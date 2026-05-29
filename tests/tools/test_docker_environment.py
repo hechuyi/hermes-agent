@@ -622,3 +622,105 @@ def test_labels_attribute_populated_after_init(monkeypatch):
         "hermes-task-id": "abc",
         "hermes-profile": "default",
     }
+
+
+def test_credential_mount_skipped_when_source_is_directory(monkeypatch, tmp_path, caplog):
+    """Credential mount should be skipped when source path is a directory."""
+    corrupted_dir = tmp_path / "google_token.json"
+    corrupted_dir.mkdir()
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    fake_mounts = [
+        {
+            "host_path": str(corrupted_dir),
+            "container_path": "/root/.hermes/google_token.json",
+        },
+    ]
+    monkeypatch.setattr(
+        "tools.credential_files.get_credential_file_mounts",
+        lambda: fake_mounts,
+    )
+    monkeypatch.setattr(
+        "tools.credential_files.get_skills_directory_mount",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "tools.credential_files.get_cache_directory_mounts",
+        lambda: [],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        _make_dummy_env()
+
+    run_args = " ".join(_run_args_from_calls(calls))
+    assert "google_token.json" not in run_args
+    assert any("source is a directory" in rec.getMessage() for rec in caplog.records)
+
+
+def test_credential_mount_skipped_when_source_missing(monkeypatch, tmp_path, caplog):
+    """Credential mount should be skipped when source file no longer exists."""
+    missing_path = tmp_path / "deleted_token.json"
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    fake_mounts = [
+        {
+            "host_path": str(missing_path),
+            "container_path": "/root/.hermes/deleted_token.json",
+        },
+    ]
+    monkeypatch.setattr(
+        "tools.credential_files.get_credential_file_mounts",
+        lambda: fake_mounts,
+    )
+    monkeypatch.setattr(
+        "tools.credential_files.get_skills_directory_mount",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "tools.credential_files.get_cache_directory_mounts",
+        lambda: [],
+    )
+
+    with caplog.at_level(logging.WARNING):
+        _make_dummy_env()
+
+    run_args = " ".join(_run_args_from_calls(calls))
+    assert "deleted_token.json" not in run_args
+    assert any("source not found" in rec.getMessage() for rec in caplog.records)
+
+
+def test_credential_mount_works_when_source_is_valid_file(monkeypatch, tmp_path):
+    """Credential mount should proceed normally when source is a valid file."""
+    valid_file = tmp_path / "token.json"
+    valid_file.write_text('{"token": "REDACTED"}')
+
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    fake_mounts = [
+        {
+            "host_path": str(valid_file),
+            "container_path": "/root/.hermes/token.json",
+        },
+    ]
+    monkeypatch.setattr(
+        "tools.credential_files.get_credential_file_mounts",
+        lambda: fake_mounts,
+    )
+    monkeypatch.setattr(
+        "tools.credential_files.get_skills_directory_mount",
+        lambda: [],
+    )
+    monkeypatch.setattr(
+        "tools.credential_files.get_cache_directory_mounts",
+        lambda: [],
+    )
+
+    _make_dummy_env()
+
+    run_args = " ".join(_run_args_from_calls(calls))
+    assert "token.json" in run_args
