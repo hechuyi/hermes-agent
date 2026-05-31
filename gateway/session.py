@@ -1488,10 +1488,24 @@ class SessionStore:
             entry = self._entries.get(session_key)
             if entry is None or not entry.resume_pending:
                 return False
+            old_resume_reason = entry.resume_reason
+            old_last_resume_marked_at = entry.last_resume_marked_at
             entry.resume_pending = False
             entry.resume_reason = None
             entry.last_resume_marked_at = None
-            self._save()
+            try:
+                self._save()
+            except Exception as e:
+                entry.resume_pending = True
+                entry.resume_reason = old_resume_reason
+                entry.last_resume_marked_at = old_last_resume_marked_at
+                raise SessionPersistenceError(
+                    "session_index_clear_resume_pending_failed",
+                    "failed to persist resume_pending clear",
+                    stage="clear_resume_pending",
+                    action="clear_resume_pending",
+                    cause=e,
+                ) from None
             return True
 
     def prune_old_entries(self, max_age_days: int) -> int:

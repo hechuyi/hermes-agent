@@ -1458,11 +1458,11 @@ class FeishuAdapter(BasePlatformAdapter):
         self._media_batch_state = FeishuBatchState()
         self._pending_media_batches = self._media_batch_state.events
         self._pending_media_batch_tasks = self._media_batch_state.tasks
-        # Exec approval button state (approval_id → {session_key, message_id, chat_id})
-        self._approval_state: Dict[int, Dict[str, str]] = {}
+        # Exec approval button state (approval_id → session/message/chat scope metadata)
+        self._approval_state: Dict[int, Dict[str, Any]] = {}
         self._approval_counter = itertools.count(1)
-        # Update prompt button state (prompt_id → {session_key, message_id, chat_id})
-        self._update_prompt_state: Dict[int, Dict[str, str]] = {}
+        # Update prompt button state (prompt_id → session/message/chat scope metadata)
+        self._update_prompt_state: Dict[int, Dict[str, Any]] = {}
         self._update_prompt_counter = itertools.count(1)
         # Feishu reaction deletion requires the opaque reaction_id returned
         # by create, so we cache it per message_id.
@@ -1870,13 +1870,22 @@ class FeishuAdapter(BasePlatformAdapter):
         try:
             approval_id = next(self._approval_counter)
             cmd_preview = command[:3000] + "..." if len(command) > 3000 else command
+            card_scope = self._build_card_scope_metadata(
+                chat_id=chat_id,
+                session_key=session_key,
+                metadata=metadata,
+            )
 
             def _btn(label: str, action_name: str, btn_type: str = "default") -> dict:
                 return {
                     "tag": "button",
                     "text": {"tag": "plain_text", "content": label},
                     "type": btn_type,
-                    "value": {"hermes_action": action_name, "approval_id": approval_id},
+                    "value": {
+                        "hermes_action": action_name,
+                        "approval_id": approval_id,
+                        "hermes_card_scope": dict(card_scope),
+                    },
                 }
 
             card = {
@@ -1917,6 +1926,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     "session_key": session_key,
                     "message_id": result.message_id or "",
                     "chat_id": chat_id,
+                    **card_scope,
                 }
             return result
         except Exception as exc:
@@ -1967,10 +1977,25 @@ class FeishuAdapter(BasePlatformAdapter):
 
         try:
             prompt_id = next(self._update_prompt_counter)
+            card_scope = self._build_card_scope_metadata(
+                chat_id=chat_id,
+                session_key=session_key,
+                metadata=metadata,
+            )
             payload = json.dumps(
                 self._build_update_prompt_card(prompt=prompt, default=default, prompt_id=prompt_id),
                 ensure_ascii=False,
             )
+            try:
+                card_payload = json.loads(payload)
+                for element in card_payload.get("elements", []):
+                    for action in element.get("actions", []) if isinstance(element, dict) else []:
+                        value = action.get("value") if isinstance(action, dict) else None
+                        if isinstance(value, dict):
+                            value["hermes_card_scope"] = dict(card_scope)
+                payload = json.dumps(card_payload, ensure_ascii=False)
+            except Exception:
+                logger.debug("[Feishu] Failed to attach update prompt card scope metadata", exc_info=True)
             response = await self._feishu_send_with_retry(
                 chat_id=chat_id,
                 msg_type="interactive",
@@ -1985,6 +2010,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     "session_key": session_key,
                     "message_id": result.message_id or "",
                     "chat_id": chat_id,
+                    **card_scope,
                 }
             return result
         except Exception as exc:
@@ -2223,6 +2249,8 @@ class FeishuAdapter(BasePlatformAdapter):
             "chat_id": chat_id,
             "name": chat_id,
             "type": "dm",
+            "reliable": False,
+            "failure_class": "feishu_chat_info_unavailable",
         }
         if not self._client:
             return fallback
@@ -2247,6 +2275,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 "name": str(getattr(data, "name", None) or chat_id),
                 "type": self._map_chat_type(raw_chat_type),
                 "raw_type": raw_chat_type or None,
+                "reliable": True,
             }
             self._chat_info_cache[chat_id] = info
             return dict(info)
@@ -2564,6 +2593,104 @@ class FeishuAdapter(BasePlatformAdapter):
             return True
         return "*" in allowed_ids or normalized in allowed_ids
 
+    @staticmethod
+    def _session_key_scope_parts(session_key: str) -> Dict[str, Optional[str]]:
+        """Extract Feishu chat scope evidence from a Hermes session key."""
+        parts = str(session_key or "").split(":")
+        if len(parts) < 4 or parts[0:3] != ["agent", "main", "feishu"]:
+            return {}
+        chat_type = FeishuAdapter._map_chat_type(parts[3])
+        if chat_type not in {"dm", "group", "forum"}:
+            return {}
+
+        scope: Dict[str, Optional[str]] = {"chat_type": chat_type}
+        if len(parts) >= 5:
+            scope["chat_id"] = parts[4]
+        return scope
+
+    @classmethod
+    def _build_card_scope_metadata(
+        cls,
+        *,
+        chat_id: str,
+        session_key: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build card/session scope evidence that can survive card callbacks."""
+        scope = cls._session_key_scope_parts(session_key)
+        scope["chat_id"] = str(scope.get("chat_id") or chat_id or "")
+        if metadata:
+            if metadata.get("thread_id"):
+                scope["thread_id"] = str(metadata.get("thread_id"))
+            raw_chat_type = metadata.get("chat_type") or metadata.get("feishu_chat_type")
+            if raw_chat_type:
+                scope["chat_type"] = cls._map_chat_type(str(raw_chat_type))
+        return {k: v for k, v in scope.items() if v}
+
+    @staticmethod
+    def _chat_info_is_reliable(chat_info: Dict[str, Any]) -> bool:
+        return chat_info.get("reliable") is not False
+
+    @staticmethod
+    def _reliable_chat_info_type(chat_info: Dict[str, Any]) -> Optional[str]:
+        if not FeishuAdapter._chat_info_is_reliable(chat_info):
+            return None
+        resolved = str(chat_info.get("type") or "").strip().lower()
+        if resolved in {"dm", "group", "forum"}:
+            return resolved
+        if resolved == "p2p":
+            return "dm"
+        return None
+
+    @staticmethod
+    def _scope_from_action_value(action_value: Dict[str, Any]) -> Dict[str, Any]:
+        scope = action_value.get("hermes_card_scope") if isinstance(action_value, dict) else None
+        return dict(scope) if isinstance(scope, dict) else {}
+
+    def _scope_from_saved_card_state(self, action_value: Dict[str, Any]) -> Dict[str, Any]:
+        state: Optional[Dict[str, Any]] = None
+        if "approval_id" in action_value:
+            state = self._approval_state.get(action_value.get("approval_id"))
+        elif "update_prompt_id" in action_value:
+            state = self._update_prompt_state.get(action_value.get("update_prompt_id"))
+        if not state:
+            return {}
+        return {
+            key: state.get(key)
+            for key in ("chat_id", "chat_type", "thread_id")
+            if state.get(key)
+        }
+
+    @staticmethod
+    def _scope_matches_chat(scope: Dict[str, Any], chat_id: str) -> bool:
+        scope_chat_id = str(scope.get("chat_id") or "").strip()
+        return not scope_chat_id or scope_chat_id == str(chat_id or "").strip()
+
+    def _resolve_card_action_chat_type(
+        self,
+        *,
+        chat_info: Dict[str, Any],
+        action_value: Dict[str, Any],
+        thread_id: Optional[str],
+        chat_id: str,
+    ) -> Optional[str]:
+        reliable_type = self._reliable_chat_info_type(chat_info)
+        if reliable_type:
+            return reliable_type
+
+        scope = self._scope_from_action_value(action_value)
+        if not scope:
+            scope = self._scope_from_saved_card_state(action_value)
+        if not self._scope_matches_chat(scope, chat_id):
+            return None
+        raw_type = scope.get("chat_type")
+        if raw_type:
+            mapped = self._map_chat_type(str(raw_type))
+            if mapped in {"dm", "group", "forum"}:
+                return mapped
+
+        return None
+
     def _handle_approval_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
         """Schedule approval resolution and build the synchronous callback response."""
         approval_id = action_value.get("approval_id")
@@ -2758,7 +2885,11 @@ class FeishuAdapter(BasePlatformAdapter):
         source = self.build_source(
             chat_id=chat_id,
             chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
-            chat_type=self._resolve_source_chat_type(chat_info=chat_info, event_chat_type=chat_type_raw),
+            chat_type=self._resolve_source_chat_type(
+                chat_info=chat_info,
+                event_chat_type=chat_type_raw,
+                prefer_event_chat_type=True,
+            ),
             user_id=sender_profile["user_id"],
             user_name=sender_profile["user_name"],
             thread_id=thread_id,
@@ -2825,10 +2956,24 @@ class FeishuAdapter(BasePlatformAdapter):
         sender_id = SimpleNamespace(open_id=open_id, user_id=None, union_id=None)
         sender_profile = await self._resolve_sender_profile(sender_id)
         chat_info = await self.get_chat_info(chat_id)
+        resolved_chat_type = self._resolve_card_action_chat_type(
+            chat_info=chat_info,
+            action_value=action_value,
+            thread_id=thread_id,
+            chat_id=chat_id,
+        )
+        if not resolved_chat_type:
+            logger.warning(
+                "[Feishu] Dropping ambiguous card action without reliable chat scope: "
+                "reason=feishu_card_scope_ambiguous chat_id=%s token_present=%s",
+                chat_id,
+                bool(token),
+            )
+            return
         source = self.build_source(
             chat_id=chat_id,
             chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
-            chat_type=self._resolve_source_chat_type(chat_info=chat_info, event_chat_type="group"),
+            chat_type=resolved_chat_type,
             user_id=sender_profile["user_id"],
             user_name=sender_profile["user_name"],
             thread_id=thread_id,

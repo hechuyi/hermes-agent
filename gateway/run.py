@@ -1100,6 +1100,7 @@ from gateway.config import (
 )
 from gateway.session import (
     InvalidLiveSessionSource,
+    SessionPersistenceError,
     SessionStore,
     SessionSource,
     SessionContext,
@@ -6140,6 +6141,7 @@ class GatewayRunner:
                 self._running_agent_count(),
             )
 
+            _resume_clear_failed = False
             if not timed_out:
                 # Drain completed gracefully — all running sessions finished.
                 # Clear the pre-drain resume_pending markers so sessions that
@@ -6149,10 +6151,13 @@ class GatewayRunner:
                         try:
                             self.session_store.clear_resume_pending(_sk)
                         except Exception as _e:
-                            logger.debug(
+                            _resume_clear_failed = True
+                            logger.error(
                                 "clear_resume_pending after drain failed for %s: %s",
                                 _sk, _e,
                             )
+                if _resume_clear_failed:
+                    self._exit_reason = "Gateway shutdown state unknown: resume_pending_clear_failed"
 
             if timed_out:
                 logger.warning(
@@ -6337,11 +6342,16 @@ class GatewayRunner:
             # message).  Skip the marker in that case so the next startup
             # suspends those sessions — giving users a clean slate instead
             # of resuming a half-finished tool loop.
-            if not timed_out:
+            if not timed_out and not _resume_clear_failed:
                 try:
                     (_hermes_home / ".clean_shutdown").touch()
                 except Exception:
                     pass
+            elif not timed_out:
+                logger.warning(
+                    "Skipping .clean_shutdown marker — shutdown state unknown: %s",
+                    self._exit_reason,
+                )
             else:
                 logger.info(
                     "Skipping .clean_shutdown marker — drain timed out with "
@@ -9333,14 +9343,23 @@ class GatewayRunner:
             # append above raises SessionPersistenceError, resume_pending stays
             # intact for restart recovery.
             if session_key and _should_clear_resume_pending_after_turn(raw_agent_result):
-                self._clear_restart_failure_count(session_key)
                 try:
                     self.session_store.clear_resume_pending(session_key)
                 except Exception as _e:
-                    logger.debug(
+                    logger.error(
                         "clear_resume_pending failed for %s: %s",
                         session_key, _e,
                     )
+                    if isinstance(_e, SessionPersistenceError):
+                        raise
+                    raise SessionPersistenceError(
+                        "session_index_clear_resume_pending_failed",
+                        "failed to clear resume_pending after successful turn",
+                        stage="clear_resume_pending",
+                        action="clear_resume_pending",
+                        cause=_e,
+                    ) from None
+                self._clear_restart_failure_count(session_key)
 
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))

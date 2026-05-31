@@ -2258,6 +2258,103 @@ class TestSchemaInit:
 
         migrated_db.close()
 
+    def test_reconciliation_add_column_failure_blocks_schema_version_bump(self, tmp_path, monkeypatch):
+        """Unexpected ADD COLUMN failure must fail init before schema_version bump."""
+        import sqlite3
+
+        from hermes_state import SCHEMA_VERSION
+
+        db_path = tmp_path / "failed_reconcile.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (7);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                user_id TEXT,
+                model_config TEXT,
+                system_prompt TEXT,
+                parent_session_id TEXT,
+                started_at REAL NOT NULL
+            );
+
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+        real_connect = sqlite3.connect
+
+        class FailingAddColumnConnection(sqlite3.Connection):
+            def execute(self, sql, parameters=(), /):
+                if (
+                    "ALTER TABLE" in sql
+                    and '"sessions"' in sql
+                    and '"model"' in sql
+                ):
+                    raise sqlite3.OperationalError("simulated provider DDL failure")
+                return super().execute(sql, parameters)
+
+            def cursor(self, *args, **kwargs):
+                return FailingAddColumnCursor(super().cursor(*args, **kwargs))
+
+        class FailingAddColumnCursor:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def execute(self, sql, parameters=(), /):
+                if (
+                    "ALTER TABLE" in sql
+                    and '"sessions"' in sql
+                    and '"model"' in sql
+                ):
+                    raise sqlite3.OperationalError("simulated provider DDL failure")
+                return self._inner.execute(sql, parameters)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        def connect_with_failing_add_column(path, *args, **kwargs):
+            if str(path) == str(db_path):
+                kwargs["factory"] = FailingAddColumnConnection
+            return real_connect(path, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite3, "connect", connect_with_failing_add_column)
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=reconcile_columns" in msg
+        assert "table=sessions" in msg
+        assert "column=model" in msg
+
+        verify_conn = real_connect(str(db_path))
+        try:
+            version = verify_conn.execute(
+                "SELECT version FROM schema_version LIMIT 1"
+            ).fetchone()[0]
+            cols = {
+                r[1]
+                for r in verify_conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+        finally:
+            verify_conn.close()
+        assert version != SCHEMA_VERSION
+        assert version == 7
+        assert "model" not in cols
+
     def test_reconciliation_is_idempotent(self, tmp_path):
         """Opening the same database twice doesn't error or duplicate columns."""
         db_path = tmp_path / "idempotent.db"

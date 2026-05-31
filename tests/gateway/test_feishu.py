@@ -705,6 +705,7 @@ class TestAdapterBehavior(unittest.TestCase):
         self,
         *,
         msg_sender_id: str,
+        msg_chat_type: str = "group",
         msg_thread_id=None,
         msg_parent_id=None,
         msg_upper_message_id=None,
@@ -722,7 +723,7 @@ class TestAdapterBehavior(unittest.TestCase):
         msg = SimpleNamespace(
             sender=SimpleNamespace(sender_type="app", id=msg_sender_id, id_type="app_id"),
             chat_id="oc_chat",
-            chat_type="group",
+            chat_type=msg_chat_type,
             thread_id=msg_thread_id,
             parent_id=msg_parent_id,
             upper_message_id=msg_upper_message_id,
@@ -795,6 +796,33 @@ class TestAdapterBehavior(unittest.TestCase):
         synthetic_event = adapter._handle_message_with_guards.await_args.args[0]
         self.assertEqual(synthetic_event.source.thread_id, "omt_topic")
         self.assertEqual(synthetic_event.reply_to_message_id, "om_root")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_reaction_uses_message_chat_scope_when_chat_lookup_falls_back_to_dm(self):
+        adapter = self._build_reaction_adapter(
+            msg_sender_id="cli_self_app",
+            msg_chat_type="group",
+            msg_thread_id="omt_topic",
+            msg_root_id="om_root",
+        )
+        adapter.get_chat_info = AsyncMock(
+            return_value={"chat_id": "oc_chat", "name": "oc_chat", "type": "dm", "reliable": False}
+        )
+
+        event = SimpleNamespace(
+            message_id="om_self_topic_msg",
+            user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
+            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+        )
+        data = SimpleNamespace(event=event)
+        asyncio.run(
+            adapter._handle_reaction_event("im.message.reaction.created_v1", data)
+        )
+
+        synthetic_event = adapter._handle_message_with_guards.await_args.args[0]
+        self.assertEqual(synthetic_event.source.chat_type, "group")
+        self.assertEqual(synthetic_event.source.chat_id, "oc_chat")
+        self.assertEqual(synthetic_event.source.thread_id, "omt_topic")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_reaction_on_reply_does_not_invent_thread_id_from_root(self):

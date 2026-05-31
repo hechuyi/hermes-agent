@@ -430,7 +430,12 @@ class TestNonApprovalCardAction:
                 adapter, "_resolve_sender_profile", new_callable=AsyncMock,
                 return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
             ),
-            patch.object(adapter, "get_chat_info", new_callable=AsyncMock, return_value={"name": "Test Chat"}),
+            patch.object(
+                adapter,
+                "get_chat_info",
+                new_callable=AsyncMock,
+                return_value={"name": "Test Chat", "type": "group", "reliable": True},
+            ),
             patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
         ):
             await adapter._handle_card_action_event(data)
@@ -469,6 +474,110 @@ class TestNonApprovalCardAction:
         assert event.source.chat_id == "oc_dm"
 
     @pytest.mark.asyncio
+    async def test_group_card_action_uses_saved_scope_when_chat_lookup_falls_back_to_dm(self):
+        adapter = _make_adapter()
+
+        data = _make_card_action_data(
+            action_value={
+                "custom_action": "something_else",
+                "hermes_card_scope": {
+                    "chat_type": "group",
+                    "thread_id": "omt_topic",
+                },
+            },
+            token="tok_group_card",
+            thread_id="omt_topic",
+            root_id="om_root",
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ),
+            patch.object(
+                adapter,
+                "get_chat_info",
+                new_callable=AsyncMock,
+                return_value={"chat_id": "oc_12345", "name": "oc_12345", "type": "dm", "reliable": False},
+            ),
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        event = mock_handle.call_args[0][0]
+        assert event.source.chat_type == "group"
+        assert event.source.chat_id == "oc_12345"
+        assert event.source.thread_id == "omt_topic"
+        assert event.reply_to_message_id == "om_root"
+
+    @pytest.mark.asyncio
+    async def test_card_action_uses_saved_state_scope_when_action_value_has_no_scope(self):
+        adapter = _make_adapter()
+        adapter._update_prompt_state[7] = {
+            "session_key": "agent:main:feishu:group:oc_12345",
+            "message_id": "msg_7",
+            "chat_id": "oc_12345",
+            "chat_type": "group",
+            "thread_id": "omt_topic",
+        }
+
+        data = _make_card_action_data(
+            action_value={
+                "custom_action": "something_else",
+                "update_prompt_id": 7,
+            },
+            token="tok_saved_state_card",
+            thread_id="omt_topic",
+            root_id="om_root",
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ),
+            patch.object(
+                adapter,
+                "get_chat_info",
+                new_callable=AsyncMock,
+                return_value={"chat_id": "oc_12345", "name": "oc_12345", "type": "dm", "reliable": False},
+            ),
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        event = mock_handle.call_args[0][0]
+        assert event.source.chat_type == "group"
+        assert event.source.thread_id == "omt_topic"
+
+    @pytest.mark.asyncio
+    async def test_card_action_without_reliable_scope_is_dropped_when_lookup_falls_back_to_dm(self):
+        adapter = _make_adapter()
+
+        data = _make_card_action_data(
+            action_value={"custom_action": "something_else"},
+            token="tok_ambiguous_card",
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ),
+            patch.object(
+                adapter,
+                "get_chat_info",
+                new_callable=AsyncMock,
+                return_value={"chat_id": "oc_12345", "name": "oc_12345", "type": "dm", "reliable": False},
+            ),
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        mock_handle.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_preserves_context_thread_id(self):
         adapter = _make_adapter()
 
@@ -484,7 +593,12 @@ class TestNonApprovalCardAction:
                 adapter, "_resolve_sender_profile", new_callable=AsyncMock,
                 return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
             ),
-            patch.object(adapter, "get_chat_info", new_callable=AsyncMock, return_value={"name": "Test Chat"}),
+            patch.object(
+                adapter,
+                "get_chat_info",
+                new_callable=AsyncMock,
+                return_value={"name": "Test Chat", "type": "group", "reliable": True},
+            ),
             patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
         ):
             await adapter._handle_card_action_event(data)
@@ -508,7 +622,12 @@ class TestNonApprovalCardAction:
                 adapter, "_resolve_sender_profile", new_callable=AsyncMock,
                 return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
             ),
-            patch.object(adapter, "get_chat_info", new_callable=AsyncMock, return_value={"name": "Test Chat"}),
+            patch.object(
+                adapter,
+                "get_chat_info",
+                new_callable=AsyncMock,
+                return_value={"name": "Test Chat", "type": "group", "reliable": True},
+            ),
             patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
         ):
             await adapter._handle_card_action_event(data)

@@ -260,6 +260,102 @@ async def test_resume_pending_marker_survives_transcript_append_failure_after_su
     runner._clear_restart_failure_count.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_clear_resume_pending_failure_after_success_returns_stable_error(
+    monkeypatch,
+):
+    import gateway.run as gateway_run
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="c1",
+        chat_type="dm",
+        user_id="u1",
+    )
+    event = MessageEvent(text="resume this", source=source, message_id="m1")
+    session_entry = SimpleNamespace(
+        session_key="agent:main:discord:dm:c1",
+        session_id="session-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        resume_pending=True,
+    )
+    history = [{"role": "user", "content": "previous"}]
+    session_store = MagicMock()
+    session_store.get_or_create_session.return_value = session_entry
+    session_store.load_transcript.return_value = history
+    session_store.has_any_sessions.return_value = True
+    session_store.update_session = MagicMock()
+    session_store.clear_resume_pending = MagicMock(side_effect=OSError("disk full"))
+    runner.session_store = session_store
+    runner.adapters = {
+        Platform.DISCORD: SimpleNamespace(
+            stop_typing=AsyncMock(),
+            send=AsyncMock(),
+        )
+    }
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.config = GatewayConfig()
+    runner._session_db = None
+    runner._ephemeral_system_prompt = ""
+    runner._prefill_messages = []
+    runner._reasoning_config = None
+    runner._provider_routing = {}
+    runner._fallback_model = None
+    runner._voice_mode = {}
+    runner._pending_model_notes = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._running_agents = {}
+    runner._agent_cache = {}
+    runner._agent_cache_lock = None
+    runner._session_model_overrides = {}
+    runner._recover_telegram_topic_thread_id = lambda _source: None
+    runner._cache_session_source = lambda *_args, **_kwargs: None
+    runner._is_telegram_topic_lane = lambda _source: False
+    runner._bind_adapter_run_generation = lambda *_args, **_kwargs: None
+    runner._is_session_run_current = lambda *_args, **_kwargs: True
+    runner._set_session_env = lambda _context: []
+    runner._clear_restart_failure_count = MagicMock()
+    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
+
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "resumed answer",
+            "messages": history
+            + [
+                {"role": "user", "content": "resume this"},
+                {"role": "assistant", "content": "resumed answer"},
+            ],
+            "history_offset": len(history),
+            "completed": True,
+            "last_prompt_tokens": 0,
+            "persistence": {
+                "attempted": True,
+                "ok": True,
+                "row_ids_by_message_index": {1: 101, 2: 102},
+            },
+        }
+    )
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "test-model")
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+
+    result = await runner._handle_message_with_agent(
+        event,
+        source,
+        session_entry.session_key,
+        1,
+    )
+
+    assert "SessionPersistenceError" in result
+    assert "session_index_clear_resume_pending_failed" in result
+    assert "resumed answer" not in result
+    runner._clear_restart_failure_count.assert_not_called()
+
+
 def _make_source(platform=Platform.TELEGRAM, chat_id="123", user_id="u1"):
     return SessionSource(platform=platform, chat_id=chat_id, user_id=user_id)
 
@@ -507,6 +603,26 @@ class TestClearResumePending:
     def test_returns_false_for_unknown_key(self, tmp_path):
         store = _make_store(tmp_path)
         assert store.clear_resume_pending("no-such-key") is False
+
+    def test_save_failure_rolls_back_in_memory_flag(self, tmp_path, monkeypatch):
+        store = _make_store(tmp_path)
+        source = _make_source()
+        entry = store.get_or_create_session(source)
+        store.mark_resume_pending(entry.session_key, reason="restart_timeout")
+
+        def _fail_save():
+            raise OSError("disk full")
+
+        monkeypatch.setattr(store, "_save", _fail_save)
+
+        with pytest.raises(SessionPersistenceError) as exc:
+            store.clear_resume_pending(entry.session_key)
+
+        assert exc.value.failure_class == "session_index_clear_resume_pending_failed"
+        e = store._entries[entry.session_key]
+        assert e.resume_pending is True
+        assert e.resume_reason == "restart_timeout"
+        assert e.last_resume_marked_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1042,6 +1158,39 @@ async def test_drain_timeout_skips_pending_sentinel_sessions():
     calls = session_store.mark_resume_pending.call_args_list
     marked = {args[0][0] for args in calls}
     assert marked == {session_key_real}
+
+
+@pytest.mark.asyncio
+async def test_graceful_drain_clear_resume_pending_failure_not_clean_shutdown(
+    tmp_path,
+    monkeypatch,
+):
+    runner, adapter = make_restart_runner()
+    adapter.disconnect = AsyncMock()
+    monkeypatch.setattr("gateway.run._hermes_home", tmp_path)
+
+    session_key = "agent:main:telegram:dm:A"
+    runner._running_agents = {session_key: MagicMock()}
+
+    async def _complete_drain(_timeout):
+        runner._running_agents.clear()
+        return ({session_key: MagicMock()}, False)
+
+    runner._drain_active_agents = _complete_drain
+
+    session_store = MagicMock()
+    session_store.mark_resume_pending = MagicMock(return_value=True)
+    session_store.clear_resume_pending = MagicMock(side_effect=OSError("disk full"))
+    runner.session_store = session_store
+
+    with patch("gateway.status.remove_pid_file"), patch(
+        "gateway.status.write_runtime_status"
+    ):
+        await runner.stop()
+
+    session_store.clear_resume_pending.assert_called_once_with(session_key)
+    assert not (tmp_path / ".clean_shutdown").exists()
+    assert runner.exit_reason == "Gateway shutdown state unknown: resume_pending_clear_failed"
 
 
 # ---------------------------------------------------------------------------

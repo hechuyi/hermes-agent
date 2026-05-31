@@ -599,10 +599,11 @@ class SessionDB:
         """
         expected = self._parse_schema_columns(SCHEMA_SQL)
         for table_name, declared_cols in expected.items():
+            safe_table = table_name.replace('"', '""')
             # Get current columns from the live table
             try:
                 rows = cursor.execute(
-                    f'PRAGMA table_info("{table_name}")'
+                    f'PRAGMA table_info("{safe_table}")'
                 ).fetchall()
             except sqlite3.OperationalError:
                 continue  # Table doesn't exist yet (shouldn't happen after executescript)
@@ -617,16 +618,36 @@ class SessionDB:
                     safe_name = col_name.replace('"', '""')
                     try:
                         cursor.execute(
-                            f'ALTER TABLE "{table_name}" ADD COLUMN "{safe_name}" {col_type}'
+                            f'ALTER TABLE "{safe_table}" ADD COLUMN "{safe_name}" {col_type}'
                         )
                     except sqlite3.OperationalError as exc:
-                        # Expected: "duplicate column name" from a race or
-                        # re-run.  Unexpected: "Cannot add a NOT NULL column
-                        # with default value NULL" from a schema mistake.
-                        # Log at DEBUG so it's visible in agent.log.
-                        logger.debug(
-                            "reconcile %s.%s: %s", table_name, col_name, exc,
-                        )
+                        # Only a verified duplicate-column race is safe to
+                        # continue: another connection added the same column
+                        # after our PRAGMA snapshot.  Any other ADD COLUMN
+                        # failure leaves the schema incomplete, so startup must
+                        # fail before schema_version is advanced.
+                        if "duplicate column name" in str(exc).lower():
+                            race_rows = cursor.execute(
+                                f'PRAGMA table_info("{safe_table}")'
+                            ).fetchall()
+                            race_cols = {
+                                row[1] if isinstance(row, (tuple, list)) else row["name"]
+                                for row in race_rows
+                            }
+                            if col_name in race_cols:
+                                logger.debug(
+                                    "reconcile %s.%s: duplicate column race verified",
+                                    table_name,
+                                    col_name,
+                                )
+                                continue
+
+                        raise sqlite3.OperationalError(
+                            "schema migration failed: "
+                            "stage=reconcile_columns "
+                            f"table={table_name} column={col_name} "
+                            "action=add_column reason=operational_error"
+                        ) from exc
 
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
