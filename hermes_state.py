@@ -34,6 +34,8 @@ T = TypeVar("T")
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
 SCHEMA_VERSION = 14
+SCHEMA_CONTRACT_META_KEY = "hermes_schema_contract"
+SCHEMA_CONTRACT_META_VALUE = "rtoc-pr2a-scope-v1"
 
 VALID_SCOPE_ASSIGNMENT_STATUSES = {
     "scoped",
@@ -324,7 +326,9 @@ CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+"""
 
+SCHEMA_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
@@ -385,6 +389,53 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update AFTER UPDATE ON message
     );
 END;
 """
+
+FTS_TABLES = ("messages_fts", "messages_fts_trigram")
+FTS_TRIGGERS = (
+    "messages_fts_insert",
+    "messages_fts_delete",
+    "messages_fts_update",
+    "messages_fts_trigram_insert",
+    "messages_fts_trigram_delete",
+    "messages_fts_trigram_update",
+)
+
+SCOPE_CONTRACT_COLUMNS = {
+    "sessions": {
+        "conversation_scope_id",
+        "scope_assignment_status",
+        "route_session_key_snapshot",
+        "route_partition_key",
+    },
+    "messages": {"conversation_scope_id"},
+    "conversation_scopes": {
+        "id",
+        "canonical_key",
+        "platform",
+        "platform_account_id",
+        "chat_type",
+        "chat_id",
+        "thread_id",
+        "participant_mode",
+        "participant_id",
+        "created_at",
+        "updated_at",
+    },
+}
+
+REQUIRED_CONTRACT_TABLES = {
+    "sessions",
+    "messages",
+    "conversation_scopes",
+    "state_meta",
+}
+
+REQUIRED_CONTRACT_INDEXES = {
+    "idx_sessions_source": ("sessions", ("source",), False),
+    "idx_sessions_parent": ("sessions", ("parent_session_id",), False),
+    "idx_sessions_started": ("sessions", ("started_at",), False),
+    "idx_messages_session": ("messages", ("session_id", "timestamp"), False),
+}
 
 
 class SessionDB:
@@ -584,6 +635,102 @@ class SessionDB:
         finally:
             ref.close()
 
+    @staticmethod
+    def _parse_schema_column_info(schema_sql: str) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        ref = sqlite3.connect(":memory:")
+        try:
+            ref.executescript(schema_sql)
+            info: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for (tbl,) in ref.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall():
+                table_info: Dict[str, Dict[str, Any]] = {}
+                for row in ref.execute(f'PRAGMA table_info("{tbl}")').fetchall():
+                    table_info[row[1]] = {
+                        "type": row[2] or "",
+                        "notnull": int(row[3]),
+                        "default": row[4],
+                        "pk": int(row[5]),
+                    }
+                info[tbl] = table_info
+            return info
+        finally:
+            ref.close()
+
+    @staticmethod
+    def _iter_sql_statements(sql_script: str):
+        pending = ""
+        for line in sql_script.splitlines():
+            pending += line + "\n"
+            if sqlite3.complete_statement(pending):
+                statement = pending.strip()
+                pending = ""
+                if statement:
+                    yield statement
+        if pending.strip():
+            raise sqlite3.OperationalError(
+                "schema migration failed: stage=execute_sql_script "
+                "reason=incomplete_statement"
+            )
+
+    @classmethod
+    def _execute_sql_script(
+        cls,
+        cursor: sqlite3.Cursor,
+        sql_script: str,
+        *,
+        stage: str,
+    ) -> None:
+        for statement in cls._iter_sql_statements(sql_script):
+            try:
+                cursor.execute(statement)
+            except sqlite3.OperationalError as exc:
+                raise sqlite3.OperationalError(
+                    "schema migration failed: "
+                    f"stage={stage} reason=operational_error"
+                ) from exc
+
+    @staticmethod
+    def _normalize_decl_type(value: Any) -> str:
+        return " ".join(str(value or "").upper().split())
+
+    @staticmethod
+    def _normalize_default(value: Any) -> str:
+        if value is None:
+            return ""
+        return " ".join(str(value).strip().split())
+
+    def _validate_existing_column_compat(
+        self,
+        *,
+        table_name: str,
+        col_name: str,
+        declared: Dict[str, Any],
+        live: Dict[str, Any],
+        stage: str = "reconcile_columns",
+    ) -> None:
+        declared_type = self._normalize_decl_type(declared["type"])
+        live_type = self._normalize_decl_type(live["type"])
+        declared_default = self._normalize_default(declared["default"])
+        live_default = self._normalize_default(live["default"])
+        declared_notnull = int(declared["notnull"])
+        live_notnull = int(live["notnull"])
+        declared_pk = int(declared["pk"])
+        live_pk = int(live["pk"])
+
+        if (
+            declared_type != live_type
+            or declared_notnull != live_notnull
+            or declared_default != live_default
+            or declared_pk != live_pk
+        ):
+            raise sqlite3.OperationalError(
+                "schema migration failed: "
+                f"stage={stage} reason=incompatible_column "
+                f"table={table_name} column={col_name}"
+            )
+
     def _reconcile_columns(self, cursor: sqlite3.Cursor) -> None:
         """Ensure live tables have every column declared in SCHEMA_SQL.
 
@@ -598,6 +745,13 @@ class SessionDB:
         Version-gated migration blocks are no longer needed for ADD COLUMN.
         """
         expected = self._parse_schema_columns(SCHEMA_SQL)
+        expected_info = self._parse_schema_column_info(SCHEMA_SQL)
+        protected_columns = {
+            (table, column)
+            for table, columns in SCOPE_CONTRACT_COLUMNS.items()
+            for column in columns
+        }
+
         for table_name, declared_cols in expected.items():
             safe_table = table_name.replace('"', '""')
             # Get current columns from the live table
@@ -607,11 +761,16 @@ class SessionDB:
                 ).fetchall()
             except sqlite3.OperationalError:
                 continue  # Table doesn't exist yet (shouldn't happen after executescript)
-            live_cols = set()
+            live_cols: Dict[str, Dict[str, Any]] = {}
             for row in rows:
                 # PRAGMA table_info returns (cid, name, type, notnull, dflt_value, pk)
                 name = row[1] if isinstance(row, (tuple, list)) else row["name"]
-                live_cols.add(name)
+                live_cols[name] = {
+                    "type": row[2] if isinstance(row, (tuple, list)) else row["type"],
+                    "notnull": row[3] if isinstance(row, (tuple, list)) else row["notnull"],
+                    "default": row[4] if isinstance(row, (tuple, list)) else row["dflt_value"],
+                    "pk": row[5] if isinstance(row, (tuple, list)) else row["pk"],
+                }
 
             for col_name, col_type in declared_cols.items():
                 if col_name not in live_cols:
@@ -648,6 +807,393 @@ class SessionDB:
                             f"table={table_name} column={col_name} "
                             "action=add_column reason=operational_error"
                         ) from exc
+                elif (table_name, col_name) in protected_columns:
+                    self._validate_existing_column_compat(
+                        table_name=table_name,
+                        col_name=col_name,
+                        declared=expected_info[table_name][col_name],
+                        live=live_cols[col_name],
+                        stage="reconcile_columns",
+                    )
+
+    def _schema_table_exists(self, cursor: sqlite3.Cursor, table_name: str) -> bool:
+        row = cursor.execute(
+            "SELECT type FROM sqlite_master WHERE name = ?",
+            (table_name,),
+        ).fetchone()
+        return bool(row and row[0] == "table")
+
+    def _read_schema_version(self, cursor: sqlite3.Cursor) -> Optional[int]:
+        if not self._schema_table_exists(cursor, "schema_version"):
+            return None
+        row = cursor.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+        if row is None:
+            return None
+        return int(row["version"] if isinstance(row, sqlite3.Row) else row[0])
+
+    def _read_schema_contract_marker(self, cursor: sqlite3.Cursor) -> Optional[str]:
+        if not self._schema_table_exists(cursor, "state_meta"):
+            return None
+        row = cursor.execute(
+            "SELECT value FROM state_meta WHERE key = ?",
+            (SCHEMA_CONTRACT_META_KEY,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["value"] if isinstance(row, sqlite3.Row) else row[0]
+
+    def _validate_unique_index(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        table_name: str,
+        columns: Tuple[str, ...],
+    ) -> None:
+        safe_table = table_name.replace('"', '""')
+        for idx_row in cursor.execute(f'PRAGMA index_list("{safe_table}")').fetchall():
+            index_name = idx_row[1] if isinstance(idx_row, (tuple, list)) else idx_row["name"]
+            is_unique = idx_row[2] if isinstance(idx_row, (tuple, list)) else idx_row["unique"]
+            if not is_unique:
+                continue
+            safe_index = str(index_name).replace('"', '""')
+            idx_cols = tuple(
+                r[2] if isinstance(r, (tuple, list)) else r["name"]
+                for r in cursor.execute(f'PRAGMA index_info("{safe_index}")').fetchall()
+            )
+            if idx_cols == columns:
+                return
+        raise sqlite3.OperationalError(
+            "schema migration failed: "
+            "stage=schema_contract reason=missing_unique_constraint "
+            f"table={table_name} columns={','.join(columns)}"
+        )
+
+    def _validate_required_index(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        index_name: str,
+        table_name: str,
+        columns: Tuple[str, ...],
+        unique: bool,
+    ) -> None:
+        row = cursor.execute(
+            "SELECT type, tbl_name FROM sqlite_master WHERE name = ?",
+            (index_name,),
+        ).fetchone()
+        if row is None or row[0] != "index" or row[1] != table_name:
+            raise sqlite3.OperationalError(
+                "schema migration failed: "
+                "stage=schema_contract reason=missing_required_index "
+                f"index={index_name} table={table_name}"
+            )
+
+        safe_index = index_name.replace('"', '""')
+        idx_cols = tuple(
+            r[2] if isinstance(r, (tuple, list)) else r["name"]
+            for r in cursor.execute(f'PRAGMA index_info("{safe_index}")').fetchall()
+        )
+        if idx_cols != columns:
+            raise sqlite3.OperationalError(
+                "schema migration failed: "
+                "stage=schema_contract reason=incompatible_index "
+                f"index={index_name} table={table_name}"
+            )
+
+        safe_table = table_name.replace('"', '""')
+        unique_by_name = None
+        for idx_row in cursor.execute(f'PRAGMA index_list("{safe_table}")').fetchall():
+            idx_name = idx_row[1] if isinstance(idx_row, (tuple, list)) else idx_row["name"]
+            if idx_name == index_name:
+                unique_by_name = bool(idx_row[2] if isinstance(idx_row, (tuple, list)) else idx_row["unique"])
+                break
+        if unique_by_name is not None and unique_by_name != unique:
+            raise sqlite3.OperationalError(
+                "schema migration failed: "
+                "stage=schema_contract reason=incompatible_index_unique "
+                f"index={index_name} table={table_name}"
+            )
+
+    def _validate_required_foreign_key(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        table_name: str,
+        column: str,
+        ref_table: str,
+        ref_column: str,
+    ) -> None:
+        safe_table = table_name.replace('"', '""')
+        for fk_row in cursor.execute(f'PRAGMA foreign_key_list("{safe_table}")').fetchall():
+            fk_table = fk_row[2] if isinstance(fk_row, (tuple, list)) else fk_row["table"]
+            fk_from = fk_row[3] if isinstance(fk_row, (tuple, list)) else fk_row["from"]
+            fk_to = fk_row[4] if isinstance(fk_row, (tuple, list)) else fk_row["to"]
+            if fk_table == ref_table and fk_from == column and fk_to == ref_column:
+                return
+        raise sqlite3.OperationalError(
+            "schema migration failed: "
+            "stage=schema_contract reason=missing_foreign_key "
+            f"table={table_name} column={column} "
+            f"references={ref_table}.{ref_column}"
+        )
+
+    def _validate_schema_contract(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        full: bool = False,
+        require_foreign_keys: bool = False,
+    ) -> None:
+        expected_info = self._parse_schema_column_info(SCHEMA_SQL)
+        for table_name in REQUIRED_CONTRACT_TABLES:
+            row = cursor.execute(
+                "SELECT type FROM sqlite_master WHERE name = ?",
+                (table_name,),
+            ).fetchone()
+            if row is None or row[0] != "table":
+                raise sqlite3.OperationalError(
+                    "schema migration failed: "
+                    "stage=schema_contract reason=missing_required_object "
+                    f"table={table_name}"
+                )
+
+        contract_columns = (
+            {
+                table_name: set(expected_info[table_name])
+                for table_name in REQUIRED_CONTRACT_TABLES
+                if table_name in expected_info
+            }
+            if full
+            else SCOPE_CONTRACT_COLUMNS
+        )
+        for table_name, columns in contract_columns.items():
+            safe_table = table_name.replace('"', '""')
+            live_rows = cursor.execute(f'PRAGMA table_info("{safe_table}")').fetchall()
+            live_cols = {
+                (row[1] if isinstance(row, (tuple, list)) else row["name"]): {
+                    "type": row[2] if isinstance(row, (tuple, list)) else row["type"],
+                    "notnull": row[3] if isinstance(row, (tuple, list)) else row["notnull"],
+                    "default": row[4] if isinstance(row, (tuple, list)) else row["dflt_value"],
+                    "pk": row[5] if isinstance(row, (tuple, list)) else row["pk"],
+                }
+                for row in live_rows
+            }
+            for column in columns:
+                if column not in live_cols:
+                    raise sqlite3.OperationalError(
+                        "schema migration failed: "
+                        "stage=schema_contract reason=missing_required_column "
+                        f"table={table_name} column={column}"
+                    )
+                self._validate_existing_column_compat(
+                    table_name=table_name,
+                    col_name=column,
+                    declared=expected_info[table_name][column],
+                    live=live_cols[column],
+                    stage="schema_contract",
+                )
+
+        self._validate_unique_index(
+            cursor,
+            table_name="conversation_scopes",
+            columns=("canonical_key",),
+        )
+        for index_name, (table_name, columns, unique) in REQUIRED_CONTRACT_INDEXES.items():
+            self._validate_required_index(
+                cursor,
+                index_name=index_name,
+                table_name=table_name,
+                columns=columns,
+                unique=unique,
+            )
+        if require_foreign_keys:
+            self._validate_required_foreign_key(
+                cursor,
+                table_name="messages",
+                column="session_id",
+                ref_table="sessions",
+                ref_column="id",
+            )
+
+    def _write_schema_contract_marker(self, cursor: sqlite3.Cursor) -> None:
+        cursor.execute(
+            "INSERT INTO state_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE),
+        )
+
+    def _require_schema_contract_marker(self, cursor: sqlite3.Cursor) -> None:
+        if self._read_schema_contract_marker(cursor) != SCHEMA_CONTRACT_META_VALUE:
+            raise sqlite3.OperationalError(
+                "schema migration failed: "
+                "stage=schema_contract reason=missing_contract_marker"
+            )
+
+    def _drop_and_rebuild_fts(self, cursor: sqlite3.Cursor) -> None:
+        try:
+            for trigger in FTS_TRIGGERS:
+                cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            for table in FTS_TABLES:
+                cursor.execute(f"DROP TABLE IF EXISTS {table}")
+            self._execute_sql_script(cursor, FTS_SQL, stage="fts_integrity")
+            self._execute_sql_script(cursor, FTS_TRIGRAM_SQL, stage="fts_integrity")
+            self._backfill_fts(cursor)
+        except sqlite3.OperationalError as exc:
+            raise sqlite3.OperationalError(
+                "schema migration failed: "
+                "stage=fts_integrity action=rebuild reason=rebuild_failed "
+                f"table={table if 'table' in locals() else 'unknown'}"
+            ) from exc
+
+    def _backfill_fts(self, cursor: sqlite3.Cursor) -> None:
+        cursor.execute(
+            "INSERT INTO messages_fts(rowid, content) "
+            "SELECT id, "
+            "COALESCE(content, '') || ' ' || "
+            "COALESCE(tool_name, '') || ' ' || "
+            "COALESCE(tool_calls, '') "
+            "FROM messages"
+        )
+        cursor.execute(
+            "INSERT INTO messages_fts_trigram(rowid, content) "
+            "SELECT id, "
+            "COALESCE(content, '') || ' ' || "
+            "COALESCE(tool_name, '') || ' ' || "
+            "COALESCE(tool_calls, '') "
+            "FROM messages"
+        )
+
+    def _fts_table_is_valid(self, cursor: sqlite3.Cursor, table_name: str) -> bool:
+        row = cursor.execute(
+            "SELECT type, sql FROM sqlite_master WHERE name = ?",
+            (table_name,),
+        ).fetchone()
+        if row is None:
+            return False
+        obj_type = row[0] if isinstance(row, (tuple, list)) else row["type"]
+        sql = row[1] if isinstance(row, (tuple, list)) else row["sql"]
+        if obj_type != "table" or sql is None:
+            return False
+
+        normalized = " ".join(sql.strip().split())
+        normalized_upper = normalized.upper()
+        if "VIRTUAL TABLE" not in normalized_upper or "USING FTS5" not in normalized_upper:
+            return False
+
+        if not re.search(r"\bcontent\b", normalized, flags=re.IGNORECASE):
+            return False
+        if re.search(r"\bcontent\s*=", normalized, flags=re.IGNORECASE):
+            return False
+        if re.search(r"\bcontent_rowid\b", normalized, flags=re.IGNORECASE):
+            return False
+
+        trigram_tokenizer = re.search(
+            r"\btokenize\s*=\s*['\"]?trigram['\"]?",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if table_name == "messages_fts":
+            return re.search(r"\btokenize\s*=", normalized, flags=re.IGNORECASE) is None
+        if table_name == "messages_fts_trigram":
+            return trigram_tokenizer is not None
+        return False
+
+    def _fts_trigger_is_valid(self, cursor: sqlite3.Cursor, trigger_name: str) -> bool:
+        row = cursor.execute(
+            "SELECT type, sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+            (trigger_name,),
+        ).fetchone()
+        if row is None:
+            return False
+        sql = row[1] if isinstance(row, (tuple, list)) else row["sql"]
+        if not sql:
+            return False
+        sql_lower = sql.lower()
+        if trigger_name.endswith("_insert") or trigger_name.endswith("_update"):
+            return "tool_name" in sql_lower and "tool_calls" in sql_lower
+        return True
+
+    def _ensure_fts_integrity(self, cursor: sqlite3.Cursor) -> None:
+        needs_rebuild = False
+        message_count = cursor.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+
+        for table in FTS_TABLES:
+            if not self._fts_table_is_valid(cursor, table):
+                needs_rebuild = True
+                break
+            try:
+                fts_count = cursor.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            except sqlite3.OperationalError as exc:
+                raise sqlite3.OperationalError(
+                    "schema migration failed: "
+                    "stage=fts_integrity reason=count_failed "
+                    f"table={table}"
+                ) from exc
+            if fts_count != message_count:
+                needs_rebuild = True
+                break
+
+        if not needs_rebuild:
+            for trigger in FTS_TRIGGERS:
+                if not self._fts_trigger_is_valid(cursor, trigger):
+                    needs_rebuild = True
+                    break
+
+        if needs_rebuild:
+            self._drop_and_rebuild_fts(cursor)
+        else:
+            self._execute_sql_script(cursor, FTS_SQL, stage="fts_integrity")
+            self._execute_sql_script(cursor, FTS_TRIGRAM_SQL, stage="fts_integrity")
+
+        for table in FTS_TABLES:
+            if not self._fts_table_is_valid(cursor, table):
+                raise sqlite3.OperationalError(
+                    "schema migration failed: "
+                    "stage=fts_integrity reason=incompatible_fts_schema "
+                    f"table={table}"
+                )
+            try:
+                fts_count = cursor.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            except sqlite3.OperationalError as exc:
+                raise sqlite3.OperationalError(
+                    "schema migration failed: "
+                    "stage=fts_integrity reason=count_failed "
+                    f"table={table}"
+                ) from exc
+            if fts_count != message_count:
+                raise sqlite3.OperationalError(
+                    "schema migration failed: "
+                    "stage=fts_integrity reason=row_count_mismatch "
+                    f"table={table}"
+                )
+
+        for trigger in FTS_TRIGGERS:
+            if not self._fts_trigger_is_valid(cursor, trigger):
+                raise sqlite3.OperationalError(
+                    "schema migration failed: "
+                    "stage=fts_integrity reason=missing_trigger "
+                    f"trigger={trigger}"
+                )
+
+    def _set_schema_version(self, cursor: sqlite3.Cursor, current_version: Optional[int]) -> None:
+        if current_version is None:
+            row = cursor.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+            if row is None:
+                cursor.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (SCHEMA_VERSION,),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE schema_version SET version = ?",
+                    (SCHEMA_VERSION,),
+                )
+            return
+        if current_version < SCHEMA_VERSION:
+            cursor.execute(
+                "UPDATE schema_version SET version = ?",
+                (SCHEMA_VERSION,),
+            )
 
     def _init_schema(self):
         """Create tables and FTS if they don't exist, reconcile columns.
@@ -663,134 +1209,56 @@ class SessionDB:
         (transforming existing rows) which cannot be handled declaratively.
         """
         cursor = self._conn.cursor()
-
-        cursor.executescript(SCHEMA_SQL)
-
-        # ── Declarative column reconciliation ──────────────────────────
-        # Diff live tables against SCHEMA_SQL and ADD any missing columns.
-        # This is idempotent and self-healing: even if a version-gated
-        # migration was skipped (e.g. due to version renumbering), the
-        # column gets created here.
-        self._reconcile_columns(cursor)
-
-        # Indexes that reference reconciler-added columns must be created
-        # AFTER _reconcile_columns runs — declaring them in SCHEMA_SQL
-        # makes the initial executescript fail on legacy DBs (the index's
-        # WHERE clause references a column that doesn't exist yet).
+        self._conn.execute("BEGIN IMMEDIATE")
         try:
+            current_version = self._read_schema_version(cursor)
+            if current_version is not None and current_version > SCHEMA_VERSION:
+                raise sqlite3.OperationalError(
+                    "schema migration failed: "
+                    "stage=schema_version reason=future_version"
+                )
+
+            if current_version == SCHEMA_VERSION:
+                self._require_schema_contract_marker(cursor)
+                self._validate_schema_contract(
+                    cursor,
+                    full=True,
+                    require_foreign_keys=True,
+                )
+
+            self._execute_sql_script(cursor, SCHEMA_SQL, stage="create_schema")
+
+            # ── Declarative column reconciliation ──────────────────────
+            # Old versions may be upgraded by adding declared columns. Current
+            # unmarked versions were already contract-checked above, so they
+            # cannot silently masquerade as this fork's v14 by auto-repair.
+            self._reconcile_columns(cursor)
+
+            self._execute_sql_script(cursor, SCHEMA_INDEX_SQL, stage="create_indexes")
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_platform_msg_id "
                 "ON messages(session_id, platform_message_id) "
                 "WHERE platform_message_id IS NOT NULL"
             )
-        except sqlite3.OperationalError as exc:
-            logger.debug("idx_messages_platform_msg_id create skipped: %s", exc)
-
-        # ── Schema version bookkeeping ─────────────────────────────────
-        # Bump to current so future data migrations (if any) can gate on
-        # version.  No version-gated column additions remain.
-        cursor.execute("SELECT version FROM schema_version LIMIT 1")
-        row = cursor.fetchone()
-        if row is None:
-            cursor.execute(
-                "INSERT INTO schema_version (version) VALUES (?)",
-                (SCHEMA_VERSION,),
-            )
-        else:
-            current_version = row["version"] if isinstance(row, sqlite3.Row) else row[0]
-            # Data migrations that can't be expressed declaratively (row
-            # backfills, index changes tied to a specific version step) stay
-            # in a version-gated chain. Column additions are handled by
-            # _reconcile_columns() above and no longer need entries here.
-            if current_version < 10:
-                # v10: trigram FTS5 table for CJK/substring search. The
-                # virtual table + triggers are created unconditionally via
-                # FTS_TRIGRAM_SQL below, but existing rows need a one-time
-                # backfill into the FTS index.
-                try:
-                    cursor.execute("SELECT * FROM messages_fts_trigram LIMIT 0")
-                    _fts_trigram_exists = True
-                except sqlite3.OperationalError:
-                    _fts_trigram_exists = False
-                if not _fts_trigram_exists:
-                    cursor.executescript(FTS_TRIGRAM_SQL)
-                    cursor.execute(
-                        "INSERT INTO messages_fts_trigram(rowid, content) "
-                        "SELECT id, content FROM messages WHERE content IS NOT NULL"
-                    )
-            if current_version < 11:
-                # v11: re-index FTS5 tables to cover tool_name + tool_calls and
-                # switch from external-content to inline mode. Existing DBs have
-                # old-schema FTS tables and triggers that IF NOT EXISTS won't
-                # overwrite, so we drop them explicitly and let the post-migration
-                # existence checks (below) recreate them from FTS_SQL /
-                # FTS_TRIGRAM_SQL, then backfill every message row. Fixes #16751.
-                for _trig in (
-                    "messages_fts_insert",
-                    "messages_fts_delete",
-                    "messages_fts_update",
-                    "messages_fts_trigram_insert",
-                    "messages_fts_trigram_delete",
-                    "messages_fts_trigram_update",
-                ):
-                    try:
-                        cursor.execute(f"DROP TRIGGER IF EXISTS {_trig}")
-                    except sqlite3.OperationalError:
-                        pass
-                for _tbl in ("messages_fts", "messages_fts_trigram"):
-                    try:
-                        cursor.execute(f"DROP TABLE IF EXISTS {_tbl}")
-                    except sqlite3.OperationalError:
-                        pass
-                # Recreate virtual tables + triggers with the new inline-mode
-                # schema that indexes content || tool_name || tool_calls.
-                cursor.executescript(FTS_SQL)
-                cursor.executescript(FTS_TRIGRAM_SQL)
-                # Backfill both indexes from every existing messages row.
-                cursor.execute(
-                    "INSERT INTO messages_fts(rowid, content) "
-                    "SELECT id, "
-                    "COALESCE(content, '') || ' ' || "
-                    "COALESCE(tool_name, '') || ' ' || "
-                    "COALESCE(tool_calls, '') "
-                    "FROM messages"
-                )
-                cursor.execute(
-                    "INSERT INTO messages_fts_trigram(rowid, content) "
-                    "SELECT id, "
-                    "COALESCE(content, '') || ' ' || "
-                    "COALESCE(tool_name, '') || ' ' || "
-                    "COALESCE(tool_calls, '') "
-                    "FROM messages"
-                )
-            if current_version < SCHEMA_VERSION:
-                cursor.execute(
-                    "UPDATE schema_version SET version = ?",
-                    (SCHEMA_VERSION,),
-                )
-
-        # Unique title index — always ensure it exists
-        try:
             cursor.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique "
                 "ON sessions(title) WHERE title IS NOT NULL"
             )
-        except sqlite3.OperationalError:
-            pass  # Index already exists
 
-        # FTS5 setup (separate because CREATE VIRTUAL TABLE can't be in executescript with IF NOT EXISTS reliably)
-        try:
-            cursor.execute("SELECT * FROM messages_fts LIMIT 0")
-        except sqlite3.OperationalError:
-            cursor.executescript(FTS_SQL)
+            if current_version is not None and current_version < 11:
+                self._drop_and_rebuild_fts(cursor)
+            self._ensure_fts_integrity(cursor)
+            self._validate_schema_contract(cursor)
+            self._write_schema_contract_marker(cursor)
+            self._set_schema_version(cursor, current_version)
 
-        # Trigram FTS5 for CJK/substring search
-        try:
-            cursor.execute("SELECT * FROM messages_fts_trigram LIMIT 0")
-        except sqlite3.OperationalError:
-            cursor.executescript(FTS_TRIGRAM_SQL)
-
-        self._conn.commit()
+            self._conn.commit()
+        except BaseException:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            raise
 
     # =========================================================================
     # Session lifecycle

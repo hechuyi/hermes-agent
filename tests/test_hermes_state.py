@@ -1815,6 +1815,155 @@ class TestSanitizeTitle:
 
 
 class TestSchemaInit:
+    def _create_v14_contract_db(
+        self,
+        db_path,
+        *,
+        marker=True,
+        sessions_id_primary_key=True,
+        canonical_key_unique=True,
+        messages_session_fk=True,
+    ):
+        import sqlite3
+
+        from hermes_state import SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE
+
+        conn = sqlite3.connect(str(db_path))
+        sessions_id = "id TEXT PRIMARY KEY" if sessions_id_primary_key else "id TEXT"
+        canonical_key = (
+            "canonical_key TEXT NOT NULL UNIQUE"
+            if canonical_key_unique
+            else "canonical_key TEXT NOT NULL"
+        )
+        messages_session = (
+            "session_id TEXT NOT NULL REFERENCES sessions(id)"
+            if messages_session_fk
+            else "session_id TEXT NOT NULL"
+        )
+        conn.executescript(f"""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (14);
+
+            CREATE TABLE sessions (
+                {sessions_id},
+                source TEXT NOT NULL,
+                user_id TEXT,
+                model TEXT,
+                model_config TEXT,
+                system_prompt TEXT,
+                parent_session_id TEXT,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                end_reason TEXT,
+                message_count INTEGER DEFAULT 0,
+                tool_call_count INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0,
+                cache_write_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0,
+                billing_provider TEXT,
+                billing_base_url TEXT,
+                billing_mode TEXT,
+                estimated_cost_usd REAL,
+                actual_cost_usd REAL,
+                cost_status TEXT,
+                cost_source TEXT,
+                pricing_version TEXT,
+                title TEXT,
+                api_call_count INTEGER DEFAULT 0,
+                handoff_state TEXT,
+                handoff_platform TEXT,
+                handoff_error TEXT,
+                conversation_scope_id TEXT,
+                scope_assignment_status TEXT,
+                route_session_key_snapshot TEXT,
+                route_partition_key TEXT
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                {messages_session},
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL,
+                token_count INTEGER,
+                finish_reason TEXT,
+                reasoning TEXT,
+                reasoning_content TEXT,
+                reasoning_details TEXT,
+                codex_reasoning_items TEXT,
+                codex_message_items TEXT,
+                platform_message_id TEXT,
+                observed INTEGER DEFAULT 0,
+                conversation_scope_id TEXT
+            );
+            CREATE TABLE conversation_scopes (
+                id TEXT PRIMARY KEY,
+                {canonical_key},
+                platform TEXT NOT NULL,
+                platform_account_id TEXT NOT NULL DEFAULT '',
+                chat_type TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                thread_id TEXT,
+                participant_mode TEXT NOT NULL,
+                participant_id TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE state_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+            CREATE INDEX idx_sessions_source ON sessions(source);
+            CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+            CREATE INDEX idx_sessions_started ON sessions(started_at DESC);
+            CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+            CREATE VIRTUAL TABLE messages_fts USING fts5(content);
+            CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, content) VALUES (
+                    new.id,
+                    COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+                );
+            END;
+            CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+                DELETE FROM messages_fts WHERE rowid = old.id;
+            END;
+            CREATE TRIGGER messages_fts_update AFTER UPDATE ON messages BEGIN
+                DELETE FROM messages_fts WHERE rowid = old.id;
+                INSERT INTO messages_fts(rowid, content) VALUES (
+                    new.id,
+                    COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+                );
+            END;
+            CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(content, tokenize='trigram');
+            CREATE TRIGGER messages_fts_trigram_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts_trigram(rowid, content) VALUES (
+                    new.id,
+                    COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+                );
+            END;
+            CREATE TRIGGER messages_fts_trigram_delete AFTER DELETE ON messages BEGIN
+                DELETE FROM messages_fts_trigram WHERE rowid = old.id;
+            END;
+            CREATE TRIGGER messages_fts_trigram_update AFTER UPDATE ON messages BEGIN
+                DELETE FROM messages_fts_trigram WHERE rowid = old.id;
+                INSERT INTO messages_fts_trigram(rowid, content) VALUES (
+                    new.id,
+                    COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+                );
+            END;
+        """)
+        if marker:
+            conn.execute(
+                "INSERT INTO state_meta (key, value) VALUES (?, ?)",
+                (SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE),
+            )
+        conn.commit()
+        conn.close()
+
     def test_wal_mode(self, db):
         cursor = db._conn.execute("PRAGMA journal_mode")
         mode = cursor.fetchone()[0]
@@ -2389,6 +2538,669 @@ class TestSchemaInit:
                     f"Column {col_name} declared in SCHEMA_SQL for {table_name} "
                     f"but missing from live DB. Live columns: {live_cols}"
                 )
+
+    def test_schema_version_13_external_content_fts_with_matching_count_rebuilds(self, tmp_path):
+        """v13 old external-content FTS must rebuild even when row counts match."""
+        import sqlite3
+
+        from hermes_state import SCHEMA_VERSION
+
+        db_path = tmp_path / "v13_external_content_fts.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (13);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL
+            );
+            CREATE VIRTUAL TABLE messages_fts USING fts5(
+                content, content=messages, content_rowid=id
+            );
+            CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+            END;
+            CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(
+                content, content=messages, content_rowid=id, tokenize='trigram'
+            );
+            CREATE TRIGGER messages_fts_trigram_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts_trigram(rowid, content) VALUES (new.id, new.content);
+            END;
+        """)
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at) VALUES (?, ?, ?)",
+            ("s1", "cli", 1000.0),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, tool_name, tool_calls, timestamp) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("s1", "assistant", "", "LEGACYTOOL", '{"q":"ARG"}', 1001.0),
+        )
+        assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM messages_fts_trigram").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'LEGACYTOOL'"
+        ).fetchall() == []
+        conn.commit()
+        conn.close()
+
+        migrated_db = SessionDB(db_path=db_path)
+        try:
+            fts_sql = migrated_db._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'messages_fts'"
+            ).fetchone()[0]
+            trigram_sql = migrated_db._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'messages_fts_trigram'"
+            ).fetchone()[0]
+            assert "content=" not in fts_sql.lower()
+            assert "content_rowid" not in fts_sql.lower()
+            assert "content=" not in trigram_sql.lower()
+            assert "content_rowid" not in trigram_sql.lower()
+            assert len(migrated_db.search_messages("LEGACYTOOL")) == 1
+            assert len(migrated_db.search_messages("ARG")) == 1
+            version = migrated_db._conn.execute(
+                "SELECT version FROM schema_version LIMIT 1"
+            ).fetchone()[0]
+            assert version == SCHEMA_VERSION
+        finally:
+            migrated_db.close()
+
+    def test_missing_schema_version_row_with_legacy_fts_backfills_all_messages(self, tmp_path):
+        """Legacy DBs with an empty schema_version table still need FTS repair."""
+        import sqlite3
+
+        db_path = tmp_path / "empty_schema_version_legacy_fts.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL
+            );
+            CREATE VIRTUAL TABLE messages_fts USING fts5(content);
+            CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(content, tokenize='trigram');
+        """)
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at) VALUES (?, ?, ?)",
+            ("s1", "cli", 1000.0),
+        )
+        for idx in range(3):
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) "
+                "VALUES (?, ?, ?, ?)",
+                ("s1", "user", f"legacy message {idx}", 1001.0 + idx),
+            )
+        conn.execute(
+            "INSERT INTO messages_fts(rowid, content) VALUES (?, ?)",
+            (1, "only one stale row"),
+        )
+        conn.commit()
+        conn.close()
+
+        migrated_db = SessionDB(db_path=db_path)
+        try:
+            message_count = migrated_db._conn.execute(
+                "SELECT COUNT(*) FROM messages"
+            ).fetchone()[0]
+            fts_count = migrated_db._conn.execute(
+                "SELECT COUNT(*) FROM messages_fts"
+            ).fetchone()[0]
+            trigram_count = migrated_db._conn.execute(
+                "SELECT COUNT(*) FROM messages_fts_trigram"
+            ).fetchone()[0]
+
+            assert message_count == 3
+            assert fts_count == message_count
+            assert trigram_count == message_count
+        finally:
+            migrated_db.close()
+
+    def test_fts_rebuild_failure_blocks_schema_version_bump(self, tmp_path):
+        """FTS repair must fail closed before advancing schema_version."""
+        import sqlite3
+
+        from hermes_state import SCHEMA_VERSION
+
+        db_path = tmp_path / "bad_fts_rebuild.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (13);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL
+            );
+        """)
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at) VALUES (?, ?, ?)",
+            ("s1", "cli", 1000.0),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) "
+            "VALUES (?, ?, ?, ?)",
+            ("s1", "user", "legacy message", 1001.0),
+        )
+        conn.execute(
+            "CREATE VIEW messages_fts AS "
+            "SELECT content FROM messages WHERE 0"
+        )
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=fts_integrity" in msg
+        assert "table=messages_fts" in msg
+        assert "reason=rebuild_failed" in msg
+
+        verify_conn = sqlite3.connect(str(db_path))
+        try:
+            version = verify_conn.execute(
+                "SELECT version FROM schema_version LIMIT 1"
+            ).fetchone()[0]
+        finally:
+            verify_conn.close()
+        assert version == 13
+        assert version != SCHEMA_VERSION
+
+    def test_incompatible_scope_column_blocks_schema_version_bump(self, tmp_path):
+        """A same-name scope column with incompatible metadata is not accepted."""
+        import sqlite3
+
+        from hermes_state import SCHEMA_VERSION
+
+        db_path = tmp_path / "bad_scope_column.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (13);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL,
+                conversation_scope_id INTEGER DEFAULT 0
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=reconcile_columns" in msg
+        assert "table=sessions" in msg
+        assert "column=conversation_scope_id" in msg
+        assert "reason=incompatible_column" in msg
+
+        verify_conn = sqlite3.connect(str(db_path))
+        try:
+            version = verify_conn.execute(
+                "SELECT version FROM schema_version LIMIT 1"
+            ).fetchone()[0]
+        finally:
+            verify_conn.close()
+        assert version == 13
+        assert version != SCHEMA_VERSION
+
+    def test_schema_version_14_without_scope_contract_fails_closed(self, tmp_path):
+        """schema_version=14 alone is not a compatible fork schema contract."""
+        import sqlite3
+
+        db_path = tmp_path / "upstream_v14_shape.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (14);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL
+            );
+            CREATE TABLE state_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=schema_contract" in msg
+        assert "reason=missing_contract_marker" in msg
+
+    def test_schema_version_14_with_marker_but_missing_scope_objects_fails_closed(self, tmp_path):
+        """A marker cannot make an incomplete current-version schema valid."""
+        import sqlite3
+
+        from hermes_state import SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE
+
+        db_path = tmp_path / "marked_but_incomplete_v14.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (14);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL
+            );
+            CREATE TABLE state_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+        """)
+        conn.execute(
+            "INSERT INTO state_meta (key, value) VALUES (?, ?)",
+            (SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE),
+        )
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=schema_contract" in msg
+        assert "reason=missing_required_object" in msg
+        assert "table=conversation_scopes" in msg
+
+    def test_future_schema_version_fails_closed(self, tmp_path):
+        """Opening a DB from a future schema version is refused."""
+        import sqlite3
+
+        from hermes_state import SCHEMA_VERSION
+
+        db_path = tmp_path / "future_version.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL
+            );
+        """)
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?)",
+            (SCHEMA_VERSION + 1,),
+        )
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=schema_version" in msg
+        assert "reason=future_version" in msg
+
+    def test_schema_version_14_missing_required_index_fails_closed(self, tmp_path):
+        """Current-version fork schemas must include required contract indexes."""
+        import sqlite3
+
+        from hermes_state import SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE
+
+        db_path = tmp_path / "v14_missing_required_index.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (14);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                user_id TEXT,
+                model TEXT,
+                model_config TEXT,
+                system_prompt TEXT,
+                parent_session_id TEXT,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                end_reason TEXT,
+                message_count INTEGER DEFAULT 0,
+                tool_call_count INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0,
+                cache_write_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0,
+                billing_provider TEXT,
+                billing_base_url TEXT,
+                billing_mode TEXT,
+                estimated_cost_usd REAL,
+                actual_cost_usd REAL,
+                cost_status TEXT,
+                cost_source TEXT,
+                pricing_version TEXT,
+                title TEXT,
+                api_call_count INTEGER DEFAULT 0,
+                handoff_state TEXT,
+                handoff_platform TEXT,
+                handoff_error TEXT,
+                conversation_scope_id TEXT,
+                scope_assignment_status TEXT,
+                route_session_key_snapshot TEXT,
+                route_partition_key TEXT
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL,
+                token_count INTEGER,
+                finish_reason TEXT,
+                reasoning TEXT,
+                reasoning_content TEXT,
+                reasoning_details TEXT,
+                codex_reasoning_items TEXT,
+                codex_message_items TEXT,
+                platform_message_id TEXT,
+                observed INTEGER DEFAULT 0,
+                conversation_scope_id TEXT
+            );
+            CREATE TABLE conversation_scopes (
+                id TEXT PRIMARY KEY,
+                canonical_key TEXT NOT NULL UNIQUE,
+                platform TEXT NOT NULL,
+                platform_account_id TEXT NOT NULL DEFAULT '',
+                chat_type TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                thread_id TEXT,
+                participant_mode TEXT NOT NULL,
+                participant_id TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE state_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+            CREATE INDEX idx_sessions_source ON sessions(source);
+            CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+            CREATE INDEX idx_sessions_started ON sessions(started_at DESC);
+        """)
+        conn.execute(
+            "INSERT INTO state_meta (key, value) VALUES (?, ?)",
+            (SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE),
+        )
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=schema_contract" in msg
+        assert "reason=missing_required_index" in msg
+        assert "index=idx_messages_session" in msg
+
+    def test_schema_version_14_missing_marker_on_full_contract_fails_closed(self, tmp_path):
+        """A structurally complete current-version DB still needs this fork's marker."""
+        import sqlite3
+
+        db_path = tmp_path / "v14_full_contract_missing_marker.db"
+        self._create_v14_contract_db(db_path, marker=False)
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=schema_contract" in msg
+        assert "reason=missing_contract_marker" in msg
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            assert conn.execute(
+                "SELECT value FROM state_meta WHERE key = 'hermes_schema_contract'"
+            ).fetchone() is None
+        finally:
+            conn.close()
+
+    def test_schema_version_14_sessions_id_must_be_primary_key(self, tmp_path):
+        import sqlite3
+
+        db_path = tmp_path / "v14_sessions_id_not_pk.db"
+        self._create_v14_contract_db(db_path, sessions_id_primary_key=False)
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=schema_contract" in msg
+        assert "reason=incompatible_column" in msg
+        assert "table=sessions" in msg
+        assert "column=id" in msg
+
+    def test_schema_version_14_conversation_scope_canonical_key_must_be_unique(self, tmp_path):
+        import sqlite3
+
+        db_path = tmp_path / "v14_canonical_key_not_unique.db"
+        self._create_v14_contract_db(db_path, canonical_key_unique=False)
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=schema_contract" in msg
+        assert "reason=missing_unique_constraint" in msg
+        assert "table=conversation_scopes" in msg
+        assert "columns=canonical_key" in msg
+
+    def test_schema_version_14_messages_session_id_must_reference_sessions(self, tmp_path):
+        import sqlite3
+
+        db_path = tmp_path / "v14_messages_session_fk_missing.db"
+        self._create_v14_contract_db(db_path, messages_session_fk=False)
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=schema_contract" in msg
+        assert "reason=missing_foreign_key" in msg
+        assert "table=messages" in msg
+        assert "column=session_id" in msg
+
+    def test_production_v13_shape_migrates_counts_and_keeps_legacy_unscoped(self, tmp_path):
+        """v13 production-shaped DBs keep counts and do not mark old rows scoped."""
+        import sqlite3
+
+        db_path = tmp_path / "production_v13_shape.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version (version) VALUES (13);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                user_id TEXT,
+                model TEXT,
+                model_config TEXT,
+                system_prompt TEXT,
+                parent_session_id TEXT,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                end_reason TEXT,
+                message_count INTEGER DEFAULT 0,
+                tool_call_count INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0,
+                cache_write_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0,
+                billing_provider TEXT,
+                billing_base_url TEXT,
+                billing_mode TEXT,
+                estimated_cost_usd REAL,
+                actual_cost_usd REAL,
+                cost_status TEXT,
+                cost_source TEXT,
+                pricing_version TEXT,
+                title TEXT,
+                api_call_count INTEGER DEFAULT 0,
+                handoff_state TEXT,
+                handoff_platform TEXT,
+                handoff_error TEXT
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL,
+                token_count INTEGER,
+                finish_reason TEXT,
+                reasoning TEXT,
+                reasoning_content TEXT,
+                reasoning_details TEXT,
+                codex_reasoning_items TEXT,
+                codex_message_items TEXT,
+                platform_message_id TEXT,
+                observed INTEGER DEFAULT 0
+            );
+        """)
+        for idx in range(5):
+            conn.execute(
+                "INSERT INTO sessions (id, source, started_at, message_count) "
+                "VALUES (?, ?, ?, ?)",
+                (f"s{idx}", "telegram", 1000.0 + idx, 2),
+            )
+            for msg_idx in range(2):
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content, timestamp) "
+                    "VALUES (?, ?, ?, ?)",
+                    (f"s{idx}", "user", f"message {idx}-{msg_idx}", 2000.0 + msg_idx),
+                )
+        conn.commit()
+        conn.close()
+
+        migrated_db = SessionDB(db_path=db_path)
+        try:
+            session_count = migrated_db._conn.execute(
+                "SELECT COUNT(*) FROM sessions"
+            ).fetchone()[0]
+            message_count = migrated_db._conn.execute(
+                "SELECT COUNT(*) FROM messages"
+            ).fetchone()[0]
+            assert session_count == 5
+            assert message_count == 10
+
+            session_cols = {
+                r[1]
+                for r in migrated_db._conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            message_cols = {
+                r[1]
+                for r in migrated_db._conn.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            assert {
+                "conversation_scope_id",
+                "scope_assignment_status",
+                "route_session_key_snapshot",
+                "route_partition_key",
+            }.issubset(session_cols)
+            assert "conversation_scope_id" in message_cols
+
+            scoped_count = migrated_db._conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE scope_assignment_status = 'scoped'"
+            ).fetchone()[0]
+            non_null_scope_count = migrated_db._conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE conversation_scope_id IS NOT NULL"
+            ).fetchone()[0]
+            fts_count = migrated_db._conn.execute(
+                "SELECT COUNT(*) FROM messages_fts"
+            ).fetchone()[0]
+            trigram_count = migrated_db._conn.execute(
+                "SELECT COUNT(*) FROM messages_fts_trigram"
+            ).fetchone()[0]
+
+            assert scoped_count == 0
+            assert non_null_scope_count == 0
+            assert fts_count == message_count
+            assert trigram_count == message_count
+            marker = migrated_db._conn.execute(
+                "SELECT value FROM state_meta WHERE key = 'hermes_schema_contract'"
+            ).fetchone()
+            assert marker is not None
+            assert marker[0] == "rtoc-pr2a-scope-v1"
+        finally:
+            migrated_db.close()
 
 
 class TestTitleUniqueness:
