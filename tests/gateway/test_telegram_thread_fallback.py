@@ -506,6 +506,35 @@ def test_base_gateway_replies_to_triggering_message_for_telegram_dm_topic():
     assert _reply_anchor_for_event(event) == "463"
 
 
+def test_base_gateway_metadata_for_feishu_topic_includes_reply_anchor():
+    source = SimpleNamespace(
+        platform=Platform.FEISHU,
+        chat_type="group",
+        thread_id="omt_topic",
+    )
+
+    metadata = _thread_metadata_for_source(source, "om_topic_event")
+
+    assert metadata == {
+        "thread_id": "omt_topic",
+        "reply_to_message_id": "om_topic_event",
+    }
+
+
+def test_feishu_topic_reply_anchor_uses_current_event_message_id():
+    event = SimpleNamespace(
+        message_id="om_topic_event",
+        reply_to_message_id="om_main_seed",
+        source=SimpleNamespace(
+            platform=Platform.FEISHU,
+            chat_type="group",
+            thread_id="omt_topic",
+        ),
+    )
+
+    assert _reply_anchor_for_event(event) == "om_topic_event"
+
+
 @pytest.mark.asyncio
 async def test_gateway_runner_busy_ack_replies_to_triggering_message_for_telegram_dm_topic(monkeypatch, tmp_path):
     """GatewayRunner's duplicate thread metadata must match the base helper."""

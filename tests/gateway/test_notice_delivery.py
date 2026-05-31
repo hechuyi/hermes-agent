@@ -8,9 +8,9 @@ from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 
 
-def _make_source() -> SessionSource:
+def _make_source(*, platform: Platform = Platform.SLACK) -> SessionSource:
     return SessionSource(
-        platform=Platform.SLACK,
+        platform=platform,
         chat_id="C123",
         chat_type="channel",
         user_id="U123",
@@ -65,3 +65,24 @@ async def test_deliver_platform_notice_uses_public_delivery_by_default():
 
     adapter.send.assert_awaited_once_with("C123", "hello", metadata={"thread_id": "111.222"})
     adapter.send_private_notice.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deliver_platform_notice_includes_feishu_current_event_anchor():
+    runner, adapter = _make_runner()
+    runner.adapters = {Platform.FEISHU: adapter}
+
+    await runner._deliver_platform_notice(
+        _make_source(platform=Platform.FEISHU),
+        "hello",
+        reply_to_message_id="om_current_event",
+    )
+
+    adapter.send.assert_awaited_once_with(
+        "C123",
+        "hello",
+        metadata={
+            "thread_id": "111.222",
+            "reply_to_message_id": "om_current_event",
+        },
+    )

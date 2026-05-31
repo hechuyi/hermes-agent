@@ -65,6 +65,8 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
     if thread_id is None:
         return None
     metadata = {"thread_id": thread_id}
+    if _platform_name(getattr(source, "platform", None)) == "feishu" and reply_to_message_id:
+        metadata["reply_to_message_id"] = str(reply_to_message_id)
     if _platform_name(getattr(source, "platform", None)) == "telegram" and getattr(source, "chat_type", None) == "dm":
         metadata["telegram_dm_topic_reply_fallback"] = True
         tid = str(thread_id)
@@ -94,8 +96,8 @@ def _reply_anchor_for_event(event) -> str | None:
         return getattr(event, "message_id", None) or getattr(event, "reply_to_message_id", None)
     if platform == "telegram" and thread_id:
         return None
-    if platform == "feishu" and thread_id and getattr(event, "reply_to_message_id", None):
-        return getattr(event, "reply_to_message_id", None)
+    if platform == "feishu" and thread_id:
+        return getattr(event, "message_id", None)
     return getattr(event, "message_id", None)
 
 

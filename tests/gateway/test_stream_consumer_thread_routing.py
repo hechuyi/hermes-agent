@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from gateway.config import Platform
+from gateway.run import GatewayRunner
 from gateway.stream_consumer import (
     GatewayStreamConsumer,
     StreamConsumerConfig,
@@ -139,12 +141,30 @@ class TestOverflowFirstMessage:
 
 
 class TestFeishuFallbackThreadRouting:
-    """Verify FeishuAdapter._send_raw_message routes to topic on fallback."""
+    """Verify FeishuAdapter._send_raw_message create routes never target topics."""
+
+    def test_runner_feishu_topic_stream_metadata_includes_reply_anchor(self):
+        source = SimpleNamespace(
+            platform=Platform.FEISHU,
+            chat_type="group",
+            thread_id="omt_topic_abc",
+        )
+
+        metadata = GatewayRunner._thread_metadata_for_source(
+            GatewayRunner.__new__(GatewayRunner),
+            source,
+            "om_topic_event",
+        )
+
+        assert metadata == {
+            "thread_id": "omt_topic_abc",
+            "reply_to_message_id": "om_topic_event",
+        }
 
     @pytest.mark.asyncio
-    async def test_create_uses_thread_id_when_available(self):
+    async def test_no_thread_id_receive_id_type_create_without_reply_anchor_uses_chat_id(self):
         """When reply_to=None and metadata has thread_id, message.create
-        should use receive_id_type='thread_id'."""
+        should still use the chat route."""
         from gateway.platforms.feishu import FeishuAdapter
 
         # We test the _send_raw_message method directly by mocking the client
@@ -163,7 +183,6 @@ class TestFeishuFallbackThreadRouting:
         adapter._build_create_message_body = FeishuAdapter._build_create_message_body
         adapter._build_create_message_request = FeishuAdapter._build_create_message_request
 
-        # Call _send_raw_message with reply_to=None and thread_id in metadata
         import json
         result = await FeishuAdapter._send_raw_message(
             adapter,
@@ -177,26 +196,110 @@ class TestFeishuFallbackThreadRouting:
         # Verify message.create was called (not message.reply)
         mock_client.im.v1.message.create.assert_called_once()
 
-        # The request should have receive_id_type="thread_id"
         call_args = mock_client.im.v1.message.create.call_args[0][0]
         # Lark SDK builder exposes .body; the in-tree fallback exposes .request_body.
         # The contributor's branch had the lark SDK installed, the test environment
         # may not — handle both shapes.
         body = getattr(call_args, "body", None) or getattr(call_args, "request_body", None)
         assert body is not None, "request has neither .body nor .request_body"
-        # receive_id should be the thread_id, not the chat_id
         receive_id = getattr(body, "receive_id", None)
         if receive_id is None and isinstance(body, str):
             import json as _json
             receive_id = _json.loads(body).get("receive_id")
-        assert receive_id == "omt_topic_abc", (
-            f"Expected receive_id='omt_topic_abc', got '{receive_id}'"
+        assert receive_id == "oc_main_chat", (
+            f"Expected receive_id='oc_main_chat', got '{receive_id}'"
         )
-        # And receive_id_type must be 'thread_id', not 'chat_id'
         receive_id_type = getattr(call_args, "receive_id_type", None)
-        assert receive_id_type == "thread_id", (
-            f"Expected receive_id_type='thread_id', got '{receive_id_type}'"
+        assert receive_id_type == "chat_id", (
+            f"Expected receive_id_type='chat_id', got '{receive_id_type}'"
         )
+
+        assert result.success()
+
+    @pytest.mark.asyncio
+    async def test_runner_feishu_topic_stream_metadata_routes_send_via_reply_api(self):
+        from gateway.platforms.feishu import FeishuAdapter
+
+        source = SimpleNamespace(
+            platform=Platform.FEISHU,
+            chat_type="group",
+            thread_id="omt_topic_abc",
+        )
+        metadata = GatewayRunner._thread_metadata_for_source(
+            GatewayRunner.__new__(GatewayRunner),
+            source,
+            "om_topic_event",
+        )
+
+        adapter = MagicMock(spec=FeishuAdapter)
+        mock_client = MagicMock()
+        mock_reply_response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(message_id="new_msg_1"),
+        )
+        mock_client.im.v1.message.reply = MagicMock(return_value=mock_reply_response)
+        mock_client.im.v1.message.create = MagicMock()
+        adapter._client = mock_client
+        adapter._build_reply_message_body = FeishuAdapter._build_reply_message_body
+        adapter._build_reply_message_request = FeishuAdapter._build_reply_message_request
+
+        import json
+        result = await FeishuAdapter._send_raw_message(
+            adapter,
+            chat_id="oc_main_chat",
+            msg_type="text",
+            payload=json.dumps({"text": "stream fallback"}),
+            reply_to=None,
+            metadata=metadata,
+        )
+
+        mock_client.im.v1.message.reply.assert_called_once()
+        mock_client.im.v1.message.create.assert_not_called()
+        request = mock_client.im.v1.message.reply.call_args[0][0]
+        assert request.message_id == "om_topic_event"
+        assert request.request_body.reply_in_thread is True
+        assert result.success()
+
+    @pytest.mark.asyncio
+    async def test_base_feishu_topic_metadata_routes_visible_send_via_reply_api(self):
+        from gateway.platforms.base import _thread_metadata_for_source
+        from gateway.platforms.feishu import FeishuAdapter
+
+        source = SimpleNamespace(
+            platform=Platform.FEISHU,
+            chat_type="group",
+            thread_id="omt_topic_abc",
+        )
+        metadata = _thread_metadata_for_source(source, "om_topic_event")
+
+        adapter = MagicMock(spec=FeishuAdapter)
+        mock_client = MagicMock()
+        mock_reply_response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(message_id="new_msg_2"),
+        )
+        mock_client.im.v1.message.reply = MagicMock(return_value=mock_reply_response)
+        mock_client.im.v1.message.create = MagicMock()
+        adapter._client = mock_client
+        adapter._build_reply_message_body = FeishuAdapter._build_reply_message_body
+        adapter._build_reply_message_request = FeishuAdapter._build_reply_message_request
+
+        import json
+        result = await FeishuAdapter._send_raw_message(
+            adapter,
+            chat_id="oc_main_chat",
+            msg_type="text",
+            payload=json.dumps({"text": "metadata-only visible send"}),
+            reply_to=None,
+            metadata=metadata,
+        )
+
+        mock_client.im.v1.message.reply.assert_called_once()
+        mock_client.im.v1.message.create.assert_not_called()
+        request = mock_client.im.v1.message.reply.call_args[0][0]
+        assert request.message_id == "om_topic_event"
+        assert request.request_body.reply_in_thread is True
+        assert result.success()
 
     @pytest.mark.asyncio
     async def test_create_uses_chat_id_when_no_thread(self):

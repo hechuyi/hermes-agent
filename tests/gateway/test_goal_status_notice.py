@@ -71,6 +71,37 @@ async def test_goal_status_notice_uses_adapter_send_with_thread_metadata():
 
 
 @pytest.mark.asyncio
+async def test_goal_status_notice_includes_feishu_current_event_anchor():
+    runner = GatewayRunner.__new__(GatewayRunner)
+    adapter = FakeAdapter()
+    runner.adapters = {Platform.FEISHU: adapter}
+
+    source = SessionSource(
+        platform=Platform.FEISHU,
+        chat_id="oc_chat",
+        thread_id="topic-123",
+    )
+
+    await runner._send_goal_status_notice(
+        source,
+        "✓ Goal achieved: done",
+        reply_to_message_id="om_current_event",
+    )
+
+    assert adapter.calls == [
+        {
+            "chat_id": "oc_chat",
+            "content": "✓ Goal achieved: done",
+            "reply_to": None,
+            "metadata": {
+                "thread_id": "topic-123",
+                "reply_to_message_id": "om_current_event",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_goal_status_notice_defers_until_post_delivery_callback():
     """Regression: goal status must appear after the agent's visible reply.
 

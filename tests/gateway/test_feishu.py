@@ -2031,6 +2031,42 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertTrue(captured["request"].request_body.reply_in_thread)
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_create_without_reply_anchor_uses_open_id_for_dm_even_with_thread_metadata(self):
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {}
+
+        class _MessageAPI:
+            def create(self, request):
+                captured["request"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_created"),
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(v1=SimpleNamespace(message=_MessageAPI()))
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct):
+            result = asyncio.run(
+                adapter.send(
+                    chat_id="ou_user",
+                    content="status update",
+                    metadata={"thread_id": "omt-thread"},
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(captured["request"].receive_id_type, "open_id")
+        self.assertEqual(captured["request"].request_body.receive_id, "ou_user")
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_send_retries_transient_failure(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
@@ -4431,6 +4467,111 @@ class TestFeishuProcessInboundMessage(unittest.TestCase):
         adapter.build_source = Mock(return_value=SimpleNamespace(thread_id=None))
         adapter._dispatch_inbound_event = AsyncMock()
         return adapter
+
+    @staticmethod
+    def _source_from_kwargs(**kwargs):
+        return SimpleNamespace(**kwargs)
+
+    def test_root_id_not_thread_id(self):
+        adapter = self._build_adapter()
+        adapter.build_source = Mock(side_effect=self._source_from_kwargs)
+        adapter._fetch_message_text = AsyncMock(return_value="parent text")
+        message = SimpleNamespace(
+            content=json.dumps({"text": "inline reply"}),
+            message_type="text",
+            message_id="om_inline_reply",
+            mentions=[],
+            chat_id="oc_chat",
+            parent_id="om_parent",
+            upper_message_id=None,
+            root_id="om_root",
+            thread_id=None,
+        )
+
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="group",
+                message_id="om_inline_reply",
+            )
+        )
+
+        event = adapter._dispatch_inbound_event.call_args.args[0]
+        self.assertIsNone(event.source.thread_id)
+        self.assertIsNone(adapter.build_source.call_args.kwargs["thread_id"])
+        self.assertEqual(event.reply_to_message_id, "om_parent")
+        self.assertEqual(event.reply_to_text, "parent text")
+        adapter._fetch_message_text.assert_awaited_once_with("om_parent")
+
+    def test_dm_root_id_not_thread_id(self):
+        adapter = self._build_adapter()
+        adapter.build_source = Mock(side_effect=self._source_from_kwargs)
+        adapter._resolve_source_chat_type = Mock(return_value="dm")
+        adapter._fetch_message_text = AsyncMock(return_value="dm root text")
+        message = SimpleNamespace(
+            content=json.dumps({"text": "dm reply"}),
+            message_type="text",
+            message_id="om_dm_reply",
+            mentions=[],
+            chat_id="ou_user",
+            parent_id=None,
+            upper_message_id=None,
+            root_id="om_dm_root",
+            thread_id=None,
+        )
+
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="p2p",
+                message_id="om_dm_reply",
+            )
+        )
+
+        event = adapter._dispatch_inbound_event.call_args.args[0]
+        self.assertEqual(event.source.chat_type, "dm")
+        self.assertIsNone(event.source.thread_id)
+        self.assertIsNone(adapter.build_source.call_args.kwargs["thread_id"])
+        self.assertEqual(event.reply_to_message_id, "om_dm_root")
+        self.assertEqual(event.reply_to_text, "dm root text")
+        adapter._fetch_message_text.assert_awaited_once_with("om_dm_root")
+
+    def test_topic_thread_id_preserved(self):
+        adapter = self._build_adapter()
+        adapter.build_source = Mock(side_effect=self._source_from_kwargs)
+        adapter._fetch_message_text = AsyncMock(return_value="topic root")
+        message = SimpleNamespace(
+            content=json.dumps({"text": "topic reply"}),
+            message_type="text",
+            message_id="om_topic_reply",
+            mentions=[],
+            chat_id="oc_chat",
+            parent_id=None,
+            upper_message_id=None,
+            root_id="om_main_seed",
+            thread_id="omt_topic",
+        )
+
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="group",
+                message_id="om_topic_reply",
+            )
+        )
+
+        event = adapter._dispatch_inbound_event.call_args.args[0]
+        self.assertEqual(event.source.thread_id, "omt_topic")
+        self.assertEqual(adapter.build_source.call_args.kwargs["thread_id"], "omt_topic")
+        self.assertEqual(event.reply_to_message_id, "om_main_seed")
+        self.assertEqual(event.reply_to_text, "topic root")
+        adapter._fetch_message_text.assert_awaited_once_with("om_main_seed")
 
     def test_leading_self_mention_stripped_for_command(self):
         from gateway.platforms.base import MessageType

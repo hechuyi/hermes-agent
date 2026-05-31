@@ -6726,7 +6726,12 @@ class GatewayRunner:
 
         return "pair"
 
-    async def _deliver_platform_notice(self, source, content: str) -> None:
+    async def _deliver_platform_notice(
+        self,
+        source,
+        content: str,
+        reply_to_message_id: Optional[str] = None,
+    ) -> None:
         """Deliver a setup/operational notice using platform-specific privacy rules."""
         adapter = self.adapters.get(source.platform)
         if not adapter:
@@ -6737,7 +6742,7 @@ class GatewayRunner:
         if config and hasattr(config, "get_notice_delivery"):
             notice_delivery = config.get_notice_delivery(source.platform)
 
-        metadata = self._thread_metadata_for_source(source)
+        metadata = self._thread_metadata_for_source(source, reply_to_message_id)
         if notice_delivery == "private" and getattr(source, "user_id", None):
             try:
                 result = await adapter.send_private_notice(
@@ -7892,6 +7897,7 @@ class GatewayRunner:
                             session_entry=session_entry,
                             source=source,
                             final_response=_final_text,
+                            reply_to_message_id=self._reply_anchor_for_event(event),
                         )
             except Exception as _goal_exc:
                 logger.debug("goal continuation hook failed: %s", _goal_exc)
@@ -8345,7 +8351,10 @@ class GatewayRunner:
                             pass
                         await adapter.send(
                             source.chat_id, notice,
-                            metadata=self._thread_metadata_for_source(source),
+                            metadata=self._thread_metadata_for_source(
+                                source,
+                                self._reply_anchor_for_event(event),
+                            ),
                         )
             except Exception as e:
                 logger.debug("Auto-reset notification failed (non-fatal): %s", e)
@@ -8735,7 +8744,11 @@ class GatewayRunner:
                     f"Type {sethome_cmd} to make this chat your home channel, "
                     f"or ignore to skip."
                 )
-                await self._deliver_platform_notice(source, notice)
+                await self._deliver_platform_notice(
+                    source,
+                    notice,
+                    reply_to_message_id=self._reply_anchor_for_event(event),
+                )
         
         # -----------------------------------------------------------------
         # Voice channel awareness — inject current voice channel state
@@ -10932,7 +10945,12 @@ class GatewayRunner:
         idx = len(mgr.state.subgoals) if mgr.state else 0
         return f"✓ Added subgoal {idx}: {text}"
 
-    async def _send_goal_status_notice(self, source: Any, message: str) -> None:
+    async def _send_goal_status_notice(
+        self,
+        source: Any,
+        message: str,
+        reply_to_message_id: Optional[str] = None,
+    ) -> None:
         """Send a /goal judge status line back to the originating chat/thread."""
         adapter = self.adapters.get(source.platform)
         if not adapter:
@@ -10940,7 +10958,7 @@ class GatewayRunner:
             return
 
         try:
-            metadata = self._thread_metadata_for_source(source)
+            metadata = self._thread_metadata_for_source(source, reply_to_message_id)
         except Exception:
             metadata = None
 
@@ -10951,7 +10969,12 @@ class GatewayRunner:
                 getattr(result, "error", "unknown error"),
             )
 
-    async def _defer_goal_status_notice_after_delivery(self, source: Any, message: str) -> None:
+    async def _defer_goal_status_notice_after_delivery(
+        self,
+        source: Any,
+        message: str,
+        reply_to_message_id: Optional[str] = None,
+    ) -> None:
         """Send a /goal status line after the main response is delivered.
 
         The gateway message handler returns the agent response to the platform
@@ -10968,7 +10991,11 @@ class GatewayRunner:
 
         async def _deliver() -> None:
             try:
-                await self._send_goal_status_notice(source, message)
+                await self._send_goal_status_notice(
+                    source,
+                    message,
+                    reply_to_message_id=reply_to_message_id,
+                )
             except Exception as exc:
                 logger.warning("goal continuation: status send failed: %s", exc, exc_info=True)
 
@@ -11000,6 +11027,7 @@ class GatewayRunner:
         session_entry: Any,
         source: Any,
         final_response: str,
+        reply_to_message_id: Optional[str] = None,
     ) -> None:
         """Run the goal judge after a gateway turn and, if still active,
         enqueue a continuation prompt for the same session.
@@ -11037,7 +11065,11 @@ class GatewayRunner:
         # an awaited post-delivery callback preserves delivery reliability
         # without reversing the user-visible ordering.
         if msg and source is not None:
-            await self._defer_goal_status_notice_after_delivery(source, msg)
+            await self._defer_goal_status_notice_after_delivery(
+                source,
+                msg,
+                reply_to_message_id=reply_to_message_id,
+            )
 
         if not decision.get("should_continue"):
             return
@@ -13826,6 +13858,8 @@ class GatewayRunner:
         if thread_id is None:
             return None
         metadata: Dict[str, Any] = {"thread_id": thread_id}
+        if getattr(source, "platform", None) == Platform.FEISHU and reply_to_message_id:
+            metadata["reply_to_message_id"] = str(reply_to_message_id)
         if (
             getattr(source, "platform", None) == Platform.TELEGRAM
             and getattr(source, "chat_type", None) == "dm"
