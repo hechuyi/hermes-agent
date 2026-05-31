@@ -6587,11 +6587,14 @@ class HermesCLI:
             row = self._session_db.get_session(self.session_id)
             if not row:
                 # Nothing has flushed yet. Create a stub so the gateway has
-                # something to switch_session onto. Inserting via title-set
-                # is the simplest path because set_session_title's INSERT OR
-                # IGNORE creates the row.
-                placeholder_title = f"handoff-{self.session_id[:8]}"
-                self._session_db.set_session_title(self.session_id, placeholder_title)
+                # something to switch_session onto. Empty CLI sessions have no
+                # transport-origin evidence, so they are explicitly legacy
+                # unscoped rather than silently marked scoped.
+                self._session_db.ensure_session(
+                    self.session_id,
+                    source="cli",
+                    scope_assignment_status="legacy_unscoped",
+                )
         except Exception as exc:
             _cprint(f"  Could not ensure session row in state.db: {exc}")
             return True

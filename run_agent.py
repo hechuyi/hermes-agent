@@ -510,6 +510,24 @@ class AIAgent:
         if self._session_db_created or not self._session_db:
             return
         try:
+            try:
+                from gateway.session_context import get_session_env
+
+                conversation_scope_id = get_session_env("HERMES_CONVERSATION_SCOPE_ID", "") or None
+                platform_account_id = get_session_env("HERMES_PLATFORM_ACCOUNT_ID", "") or None
+                route_partition_key = get_session_env("HERMES_ROUTE_PARTITION_KEY", "") or None
+            except Exception:
+                conversation_scope_id = None
+                platform_account_id = None
+                route_partition_key = None
+            scope_kwargs = {}
+            if conversation_scope_id and platform_account_id and route_partition_key:
+                scope_kwargs = {
+                    "conversation_scope_id": conversation_scope_id,
+                    "scope_assignment_status": "scoped",
+                    "route_session_key_snapshot": getattr(self, "_gateway_session_key", None) or route_partition_key,
+                    "route_partition_key": route_partition_key,
+                }
             self._session_db.create_session(
                 session_id=self.session_id,
                 source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
@@ -518,6 +536,7 @@ class AIAgent:
                 system_prompt=self._cached_system_prompt,
                 user_id=None,
                 parent_session_id=self._parent_session_id,
+                **scope_kwargs,
             )
             self._session_db_created = True
         except Exception as e:

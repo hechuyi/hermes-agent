@@ -176,6 +176,9 @@ class SessionContext:
     session_id: str = ""
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    conversation_scope_id: Optional[str] = None
+    platform_account_id: Optional[str] = None
+    route_partition_key: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -189,6 +192,9 @@ class SessionContext:
             "session_id": self.session_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "conversation_scope_id": self.conversation_scope_id,
+            "platform_account_id": self.platform_account_id,
+            "route_partition_key": self.route_partition_key,
         }
 
 
@@ -490,6 +496,9 @@ class SessionEntry:
     resume_pending: bool = False
     resume_reason: Optional[str] = None  # e.g. "restart_timeout"
     last_resume_marked_at: Optional[datetime] = None
+    conversation_scope_id: Optional[str] = None
+    platform_account_id: Optional[str] = None
+    route_partition_key: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         result = {
@@ -521,6 +530,9 @@ class SessionEntry:
             "was_auto_reset": self.was_auto_reset,
             "auto_reset_reason": self.auto_reset_reason,
             "reset_had_activity": self.reset_had_activity,
+            "conversation_scope_id": self.conversation_scope_id,
+            "platform_account_id": self.platform_account_id,
+            "route_partition_key": self.route_partition_key,
         }
         if self.origin:
             result["origin"] = self.origin.to_dict()
@@ -573,6 +585,9 @@ class SessionEntry:
             was_auto_reset=data.get("was_auto_reset", False),
             auto_reset_reason=data.get("auto_reset_reason"),
             reset_had_activity=data.get("reset_had_activity", False),
+            conversation_scope_id=data.get("conversation_scope_id"),
+            platform_account_id=data.get("platform_account_id"),
+            route_partition_key=data.get("route_partition_key"),
         )
 
 
@@ -748,6 +763,247 @@ class SessionStore:
             group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
         )
+
+    def _scope_kwargs_for_source(self, source: Optional[SessionSource], session_key: str) -> Dict[str, Any]:
+        """Return DB scope metadata for the current source.
+
+        PR1 only scopes Feishu sessions when current app identity evidence is
+        available. Other/unknown sources remain legacy-compatible.
+        """
+        if source is None or source.platform != Platform.FEISHU:
+            return {
+                "scope_assignment_status": "legacy_unscoped",
+                "conversation_scope_id": None,
+                "route_session_key_snapshot": None,
+                "route_partition_key": None,
+            }
+        from gateway.conversation_scope import (
+            conversation_identity,
+            feishu_platform_account_id,
+            route_partition_key,
+        )
+
+        platform_cfg = (getattr(self.config, "platforms", {}) or {}).get(Platform.FEISHU)
+        account_id = feishu_platform_account_id(config=platform_cfg)
+        if not account_id:
+            return {
+                "scope_assignment_status": "legacy_unscoped",
+                "conversation_scope_id": None,
+                "route_session_key_snapshot": None,
+                "route_partition_key": None,
+            }
+        route_key = route_partition_key(
+            source,
+            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
+            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+        )
+        ident = conversation_identity(
+            source,
+            platform_account_id=account_id,
+            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
+            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            group_conversation_scope_per_user=getattr(
+                self.config, "group_conversation_scope_per_user", False
+            ),
+            thread_conversation_scope_per_user=getattr(
+                self.config, "thread_conversation_scope_per_user", False
+            ),
+        )
+        if not ident:
+            return {
+                "scope_assignment_status": "legacy_unscoped",
+                "conversation_scope_id": None,
+                "route_session_key_snapshot": None,
+                "route_partition_key": None,
+            }
+        return {
+            "scope_assignment_status": "scoped",
+            "conversation_scope_id": ident.id,
+            "route_session_key_snapshot": session_key,
+            "route_partition_key": route_key,
+            "platform_account_id": account_id,
+            "_conversation_scope_identity": ident,
+        }
+
+    def _entry_accepts_scope_backfill(self, entry: SessionEntry, scope_kwargs: Dict[str, Any]) -> bool:
+        new_scope = scope_kwargs.get("conversation_scope_id")
+        new_route = scope_kwargs.get("route_partition_key")
+        new_account = scope_kwargs.get("platform_account_id")
+        if not new_scope or not new_route:
+            return False
+        current_scope = getattr(entry, "conversation_scope_id", None)
+        current_route = getattr(entry, "route_partition_key", None)
+        current_account = getattr(entry, "platform_account_id", None)
+        return current_scope == new_scope and current_route == new_route and current_account == new_account
+
+    def _entry_matches_scope(self, entry: SessionEntry, scope_kwargs: Dict[str, Any]) -> bool:
+        new_scope = scope_kwargs.get("conversation_scope_id")
+        new_route = scope_kwargs.get("route_partition_key")
+        new_account = scope_kwargs.get("platform_account_id")
+        if not new_scope or not new_route:
+            return False
+        current_scope = getattr(entry, "conversation_scope_id", None)
+        current_route = getattr(entry, "route_partition_key", None)
+        current_account = getattr(entry, "platform_account_id", None)
+        return current_scope == new_scope and current_route == new_route and current_account == new_account
+
+    def _entry_has_conflicting_scope(self, entry: SessionEntry, scope_kwargs: Dict[str, Any]) -> bool:
+        new_scope = scope_kwargs.get("conversation_scope_id")
+        new_route = scope_kwargs.get("route_partition_key")
+        new_account = scope_kwargs.get("platform_account_id")
+        if not new_scope or not new_route:
+            return False
+        current_scope = getattr(entry, "conversation_scope_id", None)
+        current_route = getattr(entry, "route_partition_key", None)
+        current_account = getattr(entry, "platform_account_id", None)
+        return (
+            (current_scope is not None and current_scope != new_scope)
+            or (current_route is not None and current_route != new_route)
+            or (current_account is not None and current_account != new_account)
+        )
+
+    def _db_row_requires_detach(self, db_row: Dict[str, Any], scope_kwargs: Dict[str, Any]) -> bool:
+        new_scope = scope_kwargs.get("conversation_scope_id")
+        new_route = scope_kwargs.get("route_partition_key")
+        if not new_scope or not new_route or not db_row:
+            return False
+        status = db_row.get("scope_assignment_status")
+        db_scope = db_row.get("conversation_scope_id")
+        db_route = db_row.get("route_partition_key")
+        db_snapshot = db_row.get("route_session_key_snapshot")
+        if status == "ambiguous":
+            return True
+        if status != "scoped":
+            return True
+        if not db_scope or not db_route or not db_snapshot:
+            return True
+        return (
+            db_scope != new_scope
+            or db_route != new_route
+            or db_snapshot != scope_kwargs.get("route_session_key_snapshot")
+        )
+
+    def _legacy_entry_requires_scoped_detach(
+        self,
+        entry: SessionEntry,
+        scope_kwargs: Dict[str, Any],
+    ) -> bool:
+        new_scope = scope_kwargs.get("conversation_scope_id")
+        new_route = scope_kwargs.get("route_partition_key")
+        if not new_scope or not new_route:
+            return False
+        return not self._entry_matches_scope(entry, scope_kwargs)
+
+    def _apply_scope_to_entry(self, entry: SessionEntry, scope_kwargs: Dict[str, Any]) -> None:
+        entry.conversation_scope_id = scope_kwargs.get("conversation_scope_id")
+        entry.platform_account_id = scope_kwargs.get("platform_account_id")
+        entry.route_partition_key = scope_kwargs.get("route_partition_key")
+
+    def _session_id_has_ambiguous_legacy_routes(
+        self,
+        *,
+        session_id: str,
+        session_key: str,
+        scope_kwargs: Dict[str, Any],
+    ) -> bool:
+        new_scope = scope_kwargs.get("conversation_scope_id")
+        new_route = scope_kwargs.get("route_partition_key")
+        if not session_id or not new_scope or not new_route:
+            return False
+        for key, entry in self._entries.items():
+            if key == session_key or entry.session_id != session_id:
+                continue
+            current_scope = getattr(entry, "conversation_scope_id", None)
+            current_route = getattr(entry, "route_partition_key", None)
+            if current_scope and current_scope != new_scope:
+                return True
+            if current_route and current_route != new_route:
+                return True
+            if not current_scope and not current_route:
+                return True
+        return False
+
+    def _new_session_entry(
+        self,
+        *,
+        session_key: str,
+        source: SessionSource,
+        now: datetime,
+        was_auto_reset: bool = False,
+        auto_reset_reason: Optional[str] = None,
+        reset_had_activity: bool = False,
+    ) -> tuple[SessionEntry, Dict[str, Any]]:
+        session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        scope_kwargs = self._scope_kwargs_for_source(source, session_key)
+        entry = SessionEntry(
+            session_key=session_key,
+            session_id=session_id,
+            created_at=now,
+            updated_at=now,
+            origin=source,
+            display_name=source.chat_name,
+            platform=source.platform,
+            chat_type=source.chat_type,
+            was_auto_reset=was_auto_reset,
+            auto_reset_reason=auto_reset_reason,
+            reset_had_activity=reset_had_activity,
+            conversation_scope_id=scope_kwargs.get("conversation_scope_id"),
+            platform_account_id=scope_kwargs.get("platform_account_id"),
+            route_partition_key=scope_kwargs.get("route_partition_key"),
+        )
+        db_create_kwargs = {
+            "session_id": session_id,
+            "source": source.platform.value,
+            "user_id": source.user_id,
+            **self._db_scope_kwargs(scope_kwargs),
+        }
+        return entry, {
+            "db_create_kwargs": db_create_kwargs,
+            "scope_kwargs": scope_kwargs,
+        }
+
+    def _db_scope_kwargs(self, scope_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            k: v
+            for k, v in scope_kwargs.items()
+            if k not in {"platform_account_id", "_conversation_scope_identity"}
+        }
+
+    def _upsert_scope_and_session_row(
+        self,
+        *,
+        session_id: str,
+        source: SessionSource,
+        scope_kwargs: Dict[str, Any],
+    ) -> None:
+        if not self._db:
+            return
+        result = self._db.update_session_scope_if_missing(
+            session_id=session_id,
+            source=source.platform.value if source.platform else "unknown",
+            user_id=source.user_id,
+            **self._db_scope_kwargs(scope_kwargs),
+        )
+        if result in {"created", "updated", "unchanged"}:
+            identity = scope_kwargs.get("_conversation_scope_identity")
+            if identity is not None:
+                self._db.upsert_conversation_scope(identity)
+        return result
+
+    def bind_session_to_scope_for_handoff(
+        self,
+        *,
+        session_id: str,
+        source: SessionSource,
+        session_key: str,
+    ) -> bool:
+        """Legacy handoff scope binding is disabled.
+
+        CLI-to-Feishu handoff must not rewrite a CLI or legacy transcript as a
+        Feishu scoped transcript. Callers should switch only to sessions that
+        already satisfy the destination scope/route guards.
+        """
+        return False
     
     def _is_session_expired(self, entry: SessionEntry) -> bool:
         """Check if a session has expired based on its reset policy.
@@ -871,6 +1127,11 @@ class SessionStore:
         # All _entries / _loaded mutations are protected by self._lock.
         db_end_session_id = None
         db_create_kwargs = None
+        db_scope_backfill = None
+        json_scope_backfill = None
+        db_mark_ambiguous = None
+        db_mark_ambiguous_and_detach = False
+        db_row = None
 
         with self._lock:
             self._ensure_loaded_locked()
@@ -893,15 +1154,86 @@ class SessionStore:
                     # the NEXT successful turn completes (not here), which
                     # means a re-interrupted retry keeps trying — the
                     # stuck-loop counter handles terminal escalation.
-                    entry.updated_at = now
-                    self._save()
-                    return entry
+                    reset_reason = None
                 else:
                     reset_reason = self._should_reset(entry, source)
                 if not reset_reason:
                     entry.updated_at = now
+                    scope_kwargs = self._scope_kwargs_for_source(source, session_key)
+                    if self._db:
+                        try:
+                            db_row = self._db.get_session(entry.session_id) or {}
+                        except Exception:
+                            db_row = {}
+                    if self._session_id_has_ambiguous_legacy_routes(
+                        session_id=entry.session_id,
+                        session_key=session_key,
+                        scope_kwargs=scope_kwargs,
+                    ):
+                        db_mark_ambiguous = {
+                            "session_id": entry.session_id,
+                            "source": source.platform.value if source.platform else "unknown",
+                            "user_id": source.user_id,
+                        }
+                        db_mark_ambiguous_and_detach = True
+                        entry, create_data = self._new_session_entry(
+                            session_key=session_key,
+                            source=source,
+                            now=now,
+                        )
+                        self._entries[session_key] = entry
+                        db_create_kwargs = create_data["db_create_kwargs"]
+                        scope_kwargs = create_data["scope_kwargs"]
+                        existing_entry = entry
+                    elif self._entry_has_conflicting_scope(entry, scope_kwargs):
+                        entry, create_data = self._new_session_entry(
+                            session_key=session_key,
+                            source=source,
+                            now=now,
+                        )
+                        self._entries[session_key] = entry
+                        db_create_kwargs = create_data["db_create_kwargs"]
+                        scope_kwargs = create_data["scope_kwargs"]
+                        existing_entry = entry
+                    elif self._db_row_requires_detach(db_row or {}, scope_kwargs):
+                        entry, create_data = self._new_session_entry(
+                            session_key=session_key,
+                            source=source,
+                            now=now,
+                        )
+                        self._entries[session_key] = entry
+                        db_create_kwargs = create_data["db_create_kwargs"]
+                        scope_kwargs = create_data["scope_kwargs"]
+                        existing_entry = entry
+                    elif self._legacy_entry_requires_scoped_detach(entry, scope_kwargs):
+                        entry, create_data = self._new_session_entry(
+                            session_key=session_key,
+                            source=source,
+                            now=now,
+                        )
+                        self._entries[session_key] = entry
+                        db_create_kwargs = create_data["db_create_kwargs"]
+                        scope_kwargs = create_data["scope_kwargs"]
+                        existing_entry = entry
+                    elif self._entry_accepts_scope_backfill(entry, scope_kwargs):
+                        db_scope_backfill = {
+                            "session_id": entry.session_id,
+                            "source": source,
+                            "scope_kwargs": scope_kwargs,
+                        }
+                        json_scope_backfill = {
+                            "session_key": session_key,
+                            "scope_kwargs": scope_kwargs,
+                        }
+                    elif self._entry_matches_scope(entry, scope_kwargs):
+                        db_scope_backfill = {
+                            "session_id": entry.session_id,
+                            "source": source,
+                            "scope_kwargs": scope_kwargs,
+                        }
                     self._save()
-                    return entry
+                    if not db_mark_ambiguous_and_detach:
+                        existing_entry = entry
                 else:
                     # Session is being auto-reset.
                     was_auto_reset = True
@@ -909,37 +1241,55 @@ class SessionStore:
                     # Track whether the expired session had any real conversation
                     reset_had_activity = entry.total_tokens > 0
                     db_end_session_id = entry.session_id
+                    existing_entry = None
             else:
                 was_auto_reset = False
                 auto_reset_reason = None
                 reset_had_activity = False
+                existing_entry = None
 
-            # Create new session
-            session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            if existing_entry is not None:
+                pass
+            else:
+                # Create new session
+                entry, create_data = self._new_session_entry(
+                    session_key=session_key,
+                    source=source,
+                    now=now,
+                    was_auto_reset=was_auto_reset,
+                    auto_reset_reason=auto_reset_reason,
+                    reset_had_activity=reset_had_activity,
+                )
+                scope_kwargs = create_data["scope_kwargs"]
 
-            entry = SessionEntry(
-                session_key=session_key,
-                session_id=session_id,
-                created_at=now,
-                updated_at=now,
-                origin=source,
-                display_name=source.chat_name,
-                platform=source.platform,
-                chat_type=source.chat_type,
-                was_auto_reset=was_auto_reset,
-                auto_reset_reason=auto_reset_reason,
-                reset_had_activity=reset_had_activity,
-            )
-
-            self._entries[session_key] = entry
-            self._save()
-            db_create_kwargs = {
-                "session_id": session_id,
-                "source": source.platform.value,
-                "user_id": source.user_id,
-            }
+                self._entries[session_key] = entry
+                self._save()
+                db_create_kwargs = create_data["db_create_kwargs"]
 
         # SQLite operations outside the lock
+        if db_mark_ambiguous and self._db:
+            try:
+                self._db.mark_session_scope_ambiguous(**db_mark_ambiguous)
+            except Exception as e:
+                logger.debug("Session DB scope ambiguity mark failed: %s", e)
+            if not db_mark_ambiguous_and_detach:
+                return existing_entry
+
+        if db_scope_backfill:
+            try:
+                backfill_result = self._upsert_scope_and_session_row(**db_scope_backfill)
+                if backfill_result in {"created", "updated", "unchanged"} and json_scope_backfill:
+                    with self._lock:
+                        self._ensure_loaded_locked()
+                        entry_to_update = self._entries.get(json_scope_backfill["session_key"])
+                        if entry_to_update and entry_to_update.session_id == db_scope_backfill["session_id"]:
+                            self._apply_scope_to_entry(entry_to_update, json_scope_backfill["scope_kwargs"])
+                            self._save()
+                            existing_entry = entry_to_update
+            except Exception as e:
+                logger.debug("Session DB scope backfill failed: %s", e)
+            return existing_entry
+
         if self._db and db_end_session_id:
             try:
                 self._db.end_session(db_end_session_id, "session_reset")
@@ -948,6 +1298,9 @@ class SessionStore:
 
         if self._db and db_create_kwargs:
             try:
+                identity = scope_kwargs.get("_conversation_scope_identity") if "scope_kwargs" in locals() else None
+                if identity is not None:
+                    self._db.upsert_conversation_scope(identity)
                 self._db.create_session(**db_create_kwargs)
             except Exception as e:
                 print(f"[gateway] Warning: Failed to create SQLite session: {e}")
@@ -1144,6 +1497,7 @@ class SessionStore:
 
             now = _now()
             session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+            scope_kwargs = self._scope_kwargs_for_source(old_entry.origin, session_key)
 
             new_entry = SessionEntry(
                 session_key=session_key,
@@ -1155,6 +1509,9 @@ class SessionStore:
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
                 is_fresh_reset=True,
+                conversation_scope_id=scope_kwargs.get("conversation_scope_id"),
+                platform_account_id=scope_kwargs.get("platform_account_id"),
+                route_partition_key=scope_kwargs.get("route_partition_key"),
             )
 
             self._entries[session_key] = new_entry
@@ -1163,6 +1520,11 @@ class SessionStore:
                 "session_id": session_id,
                 "source": old_entry.platform.value if old_entry.platform else "unknown",
                 "user_id": old_entry.origin.user_id if old_entry.origin else None,
+                **{
+                    k: v
+                    for k, v in scope_kwargs.items()
+                    if k not in {"platform_account_id", "_conversation_scope_identity"}
+                },
             }
 
         if self._db and db_end_session_id:
@@ -1173,6 +1535,9 @@ class SessionStore:
 
         if self._db and db_create_kwargs:
             try:
+                identity = scope_kwargs.get("_conversation_scope_identity") if "scope_kwargs" in locals() else None
+                if identity is not None:
+                    self._db.upsert_conversation_scope(identity)
                 self._db.create_session(**db_create_kwargs)
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
@@ -1190,6 +1555,9 @@ class SessionStore:
         """
         db_end_session_id = None
         new_entry = None
+        target_scope_id = None
+        target_platform_account_id = None
+        target_route_key = None
 
         with self._lock:
             self._ensure_loaded_locked()
@@ -1204,6 +1572,37 @@ class SessionStore:
                 return old_entry
 
             db_end_session_id = old_entry.session_id
+            if self._db:
+                try:
+                    target_row = self._db.get_session(target_session_id) or {}
+                except Exception as e:
+                    logger.debug("Session DB get_session failed during switch: %s", e)
+                    target_row = {}
+                target_scope_id = target_row.get("conversation_scope_id")
+                target_route_key = target_row.get("route_partition_key")
+                target_status = target_row.get("scope_assignment_status")
+                current_scope_id = getattr(old_entry, "conversation_scope_id", None)
+                current_route_key = getattr(old_entry, "route_partition_key", None)
+                current_scope_id = current_scope_id if isinstance(current_scope_id, str) and current_scope_id else None
+                current_route_key = current_route_key if isinstance(current_route_key, str) and current_route_key else None
+                if target_scope_id and (not current_scope_id or not current_route_key):
+                    return None
+                if (current_scope_id or current_route_key) and (
+                    target_status != "scoped" or not target_scope_id or not target_route_key
+                ):
+                    return None
+                if current_scope_id and target_scope_id != current_scope_id:
+                    return None
+                if current_route_key and target_route_key != current_route_key:
+                    return None
+                if target_scope_id:
+                    try:
+                        scope_row = self._db.get_conversation_scope(target_scope_id)
+                    except Exception as e:
+                        logger.debug("Session DB get_conversation_scope failed during switch: %s", e)
+                        scope_row = None
+                    if scope_row:
+                        target_platform_account_id = scope_row.get("platform_account_id")
 
             now = _now()
             new_entry = SessionEntry(
@@ -1215,6 +1614,13 @@ class SessionStore:
                 display_name=old_entry.display_name,
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
+                conversation_scope_id=target_scope_id,
+                platform_account_id=(
+                    (target_platform_account_id or getattr(old_entry, "platform_account_id", None))
+                    if target_scope_id
+                    else None
+                ),
+                route_partition_key=target_route_key,
             )
 
             self._entries[session_key] = new_entry
@@ -1344,5 +1750,8 @@ def build_session_context(
         context.session_id = session_entry.session_id
         context.created_at = session_entry.created_at
         context.updated_at = session_entry.updated_at
+        context.conversation_scope_id = getattr(session_entry, "conversation_scope_id", None)
+        context.platform_account_id = getattr(session_entry, "platform_account_id", None)
+        context.route_partition_key = getattr(session_entry, "route_partition_key", None)
     
     return context

@@ -136,6 +136,227 @@ class TestSessionLifecycle:
         child = db.get_session("child")
         assert child["parent_session_id"] == "parent"
 
+    def test_scope_lifecycle_create_session_writes_scope_columns(self, db):
+        db.create_session(
+            session_id="scoped",
+            source="feishu",
+            user_id="ou_user",
+            conversation_scope_id="cs_scope",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="agent:main:feishu:group:oc_group:on_union",
+            route_partition_key="agent:main:feishu:group:oc_group:on_union",
+        )
+
+        session = db.get_session("scoped")
+        assert session["conversation_scope_id"] == "cs_scope"
+        assert session["scope_assignment_status"] == "scoped"
+        assert session["route_session_key_snapshot"] == "agent:main:feishu:group:oc_group:on_union"
+        assert session["route_partition_key"] == "agent:main:feishu:group:oc_group:on_union"
+
+    def test_scope_lifecycle_rejects_invalid_scope_assignment_status(self, db):
+        with pytest.raises(ValueError, match="scope_assignment_status"):
+            db.create_session(
+                session_id="bad-status",
+                source="feishu",
+                scope_assignment_status="maybe",
+            )
+
+    def test_scope_backfill_legacy_session_is_not_marked_scoped_by_default(self, db):
+        db.create_session(session_id="legacy", source="feishu")
+
+        session = db.get_session("legacy")
+        assert session["scope_assignment_status"] in {None, "legacy_unscoped"}
+        assert session["scope_assignment_status"] != "scoped"
+        assert session["conversation_scope_id"] is None
+
+    def test_scope_lifecycle_create_session_does_not_promote_existing_legacy_row_to_scoped(self, db):
+        db.create_session(session_id="s", source="unknown")
+
+        db.create_session(
+            session_id="s",
+            source="feishu",
+            conversation_scope_id="cs_promoted",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-promoted",
+            route_partition_key="route-promoted",
+        )
+
+        session = db.get_session("s")
+        assert session["scope_assignment_status"] in {None, "legacy_unscoped"}
+        assert session["conversation_scope_id"] is None
+        assert session["route_session_key_snapshot"] is None
+        assert session["route_partition_key"] is None
+
+    def test_scope_lifecycle_explicit_backfill_does_not_promote_existing_legacy_row_to_scoped(self, db):
+        db.create_session(session_id="s", source="unknown")
+
+        result = db.update_session_scope_if_missing(
+            session_id="s",
+            source="feishu",
+            conversation_scope_id="cs_promoted",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-promoted",
+            route_partition_key="route-promoted",
+        )
+
+        session = db.get_session("s")
+        assert result == "conflict"
+        assert session["scope_assignment_status"] in {None, "legacy_unscoped"}
+        assert session["conversation_scope_id"] is None
+        assert session["route_session_key_snapshot"] is None
+        assert session["route_partition_key"] is None
+
+    def test_scope_lifecycle_explicit_backfill_is_idempotent_for_matching_scoped_row(self, db):
+        db.create_session(
+            session_id="s",
+            source="feishu",
+            conversation_scope_id="cs_existing",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-existing",
+            route_partition_key="route-existing",
+        )
+
+        result = db.update_session_scope_if_missing(
+            session_id="s",
+            source="feishu",
+            conversation_scope_id="cs_existing",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-existing",
+            route_partition_key="route-existing",
+        )
+
+        session = db.get_session("s")
+        assert result in {"updated", "unchanged"}
+        assert session["scope_assignment_status"] == "scoped"
+        assert session["conversation_scope_id"] == "cs_existing"
+        assert session["route_session_key_snapshot"] == "route-existing"
+        assert session["route_partition_key"] == "route-existing"
+
+    def test_scope_lifecycle_create_session_does_not_overwrite_different_scoped_row(self, db):
+        db.create_session(
+            session_id="s",
+            source="feishu",
+            conversation_scope_id="cs_existing",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-existing",
+            route_partition_key="route-existing",
+        )
+
+        db.create_session(
+            session_id="s",
+            source="feishu",
+            conversation_scope_id="cs_new",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-new",
+            route_partition_key="route-new",
+        )
+
+        session = db.get_session("s")
+        assert session["scope_assignment_status"] == "scoped"
+        assert session["conversation_scope_id"] == "cs_existing"
+        assert session["route_session_key_snapshot"] == "route-existing"
+        assert session["route_partition_key"] == "route-existing"
+
+    def test_scope_lifecycle_update_scope_rejects_partial_legacy_route_conflict(self, db):
+        db.create_session(session_id="partial", source="feishu")
+        db._conn.execute(
+            "UPDATE sessions SET scope_assignment_status='legacy_unscoped', route_partition_key=? WHERE id=?",
+            ("route-old", "partial"),
+        )
+        db._conn.commit()
+
+        result = db.update_session_scope_if_missing(
+            session_id="partial",
+            source="feishu",
+            conversation_scope_id="cs_new",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-new",
+            route_partition_key="route-new",
+        )
+
+        session = db.get_session("partial")
+        assert result == "conflict"
+        assert session["scope_assignment_status"] == "legacy_unscoped"
+        assert session["conversation_scope_id"] is None
+        assert session["route_session_key_snapshot"] is None
+        assert session["route_partition_key"] == "route-old"
+
+    def test_scope_lifecycle_update_scope_rejects_partial_legacy_snapshot_conflict(self, db):
+        db.create_session(session_id="partial", source="feishu")
+        db._conn.execute(
+            "UPDATE sessions SET scope_assignment_status='legacy_unscoped', route_session_key_snapshot=? WHERE id=?",
+            ("snapshot-old", "partial"),
+        )
+        db._conn.commit()
+
+        result = db.update_session_scope_if_missing(
+            session_id="partial",
+            source="feishu",
+            conversation_scope_id="cs_new",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="snapshot-new",
+            route_partition_key="route-new",
+        )
+
+        session = db.get_session("partial")
+        assert result == "conflict"
+        assert session["scope_assignment_status"] == "legacy_unscoped"
+        assert session["conversation_scope_id"] is None
+        assert session["route_session_key_snapshot"] == "snapshot-old"
+        assert session["route_partition_key"] is None
+
+    def test_scope_lifecycle_update_scope_rejects_imported_row_to_scoped(self, db):
+        db.create_session(session_id="imported", source="feishu")
+        db._conn.execute(
+            "UPDATE sessions SET scope_assignment_status='imported' WHERE id=?",
+            ("imported",),
+        )
+        db._conn.commit()
+
+        result = db.update_session_scope_if_missing(
+            session_id="imported",
+            source="feishu",
+            conversation_scope_id="cs_new",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-new",
+            route_partition_key="route-new",
+        )
+
+        session = db.get_session("imported")
+        assert result == "conflict"
+        assert session["scope_assignment_status"] == "imported"
+        assert session["conversation_scope_id"] is None
+        assert session["route_session_key_snapshot"] is None
+        assert session["route_partition_key"] is None
+
+    def test_scope_lifecycle_imported_row_can_be_marked_ambiguous(self, db):
+        db.create_session(session_id="imported", source="feishu")
+        db._conn.execute(
+            "UPDATE sessions SET scope_assignment_status='imported' WHERE id=?",
+            ("imported",),
+        )
+        db._conn.commit()
+
+        result = db.mark_session_scope_ambiguous("imported", source="feishu")
+
+        session = db.get_session("imported")
+        assert result == "updated"
+        assert session["scope_assignment_status"] == "ambiguous"
+        assert session["conversation_scope_id"] is None
+        assert session["route_session_key_snapshot"] is None
+        assert session["route_partition_key"] is None
+
+    def test_scope_lifecycle_pr1_messages_schema_does_not_predeclare_turn_ledger_fields(self, db):
+        columns = {
+            row["name"]
+            for row in db._conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+
+        assert "conversation_scope_id" in columns
+        assert "turn_id" not in columns
+        assert "replay_visibility" not in columns
+        assert "control_kind" not in columns
+
 
 # =========================================================================
 # Message storage
@@ -160,6 +381,46 @@ class TestMessageStorage:
 
         session = db.get_session("s1")
         assert session["message_count"] == 2
+
+    def test_scope_lifecycle_append_message_inherits_session_conversation_scope(self, db):
+        db.create_session(
+            session_id="scoped-msg",
+            source="feishu",
+            conversation_scope_id="cs_msg",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-msg",
+            route_partition_key="route-msg",
+        )
+
+        msg_id = db.append_message("scoped-msg", role="user", content="hello")
+        message = db._conn.execute(
+            "SELECT conversation_scope_id FROM messages WHERE id = ?",
+            (msg_id,),
+        ).fetchone()
+
+        assert message["conversation_scope_id"] == "cs_msg"
+
+    def test_scope_lifecycle_partial_legacy_messages_keep_null_conversation_scope(self, db):
+        db.create_session(session_id="partial-legacy-msg", source="feishu")
+        db._conn.execute(
+            "UPDATE sessions SET scope_assignment_status='legacy_unscoped', route_partition_key=? WHERE id=?",
+            ("route-without-scope", "partial-legacy-msg"),
+        )
+        db._conn.commit()
+
+        append_id = db.append_message("partial-legacy-msg", role="user", content="hello")
+        db.replace_messages(
+            "partial-legacy-msg",
+            [{"role": "assistant", "content": "replacement"}],
+        )
+        rows = db._conn.execute(
+            "SELECT id, conversation_scope_id FROM messages WHERE session_id = ? ORDER BY id",
+            ("partial-legacy-msg",),
+        ).fetchall()
+
+        assert append_id is not None
+        assert rows
+        assert all(row["conversation_scope_id"] is None for row in rows)
 
     def test_observed_flag_round_trips_for_gateway_replay(self, db):
         db.create_session(session_id="s1", source="telegram:-100")
@@ -2396,6 +2657,417 @@ class TestCompressionChainProjection:
         # root1's tip must be tip1 (via mid1), not delegate1.
         assert db.get_compression_tip("root1") == "tip1"
 
+    def test_compression_tip_does_not_cross_conversation_scope(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session(
+            "scope-a-root",
+            "feishu",
+            conversation_scope_id="cs_a",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "scope-a-root"))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "scope-a-root"),
+        )
+        db.create_session(
+            "scope-b-child",
+            "feishu",
+            parent_session_id="scope-a-root",
+            conversation_scope_id="cs_b",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "scope-b-child"))
+        db.append_message("scope-b-child", "user", "wrong scope")
+        db._conn.commit()
+
+        assert db.get_compression_tip("scope-a-root") == "scope-a-root"
+
+    def test_compression_tip_does_not_cross_route_partition_with_same_scope(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session(
+            "route-a-root",
+            "feishu",
+            conversation_scope_id="cs_same",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "route-a-root"))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "route-a-root"),
+        )
+        db.create_session(
+            "route-b-child",
+            "feishu",
+            parent_session_id="route-a-root",
+            conversation_scope_id="cs_same",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "route-b-child"))
+        db.append_message("route-b-child", "user", "wrong route")
+        db._conn.commit()
+
+        assert db.get_compression_tip("route-a-root") == "route-a-root"
+
+    def test_list_projection_does_not_cross_route_partition_with_same_scope(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session(
+            "route-a-root",
+            "feishu",
+            conversation_scope_id="cs_same",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db.set_session_title("route-a-root", "Route A Root")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "route-a-root"))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "route-a-root"),
+        )
+        db.create_session(
+            "route-b-child",
+            "feishu",
+            parent_session_id="route-a-root",
+            conversation_scope_id="cs_same",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db.set_session_title("route-b-child", "Route B Secret")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "route-b-child"))
+        db.append_message("route-b-child", "user", "wrong route preview")
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(
+            source="feishu",
+            conversation_scope_id="cs_same",
+            route_partition_key="route-a",
+            limit=10,
+            project_compression_tips=True,
+        )
+
+        assert [s["id"] for s in sessions] == ["route-a-root"]
+        assert sessions[0]["title"] == "Route A Root"
+        assert "wrong route" not in sessions[0].get("preview", "")
+
+    def test_compression_tip_does_not_allow_legacy_null_parent_to_scoped_child(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session("legacy-root", "feishu")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "legacy-root"))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "legacy-root"),
+        )
+        db.create_session(
+            "scoped-child",
+            "feishu",
+            parent_session_id="legacy-root",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-child",
+            route_partition_key="route-child",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "scoped-child"))
+        db.append_message("scoped-child", "user", "migrated child")
+        db._conn.commit()
+
+        assert db.get_compression_tip("legacy-root") == "legacy-root"
+
+    def test_compression_tip_does_not_treat_partial_legacy_parent_as_migration_edge(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session("partial-legacy-root", "feishu")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=?, route_partition_key=? WHERE id=?",
+            (t0, "route-a", "partial-legacy-root"),
+        )
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "partial-legacy-root"),
+        )
+        db.create_session(
+            "route-b-child",
+            "feishu",
+            parent_session_id="partial-legacy-root",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "route-b-child"))
+        db.append_message("route-b-child", "user", "must not migrate from partial legacy")
+        db._conn.commit()
+
+        assert db.get_compression_tip("partial-legacy-root") == "partial-legacy-root"
+
+    def test_scoped_list_does_not_surface_legacy_null_parent_to_scoped_child(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session("legacy-root", "feishu")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "legacy-root"))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "legacy-root"),
+        )
+        db.create_session(
+            "scoped-child",
+            "feishu",
+            parent_session_id="legacy-root",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-child",
+            route_partition_key="route-child",
+        )
+        db.set_session_title("scoped-child", "Scoped Child")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "scoped-child"))
+        db.append_message("scoped-child", "user", "migrated child preview")
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(
+            source="feishu",
+            conversation_scope_id="cs_child",
+            route_partition_key="route-child",
+            limit=10,
+            project_compression_tips=True,
+        )
+
+        assert sessions == []
+
+    def test_scoped_list_excludes_legacy_null_parent_candidates_from_regular_scope_results(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session(
+            "regular-scoped",
+            "feishu",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-child",
+            route_partition_key="route-child",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 30, "regular-scoped"))
+        db.append_message("regular-scoped", "user", "regular scoped preview")
+
+        db.create_session("legacy-root", "feishu")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "legacy-root"))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "legacy-root"),
+        )
+        db.create_session(
+            "scoped-child",
+            "feishu",
+            parent_session_id="legacy-root",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-child",
+            route_partition_key="route-child",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "scoped-child"))
+        db.append_message("scoped-child", "user", "migrated child preview")
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(
+            source="feishu",
+            conversation_scope_id="cs_child",
+            route_partition_key="route-child",
+            limit=10,
+            project_compression_tips=True,
+        )
+
+        ids = [s["id"] for s in sessions]
+        assert ids == ["regular-scoped"]
+        assert len(ids) == len(set(ids))
+
+    def test_scoped_list_applies_limit_after_merging_legacy_null_parent_candidates(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session("legacy-root", "feishu")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "legacy-root"))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "legacy-root"),
+        )
+        db.create_session(
+            "scoped-child",
+            "feishu",
+            parent_session_id="legacy-root",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-child",
+            route_partition_key="route-child",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "scoped-child"))
+        db.append_message("scoped-child", "user", "migrated child preview")
+
+        db.create_session(
+            "regular-scoped",
+            "feishu",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-child",
+            route_partition_key="route-child",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 30, "regular-scoped"))
+        db.append_message("regular-scoped", "user", "regular scoped preview")
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(
+            source="feishu",
+            conversation_scope_id="cs_child",
+            route_partition_key="route-child",
+            limit=1,
+            project_compression_tips=True,
+        )
+
+        assert [s["id"] for s in sessions] == ["regular-scoped"]
+
+    def test_scoped_list_applies_offset_without_merging_legacy_null_parent_candidates(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session(
+            "regular-new",
+            "feishu",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-child",
+            route_partition_key="route-child",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 30, "regular-new"))
+        db.append_message("regular-new", "user", "new regular")
+
+        db.create_session("legacy-root", "feishu")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "legacy-root"))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "legacy-root"),
+        )
+        db.create_session(
+            "scoped-child",
+            "feishu",
+            parent_session_id="legacy-root",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-child",
+            route_partition_key="route-child",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 20, "scoped-child"))
+        db.append_message("scoped-child", "user", "migrated child preview")
+
+        db.create_session(
+            "regular-old",
+            "feishu",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-child",
+            route_partition_key="route-child",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 15, "regular-old"))
+        db.append_message("regular-old", "user", "old regular")
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(
+            source="feishu",
+            conversation_scope_id="cs_child",
+            route_partition_key="route-child",
+            limit=1,
+            offset=1,
+            project_compression_tips=True,
+        )
+
+        assert [s["id"] for s in sessions] == ["regular-old"]
+
+    def test_scoped_list_does_not_surface_partial_legacy_parent_to_scoped_child(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session("partial-legacy-root", "feishu")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=?, route_partition_key=? WHERE id=?",
+            (t0, "route-a", "partial-legacy-root"),
+        )
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "partial-legacy-root"),
+        )
+        db.create_session(
+            "route-b-child",
+            "feishu",
+            parent_session_id="partial-legacy-root",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db.set_session_title("route-b-child", "Route B Secret")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "route-b-child"))
+        db.append_message("route-b-child", "user", "must not migrate from partial legacy")
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(
+            source="feishu",
+            conversation_scope_id="cs_child",
+            route_partition_key="route-b",
+            limit=10,
+            project_compression_tips=True,
+        )
+
+        assert sessions == []
+
+    def test_unfiltered_legacy_null_parent_projection_does_not_use_tip_scope_metadata(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session("legacy-root", "feishu")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "legacy-root"))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "legacy-root"),
+        )
+        db.create_session(
+            "scoped-child",
+            "feishu",
+            parent_session_id="legacy-root",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-child",
+            route_partition_key="route-child",
+        )
+        db.append_message("scoped-child", "user", "migrated child preview")
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(source="feishu", limit=10, project_compression_tips=True)
+
+        ids = [s["id"] for s in sessions]
+        assert "legacy-root" in ids
+        assert "scoped-child" not in ids
+        row = next(s for s in sessions if s["id"] == "legacy-root")
+        assert row["conversation_scope_id"] is None
+        assert row["scope_assignment_status"] in {None, "legacy_unscoped"}
+        assert row["route_session_key_snapshot"] is None
+        assert row["route_partition_key"] is None
+
     def test_list_surfaces_tip_for_compressed_root(self, db):
         """The list must show the tip's id/message_count/preview in place of
         the root row, so users can see and resume the live conversation.
@@ -2487,6 +3159,71 @@ class TestCompressionChainProjection:
         # No tip means no projection — row stays raw.
         assert "_lineage_root_id" not in row
         assert row["end_reason"] == "compression"
+
+    def test_list_sessions_rich_compression_scope_does_not_project_cross_scope_tip(self, db):
+        import time as _time
+
+        t0 = _time.time() - 7200
+        db.create_session(
+            "scope-a-root",
+            "feishu",
+            conversation_scope_id="cs_a",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "scope-a-root"))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "scope-a-root"),
+        )
+        db.create_session(
+            "scope-b-child",
+            "feishu",
+            parent_session_id="scope-a-root",
+            conversation_scope_id="cs_b",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "scope-b-child"))
+        db.append_message("scope-b-child", "user", "wrong scope")
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(source="feishu", limit=10, project_compression_tips=True)
+        ids = [s["id"] for s in sessions]
+
+        assert "scope-a-root" in ids
+        assert "scope-b-child" not in ids
+
+    def test_list_sessions_rich_compression_scope_does_not_project_legacy_null_parent_to_scoped_child(self, db):
+        import time as _time
+
+        t0 = _time.time() - 7200
+        db.create_session("legacy-root", "feishu")
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "legacy-root"))
+        db._conn.execute(
+            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
+            (t0 + 10, "legacy-root"),
+        )
+        db.create_session(
+            "scoped-child",
+            "feishu",
+            parent_session_id="legacy-root",
+            conversation_scope_id="cs_child",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-child",
+            route_partition_key="route-child",
+        )
+        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 11, "scoped-child"))
+        db.append_message("scoped-child", "user", "migrated child")
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(source="feishu", limit=10, project_compression_tips=True)
+        ids = [s["id"] for s in sessions]
+
+        assert "legacy-root" in ids
+        assert "scoped-child" not in ids
 
 
 # =========================================================================

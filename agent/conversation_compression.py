@@ -376,6 +376,25 @@ def compress_context(
         try:
             # Propagate title to the new session with auto-numbering
             old_title = agent._session_db.get_session_title(agent.session_id)
+            old_scope_row = agent._session_db.get_session(agent.session_id) or {}
+            child_scope_kwargs = {
+                "conversation_scope_id": old_scope_row.get("conversation_scope_id"),
+                "scope_assignment_status": old_scope_row.get("scope_assignment_status"),
+                "route_session_key_snapshot": old_scope_row.get("route_session_key_snapshot"),
+                "route_partition_key": old_scope_row.get("route_partition_key"),
+            }
+            parent_is_scoped = (
+                child_scope_kwargs["conversation_scope_id"]
+                and child_scope_kwargs["route_partition_key"]
+                and child_scope_kwargs["scope_assignment_status"] == "scoped"
+            )
+            if not parent_is_scoped:
+                child_scope_kwargs = {
+                    "conversation_scope_id": None,
+                    "scope_assignment_status": old_scope_row.get("scope_assignment_status") or "legacy_unscoped",
+                    "route_session_key_snapshot": None,
+                    "route_partition_key": None,
+                }
             # Trigger memory extraction on the old session before it rotates.
             agent.commit_memory_session(messages)
             agent._session_db.end_session(agent.session_id, "compression")
@@ -394,6 +413,7 @@ def compress_context(
                 model=agent.model,
                 model_config=agent._session_init_model_config,
                 parent_session_id=old_session_id,
+                **child_scope_kwargs,
             )
             agent._session_db_created = True
             # Auto-number the title for the continuation session

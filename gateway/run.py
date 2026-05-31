@@ -12985,6 +12985,14 @@ class GatewayRunner:
         source = event.source
         session_key = self._session_key_for_source(source)
         name = event.get_command_args().strip()
+        current_entry = self.session_store.get_or_create_session(source)
+        current_scope_id = getattr(current_entry, "conversation_scope_id", None)
+        current_route_key = getattr(current_entry, "route_partition_key", None)
+        current_scope_id = current_scope_id if isinstance(current_scope_id, str) and current_scope_id else None
+        current_route_key = current_route_key if isinstance(current_route_key, str) and current_route_key else None
+        scope_required = source.platform == Platform.FEISHU
+        if scope_required and (not current_scope_id or not current_route_key):
+            return t("gateway.resume.not_found", name=name or "session")
 
         # Strip common outer brackets/quotes users may type literally from the
         # usage hint (e.g. ``/resume <abc123>``). Mirrors the CLI behavior.
@@ -12998,7 +13006,12 @@ class GatewayRunner:
 
         def _list_titled_sessions() -> list[dict]:
             user_source = source.platform.value if source.platform else None
-            sessions = self._session_db.list_sessions_rich(source=user_source, limit=10)
+            sessions = self._session_db.list_sessions_rich(
+                source=user_source,
+                conversation_scope_id=current_scope_id,
+                route_partition_key=current_route_key,
+                limit=10,
+            )
             return [s for s in sessions if s.get("title")][:10]
 
         if not name:
@@ -13035,11 +13048,19 @@ class GatewayRunner:
         else:
             # Try direct session ID lookup first (so `/resume <session_id>`
             # works in the gateway, not just `/resume <title>`).
-            session = self._session_db.get_session(name)
-            if session:
-                target_id = session["id"]
+            target_id = self._session_db.resolve_session_id(
+                name,
+                conversation_scope_id=current_scope_id,
+                route_partition_key=current_route_key,
+            )
+            if target_id:
+                pass
             else:
-                target_id = self._session_db.resolve_session_by_title(name)
+                target_id = self._session_db.resolve_session_by_title(
+                    name,
+                    conversation_scope_id=current_scope_id,
+                    route_partition_key=current_route_key,
+                )
         if not target_id:
             return t("gateway.resume.not_found", name=name)
         # Compression creates child continuations that hold the live transcript.
@@ -13050,9 +13071,16 @@ class GatewayRunner:
             logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
 
         # Check if already on that session
-        current_entry = self.session_store.get_or_create_session(source)
         if current_entry.session_id == target_id:
             return t("gateway.resume.already_on", name=name)
+
+        target_session = self._session_db.get_session(target_id) or {}
+        target_scope_id = target_session.get("conversation_scope_id")
+        target_route_key = target_session.get("route_partition_key")
+        if current_scope_id and target_scope_id != current_scope_id:
+            return t("gateway.resume.not_found", name=name)
+        if current_route_key and target_route_key != current_route_key:
+            return t("gateway.resume.not_found", name=name)
 
         # Clear any running agent for this session key
         self._release_running_agent_state(session_key)
@@ -13100,6 +13128,18 @@ class GatewayRunner:
 
         # Load the current session and its transcript
         current_entry = self.session_store.get_or_create_session(source)
+        current_scope_id = getattr(current_entry, "conversation_scope_id", None)
+        current_route_key = getattr(current_entry, "route_partition_key", None)
+        parent_scope = self._session_db.get_session(current_entry.session_id) or {}
+        if source.platform == Platform.FEISHU:
+            if not current_scope_id or not current_route_key:
+                return t("gateway.branch.no_conversation")
+            if (
+                parent_scope.get("scope_assignment_status") != "scoped"
+                or parent_scope.get("conversation_scope_id") != current_scope_id
+                or parent_scope.get("route_partition_key") != current_route_key
+            ):
+                return t("gateway.branch.no_conversation")
         history = self.session_store.load_transcript(current_entry.session_id)
         if not history:
             return t("gateway.branch.no_conversation")
@@ -13122,6 +13162,12 @@ class GatewayRunner:
             branch_title = self._session_db.get_next_title_in_lineage(base)
 
         parent_session_id = current_entry.session_id
+        parent_conversation_scope_id = parent_scope.get("conversation_scope_id")
+        parent_route_partition_key = parent_scope.get("route_partition_key")
+        parent_route_snapshot = parent_scope.get("route_session_key_snapshot") or parent_route_partition_key
+        parent_scope_status = parent_scope.get("scope_assignment_status")
+        if parent_conversation_scope_id and parent_route_partition_key:
+            parent_scope_status = "scoped"
 
         # Create the new session with parent link
         try:
@@ -13130,6 +13176,10 @@ class GatewayRunner:
                 source=source.platform.value if source.platform else "gateway",
                 model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
                 parent_session_id=parent_session_id,
+                conversation_scope_id=parent_conversation_scope_id,
+                scope_assignment_status=parent_scope_status,
+                route_session_key_snapshot=parent_route_snapshot,
+                route_partition_key=parent_route_partition_key,
             )
         except Exception as e:
             logger.error("Failed to create branch session: %s", e)
@@ -14642,6 +14692,9 @@ class GatewayRunner:
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
             message_id=str(context.source.message_id) if context.source.message_id else "",
+            conversation_scope_id=getattr(context, "conversation_scope_id", "") or "",
+            platform_account_id=getattr(context, "platform_account_id", "") or "",
+            route_partition_key=getattr(context, "route_partition_key", "") or "",
         )
 
     def _clear_session_env(self, tokens: list) -> None:
@@ -15459,7 +15512,15 @@ class GatewayRunner:
                 self._agent_cache.pop(session_key, None)
 
     @staticmethod
-    def _init_cached_agent_for_turn(agent: Any, interrupt_depth: int) -> None:
+    def _init_cached_agent_for_turn(
+        agent: Any,
+        interrupt_depth: int,
+        *,
+        gateway_session_key: Optional[str] = None,
+        conversation_scope_id: Optional[str] = None,
+        platform_account_id: Optional[str] = None,
+        route_partition_key: Optional[str] = None,
+    ) -> None:
         """Reset per-turn state on a cached agent before a new turn starts.
 
         Both _last_activity_ts and _last_activity_desc are only reset for
@@ -15476,6 +15537,11 @@ class GatewayRunner:
             agent._last_activity_ts = time.time()
             agent._last_activity_desc = "starting new turn (cached)"
         agent._api_call_count = 0
+        if gateway_session_key is not None:
+            agent._gateway_session_key = gateway_session_key
+        agent._gateway_conversation_scope_id = conversation_scope_id
+        agent._gateway_platform_account_id = platform_account_id
+        agent._gateway_route_partition_key = route_partition_key
 
     def _release_evicted_agent_soft(self, agent: Any) -> None:
         """Soft cleanup for cache-evicted agents — preserves session tool state.
@@ -16812,7 +16878,14 @@ class GatewayRunner:
                                 _cache.move_to_end(session_key)
                             except KeyError:
                                 pass
-                        self._init_cached_agent_for_turn(agent, _interrupt_depth)
+                        self._init_cached_agent_for_turn(
+                            agent,
+                            _interrupt_depth,
+                            gateway_session_key=session_key,
+                            conversation_scope_id=getattr(context, "conversation_scope_id", None),
+                            platform_account_id=getattr(context, "platform_account_id", None),
+                            route_partition_key=getattr(context, "route_partition_key", None),
+                        )
                         logger.debug("Reusing cached agent for session %s", session_key)
 
             if agent is None:

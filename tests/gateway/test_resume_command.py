@@ -10,7 +10,7 @@ import pytest
 
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent
-from gateway.session import SessionSource, build_session_key
+from gateway.session import SessionEntry, SessionSource, build_session_key
 
 
 def _make_event(text="/resume", platform=Platform.TELEGRAM,
@@ -103,7 +103,7 @@ class TestHandleResumeCommand:
         event = _make_event(text="/resume")
         runner = _make_runner(session_db=db, event=event)
         result = await runner._handle_resume_command(event)
-        assert "No named sessions" in result
+        assert "named sessions" in result.lower()
         assert "/title" in result
         db.close()
 
@@ -252,6 +252,466 @@ class TestHandleResumeCommand:
         call_args = runner.session_store.switch_session.call_args
         assert call_args[0][1] == "compressed_child"
         runner.session_store.load_transcript.assert_called_with("compressed_child")
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_rejects_cross_conversation_scope_target(self, tmp_path):
+        """Gateway /resume must fail closed instead of source-wide Feishu resume."""
+        from datetime import datetime
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(
+            "current_scope_a",
+            "feishu",
+            conversation_scope_id="cs_a",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db.create_session(
+            "target_scope_b",
+            "feishu",
+            conversation_scope_id="cs_b",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db.set_session_title("target_scope_b", "Other Group")
+
+        event = _make_event(
+            text="/resume Other Group",
+            platform=Platform.FEISHU,
+            user_id="ou_user",
+            chat_id="oc_group_a",
+        )
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_scope_a",
+            event=event,
+        )
+        session_key = build_session_key(event.source)
+        current_entry = SessionEntry(
+            session_key=session_key,
+            session_id="current_scope_a",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=event.source,
+            platform=event.source.platform,
+            chat_type=event.source.chat_type,
+            conversation_scope_id="cs_a",
+            platform_account_id="feishu_app:test",
+            route_partition_key="route-a",
+        )
+        runner.session_store.get_or_create_session.return_value = current_entry
+
+        result = await runner._handle_resume_command(event)
+
+        assert "No session found" in result
+        runner.session_store.switch_session.assert_not_called()
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_list_hides_cross_conversation_scope_titles(self, tmp_path):
+        """Feishu /resume list must not reveal titles from other groups/DMs."""
+        from datetime import datetime
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(
+            "current_scope_a",
+            "feishu",
+            conversation_scope_id="cs_a",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db.create_session(
+            "same_scope",
+            "feishu",
+            conversation_scope_id="cs_a",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db.set_session_title("same_scope", "Same Group Work")
+        db.create_session(
+            "other_scope",
+            "feishu",
+            conversation_scope_id="cs_b",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db.set_session_title("other_scope", "Other Group Secret")
+
+        event = _make_event(
+            text="/resume",
+            platform=Platform.FEISHU,
+            user_id="ou_user",
+            chat_id="oc_group_a",
+        )
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_scope_a",
+            event=event,
+        )
+        runner.session_store.get_or_create_session.return_value = SessionEntry(
+            session_key=build_session_key(event.source),
+            session_id="current_scope_a",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=event.source,
+            platform=event.source.platform,
+            chat_type=event.source.chat_type,
+            conversation_scope_id="cs_a",
+            platform_account_id="feishu_app:test",
+            route_partition_key="route-a",
+        )
+
+        result = await runner._handle_resume_command(event)
+
+        assert "Same Group Work" in result
+        assert "Other Group Secret" not in result
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_feishu_resume_blocks_when_current_scope_is_unverified(self, tmp_path):
+        """Unscoped Feishu current sessions must not fall back to source-wide resume."""
+        from datetime import datetime
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("current_legacy", "feishu")
+        db.create_session(
+            "target_scope_b",
+            "feishu",
+            conversation_scope_id="cs_b",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db.set_session_title("target_scope_b", "Other Group Secret")
+
+        event = _make_event(
+            text="/resume Other Group Secret",
+            platform=Platform.FEISHU,
+            user_id="ou_user",
+            chat_id="oc_group_a",
+        )
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_legacy",
+            event=event,
+        )
+        runner.session_store.get_or_create_session.return_value = SessionEntry(
+            session_key=build_session_key(event.source),
+            session_id="current_legacy",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=event.source,
+            platform=event.source.platform,
+            chat_type=event.source.chat_type,
+            conversation_scope_id=None,
+            platform_account_id=None,
+            route_partition_key=None,
+        )
+
+        result = await runner._handle_resume_command(event)
+
+        assert "No session found" in result or "not found" in result.lower() or "unverified" in result.lower()
+        runner.session_store.switch_session.assert_not_called()
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_feishu_resume_list_blocks_when_current_scope_is_unverified(self, tmp_path):
+        """Unscoped Feishu current sessions must not source-wide list titles."""
+        from datetime import datetime
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("current_legacy", "feishu")
+        db.create_session(
+            "target_scope_b",
+            "feishu",
+            conversation_scope_id="cs_b",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db.set_session_title("target_scope_b", "Other Group Secret")
+
+        event = _make_event(
+            text="/resume",
+            platform=Platform.FEISHU,
+            user_id="ou_user",
+            chat_id="oc_group_a",
+        )
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_legacy",
+            event=event,
+        )
+        runner.session_store.get_or_create_session.return_value = SessionEntry(
+            session_key=build_session_key(event.source),
+            session_id="current_legacy",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=event.source,
+            platform=event.source.platform,
+            chat_type=event.source.chat_type,
+            conversation_scope_id=None,
+            platform_account_id=None,
+            route_partition_key=None,
+        )
+
+        result = await runner._handle_resume_command(event)
+
+        assert "Other Group Secret" not in result
+        assert "Named Sessions" not in result
+        runner.session_store.switch_session.assert_not_called()
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_feishu_resume_direct_session_id_blocks_when_current_scope_is_unverified(self, tmp_path):
+        """Unscoped Feishu current sessions must not direct-resume scoped IDs."""
+        from datetime import datetime
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("current_legacy", "feishu")
+        db.create_session(
+            "target_scope_b",
+            "feishu",
+            conversation_scope_id="cs_b",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+
+        event = _make_event(
+            text="/resume target_scope_b",
+            platform=Platform.FEISHU,
+            user_id="ou_user",
+            chat_id="oc_group_a",
+        )
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_legacy",
+            event=event,
+        )
+        runner.session_store.get_or_create_session.return_value = SessionEntry(
+            session_key=build_session_key(event.source),
+            session_id="current_legacy",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=event.source,
+            platform=event.source.platform,
+            chat_type=event.source.chat_type,
+            conversation_scope_id=None,
+            platform_account_id=None,
+            route_partition_key=None,
+        )
+
+        result = await runner._handle_resume_command(event)
+
+        assert "No session found" in result
+        runner.session_store.switch_session.assert_not_called()
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_feishu_resume_direct_cross_scope_is_indistinguishable_from_not_found(self, tmp_path):
+        """Direct title lookup must not expose that another Feishu scope exists."""
+        from datetime import datetime
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(
+            "current_scope_a",
+            "feishu",
+            conversation_scope_id="cs_a",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db.create_session(
+            "target_scope_b",
+            "feishu",
+            conversation_scope_id="cs_b",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db.set_session_title("target_scope_b", "Other Group Secret")
+
+        event = _make_event(
+            text="/resume Other Group Secret",
+            platform=Platform.FEISHU,
+            user_id="ou_user",
+            chat_id="oc_group_a",
+        )
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_scope_a",
+            event=event,
+        )
+        runner.session_store.get_or_create_session.return_value = SessionEntry(
+            session_key=build_session_key(event.source),
+            session_id="current_scope_a",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=event.source,
+            platform=event.source.platform,
+            chat_type=event.source.chat_type,
+            conversation_scope_id="cs_a",
+            platform_account_id="feishu_app:test",
+            route_partition_key="route-a",
+        )
+        get_session_calls = []
+        original_get_session = db.get_session
+
+        def scoped_probe_get_session(session_id):
+            get_session_calls.append(session_id)
+            assert session_id != "target_scope_b"
+            return original_get_session(session_id)
+
+        db.get_session = scoped_probe_get_session
+
+        result = await runner._handle_resume_command(event)
+
+        assert "No session found" in result
+        assert "Cannot resume" not in result
+        runner.session_store.switch_session.assert_not_called()
+        assert "target_scope_b" not in get_session_calls
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_feishu_resume_direct_cross_scope_session_id_is_indistinguishable_from_not_found(self, tmp_path):
+        """Direct session-id lookup must not expose that another Feishu scope exists."""
+        from datetime import datetime
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(
+            "current_scope_a",
+            "feishu",
+            conversation_scope_id="cs_a",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db.create_session(
+            "target_scope_b",
+            "feishu",
+            conversation_scope_id="cs_b",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+
+        event = _make_event(
+            text="/resume target_scope_b",
+            platform=Platform.FEISHU,
+            user_id="ou_user",
+            chat_id="oc_group_a",
+        )
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_scope_a",
+            event=event,
+        )
+        runner.session_store.get_or_create_session.return_value = SessionEntry(
+            session_key=build_session_key(event.source),
+            session_id="current_scope_a",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=event.source,
+            platform=event.source.platform,
+            chat_type=event.source.chat_type,
+            conversation_scope_id="cs_a",
+            platform_account_id="feishu_app:test",
+            route_partition_key="route-a",
+        )
+        get_session_calls = []
+        original_get_session = db.get_session
+
+        def scoped_probe_get_session(session_id):
+            get_session_calls.append(session_id)
+            assert session_id != "target_scope_b"
+            return original_get_session(session_id)
+
+        db.get_session = scoped_probe_get_session
+
+        result = await runner._handle_resume_command(event)
+
+        assert "No session found" in result
+        assert "Cannot resume" not in result
+        runner.session_store.switch_session.assert_not_called()
+        assert "target_scope_b" not in get_session_calls
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_feishu_resume_title_resolution_prefers_current_scope_lineage(self, tmp_path):
+        """A newer title variant in another Feishu scope must not mask current-scope title."""
+        from datetime import datetime
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session(
+            "current_scope_a",
+            "feishu",
+            conversation_scope_id="cs_a",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db.create_session(
+            "scope_a_work",
+            "feishu",
+            conversation_scope_id="cs_a",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db.set_session_title("scope_a_work", "Work")
+        db.create_session(
+            "scope_b_work_2",
+            "feishu",
+            conversation_scope_id="cs_b",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db.set_session_title("scope_b_work_2", "Work #2")
+
+        event = _make_event(
+            text="/resume Work",
+            platform=Platform.FEISHU,
+            user_id="ou_user",
+            chat_id="oc_group_a",
+        )
+        runner = _make_runner(
+            session_db=db,
+            current_session_id="current_scope_a",
+            event=event,
+        )
+        runner.session_store.get_or_create_session.return_value = SessionEntry(
+            session_key=build_session_key(event.source),
+            session_id="current_scope_a",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            origin=event.source,
+            platform=event.source.platform,
+            chat_type=event.source.chat_type,
+            conversation_scope_id="cs_a",
+            platform_account_id="feishu_app:test",
+            route_partition_key="route-a",
+        )
+
+        result = await runner._handle_resume_command(event)
+
+        assert "Resumed" in result
+        assert runner.session_store.switch_session.call_args[0][1] == "scope_a_work"
         db.close()
 
     @pytest.mark.asyncio

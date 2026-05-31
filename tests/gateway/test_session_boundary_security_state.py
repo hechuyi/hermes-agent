@@ -7,7 +7,7 @@ import pytest
 
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource, build_session_key
+from gateway.session import SessionEntry, SessionSource, SessionStore, build_session_key
 from tools import approval as approval_mod
 from tools import slash_confirm as slash_confirm_mod
 from tools.approval import (
@@ -218,6 +218,188 @@ async def test_branch_preserves_persisted_assistant_metadata():
     assert assistant_kwargs["reasoning_details"] == [{"type": "summary", "text": "step"}]
     assert assistant_kwargs["codex_reasoning_items"] == [{"id": "r1", "type": "reasoning"}]
     assert assistant_kwargs["codex_message_items"] == [{"id": "m1", "type": "message"}]
+
+
+@pytest.mark.asyncio
+async def test_branch_command_copies_parent_scope_and_switch_entry_keeps_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    from gateway.config import GatewayConfig, PlatformConfig, SessionResetPolicy
+    from gateway.run import GatewayRunner
+    from hermes_state import SessionDB
+
+    source = SessionSource(
+        platform=Platform.FEISHU,
+        user_id="ou_user",
+        user_id_alt="on_union",
+        chat_id="oc_group",
+        chat_type="group",
+        user_name="tester",
+    )
+    event = MessageEvent(text="/branch scoped-copy", source=source, message_id="m1")
+    config = GatewayConfig()
+    config.default_reset_policy = SessionResetPolicy(mode="none")
+    config.sessions_dir = tmp_path / "sessions"
+    config.platforms[Platform.FEISHU] = PlatformConfig(
+        enabled=True,
+        extra={"app_id": "cli_branch_scope"},
+    )
+    db = SessionDB(db_path=tmp_path / "state.db")
+    store = SessionStore(sessions_dir=config.sessions_dir, config=config)
+    store._db = db
+    current = store.get_or_create_session(source)
+    store.append_to_transcript(current.session_id, {"role": "user", "content": "hello"})
+
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {}
+    runner.config = config
+    runner._running_agents = {}
+    runner._running_agents_ts = {}
+    runner._busy_ack_ts = {}
+    runner._pending_approvals = {}
+    runner._update_prompt_pending = {}
+    runner._agent_cache_lock = None
+    runner._background_tasks = set()
+    runner.session_store = store
+    runner._session_db = db
+
+    result = await runner._handle_branch_command(event)
+    branched = store._entries[current.session_key]
+    row = db.get_session(branched.session_id)
+
+    assert "Branched to" in result
+    assert row["parent_session_id"] == current.session_id
+    assert row["scope_assignment_status"] == "scoped"
+    assert row["conversation_scope_id"] == current.conversation_scope_id
+    assert row["route_partition_key"] == current.route_partition_key
+    assert branched.conversation_scope_id == current.conversation_scope_id
+    assert branched.platform_account_id == current.platform_account_id
+    assert branched.route_partition_key == current.route_partition_key
+
+
+@pytest.mark.asyncio
+async def test_branch_command_rejects_current_entry_scope_when_parent_db_row_is_legacy(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    from gateway.config import GatewayConfig, PlatformConfig, SessionResetPolicy
+    from gateway.run import GatewayRunner
+    from hermes_state import SessionDB
+
+    source = SessionSource(
+        platform=Platform.FEISHU,
+        user_id="ou_user",
+        user_id_alt="on_union",
+        chat_id="oc_group",
+        chat_type="group",
+        user_name="tester",
+    )
+    event = MessageEvent(text="/branch fallback-scope", source=source, message_id="m1")
+    config = GatewayConfig()
+    config.default_reset_policy = SessionResetPolicy(mode="none")
+    config.sessions_dir = tmp_path / "sessions"
+    config.platforms[Platform.FEISHU] = PlatformConfig(
+        enabled=True,
+        extra={"app_id": "cli_branch_scope_fallback"},
+    )
+    db = SessionDB(db_path=tmp_path / "state.db")
+    store = SessionStore(sessions_dir=config.sessions_dir, config=config)
+    store._db = db
+    current = store.get_or_create_session(source)
+    db._conn.execute(
+        "UPDATE sessions SET conversation_scope_id=NULL, scope_assignment_status='legacy_unscoped', "
+        "route_session_key_snapshot=NULL, route_partition_key=NULL WHERE id=?",
+        (current.session_id,),
+    )
+    db._conn.commit()
+    store.append_to_transcript(current.session_id, {"role": "user", "content": "hello"})
+
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {}
+    runner.config = config
+    runner._running_agents = {}
+    runner._running_agents_ts = {}
+    runner._busy_ack_ts = {}
+    runner._pending_approvals = {}
+    runner._update_prompt_pending = {}
+    runner._agent_cache_lock = None
+    runner._background_tasks = set()
+    runner.session_store = store
+    runner._session_db = db
+
+    result = await runner._handle_branch_command(event)
+    branched = store._entries[current.session_key]
+
+    assert result == "No conversation to branch — send a message first."
+    assert branched.session_id != current.session_id
+    assert branched.conversation_scope_id == current.conversation_scope_id
+    assert branched.route_partition_key == current.route_partition_key
+
+
+@pytest.mark.asyncio
+async def test_branch_command_rejects_current_entry_scope_when_parent_db_row_is_legacy_even_if_store_returns_entry(tmp_path):
+    from datetime import datetime
+    from unittest.mock import MagicMock
+    from gateway.run import GatewayRunner
+    from hermes_state import SessionDB
+
+    source = SessionSource(
+        platform=Platform.FEISHU,
+        user_id="ou_user",
+        user_id_alt="on_union",
+        chat_id="oc_group",
+        chat_type="group",
+        user_name="tester",
+    )
+    event = MessageEvent(text="/branch fallback-scope", source=source, message_id="m1")
+    db = SessionDB(db_path=tmp_path / "state.db")
+    parent_session_id = "legacy-parent-row"
+    db.create_session(parent_session_id, "feishu")
+
+    current_entry = SessionEntry(
+        session_key=build_session_key(source),
+        session_id=parent_session_id,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=source.platform,
+        chat_type=source.chat_type,
+        conversation_scope_id="cs_entry",
+        platform_account_id="feishu_app:test",
+        route_partition_key="route-entry",
+    )
+
+    switched_entry = SessionEntry(
+        session_key=current_entry.session_key,
+        session_id="unused",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=source.platform,
+        chat_type=source.chat_type,
+        conversation_scope_id="cs_entry",
+        platform_account_id="feishu_app:test",
+        route_partition_key="route-entry",
+    )
+    store = MagicMock()
+    store.get_or_create_session.return_value = current_entry
+    store.load_transcript.return_value = [{"role": "user", "content": "hello"}]
+    store.switch_session.return_value = switched_entry
+
+    runner = object.__new__(GatewayRunner)
+    runner.adapters = {}
+    runner.config = {}
+    runner._running_agents = {}
+    runner._running_agents_ts = {}
+    runner._busy_ack_ts = {}
+    runner._pending_approvals = {}
+    runner._update_prompt_pending = {}
+    runner._agent_cache_lock = None
+    runner._background_tasks = set()
+    runner.session_store = store
+    runner._session_db = db
+
+    result = await runner._handle_branch_command(event)
+
+    assert result == "No conversation to branch — send a message first."
+    store.switch_session.assert_not_called()
 
 
 def test_clear_session_boundary_security_state_is_scoped():

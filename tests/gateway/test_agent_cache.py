@@ -1345,6 +1345,54 @@ class TestCachedAgentInactivityReset:
             "Inactivity timeout could not fire for a stuck interrupted turn."
         )
 
+    def test_reused_agent_refreshes_gateway_scope_for_new_turn(self):
+        """Cached Feishu agents must not carry the previous route's scope."""
+        from gateway.run import GatewayRunner
+
+        agent = self._fake_agent()
+        agent._gateway_session_key = "route-old"
+        agent._gateway_conversation_scope_id = "cs_old"
+        agent._gateway_platform_account_id = "feishu_app:old"
+        agent._gateway_route_partition_key = "route-old"
+
+        GatewayRunner._init_cached_agent_for_turn(
+            agent,
+            interrupt_depth=0,
+            gateway_session_key="route-new",
+            conversation_scope_id="cs_new",
+            platform_account_id="feishu_app:new",
+            route_partition_key="route-new",
+        )
+
+        assert agent._gateway_session_key == "route-new"
+        assert agent._gateway_conversation_scope_id == "cs_new"
+        assert agent._gateway_platform_account_id == "feishu_app:new"
+        assert agent._gateway_route_partition_key == "route-new"
+
+    def test_reused_agent_clears_gateway_scope_for_unscoped_turn(self):
+        """A cached scoped agent reused by an unscoped turn must not keep stale scope."""
+        from gateway.run import GatewayRunner
+
+        agent = self._fake_agent()
+        agent._gateway_session_key = "route-old"
+        agent._gateway_conversation_scope_id = "cs_old"
+        agent._gateway_platform_account_id = "feishu_app:old"
+        agent._gateway_route_partition_key = "route-old"
+
+        GatewayRunner._init_cached_agent_for_turn(
+            agent,
+            interrupt_depth=0,
+            gateway_session_key="route-new",
+            conversation_scope_id=None,
+            platform_account_id=None,
+            route_partition_key=None,
+        )
+
+        assert agent._gateway_session_key == "route-new"
+        assert agent._gateway_conversation_scope_id is None
+        assert agent._gateway_platform_account_id is None
+        assert agent._gateway_route_partition_key is None
+
 
 class TestAgentConfigSignatureUserId:
     """Shared-thread cache must not reuse an agent across users.
