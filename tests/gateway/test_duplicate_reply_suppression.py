@@ -13,12 +13,13 @@ Covers four fix paths:
 """
 
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -27,6 +28,334 @@ from gateway.platforms.base import (
     SendResult,
 )
 from gateway.session import SessionSource, build_session_key
+
+
+@pytest.mark.parametrize(
+    ("persistence", "expected_skip_db"),
+    [
+        (
+            {
+                "attempted": True,
+                "ok": True,
+                "row_ids_by_message_index": {2: 101},
+            },
+            True,
+        ),
+        (
+            {
+                "attempted": True,
+                "ok": True,
+                "row_ids_by_message_index": {3: 102},
+            },
+            False,
+        ),
+    ],
+    ids=["user-row-proof", "no-user-row-proof"],
+)
+@pytest.mark.asyncio
+async def test_failed_agent_user_persistence_proof_controls_gateway_db_rewrite(
+    monkeypatch,
+    persistence,
+    expected_skip_db,
+):
+    import gateway.run as gateway_run
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="c1",
+        chat_type="dm",
+        user_id="u1",
+    )
+    event = MessageEvent(text="hello", source=source, message_id="m1")
+    session_entry = SimpleNamespace(
+        session_key="agent:main:discord:dm:c1",
+        session_id="session-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    session_store = MagicMock()
+    session_store.get_or_create_session.return_value = session_entry
+    history = [
+        {"role": "user", "content": "before"},
+        {"role": "assistant", "content": "old"},
+    ]
+    session_store.load_transcript.return_value = history
+    session_store.has_any_sessions.return_value = True
+    session_store.update_session = MagicMock()
+    session_store.clear_resume_pending = MagicMock()
+    runner.session_store = session_store
+    runner.adapters = {
+        Platform.DISCORD: SimpleNamespace(
+            stop_typing=AsyncMock(),
+            send=AsyncMock(),
+        )
+    }
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.config = GatewayConfig()
+    runner._session_db = None
+    runner._ephemeral_system_prompt = ""
+    runner._prefill_messages = []
+    runner._reasoning_config = None
+    runner._provider_routing = {}
+    runner._fallback_model = None
+    runner._voice_mode = {}
+    runner._pending_model_notes = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._running_agents = {}
+    runner._agent_cache = {}
+    runner._agent_cache_lock = None
+    runner._session_model_overrides = {}
+    runner._recover_telegram_topic_thread_id = lambda _source: None
+    runner._cache_session_source = lambda *_args, **_kwargs: None
+    runner._is_telegram_topic_lane = lambda _source: False
+    runner._bind_adapter_run_generation = lambda *_args, **_kwargs: None
+    runner._is_session_run_current = lambda *_args, **_kwargs: True
+    runner._set_session_env = lambda _context: []
+    runner._clear_restart_failure_count = lambda _session_key: None
+    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
+
+    messages = history + [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "temporary failure"},
+    ]
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "temporary failure",
+            "messages": messages,
+            "history_offset": len(history),
+            "failed": True,
+            "error": "rate limit",
+            "last_prompt_tokens": 0,
+            "persistence": persistence,
+        }
+    )
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "test-model")
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+
+    result = await runner._handle_message_with_agent(event, source, session_entry.session_key, 1)
+
+    assert result == "temporary failure"
+    user_write = [
+        call
+        for call in session_store.append_to_transcript.call_args_list
+        if call.args[1].get("role") == "user"
+    ][-1]
+    assert user_write.args[0] == "session-1"
+    assert user_write.args[1]["role"] == "user"
+    assert user_write.kwargs["skip_db"] is expected_skip_db
+
+
+def test_agent_persistence_proof_suppresses_only_covered_gateway_db_rewrites():
+    """Gateway may skip its own DB write only when run_agent proved coverage."""
+    from gateway.run import (
+        _gateway_agent_persistence_covers_full_transcript,
+        _preserve_queued_followup_history_offset,
+    )
+
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+
+    assert _gateway_agent_persistence_covers_full_transcript(
+        {
+            "attempted": True,
+            "ok": True,
+            "row_ids_by_message_index": {0: 11, 1: 12},
+        },
+        messages,
+        history_offset=0,
+    ) is True
+    assert _gateway_agent_persistence_covers_full_transcript(
+        {
+            "attempted": True,
+            "ok": True,
+            "row_ids_by_message_index": {0: 11},
+        },
+        messages,
+        history_offset=0,
+    ) is False
+    assert _gateway_agent_persistence_covers_full_transcript(
+        {"attempted": True, "ok": False, "row_ids_by_message_index": {0: 11, 1: 12}},
+        messages,
+        history_offset=0,
+    ) is False
+    assert _gateway_agent_persistence_covers_full_transcript(
+        {
+            "attempted": True,
+            "ok": True,
+            "row_ids_by_message_index": {5: 11},
+        },
+        [{"role": "system", "content": "skip"}, {"role": "user", "content": "hello"}],
+        history_offset=4,
+    ) is True
+
+    history = [
+        {"role": "user", "content": "before"},
+        {"role": "assistant", "content": "old"},
+    ]
+    first_turn = [
+        {"role": "user", "content": "first queued"},
+        {"role": "assistant", "content": "first answer"},
+    ]
+    followup_turn = [
+        {"role": "user", "content": "second queued"},
+        {"role": "assistant", "content": "second answer"},
+    ]
+    current_result = {
+        "history_offset": len(history),
+        "messages": history + first_turn,
+        "persistence": {
+            "attempted": True,
+            "ok": True,
+            "row_ids_by_message_index": {2: 21, 3: 22},
+        },
+    }
+    followup_result = {
+        "history_offset": len(history + first_turn),
+        "messages": history + first_turn + followup_turn,
+        "persistence": {
+            "attempted": True,
+            "ok": True,
+            "row_ids_by_message_index": {4: 23, 5: 24},
+        },
+    }
+
+    merged = _preserve_queued_followup_history_offset(current_result, followup_result)
+    assert merged["history_offset"] == len(history)
+    new_messages = merged["messages"][merged["history_offset"]:]
+    assert _gateway_agent_persistence_covers_full_transcript(
+        merged["persistence"],
+        new_messages,
+        history_offset=merged["history_offset"],
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_queued_mixed_proof_skips_only_persisted_prefix_rows(monkeypatch):
+    """Queued follow-up fallback must not rewrite rows already covered by proof."""
+    import gateway.run as gateway_run
+    from gateway.run import GatewayRunner, _preserve_queued_followup_history_offset
+
+    first_turn = [
+        {"role": "user", "content": "first queued"},
+        {"role": "assistant", "content": "first answer"},
+    ]
+    followup_turn = [
+        {"role": "user", "content": "second queued"},
+        {"role": "assistant", "content": "second answer"},
+    ]
+    current_result = {
+        "history_offset": 0,
+        "messages": first_turn,
+        "persistence": {
+            "attempted": True,
+            "ok": True,
+            "row_ids_by_message_index": {0: 21, 1: 22},
+        },
+    }
+    followup_result = {
+        "history_offset": len(first_turn),
+        "messages": first_turn + followup_turn,
+        "persistence": {
+            "attempted": True,
+            "ok": False,
+            "row_ids_by_message_index": {},
+        },
+    }
+
+    merged = _preserve_queued_followup_history_offset(current_result, followup_result)
+    assert merged["history_offset"] == 0
+
+    runner = object.__new__(GatewayRunner)
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="c1",
+        chat_type="dm",
+        user_id="u1",
+    )
+    event = MessageEvent(text="first queued", source=source, message_id="m1")
+    session_entry = SimpleNamespace(
+        session_key="agent:main:discord:dm:c1",
+        session_id="session-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    session_store = MagicMock()
+    session_store.get_or_create_session.return_value = session_entry
+    session_store.load_transcript.return_value = []
+    session_store.has_any_sessions.return_value = True
+    session_store.update_session = MagicMock()
+    session_store.clear_resume_pending = MagicMock()
+    runner.session_store = session_store
+    runner.adapters = {
+        Platform.DISCORD: SimpleNamespace(
+            stop_typing=AsyncMock(),
+            send=AsyncMock(),
+        )
+    }
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.config = GatewayConfig()
+    runner._session_db = None
+    runner._ephemeral_system_prompt = ""
+    runner._prefill_messages = []
+    runner._reasoning_config = None
+    runner._provider_routing = {}
+    runner._fallback_model = None
+    runner._voice_mode = {}
+    runner._pending_model_notes = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._running_agents = {}
+    runner._agent_cache = {}
+    runner._agent_cache_lock = None
+    runner._session_model_overrides = {}
+    runner._recover_telegram_topic_thread_id = lambda _source: None
+    runner._cache_session_source = lambda *_args, **_kwargs: None
+    runner._is_telegram_topic_lane = lambda _source: False
+    runner._bind_adapter_run_generation = lambda *_args, **_kwargs: None
+    runner._is_session_run_current = lambda *_args, **_kwargs: True
+    runner._set_session_env = lambda _context: []
+    runner._clear_restart_failure_count = lambda _session_key: None
+    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
+
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "second answer",
+            "messages": merged["messages"],
+            "history_offset": merged["history_offset"],
+            "last_prompt_tokens": 0,
+            "persistence": merged["persistence"],
+        }
+    )
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "test-model")
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+
+    result = await runner._handle_message_with_agent(event, source, session_entry.session_key, 1)
+
+    assert result == "second answer"
+    transcript_writes = [
+        call
+        for call in session_store.append_to_transcript.call_args_list
+        if call.args[1].get("role") in {"user", "assistant"}
+    ]
+    assert [call.args[1]["content"] for call in transcript_writes] == [
+        "first queued",
+        "first answer",
+        "second queued",
+        "second answer",
+    ]
+    assert [call.kwargs.get("skip_db", False) for call in transcript_writes] == [
+        True,
+        True,
+        False,
+        False,
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +397,7 @@ def _make_event(text="hello", chat_id="c1", user_id="u1"):
         ),
         message_id="m1",
     )
+
 
 
 # ===================================================================

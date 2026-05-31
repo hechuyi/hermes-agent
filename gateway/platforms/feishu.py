@@ -127,6 +127,7 @@ FEISHU_WEBSOCKET_AVAILABLE = websockets is not None
 FEISHU_WEBHOOK_AVAILABLE = aiohttp is not None
 
 from gateway.config import Platform, PlatformConfig
+from gateway.session import InvalidLiveSessionSource
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -1417,9 +1418,8 @@ class FeishuAdapter(BasePlatformAdapter):
     # Lifecycle — init / settings / connect / disconnect
     # =========================================================================
 
-    def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform.FEISHU)
-
+    def __init__(self, config: PlatformConfig, session_isolation_config: Optional[Any] = None):
+        super().__init__(config, Platform.FEISHU, session_isolation_config=session_isolation_config)
         self._settings = self._load_settings(config.extra or {})
         self._apply_settings(self._settings)
         self._client: Optional[Any] = None
@@ -2736,6 +2736,13 @@ class FeishuAdapter(BasePlatformAdapter):
             chat_type_raw = str(getattr(msg, "chat_type", "p2p") or "p2p")
             if not chat_id:
                 return
+            thread_id = getattr(msg, "thread_id", None) or None
+            reply_to_message_id = (
+                getattr(msg, "parent_id", None)
+                or getattr(msg, "upper_message_id", None)
+                or getattr(msg, "root_id", None)
+                or None
+            )
         except Exception:
             logger.debug("[Feishu] Failed to fetch message for reaction routing", exc_info=True)
             return
@@ -2754,7 +2761,7 @@ class FeishuAdapter(BasePlatformAdapter):
             chat_type=self._resolve_source_chat_type(chat_info=chat_info, event_chat_type=chat_type_raw),
             user_id=sender_profile["user_id"],
             user_name=sender_profile["user_name"],
-            thread_id=None,
+            thread_id=thread_id,
             user_id_alt=sender_profile["user_id_alt"],
         )
         synthetic_event = MessageEvent(
@@ -2763,6 +2770,7 @@ class FeishuAdapter(BasePlatformAdapter):
             source=source,
             raw_message=data,
             message_id=message_id,
+            reply_to_message_id=reply_to_message_id,
             timestamp=datetime.now(),
         )
         logger.info("[Feishu] Routing reaction %s:%s on bot message %s as synthetic event", action, emoji_type, message_id)
@@ -2790,6 +2798,13 @@ class FeishuAdapter(BasePlatformAdapter):
 
         context = getattr(event, "context", None)
         chat_id = str(getattr(context, "open_chat_id", "") or "")
+        thread_id = getattr(context, "thread_id", None) or None
+        reply_to_message_id = (
+            getattr(context, "parent_id", None)
+            or getattr(context, "upper_message_id", None)
+            or getattr(context, "root_id", None)
+            or None
+        )
         operator = getattr(event, "operator", None)
         open_id = str(getattr(operator, "open_id", "") or "")
         if not chat_id or not open_id:
@@ -2816,7 +2831,7 @@ class FeishuAdapter(BasePlatformAdapter):
             chat_type=self._resolve_source_chat_type(chat_info=chat_info, event_chat_type="group"),
             user_id=sender_profile["user_id"],
             user_name=sender_profile["user_name"],
-            thread_id=None,
+            thread_id=thread_id,
             user_id_alt=sender_profile["user_id_alt"],
         )
         synthetic_event = MessageEvent(
@@ -2825,6 +2840,7 @@ class FeishuAdapter(BasePlatformAdapter):
             source=source,
             raw_message=data,
             message_id=token or str(uuid.uuid4()),
+            reply_to_message_id=reply_to_message_id,
             timestamp=datetime.now(),
         )
         logger.info("[Feishu] Routing card action %r from %s in %s as synthetic command", action_tag, open_id, chat_id)
@@ -2852,7 +2868,10 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_id = getattr(event.source, "chat_id", "") or "" if event.source else ""
         chat_lock = self._get_chat_lock(chat_id)
         async with chat_lock:
-            await self.handle_message(event)
+            try:
+                await self.handle_message(event)
+            except InvalidLiveSessionSource as exc:
+                logger.warning("[Feishu] Ignoring invalid live inbound source: reason=%s", exc.reason)
 
     # =========================================================================
     # Processing status reactions
@@ -3020,6 +3039,16 @@ class FeishuAdapter(BasePlatformAdapter):
         message_id: str,
         is_bot: bool = False,
     ) -> None:
+        chat_id = getattr(message, "chat_id", "") or ""
+        if not chat_id:
+            logger.warning(
+                "[Feishu] Ignoring inbound message without chat identity: id=%s chat_type=%s reason=%s",
+                message_id,
+                chat_type,
+                "feishu_missing_chat_identity",
+            )
+            return
+
         text, inbound_type, media_urls, media_types, mentions = await self._extract_message_content(message)
 
         if inbound_type == MessageType.TEXT:
@@ -3064,13 +3093,16 @@ class FeishuAdapter(BasePlatformAdapter):
             len(media_urls),
         )
 
-        chat_id = getattr(message, "chat_id", "") or ""
         chat_info = await self.get_chat_info(chat_id)
         sender_profile = await self._resolve_sender_profile(sender_id, is_bot=is_bot)
         source = self.build_source(
             chat_id=chat_id,
             chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
-            chat_type=self._resolve_source_chat_type(chat_info=chat_info, event_chat_type=chat_type),
+            chat_type=self._resolve_source_chat_type(
+                chat_info=chat_info,
+                event_chat_type=chat_type,
+                prefer_event_chat_type=True,
+            ),
             user_id=sender_profile["user_id"],
             user_name=sender_profile["user_name"],
             thread_id=thread_id,
@@ -3116,8 +3148,8 @@ class FeishuAdapter(BasePlatformAdapter):
 
         session_key = build_session_key(
             event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            **self._effective_session_isolation(),
+            require_conversation_identity=True,
         )
         return f"{session_key}:media:{event.message_type.value}"
 
@@ -3403,9 +3435,33 @@ class FeishuAdapter(BasePlatformAdapter):
 
         return build_session_key(
             event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            **self._effective_session_isolation(),
+            require_conversation_identity=True,
         )
+
+    def _session_guard_isolation_options(self) -> Dict[str, bool]:
+        return self._effective_session_isolation()
+
+    def _effective_session_isolation(self) -> Dict[str, bool]:
+        cfg = self._session_isolation_config
+        if cfg is not None and hasattr(cfg, "effective_session_isolation"):
+            return dict(cfg.effective_session_isolation(Platform.FEISHU))
+        return {
+            "group_sessions_per_user": self._group_sessions_per_user(),
+            "thread_sessions_per_user": self._thread_sessions_per_user(),
+        }
+
+    def _group_sessions_per_user(self) -> bool:
+        cfg = self._session_isolation_config
+        if cfg is not None and hasattr(cfg, "group_sessions_per_user"):
+            return bool(getattr(cfg, "group_sessions_per_user"))
+        return bool(self.config.extra.get("group_sessions_per_user", False))
+
+    def _thread_sessions_per_user(self) -> bool:
+        cfg = self._session_isolation_config
+        if cfg is not None and hasattr(cfg, "thread_sessions_per_user"):
+            return bool(getattr(cfg, "thread_sessions_per_user"))
+        return bool(self.config.extra.get("thread_sessions_per_user", False))
 
     @staticmethod
     def _text_batch_is_compatible(existing: MessageEvent, incoming: MessageEvent) -> bool:
@@ -3797,10 +3853,21 @@ class FeishuAdapter(BasePlatformAdapter):
         return "dm"
 
     @staticmethod
-    def _resolve_source_chat_type(*, chat_info: Dict[str, Any], event_chat_type: str) -> str:
+    def _resolve_source_chat_type(
+        *,
+        chat_info: Dict[str, Any],
+        event_chat_type: str,
+        prefer_event_chat_type: bool = False,
+    ) -> str:
+        if prefer_event_chat_type:
+            mapped_event_type = FeishuAdapter._map_chat_type(event_chat_type)
+            if mapped_event_type in {"dm", "group", "forum"}:
+                return mapped_event_type
         resolved = str(chat_info.get("type") or "").strip().lower()
         if resolved in {"group", "forum"}:
             return resolved
+        if resolved in {"dm", "p2p"}:
+            return "dm"
         if event_chat_type == "p2p":
             return "dm"
         return "group"

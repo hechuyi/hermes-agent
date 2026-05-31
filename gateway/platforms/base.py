@@ -483,7 +483,7 @@ from enum import Enum
 from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.session import SessionSource, build_session_key
 from hermes_constants import get_hermes_dir, get_hermes_home
 
@@ -1559,9 +1559,15 @@ class BasePlatformAdapter(ABC):
     - Handling media
     """
     
-    def __init__(self, config: PlatformConfig, platform: Platform):
+    def __init__(
+        self,
+        config: PlatformConfig,
+        platform: Platform,
+        session_isolation_config: Optional[Any] = None,
+    ):
         self.config = config
         self.platform = platform
+        self._session_isolation_config = session_isolation_config or GatewayConfig()
         self._message_handler: Optional[MessageHandler] = None
         self._running = False
         self._fatal_error_code: Optional[str] = None
@@ -1629,6 +1635,21 @@ class BasePlatformAdapter(ABC):
         Python ``len`` (e.g. Telegram counts UTF-16 code units).
         """
         return len
+
+    def _session_guard_isolation_options(self) -> Dict[str, bool]:
+        """Return session-isolation options used by the active-session guard."""
+        cfg = getattr(self, "_session_isolation_config", None)
+        if cfg is None or not hasattr(cfg, "effective_session_isolation"):
+            raise RuntimeError("BasePlatformAdapter requires injected session_isolation_config")
+        return dict(cfg.effective_session_isolation(self.platform))
+
+    def _session_guard_key(self, source: SessionSource) -> str:
+        """Return the active-session guard key for a message source."""
+        return build_session_key(
+            source,
+            **self._session_guard_isolation_options(),
+            require_conversation_identity=True,
+        )
 
     def supports_draft_streaming(
         self,
@@ -3335,11 +3356,7 @@ class BasePlatformAdapter(ABC):
 
         coerce_plaintext_gateway_command(event)
         
-        session_key = build_session_key(
-            event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-        )
+        session_key = self._session_guard_key(event.source)
 
         # On-entry self-heal: if the adapter still has an _active_sessions
         # entry for this key but the owner task has already exited (done or
@@ -3938,6 +3955,7 @@ class BasePlatformAdapter(ABC):
                 "_hermes_run_generation",
                 None,
             )
+            _post_cb = None
             if hasattr(self, "pop_post_delivery_callback"):
                 _post_cb = self.pop_post_delivery_callback(
                     session_key,

@@ -1653,8 +1653,12 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
             around_message_id=function_args.get("around_message_id"),
             window=function_args.get("window", 5),
             sort=function_args.get("sort"),
+            scope=function_args["scope"] if "scope" in function_args else None,
             db=session_db,
             current_session_id=agent.session_id,
+            current_conversation_scope_id=getattr(agent, "_gateway_conversation_scope_id", None),
+            current_route_partition_key=getattr(agent, "_gateway_route_partition_key", None),
+            current_platform_account_id=getattr(agent, "_gateway_platform_account_id", None),
         )
     elif function_name == "memory":
         target = function_args.get("target", "memory")

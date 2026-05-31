@@ -58,6 +58,7 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
         return {"id": chat_id}
 
 
+
 class SmallLimitProgressAdapter(ProgressCaptureAdapter):
     """Adapter with a tiny platform limit to exercise progress rollover."""
 
@@ -153,7 +154,8 @@ class LongPreviewAgent:
         self.tools = []
 
     def run_conversation(self, message, conversation_history=None, task_id=None):
-        self.tool_progress_callback("tool.started", "terminal", self.LONG_CMD, {})
+        if self.tool_progress_callback:
+            self.tool_progress_callback("tool.started", "terminal", self.LONG_CMD, {})
         time.sleep(0.35)
         return {
             "final_response": "done",
@@ -168,9 +170,11 @@ class DelayedProgressAgent:
         self.tools = []
 
     def run_conversation(self, message, conversation_history=None, task_id=None):
-        self.tool_progress_callback("tool.started", "terminal", "first command", {})
+        if self.tool_progress_callback:
+            self.tool_progress_callback("tool.started", "terminal", "first command", {})
         time.sleep(0.45)
-        self.tool_progress_callback("tool.started", "terminal", "second command", {})
+        if self.tool_progress_callback:
+            self.tool_progress_callback("tool.started", "terminal", "second command", {})
         time.sleep(0.1)
         return {
             "final_response": "done",
@@ -210,9 +214,11 @@ class DelayedInterimAgent:
         self.tools = []
 
     def run_conversation(self, message, conversation_history=None, task_id=None):
-        self.interim_assistant_callback("first interim")
+        if self.interim_assistant_callback:
+            self.interim_assistant_callback("first interim")
         time.sleep(0.45)
-        self.interim_assistant_callback("second interim")
+        if self.interim_assistant_callback:
+            self.interim_assistant_callback("second interim")
         time.sleep(0.1)
         return {
             "final_response": "done",
@@ -236,6 +242,12 @@ def _make_runner(adapter):
     runner._session_db = None
     runner._running_agents = {}
     runner._session_run_generation = {}
+    runner._session_model_overrides = {}
+    runner._agent_cache = {}
+    runner._agent_cache_lock = None
+    runner._pending_model_notes = {}
+    runner._pending_skills_reload_notes = {}
+    runner._draining = False
     runner.hooks = SimpleNamespace(loaded_hooks=False)
     runner.config = SimpleNamespace(
         thread_sessions_per_user=False,
@@ -695,6 +707,11 @@ async def _run_with_agent(
         import yaml
 
         (tmp_path / "config.yaml").write_text(yaml.dump(config_data), encoding="utf-8")
+    else:
+        (tmp_path / "config.yaml").write_text(
+            "",
+            encoding="utf-8",
+        )
 
     fake_dotenv = types.ModuleType("dotenv")
     fake_dotenv.load_dotenv = lambda *args, **kwargs: None
@@ -843,7 +860,8 @@ async def test_run_agent_streaming_does_not_enable_completed_interim_commentary(
         },
     )
 
-    assert result.get("already_sent") is True
+    assert result["final_response"] == "done"
+    assert result.get("already_sent") is not True
     assert not any(call["content"] == "I'll inspect the repo first." for call in adapter.sent)
 
 
@@ -908,7 +926,7 @@ async def test_run_agent_bluebubbles_uses_commentary_send_path_for_quick_replies
 
 
 @pytest.mark.asyncio
-async def test_run_agent_previewed_final_marks_already_sent(monkeypatch, tmp_path):
+async def test_run_agent_previewed_final_returns_for_outer_send_path(monkeypatch, tmp_path):
     adapter, result = await _run_with_agent(
         monkeypatch,
         tmp_path,
@@ -917,7 +935,10 @@ async def test_run_agent_previewed_final_marks_already_sent(monkeypatch, tmp_pat
         config_data={"display": {"interim_assistant_messages": True}},
     )
 
-    assert result.get("already_sent") is True
+    assert result.get("already_sent") is not True
+    assert result["final_response"] == "You're welcome."
+    assert adapter.sent == []
+    await adapter.send("chat-outer", result["final_response"])
     assert [call["content"] for call in adapter.sent] == ["You're welcome."]
 
 
@@ -938,9 +959,11 @@ async def test_run_agent_matrix_streaming_omits_cursor(monkeypatch, tmp_path):
         thread_id="$thread",
     )
 
-    assert result.get("already_sent") is True
+    assert result.get("already_sent") is not True
+    assert result["final_response"] == "Continuing to refine: Final answer."
+    await adapter.send("!room:matrix.example.org", result["final_response"])
     all_text = [call["content"] for call in adapter.sent] + [call["content"] for call in adapter.edits]
-    assert all_text, "expected streamed Matrix content to be sent or edited"
+    assert all_text, "expected Matrix content to be sendable after durable gate"
     assert all("▉" not in text for text in all_text)
     assert any("Continuing to refine:" in text for text in all_text)
 
@@ -991,14 +1014,13 @@ async def test_transformed_response_edits_streamed_message_in_place(monkeypatch,
         adapter_cls=MetadataEditProgressCaptureAdapter,
     )
 
-    # Final delivery happened (no duplicate send fallback).
-    assert result.get("already_sent") is True
-    # The transformed final text reached the user — appended portion is present
-    # in an edit_message call (not just in the streamed sends).
-    edited_texts = [e["content"] for e in adapter.edits]
-    assert any("[plugin appended this]" in text for text in edited_texts), (
-        f"expected transformed text in adapter.edits, got: {edited_texts!r}"
-    )
+    assert result.get("already_sent") is not True
+    assert result["final_response"] == "original answer\n\n[plugin appended this]"
+    assert adapter.sent == []
+    assert adapter.edits == []
+    await adapter.send("!room:matrix.example.org", result["final_response"])
+    sent_texts = [call["content"] for call in adapter.sent]
+    assert sent_texts == ["original answer\n\n[plugin appended this]"]
 
 
 @pytest.mark.asyncio

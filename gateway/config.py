@@ -483,6 +483,8 @@ class GatewayConfig:
     thread_sessions_per_user: bool = False  # When False (default), threads are shared across all participants
     group_conversation_scope_per_user: bool = False  # Semantic conversation scope is shared unless explicitly per-user
     thread_conversation_scope_per_user: bool = False  # Thread semantic scope is shared unless explicitly per-user
+    _session_isolation_explicit: frozenset[str] = field(default_factory=frozenset, repr=False, compare=False)
+    session_isolation_overrides: Dict[str, bool] = field(default_factory=dict)
 
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
@@ -587,6 +589,7 @@ class GatewayConfig:
             "stt_enabled": self.stt_enabled,
             "group_sessions_per_user": self.group_sessions_per_user,
             "thread_sessions_per_user": self.thread_sessions_per_user,
+            "session_isolation_overrides": dict(self.session_isolation_overrides),
             "group_conversation_scope_per_user": self.group_conversation_scope_per_user,
             "thread_conversation_scope_per_user": self.thread_conversation_scope_per_user,
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
@@ -634,6 +637,14 @@ class GatewayConfig:
 
         group_sessions_per_user = data.get("group_sessions_per_user")
         thread_sessions_per_user = data.get("thread_sessions_per_user")
+        session_isolation_overrides = data.get("session_isolation_overrides", {})
+        if not isinstance(session_isolation_overrides, dict):
+            session_isolation_overrides = {}
+        session_isolation_explicit = {
+            name
+            for name in ("group_sessions_per_user", "thread_sessions_per_user")
+            if name in session_isolation_overrides
+        }
         group_conversation_scope_per_user = data.get("group_conversation_scope_per_user")
         thread_conversation_scope_per_user = data.get("thread_conversation_scope_per_user")
         unauthorized_dm_behavior = _normalize_unauthorized_dm_behavior(
@@ -659,12 +670,69 @@ class GatewayConfig:
             stt_enabled=_coerce_bool(stt_enabled, True),
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
+            _session_isolation_explicit=frozenset(session_isolation_explicit),
+            session_isolation_overrides={
+                name: _coerce_bool(value, getattr(cls(), name))
+                for name, value in session_isolation_overrides.items()
+                if name in {"group_sessions_per_user", "thread_sessions_per_user"}
+            },
             group_conversation_scope_per_user=_coerce_bool(group_conversation_scope_per_user, False),
             thread_conversation_scope_per_user=_coerce_bool(thread_conversation_scope_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
         )
+
+    def _has_explicit_session_isolation(self, key: str) -> bool:
+        explicit = getattr(self, "_session_isolation_explicit", frozenset())
+        if key in explicit:
+            return True
+        return False
+
+    def effective_session_isolation(self, platform: Optional[Platform] = None) -> Dict[str, bool]:
+        """Return canonical session-isolation switches for a platform.
+
+        Global defaults remain unchanged for all platforms.  Feishu is chat-scoped
+        by default, unless top-level config or explicit Feishu platform config
+        requests per-user isolation.  Top-level canonical config wins conflicts
+        with legacy ``platforms.feishu.extra`` without mutating that extra dict.
+        """
+        if platform != Platform.FEISHU:
+            return {
+                "group_sessions_per_user": self.group_sessions_per_user,
+                "thread_sessions_per_user": self.thread_sessions_per_user,
+            }
+
+        platform_cfg = (self.platforms or {}).get(Platform.FEISHU)
+        extra = platform_cfg.extra if platform_cfg and isinstance(platform_cfg.extra, dict) else {}
+        result = {
+            "group_sessions_per_user": False,
+            "thread_sessions_per_user": False,
+        }
+
+        for key in ("group_sessions_per_user", "thread_sessions_per_user"):
+            if self._has_explicit_session_isolation(key):
+                result[key] = _coerce_bool(
+                    self.session_isolation_overrides.get(key),
+                    result[key],
+                )
+            elif key in extra:
+                result[key] = _coerce_bool(extra.get(key), result[key])
+        return result
+
+    def session_key_for_source(self, source: Any) -> str:
+        """Build a session key using this config's canonical platform semantics."""
+        from gateway.session import build_session_key
+
+        platform = getattr(source, "platform", None)
+        return build_session_key(source, **self.effective_session_isolation(platform))
+
+    def route_partition_key_for_source(self, source: Any) -> str:
+        """Build a route partition key using this config's canonical platform semantics."""
+        from gateway.conversation_scope import route_partition_key
+
+        platform = getattr(source, "platform", None)
+        return route_partition_key(source, **self.effective_session_isolation(platform))
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
         """Return the effective unauthorized-DM behavior for a platform."""
@@ -747,9 +815,15 @@ def load_gateway_config() -> GatewayConfig:
 
             if "group_sessions_per_user" in yaml_cfg:
                 gw_data["group_sessions_per_user"] = yaml_cfg["group_sessions_per_user"]
+                overrides = gw_data.setdefault("session_isolation_overrides", {})
+                if isinstance(overrides, dict):
+                    overrides["group_sessions_per_user"] = yaml_cfg["group_sessions_per_user"]
 
             if "thread_sessions_per_user" in yaml_cfg:
                 gw_data["thread_sessions_per_user"] = yaml_cfg["thread_sessions_per_user"]
+                overrides = gw_data.setdefault("session_isolation_overrides", {})
+                if isinstance(overrides, dict):
+                    overrides["thread_sessions_per_user"] = yaml_cfg["thread_sessions_per_user"]
 
             if "group_conversation_scope_per_user" in yaml_cfg:
                 gw_data["group_conversation_scope_per_user"] = yaml_cfg["group_conversation_scope_per_user"]

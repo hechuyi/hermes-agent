@@ -289,8 +289,6 @@ class TestRunBackgroundTask:
         runner._run_in_executor_with_context = AsyncMock(
             return_value={"final_response": "done", "messages": []}
         )
-        monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
-
         mock_adapter = AsyncMock()
         mock_adapter.send = AsyncMock()
         mock_adapter.extract_media = MagicMock(return_value=([], "done"))
@@ -323,6 +321,11 @@ class TestRunBackgroundTask:
     @pytest.mark.asyncio
     async def test_agent_cleanup_runs_when_background_agent_raises(self):
         """Temporary background agents must be cleaned up on error paths too."""
+        monkeypatch.setattr(
+            gateway_run,
+            "_load_gateway_config",
+            lambda: {},
+        )
         runner = _make_runner()
         mock_adapter = AsyncMock()
         mock_adapter.send = AsyncMock()
@@ -352,6 +355,11 @@ class TestRunBackgroundTask:
     @pytest.mark.asyncio
     async def test_exception_sends_error_message(self):
         """When the agent raises an exception, an error message is sent."""
+        monkeypatch.setattr(
+            gateway_run,
+            "_load_gateway_config",
+            lambda: {},
+        )
         runner = _make_runner()
         mock_adapter = AsyncMock()
         mock_adapter.send = AsyncMock()

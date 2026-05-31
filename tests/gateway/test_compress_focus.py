@@ -33,7 +33,7 @@ def _make_history() -> list[dict[str, str]]:
     ]
 
 
-def _make_runner(history: list[dict[str, str]]):
+def _make_runner(history: list[dict[str, str]], session_db=None):
     from gateway.run import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
@@ -54,6 +54,7 @@ def _make_runner(history: list[dict[str, str]]):
     runner.session_store.rewrite_transcript = MagicMock()
     runner.session_store.update_session = MagicMock()
     runner.session_store._save = MagicMock()
+    runner._session_db = session_db
     return runner
 
 
@@ -112,3 +113,34 @@ async def test_compress_no_focus_passes_none():
 
     # No focus line in response
     assert "Focus:" not in result
+
+
+@pytest.mark.asyncio
+async def test_manual_compress_temp_agent_receives_session_db_and_scope():
+    """Manual gateway /compress must use DB-backed scoped compression split."""
+    history = _make_history()
+    runner = _make_runner(history, session_db=object())
+    entry = runner.session_store.get_or_create_session.return_value
+    entry.conversation_scope_id = "cs_manual"
+    entry.platform_account_id = "feishu_app:manual"
+    entry.route_partition_key = "route-manual"
+
+    agent_instance = MagicMock()
+    agent_instance.context_compressor.has_content_to_compress.return_value = True
+    agent_instance.session_id = "sess-1"
+    agent_instance._compress_context.return_value = (list(history), "")
+
+    with (
+        patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "***"}),
+        patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+        patch("run_agent.AIAgent", return_value=agent_instance) as mock_agent_cls,
+        patch("agent.model_metadata.estimate_request_tokens_rough", return_value=100),
+    ):
+        await runner._handle_compress_command(_make_event("/compress"))
+
+    kwargs = mock_agent_cls.call_args.kwargs
+    assert kwargs["session_db"] is runner._session_db
+    assert kwargs["gateway_session_key"] == entry.session_key
+    assert agent_instance._gateway_conversation_scope_id == "cs_manual"
+    assert agent_instance._gateway_platform_account_id == "feishu_app:manual"
+    assert agent_instance._gateway_route_partition_key == "route-manual"

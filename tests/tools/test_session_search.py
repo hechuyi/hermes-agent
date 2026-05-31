@@ -58,6 +58,49 @@ def _seed_modpack_sessions(db):
     db._conn.commit()
 
 
+def _create_scoped_session(db, session_id, *, scope_id, route_key, content):
+    db.create_session(
+        session_id,
+        source="feishu",
+        conversation_scope_id=scope_id,
+        scope_assignment_status="scoped",
+        route_session_key_snapshot=route_key,
+        route_partition_key=route_key,
+    )
+    mid = db.append_message(session_id, role="user", content=content)
+    db._conn.commit()
+    return mid
+
+
+def _create_compression_child(db, parent_id, child_id, *, scope_id, route_key, content):
+    now = int(time.time())
+    db.create_session(
+        parent_id,
+        source="feishu",
+        conversation_scope_id=scope_id,
+        scope_assignment_status="scoped",
+        route_session_key_snapshot=route_key,
+        route_partition_key=route_key,
+    )
+    db._conn.execute(
+        "UPDATE sessions SET started_at = ?, ended_at = ?, end_reason = 'compression' WHERE id = ?",
+        (now - 100, now - 50, parent_id),
+    )
+    db.append_message(parent_id, role="user", content="parent context")
+    db.create_session(
+        child_id,
+        source="feishu",
+        parent_session_id=parent_id,
+        conversation_scope_id=scope_id,
+        scope_assignment_status="scoped",
+        route_session_key_snapshot=route_key,
+        route_partition_key=route_key,
+    )
+    mid = db.append_message(child_id, role="user", content=content)
+    db._conn.commit()
+    return mid
+
+
 # =========================================================================
 # Schema invariants
 # =========================================================================
@@ -84,6 +127,28 @@ class TestSchema:
     def test_sort_enum(self):
         params = SESSION_SEARCH_SCHEMA["parameters"]["properties"]
         assert params["sort"]["enum"] == ["newest", "oldest"]
+
+    def test_scope_enum_defaults_to_current_chat(self):
+        params = SESSION_SEARCH_SCHEMA["parameters"]["properties"]
+        assert params["scope"]["enum"] == ["current_chat", "current_route", "global"]
+        assert params["scope"]["default"] == "current_chat"
+
+    def test_default_without_runtime_scope_uses_global_history(self, db):
+        _seed_modpack_sessions(db)
+
+        result = json.loads(session_search(query="modpack", db=db))
+
+        assert result["success"] is True
+        assert result["mode"] == "discover"
+        assert result["count"] >= 1
+
+    def test_explicit_current_chat_without_runtime_scope_errors(self, db):
+        _seed_modpack_sessions(db)
+
+        result = json.loads(session_search(query="modpack", db=db, scope="current_chat"))
+
+        assert result["success"] is False
+        assert "current_chat requires a runtime conversation scope" in result.get("error", "")
 
     def test_schema_description_teaches_scroll(self):
         desc = SESSION_SEARCH_SCHEMA["description"]
@@ -124,20 +189,20 @@ class TestFormatTimestamp:
 class TestBrowseShape:
     def test_no_args_returns_recent_sessions(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(db=db))
+        result = json.loads(session_search(db=db, scope="global"))
         assert result["success"] is True
         assert result["mode"] == "browse"
         assert result["count"] >= 3
 
     def test_browse_excludes_current_session(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(db=db, current_session_id="s_newest"))
+        result = json.loads(session_search(db=db, current_session_id="s_newest", scope="global"))
         sids = [r["session_id"] for r in result["results"]]
         assert "s_newest" not in sids
 
     def test_browse_returns_titles(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(db=db))
+        result = json.loads(session_search(db=db, scope="global"))
         titles = [r.get("title") for r in result["results"]]
         assert any("Modpack" in (t or "") for t in titles)
 
@@ -149,14 +214,14 @@ class TestBrowseShape:
 class TestDiscoveryShape:
     def test_query_returns_anchored_windows(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(query="modpack", db=db))
+        result = json.loads(session_search(query="modpack", db=db, scope="global"))
         assert result["success"] is True
         assert result["mode"] == "discover"
         assert result["count"] >= 1
 
     def test_discovery_result_has_bookends_and_window(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(query="modpack", limit=3, db=db))
+        result = json.loads(session_search(query="modpack", limit=3, db=db, scope="global"))
         for hit in result["results"]:
             assert "bookend_start" in hit
             assert "messages" in hit
@@ -168,7 +233,7 @@ class TestDiscoveryShape:
 
     def test_match_message_id_is_anchor_in_window(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(query="modpack", limit=3, db=db))
+        result = json.loads(session_search(query="modpack", limit=3, db=db, scope="global"))
         for hit in result["results"]:
             anchor_id = hit["match_message_id"]
             window_ids = [m["id"] for m in hit["messages"]]
@@ -176,7 +241,7 @@ class TestDiscoveryShape:
 
     def test_no_results_returns_empty_list(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(query="zzz_no_such_term_zzz", db=db))
+        result = json.loads(session_search(query="zzz_no_such_term_zzz", db=db, scope="global"))
         assert result["success"] is True
         assert result["results"] == []
         assert result["count"] == 0
@@ -184,45 +249,88 @@ class TestDiscoveryShape:
     def test_limit_clamped_to_max_10(self, db):
         _seed_modpack_sessions(db)
         # Pass huge limit; should not error and should cap
-        result = json.loads(session_search(query="modpack", limit=999, db=db))
+        result = json.loads(session_search(query="modpack", limit=999, db=db, scope="global"))
         assert result["count"] <= 10
 
     def test_limit_floor_to_1(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(query="modpack", limit=0, db=db))
+        result = json.loads(session_search(query="modpack", limit=0, db=db, scope="global"))
         # Result count depends on hits, but the limit must be at least 1
         assert result["count"] >= 0
 
     def test_non_int_limit_falls_back(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(query="modpack", limit="bogus", db=db))
+        result = json.loads(session_search(query="modpack", limit="bogus", db=db, scope="global"))
         assert result["success"] is True
 
     def test_current_session_filtered_out(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(query="modpack", db=db, current_session_id="s_newest"))
+        result = json.loads(session_search(query="modpack", db=db, current_session_id="s_newest", scope="global"))
         sids = [r["session_id"] for r in result["results"]]
         assert "s_newest" not in sids
+
+    def test_current_chat_scope_hides_other_chat_by_default(self, db):
+        _create_scoped_session(
+            db, "chat-a", scope_id="cs_a", route_key="route-a",
+            content="scoped recall needle",
+        )
+        _create_scoped_session(
+            db, "chat-b", scope_id="cs_b", route_key="route-b",
+            content="scoped recall needle",
+        )
+
+        result = json.loads(session_search(
+            query="scoped recall needle",
+            db=db,
+            current_conversation_scope_id="cs_a",
+            current_route_partition_key="route-a",
+        ))
+
+        assert result["success"] is True
+        assert [r["session_id"] for r in result["results"]] == ["chat-a"]
+        assert result["results"][0]["conversation_scope_id"] == "cs_a"
+
+    def test_global_scope_returns_provenance_across_chats(self, db):
+        _create_scoped_session(
+            db, "chat-a", scope_id="cs_a", route_key="route-a",
+            content="global recall needle",
+        )
+        _create_scoped_session(
+            db, "chat-b", scope_id="cs_b", route_key="route-b",
+            content="global recall needle",
+        )
+
+        result = json.loads(session_search(
+            query="global recall needle",
+            scope="global",
+            db=db,
+        ))
+
+        assert result["success"] is True
+        by_id = {r["session_id"]: r for r in result["results"]}
+        assert set(by_id) == {"chat-a", "chat-b"}
+        assert by_id["chat-a"]["conversation_scope_id"] == "cs_a"
+        assert by_id["chat-b"]["route_partition_key"] == "route-b"
 
 
 class TestDiscoverySort:
     def test_sort_newest_orders_by_recency(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(query="modpack", limit=3, sort="newest", db=db))
+        result = json.loads(session_search(query="modpack", limit=3, sort="newest", db=db, scope="global"))
         # First result should be the most recent session
         first = result["results"][0]
         assert first["session_id"] == "s_newest" or "Newest" in (first.get("title") or "")
 
     def test_sort_oldest_orders_by_age(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(query="modpack", limit=3, sort="oldest", db=db))
+        result = json.loads(session_search(query="modpack", limit=3, sort="oldest", db=db, scope="global"))
         first = result["results"][0]
         assert first["session_id"] == "s_oldest"
 
     def test_invalid_sort_silently_ignored(self, db):
         _seed_modpack_sessions(db)
         # Should not error
-        result = json.loads(session_search(query="modpack", sort="bogus", db=db))
+        result = json.loads(session_search(query="modpack", sort="bogus", db=db, scope="global"))
         assert result["success"] is True
 
 
@@ -231,7 +339,7 @@ class TestRoleFilter:
         db.create_session("s1", source="cli")
         db.append_message("s1", role="user", content="modpack question")
         db.append_message("s1", role="tool", content="modpack tool output", tool_name="x")
-        result = json.loads(session_search(query="modpack", db=db))
+        result = json.loads(session_search(query="modpack", db=db, scope="global"))
         # The FTS5 match should be on the user message, not the tool message
         if result["count"] > 0:
             matched_role = result["results"][0]["matched_role"]
@@ -240,7 +348,7 @@ class TestRoleFilter:
     def test_explicit_tool_role_includes_tool(self, db):
         db.create_session("s1", source="cli")
         db.append_message("s1", role="tool", content="modpack tool output", tool_name="x")
-        result = json.loads(session_search(query="modpack", role_filter="tool", db=db))
+        result = json.loads(session_search(query="modpack", role_filter="tool", db=db, scope="global"))
         # Should now match the tool message
         if result["count"] > 0:
             assert result["results"][0]["matched_role"] == "tool"
@@ -254,13 +362,13 @@ class TestScrollShape:
     def test_scroll_returns_window_without_bookends(self, db):
         _seed_modpack_sessions(db)
         # Get an anchor first via discovery
-        disc = json.loads(session_search(query="modpack", limit=1, db=db))
+        disc = json.loads(session_search(query="modpack", limit=1, db=db, scope="global"))
         anchor_sid = disc["results"][0]["session_id"]
         anchor_mid = disc["results"][0]["match_message_id"]
 
         # Now scroll
         result = json.loads(session_search(
-            session_id=anchor_sid, around_message_id=anchor_mid, window=2, db=db
+            session_id=anchor_sid, around_message_id=anchor_mid, window=2, db=db, scope="global"
         ))
         assert result["success"] is True
         assert result["mode"] == "scroll"
@@ -271,42 +379,42 @@ class TestScrollShape:
 
     def test_scroll_window_clamped_to_20(self, db):
         _seed_modpack_sessions(db)
-        disc = json.loads(session_search(query="modpack", limit=1, db=db))
+        disc = json.loads(session_search(query="modpack", limit=1, db=db, scope="global"))
         anchor_sid = disc["results"][0]["session_id"]
         anchor_mid = disc["results"][0]["match_message_id"]
         result = json.loads(session_search(
-            session_id=anchor_sid, around_message_id=anchor_mid, window=999, db=db
+            session_id=anchor_sid, around_message_id=anchor_mid, window=999, db=db, scope="global"
         ))
         assert result["window"] == 20
 
     def test_scroll_window_floor_to_1(self, db):
         _seed_modpack_sessions(db)
-        disc = json.loads(session_search(query="modpack", limit=1, db=db))
+        disc = json.loads(session_search(query="modpack", limit=1, db=db, scope="global"))
         anchor_sid = disc["results"][0]["session_id"]
         anchor_mid = disc["results"][0]["match_message_id"]
         result = json.loads(session_search(
-            session_id=anchor_sid, around_message_id=anchor_mid, window=-5, db=db
+            session_id=anchor_sid, around_message_id=anchor_mid, window=-5, db=db, scope="global"
         ))
         assert result["window"] == 1
 
     def test_scroll_returns_messages_before_after_counts(self, db):
         _seed_modpack_sessions(db)
-        disc = json.loads(session_search(query="modpack", limit=1, db=db))
+        disc = json.loads(session_search(query="modpack", limit=1, db=db, scope="global"))
         anchor_sid = disc["results"][0]["session_id"]
         anchor_mid = disc["results"][0]["match_message_id"]
         result = json.loads(session_search(
-            session_id=anchor_sid, around_message_id=anchor_mid, window=3, db=db
+            session_id=anchor_sid, around_message_id=anchor_mid, window=3, db=db, scope="global"
         ))
         assert "messages_before" in result
         assert "messages_after" in result
 
     def test_scroll_anchor_in_window(self, db):
         _seed_modpack_sessions(db)
-        disc = json.loads(session_search(query="modpack", limit=1, db=db))
+        disc = json.loads(session_search(query="modpack", limit=1, db=db, scope="global"))
         anchor_sid = disc["results"][0]["session_id"]
         anchor_mid = disc["results"][0]["match_message_id"]
         result = json.loads(session_search(
-            session_id=anchor_sid, around_message_id=anchor_mid, window=2, db=db
+            session_id=anchor_sid, around_message_id=anchor_mid, window=2, db=db, scope="global"
         ))
         anchor_in_window = [m for m in result["messages"] if m["id"] == anchor_mid]
         assert len(anchor_in_window) == 1
@@ -315,35 +423,70 @@ class TestScrollShape:
     def test_scroll_missing_anchor_errors(self, db):
         _seed_modpack_sessions(db)
         result = json.loads(session_search(
-            session_id="s_oldest", around_message_id=999999, db=db
+            session_id="s_oldest", around_message_id=999999, db=db, scope="global"
         ))
         assert result["success"] is False
         assert "not in" in result.get("error", "")
 
     def test_scroll_missing_session_errors(self, db):
         result = json.loads(session_search(
-            session_id="nonexistent", around_message_id=1, db=db
+            session_id="nonexistent", around_message_id=1, db=db, scope="global"
         ))
         assert result["success"] is False
 
     def test_scroll_rejects_current_session_lineage(self, db):
         _seed_modpack_sessions(db)
         # Grab some valid id from s_oldest
-        disc = json.loads(session_search(query="modpack", limit=3, db=db))
+        disc = json.loads(session_search(query="modpack", limit=3, db=db, scope="global"))
         match = [r for r in disc["results"] if r["session_id"] == "s_oldest"]
         if match:
             mid = match[0]["match_message_id"]
             result = json.loads(session_search(
                 session_id="s_oldest", around_message_id=mid, db=db,
-                current_session_id="s_oldest",
+                current_session_id="s_oldest", scope="global",
             ))
             assert result["success"] is False
             assert "current session" in result.get("error", "").lower()
 
+    def test_scroll_rebind_allows_same_scope_compression_child(self, db):
+        mid = _create_compression_child(
+            db, "parent", "child", scope_id="cs_a", route_key="route-a",
+            content="child scroll needle",
+        )
+
+        result = json.loads(session_search(
+            session_id="parent",
+            around_message_id=mid,
+            db=db,
+            current_conversation_scope_id="cs_a",
+            current_route_partition_key="route-a",
+        ))
+
+        assert result["success"] is True
+        assert result["session_id"] == "child"
+        assert any(m["id"] == mid and m.get("anchor") for m in result["messages"])
+
+    def test_scroll_rejects_cross_scope_anchor(self, db):
+        mid = _create_scoped_session(
+            db, "chat-b", scope_id="cs_b", route_key="route-b",
+            content="foreign scroll needle",
+        )
+
+        result = json.loads(session_search(
+            session_id="chat-b",
+            around_message_id=mid,
+            db=db,
+            current_conversation_scope_id="cs_a",
+            current_route_partition_key="route-a",
+        ))
+
+        assert result["success"] is False
+        assert "outside the current conversation scope" in result.get("error", "")
+
     def test_scroll_invalid_around_message_id_errors(self, db):
         _seed_modpack_sessions(db)
         result = json.loads(session_search(
-            session_id="s_oldest", around_message_id="not-an-int", db=db
+            session_id="s_oldest", around_message_id="not-an-int", db=db, scope="global"
         ))
         assert result["success"] is False
 
@@ -360,11 +503,11 @@ class TestScrollPattern:
                                          content=f"long session msg {i}"))
 
         v1 = json.loads(session_search(
-            session_id="s_long", around_message_id=ids[5], window=3, db=db
+            session_id="s_long", around_message_id=ids[5], window=3, db=db, scope="global"
         ))
         last_id = v1["messages"][-1]["id"]
         v2 = json.loads(session_search(
-            session_id="s_long", around_message_id=last_id, window=3, db=db
+            session_id="s_long", around_message_id=last_id, window=3, db=db, scope="global"
         ))
         # Forward scroll: v2 should reach further than v1
         assert max(m["id"] for m in v2["messages"]) > max(m["id"] for m in v1["messages"])
@@ -380,22 +523,22 @@ class TestScrollPattern:
 class TestShapePrecedence:
     def test_scroll_args_beat_query(self, db):
         _seed_modpack_sessions(db)
-        disc = json.loads(session_search(query="modpack", limit=1, db=db))
+        disc = json.loads(session_search(query="modpack", limit=1, db=db, scope="global"))
         anchor_sid = disc["results"][0]["session_id"]
         anchor_mid = disc["results"][0]["match_message_id"]
         # Pass both query and scroll args — scroll should win
         result = json.loads(session_search(
             query="modpack",  # would normally trigger discovery
-            session_id=anchor_sid, around_message_id=anchor_mid, db=db,
+            session_id=anchor_sid, around_message_id=anchor_mid, db=db, scope="global",
         ))
         assert result["mode"] == "scroll"
 
     def test_empty_query_falls_back_to_browse(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(query="   ", db=db))
+        result = json.loads(session_search(query="   ", db=db, scope="global"))
         assert result["mode"] == "browse"
 
     def test_non_string_query_falls_back_to_browse(self, db):
         _seed_modpack_sessions(db)
-        result = json.loads(session_search(query=None, db=db))  # type: ignore
+        result = json.loads(session_search(query=None, db=db, scope="global"))  # type: ignore
         assert result["mode"] == "browse"

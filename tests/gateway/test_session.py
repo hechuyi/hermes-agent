@@ -7,6 +7,7 @@ from gateway.config import Platform, HomeChannel, GatewayConfig, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import (
     SessionSource,
+    SessionPersistenceError,
     SessionStore,
     build_session_context,
     build_session_context_prompt,
@@ -165,6 +166,35 @@ class TestLocalCliFactory:
         assert source.chat_id == "cli"
         assert source.chat_type == "dm"
         assert source.chat_name == "CLI terminal"
+
+
+class TestRewriteTranscriptPersistence:
+    def test_rewrite_transcript_raises_typed_error_when_db_replace_fails(self, tmp_path):
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        db = MagicMock()
+        db.replace_messages.side_effect = RuntimeError("replace failed")
+        store._db = db
+
+        with pytest.raises(SessionPersistenceError) as exc:
+            store.rewrite_transcript(
+                "session-1",
+                [{"role": "user", "content": "trimmed"}],
+            )
+
+        assert exc.value.failure_class == "session_db_rewrite_failed"
+        assert exc.value.stage == "rewrite_transcript"
+        assert exc.value.action == "rewrite_transcript"
+
+    def test_rewrite_transcript_raises_typed_error_when_db_missing(self, tmp_path):
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        store._db = None
+
+        with pytest.raises(SessionPersistenceError) as exc:
+            store.rewrite_transcript("session-1", [])
+
+        assert exc.value.failure_class == "session_db_unavailable"
+        assert exc.value.stage == "rewrite_transcript"
+        assert exc.value.action == "rewrite_transcript"
 
 
 class TestBuildSessionContextPrompt:
@@ -570,6 +600,79 @@ class TestLoadTranscriptDBOnly:
         assert len(result) == 2
         assert result[0]["content"] == "db-q"
         assert result[1]["content"] == "db-a"
+
+
+class TestSessionPersistenceContract:
+    def test_init_raises_when_sqlite_session_db_is_unavailable(self, tmp_path, monkeypatch):
+        import hermes_state
+
+        class BrokenSessionDB:
+            def __init__(self):
+                raise RuntimeError("sqlite unavailable")
+
+        monkeypatch.setattr(hermes_state, "SessionDB", BrokenSessionDB)
+
+        with pytest.raises(SessionPersistenceError) as exc_info:
+            SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+
+        assert exc_info.value.failure_class == "session_db_init_failed"
+        assert exc_info.value.stage == "session_db_init"
+
+    def test_append_raises_when_db_append_fails(self, tmp_path, monkeypatch):
+        import hermes_state
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        store._db.append_message = MagicMock(side_effect=RuntimeError("disk full"))
+
+        with pytest.raises(SessionPersistenceError) as exc_info:
+            store.append_to_transcript(
+                "session-1",
+                {"role": "user", "content": "hello"},
+                skip_db=False,
+            )
+
+        assert exc_info.value.failure_class == "session_db_append_failed"
+        assert exc_info.value.stage == "append_message"
+        assert exc_info.value.action == "append_to_transcript"
+
+    def test_append_raises_when_db_missing_and_skip_db_false(self, tmp_path, monkeypatch):
+        import hermes_state
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        store._db = None
+
+        with pytest.raises(SessionPersistenceError) as exc_info:
+            store.append_to_transcript(
+                "session-1",
+                {"role": "user", "content": "hello"},
+                skip_db=False,
+            )
+
+        assert exc_info.value.failure_class == "session_db_unavailable"
+        assert exc_info.value.stage == "append_message"
+
+    def test_skip_db_true_preserves_source_persisted_no_db_semantics(self, tmp_path, monkeypatch):
+        import hermes_state
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        fake_db = MagicMock()
+        store._db = fake_db
+        store.append_to_transcript(
+            "session-1",
+            {"role": "assistant", "content": "already persisted"},
+            skip_db=True,
+        )
+        fake_db.append_message.assert_not_called()
+
+        store._db = None
+        store.append_to_transcript(
+            "session-1",
+            {"role": "assistant", "content": "already persisted"},
+            skip_db=True,
+        )
 
 
 class TestSessionStoreSwitchSession:

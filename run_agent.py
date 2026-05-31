@@ -209,6 +209,29 @@ from hermes_cli.config import cfg_get
 
 _MAX_TOOL_WORKERS = 8
 
+from hermes_cli.persistence_contract import (
+    PERSISTENCE_ASSISTANT_CONTENT_SHA256,
+    PERSISTENCE_ASSISTANT_ROW_ID,
+    PERSISTENCE_ATTEMPTED,
+    PERSISTENCE_CANONICAL_ASSISTANT_ID,
+    PERSISTENCE_DB_APPEND_FAILED,
+    PERSISTENCE_DB_SESSION_UNAVAILABLE,
+    PERSISTENCE_FAILURE_CLASS,
+    PERSISTENCE_MESSAGE_INDEX,
+    PERSISTENCE_NO_CURRENT_PROOF,
+    PERSISTENCE_NO_SESSION_DB,
+    PERSISTENCE_OK,
+    PERSISTENCE_ROLE,
+    PERSISTENCE_ROW_IDS_BY_MESSAGE_INDEX,
+    PERSISTENCE_SANITIZED_REASON,
+    PERSISTENCE_STAGE,
+    PERSISTENCE_STAGE_APPEND_MESSAGE,
+    PERSISTENCE_STAGE_CREATE_SESSION,
+    PERSISTENCE_STAGE_SESSION_DB_UNAVAILABLE,
+    PERSISTENCE_STAGE_TURN_EXIT,
+    sanitize_persistence_failure_reason,
+)
+
 # Guard so the OpenRouter metadata pre-warm thread is only spawned once per
 # process, not once per AIAgent instantiation.  Without this, long-running
 # gateway processes leak one OS thread per incoming message and eventually
@@ -1454,7 +1477,69 @@ class AIAgent:
         self._apply_persist_user_message_override(messages)
         self._session_messages = messages
         self._save_session_log(messages)
-        self._flush_messages_to_session_db(messages, conversation_history)
+        result = self._flush_messages_to_session_db(messages, conversation_history)
+        self._last_persistence_result = result
+        return result
+
+    @staticmethod
+    def _assistant_content_digest(content: Any) -> Optional[str]:
+        if not isinstance(content, str):
+            return None
+        return hashlib.sha256(content.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+    def _ensure_final_visible_assistant_message(
+        self,
+        messages: List[Dict],
+        final_response: Any,
+    ) -> None:
+        """Make the durable final assistant content match returned visible text."""
+        if not isinstance(final_response, str):
+            return
+        if not final_response:
+            return
+        last_msg = messages[-1] if messages else None
+        if (
+            isinstance(last_msg, dict)
+            and last_msg.get("role") == "assistant"
+            and not last_msg.get("tool_calls")
+        ):
+            last_msg["content"] = final_response
+            return
+        messages.append({"role": "assistant", "content": final_response})
+
+    def _persistence_result(
+        self,
+        *,
+        attempted: bool,
+        ok: bool,
+        row_ids_by_message_index: Optional[Dict[int, int]] = None,
+        assistant_message_row_id: Optional[int] = None,
+        assistant_content_sha256: Optional[str] = None,
+        failure_class: Optional[str] = None,
+        stage: Optional[str] = None,
+        message_index: Optional[int] = None,
+        role: Optional[str] = None,
+        sanitized_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build the stable persistence contract returned to gateway callers."""
+        result = {
+            PERSISTENCE_ATTEMPTED: bool(attempted),
+            PERSISTENCE_OK: bool(ok),
+            PERSISTENCE_ROW_IDS_BY_MESSAGE_INDEX: row_ids_by_message_index or {},
+            PERSISTENCE_ASSISTANT_ROW_ID: assistant_message_row_id,
+            PERSISTENCE_CANONICAL_ASSISTANT_ID: assistant_message_row_id,
+            PERSISTENCE_ASSISTANT_CONTENT_SHA256: assistant_content_sha256,
+            PERSISTENCE_FAILURE_CLASS: failure_class,
+            PERSISTENCE_STAGE: stage,
+            PERSISTENCE_MESSAGE_INDEX: message_index,
+            PERSISTENCE_ROLE: role,
+            PERSISTENCE_SANITIZED_REASON: sanitized_reason,
+        }
+        return result
+
+    def _sanitize_persistence_reason(self, exc: BaseException) -> str:
+        """Return a short, non-path-bearing failure reason for result dicts."""
+        return sanitize_persistence_failure_reason(exc)
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.
@@ -1522,16 +1607,40 @@ class AIAgent:
         truly new messages — preventing the duplicate-write bug (#860).
         """
         if not self._session_db:
-            return
+            return self._persistence_result(
+                attempted=False,
+                ok=False,
+                failure_class=PERSISTENCE_NO_SESSION_DB,
+                stage=PERSISTENCE_STAGE_SESSION_DB_UNAVAILABLE,
+            )
         self._apply_persist_user_message_override(messages)
+        row_ids_by_message_index: Dict[int, int] = {}
+        assistant_message_row_id: Optional[int] = None
+        assistant_content_sha256: Optional[str] = None
+        message_index: Optional[int] = None
+        role: Optional[str] = None
         try:
             # Retry row creation if the earlier attempt failed transiently.
             if not self._session_db_created:
                 self._ensure_db_session()
+            if not self._session_db_created:
+                result = self._persistence_result(
+                    attempted=True,
+                    ok=False,
+                    row_ids_by_message_index=row_ids_by_message_index,
+                    assistant_message_row_id=None,
+                    failure_class=PERSISTENCE_DB_SESSION_UNAVAILABLE,
+                    stage=PERSISTENCE_STAGE_CREATE_SESSION,
+                    sanitized_reason="session row was not created",
+                )
+                self._last_persistence_result = result
+                return result
             start_idx = len(conversation_history) if conversation_history else 0
             flush_from = max(start_idx, self._last_flushed_db_idx)
-            for msg in messages[flush_from:]:
-                role = msg.get("role", "unknown")
+            pending_messages = list(enumerate(messages[flush_from:], start=flush_from))
+
+            def _normalize_persisted_message(msg: Dict[str, Any]) -> Dict[str, Any]:
+                _role = msg.get("role", "unknown")
                 content = msg.get("content")
                 # Persist multimodal tool results as their text summary only —
                 # base64 images would bloat the session DB and aren't useful
@@ -1555,23 +1664,92 @@ class AIAgent:
                     ]
                 elif isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
-                self._session_db.append_message(
-                    session_id=self.session_id,
-                    role=role,
-                    content=content,
-                    tool_name=msg.get("tool_name"),
-                    tool_calls=tool_calls_data,
-                    tool_call_id=msg.get("tool_call_id"),
-                    finish_reason=msg.get("finish_reason"),
-                    reasoning=msg.get("reasoning") if role == "assistant" else None,
-                    reasoning_content=msg.get("reasoning_content") if role == "assistant" else None,
-                    reasoning_details=msg.get("reasoning_details") if role == "assistant" else None,
-                    codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
-                    codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
+                return {
+                    "role": _role,
+                    "content": content,
+                    "tool_name": msg.get("tool_name"),
+                    "tool_calls": tool_calls_data,
+                    "tool_call_id": msg.get("tool_call_id"),
+                    "finish_reason": msg.get("finish_reason"),
+                    "reasoning": msg.get("reasoning") if _role == "assistant" else None,
+                    "reasoning_content": msg.get("reasoning_content") if _role == "assistant" else None,
+                    "reasoning_details": msg.get("reasoning_details") if _role == "assistant" else None,
+                    "codex_reasoning_items": msg.get("codex_reasoning_items") if _role == "assistant" else None,
+                    "codex_message_items": msg.get("codex_message_items") if _role == "assistant" else None,
+                }
+
+            normalized_pending = [
+                (idx, _normalize_persisted_message(msg))
+                for idx, msg in pending_messages
+            ]
+
+            append_messages = getattr(self._session_db, "append_messages", None)
+            if (
+                type(self._session_db).__module__ == "hermes_state"
+                and callable(append_messages)
+            ):
+                row_ids_by_message_index.update(
+                    append_messages(self.session_id, normalized_pending)
                 )
+            else:
+                for message_index, persisted_msg in normalized_pending:
+                    role = persisted_msg["role"]
+                    row_id = self._session_db.append_message(
+                        session_id=self.session_id,
+                        role=role,
+                        content=persisted_msg["content"],
+                        tool_name=persisted_msg["tool_name"],
+                        tool_calls=persisted_msg["tool_calls"],
+                        tool_call_id=persisted_msg["tool_call_id"],
+                        finish_reason=persisted_msg["finish_reason"],
+                        reasoning=persisted_msg["reasoning"],
+                        reasoning_content=persisted_msg["reasoning_content"],
+                        reasoning_details=persisted_msg["reasoning_details"],
+                        codex_reasoning_items=persisted_msg["codex_reasoning_items"],
+                        codex_message_items=persisted_msg["codex_message_items"],
+                    )
+                    row_ids_by_message_index[message_index] = row_id
+
+            for message_index, persisted_msg in normalized_pending:
+                role = persisted_msg["role"]
+                row_id = row_ids_by_message_index.get(message_index)
+                if role == "assistant":
+                    assistant_message_row_id = row_id
+                    assistant_content_sha256 = self._assistant_content_digest(
+                        persisted_msg["content"]
+                    )
             self._last_flushed_db_idx = len(messages)
+            result = self._persistence_result(
+                attempted=True,
+                ok=True,
+                row_ids_by_message_index=row_ids_by_message_index,
+                assistant_message_row_id=assistant_message_row_id,
+                assistant_content_sha256=assistant_content_sha256,
+            )
+            self._last_persistence_result = result
+            return result
         except Exception as e:
             logger.warning("Session DB append_message failed: %s", e)
+            message_index = getattr(e, "message_index", message_index)
+            role = getattr(e, "role", role)
+            partial_row_ids = getattr(e, "row_ids_by_message_index", None)
+            if getattr(e, "atomic_rolled_back", False):
+                row_ids_by_message_index = {}
+            elif isinstance(partial_row_ids, dict):
+                row_ids_by_message_index = partial_row_ids
+            result = self._persistence_result(
+                attempted=True,
+                ok=False,
+                row_ids_by_message_index=row_ids_by_message_index,
+                assistant_message_row_id=None,
+                failure_class=PERSISTENCE_DB_APPEND_FAILED,
+                stage=PERSISTENCE_STAGE_APPEND_MESSAGE,
+                message_index=message_index,
+                role=role,
+                sanitized_reason=self._sanitize_persistence_reason(e),
+            )
+            self._last_persistence_result = result
+            return result
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
         """
@@ -4387,7 +4565,25 @@ class AIAgent:
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         from agent.conversation_loop import run_conversation
-        return run_conversation(self, user_message, system_message, conversation_history, task_id, stream_callback, persist_user_message)
+        self._last_persistence_result = None
+        result = run_conversation(
+            self,
+            user_message,
+            system_message,
+            conversation_history,
+            task_id,
+            stream_callback,
+            persist_user_message,
+        )
+        if isinstance(result, dict) and "persistence" not in result:
+            result["persistence"] = self._persistence_result(
+                attempted=False,
+                ok=False,
+                failure_class=PERSISTENCE_NO_CURRENT_PROOF,
+                stage=PERSISTENCE_STAGE_TURN_EXIT,
+                sanitized_reason="turn returned without current persistence proof",
+            )
+        return result
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """

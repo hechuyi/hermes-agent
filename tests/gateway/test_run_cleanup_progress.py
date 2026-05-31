@@ -145,6 +145,12 @@ def _make_runner(adapter):
     runner._session_db = None
     runner._running_agents = {}
     runner._session_run_generation = {}
+    runner._session_model_overrides = {}
+    runner._agent_cache = {}
+    runner._agent_cache_lock = None
+    runner._pending_model_notes = {}
+    runner._pending_skills_reload_notes = {}
+    runner._draining = False
     runner.hooks = SimpleNamespace(loaded_hooks=False)
     runner.config = SimpleNamespace(
         thread_sessions_per_user=False,
@@ -194,7 +200,11 @@ async def test_cleanup_off_by_default_leaves_bubbles(monkeypatch, tmp_path):
     registered never reaches delete_message."""
     adapter = CleanupCaptureAdapter()
     runner = _make_runner(adapter)
-    gateway_run = _install_fakes(monkeypatch, ProgressAgent, cleanup_on=False)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        ProgressAgent,
+        cleanup_on=False,
+    )
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
 
     source = SessionSource(platform=Platform.TELEGRAM, chat_id="-1001")
@@ -226,7 +236,11 @@ async def test_cleanup_registers_callback_and_deletes_on_success(monkeypatch, tm
     """With the flag on, the cleanup callback deletes the progress bubble."""
     adapter = CleanupCaptureAdapter()
     runner = _make_runner(adapter)
-    gateway_run = _install_fakes(monkeypatch, ProgressAgent, cleanup_on=True)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        ProgressAgent,
+        cleanup_on=True,
+    )
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
 
     source = SessionSource(platform=Platform.TELEGRAM, chat_id="-1001")
@@ -267,7 +281,11 @@ async def test_cleanup_skipped_on_failed_run(monkeypatch, tmp_path):
     """Failed runs skip cleanup registration — breadcrumbs stay."""
     adapter = CleanupCaptureAdapter()
     runner = _make_runner(adapter)
-    gateway_run = _install_fakes(monkeypatch, FailingAgent, cleanup_on=True)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        FailingAgent,
+        cleanup_on=True,
+    )
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
 
     source = SessionSource(platform=Platform.TELEGRAM, chat_id="-1001")
@@ -300,7 +318,11 @@ async def test_cleanup_noop_on_adapter_without_delete_support(monkeypatch, tmp_p
     a stray bg-review callback (if present) can fire harmlessly."""
     adapter = NoDeleteAdapter()
     runner = _make_runner(adapter)
-    gateway_run = _install_fakes(monkeypatch, ProgressAgent, cleanup_on=True)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        ProgressAgent,
+        cleanup_on=True,
+    )
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
 
     source = SessionSource(platform=Platform.TELEGRAM, chat_id="-1001")
@@ -328,7 +350,11 @@ async def test_cleanup_chains_with_existing_callback(monkeypatch, tmp_path):
     callback chains with it — both fire, neither clobbers the other."""
     adapter = CleanupCaptureAdapter()
     runner = _make_runner(adapter)
-    gateway_run = _install_fakes(monkeypatch, ProgressAgent, cleanup_on=True)
+    gateway_run = _install_fakes(
+        monkeypatch,
+        ProgressAgent,
+        cleanup_on=True,
+    )
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
 
     source = SessionSource(platform=Platform.TELEGRAM, chat_id="-1001")

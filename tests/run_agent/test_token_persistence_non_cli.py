@@ -93,3 +93,40 @@ def test_session_search_lazily_opens_db_when_entrypoint_did_not_pass_one(monkeyp
     assert captured["db"] is sentinel_db
     assert captured["query"] == "Hermes"
     assert agent._session_db is sentinel_db
+
+
+def test_session_search_injects_gateway_scope_from_agent_not_tool_args(monkeypatch):
+    sentinel_db = object()
+    captured = {}
+
+    session_search_mod = ModuleType("tools.session_search_tool")
+
+    def fake_session_search(**kwargs):
+        captured.update(kwargs)
+        return json.dumps({"success": True, "results": []})
+
+    session_search_mod.session_search = fake_session_search
+    monkeypatch.setitem(sys.modules, "tools.session_search_tool", session_search_mod)
+
+    agent = _make_agent(sentinel_db, platform="feishu")
+    agent._gateway_conversation_scope_id = "cs_real"
+    agent._gateway_route_partition_key = "route-real"
+    agent._gateway_platform_account_id = "feishu_app:real"
+
+    result = json.loads(agent._invoke_tool(
+        "session_search",
+        {
+            "query": "Hermes",
+            "scope": "global",
+            "current_conversation_scope_id": "cs_spoofed",
+            "current_route_partition_key": "route-spoofed",
+            "current_platform_account_id": "feishu_app:spoofed",
+        },
+        "task-id",
+    ))
+
+    assert result["success"] is True
+    assert captured["scope"] == "global"
+    assert captured["current_conversation_scope_id"] == "cs_real"
+    assert captured["current_route_partition_key"] == "route-real"
+    assert captured["current_platform_account_id"] == "feishu_app:real"

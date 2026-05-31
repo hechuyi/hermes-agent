@@ -28,6 +28,7 @@ PRs #9850, #9934, #7536):
 import asyncio
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -41,7 +42,12 @@ from gateway.run import (
     _last_transcript_timestamp,
     _should_clear_resume_pending_after_turn,
 )
-from gateway.session import SessionEntry, SessionSource, SessionStore
+from gateway.session import (
+    SessionEntry,
+    SessionPersistenceError,
+    SessionSource,
+    SessionStore,
+)
 from tests.gateway.restart_test_helpers import (
     make_restart_runner,
     make_restart_source,
@@ -62,12 +68,196 @@ def test_resume_pending_is_cleared_only_after_successful_turn():
     auto-resume it.
     """
     assert _should_clear_resume_pending_after_turn({"final_response": "done"}) is True
-    assert _should_clear_resume_pending_after_turn({"completed": True}) is True
+    assert _should_clear_resume_pending_after_turn({"completed": True}) is False
+    assert _should_clear_resume_pending_after_turn({"final_response": ""}) is False
+    assert _should_clear_resume_pending_after_turn({"final_response": "(empty)"}) is False
     assert _should_clear_resume_pending_after_turn({"interrupted": True}) is False
     assert _should_clear_resume_pending_after_turn({"completed": False}) is False
     assert _should_clear_resume_pending_after_turn({"failed": True}) is False
     assert _should_clear_resume_pending_after_turn({"partial": True}) is False
     assert _should_clear_resume_pending_after_turn({"error": "boom"}) is False
+
+
+@pytest.mark.asyncio
+async def test_empty_sentinel_turn_does_not_clear_resume_pending_after_friendly_text(monkeypatch):
+    import gateway.run as gateway_run
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="c1",
+        chat_type="dm",
+        user_id="u1",
+    )
+    event = MessageEvent(text="hello", source=source, message_id="m1")
+    session_entry = SimpleNamespace(
+        session_key="agent:main:discord:dm:c1",
+        session_id="session-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    session_store = MagicMock()
+    session_store.get_or_create_session.return_value = session_entry
+    session_store.load_transcript.return_value = []
+    session_store.has_any_sessions.return_value = True
+    session_store.update_session = MagicMock()
+    session_store.clear_resume_pending = MagicMock()
+    runner.session_store = session_store
+    runner.adapters = {
+        Platform.DISCORD: SimpleNamespace(
+            stop_typing=AsyncMock(),
+            send=AsyncMock(),
+        )
+    }
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.config = GatewayConfig()
+    runner._session_db = None
+    runner._ephemeral_system_prompt = ""
+    runner._prefill_messages = []
+    runner._reasoning_config = None
+    runner._provider_routing = {}
+    runner._fallback_model = None
+    runner._voice_mode = {}
+    runner._pending_model_notes = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._running_agents = {}
+    runner._agent_cache = {}
+    runner._agent_cache_lock = None
+    runner._session_model_overrides = {}
+    runner._recover_telegram_topic_thread_id = lambda _source: None
+    runner._cache_session_source = lambda *_args, **_kwargs: None
+    runner._is_telegram_topic_lane = lambda _source: False
+    runner._bind_adapter_run_generation = lambda *_args, **_kwargs: None
+    runner._is_session_run_current = lambda *_args, **_kwargs: True
+    runner._set_session_env = lambda _context: []
+    runner._clear_restart_failure_count = MagicMock()
+    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
+
+    messages = [{"role": "user", "content": "hello"}]
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "(empty)",
+            "messages": messages,
+            "history_offset": 0,
+            "api_calls": 1,
+            "completed": True,
+            "last_prompt_tokens": 0,
+            "persistence": {
+                "attempted": True,
+                "ok": True,
+                "row_ids_by_message_index": {0: 101},
+            },
+        }
+    )
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "test-model")
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+
+    result = await runner._handle_message_with_agent(event, source, session_entry.session_key, 1)
+
+    assert result.startswith("⚠️ The model returned no response")
+    session_store.clear_resume_pending.assert_not_called()
+    runner._clear_restart_failure_count.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resume_pending_marker_survives_transcript_append_failure_after_success(
+    monkeypatch,
+):
+    import gateway.run as gateway_run
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="c1",
+        chat_type="dm",
+        user_id="u1",
+    )
+    event = MessageEvent(text="resume this", source=source, message_id="m1")
+    session_entry = SimpleNamespace(
+        session_key="agent:main:discord:dm:c1",
+        session_id="session-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        resume_pending=True,
+    )
+    history = [{"role": "user", "content": "previous"}]
+    session_store = MagicMock()
+    session_store.get_or_create_session.return_value = session_entry
+    session_store.load_transcript.return_value = history
+    session_store.has_any_sessions.return_value = True
+    session_store.update_session = MagicMock()
+    session_store.clear_resume_pending = MagicMock()
+    session_store.append_to_transcript.side_effect = SessionPersistenceError(
+        "session_db_append_failed",
+        "failed to append transcript message",
+        stage="append_message",
+        action="append_to_transcript",
+        role="user",
+    )
+    runner.session_store = session_store
+    runner.adapters = {
+        Platform.DISCORD: SimpleNamespace(
+            stop_typing=AsyncMock(),
+            send=AsyncMock(),
+        )
+    }
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
+    runner.config = GatewayConfig()
+    runner._session_db = None
+    runner._ephemeral_system_prompt = ""
+    runner._prefill_messages = []
+    runner._reasoning_config = None
+    runner._provider_routing = {}
+    runner._fallback_model = None
+    runner._voice_mode = {}
+    runner._pending_model_notes = {}
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._running_agents = {}
+    runner._agent_cache = {}
+    runner._agent_cache_lock = None
+    runner._session_model_overrides = {}
+    runner._recover_telegram_topic_thread_id = lambda _source: None
+    runner._cache_session_source = lambda *_args, **_kwargs: None
+    runner._is_telegram_topic_lane = lambda _source: False
+    runner._bind_adapter_run_generation = lambda *_args, **_kwargs: None
+    runner._is_session_run_current = lambda *_args, **_kwargs: True
+    runner._set_session_env = lambda _context: []
+    runner._clear_restart_failure_count = MagicMock()
+    runner._should_send_voice_reply = lambda *_args, **_kwargs: False
+
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "resumed answer",
+            "messages": history
+            + [
+                {"role": "user", "content": "resume this"},
+                {"role": "assistant", "content": "resumed answer"},
+            ],
+            "history_offset": len(history),
+            "completed": True,
+            "last_prompt_tokens": 0,
+            "persistence": {"attempted": True, "ok": False},
+        }
+    )
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "test-model")
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+
+    result = await runner._handle_message_with_agent(
+        event,
+        source,
+        session_entry.session_key,
+        1,
+    )
+
+    assert "SessionPersistenceError" in result
+    session_store.clear_resume_pending.assert_not_called()
+    runner._clear_restart_failure_count.assert_not_called()
 
 
 def _make_source(platform=Platform.TELEGRAM, chat_id="123", user_id="u1"):

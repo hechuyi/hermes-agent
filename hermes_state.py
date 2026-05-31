@@ -42,6 +42,24 @@ VALID_SCOPE_ASSIGNMENT_STATUSES = {
     "imported",
 }
 
+
+class SessionDBAppendMessagesError(RuntimeError):
+    """Raised when an atomic multi-message append fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        row_ids_by_message_index: Optional[Dict[int, int]] = None,
+        message_index: Optional[int] = None,
+        role: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.row_ids_by_message_index = row_ids_by_message_index or {}
+        self.message_index = message_index
+        self.role = role
+        self.atomic_rolled_back = True
+
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
 # ---------------------------------------------------------------------------
@@ -771,10 +789,22 @@ class SessionDB:
         route_session_key_snapshot: str = None,
         route_partition_key: str = None,
     ) -> None:
-        """Shared INSERT OR IGNORE for session rows."""
+        """Shared INSERT OR IGNORE for session rows.
+
+        Plain sessions with no scope or route metadata are explicit
+        ``legacy_unscoped`` rows. NULL scope status is reserved for migrated or
+        corrupted historical rows and is not a valid new lineage contract.
+        """
+        scope_assignment_status = self._normalize_scope_assignment_status(
+            conversation_scope_id=conversation_scope_id,
+            scope_assignment_status=scope_assignment_status,
+            route_session_key_snapshot=route_session_key_snapshot,
+            route_partition_key=route_partition_key,
+        )
         self._validate_session_scope_fields(
             conversation_scope_id=conversation_scope_id,
             scope_assignment_status=scope_assignment_status,
+            route_session_key_snapshot=route_session_key_snapshot,
             route_partition_key=route_partition_key,
         )
         def _do(conn):
@@ -822,9 +852,16 @@ class SessionDB:
         metadata filled. NULL/legacy rows are not promoted to scoped; callers
         must detach current scoped routes to a new session instead.
         """
+        scope_assignment_status = self._normalize_scope_assignment_status(
+            conversation_scope_id=conversation_scope_id,
+            scope_assignment_status=scope_assignment_status,
+            route_session_key_snapshot=route_session_key_snapshot,
+            route_partition_key=route_partition_key,
+        )
         self._validate_session_scope_fields(
             conversation_scope_id=conversation_scope_id,
             scope_assignment_status=scope_assignment_status,
+            route_session_key_snapshot=route_session_key_snapshot,
             route_partition_key=route_partition_key,
         )
 
@@ -967,6 +1004,7 @@ class SessionDB:
         *,
         conversation_scope_id: Optional[str] = None,
         scope_assignment_status: Optional[str] = None,
+        route_session_key_snapshot: Optional[str] = None,
         route_partition_key: Optional[str] = None,
     ) -> None:
         if scope_assignment_status is not None and scope_assignment_status not in VALID_SCOPE_ASSIGNMENT_STATUSES:
@@ -976,8 +1014,33 @@ class SessionDB:
             )
         if scope_assignment_status == "scoped" and not conversation_scope_id:
             raise ValueError("conversation_scope_id is required when scope_assignment_status='scoped'")
+        if scope_assignment_status == "scoped" and not route_session_key_snapshot:
+            raise ValueError("route_session_key_snapshot is required when scope_assignment_status='scoped'")
         if scope_assignment_status == "scoped" and not route_partition_key:
             raise ValueError("route_partition_key is required when scope_assignment_status='scoped'")
+        if scope_assignment_status == "legacy_unscoped" and (
+            conversation_scope_id or route_session_key_snapshot or route_partition_key
+        ):
+            raise ValueError(
+                "legacy_unscoped sessions must not carry scope, route snapshot, or route partition metadata"
+            )
+
+    @staticmethod
+    def _normalize_scope_assignment_status(
+        *,
+        conversation_scope_id: Optional[str] = None,
+        scope_assignment_status: Optional[str] = None,
+        route_session_key_snapshot: Optional[str] = None,
+        route_partition_key: Optional[str] = None,
+    ) -> Optional[str]:
+        if (
+            scope_assignment_status is None
+            and conversation_scope_id is None
+            and route_session_key_snapshot is None
+            and route_partition_key is None
+        ):
+            return "legacy_unscoped"
+        return scope_assignment_status
 
     def upsert_conversation_scope(self, identity: Any) -> None:
         """Persist a deterministic conversation scope identity."""
@@ -1260,6 +1323,8 @@ class SessionDB:
         """
         where = ["id = ?"]
         params: list[Any] = [session_id_or_prefix]
+        if conversation_scope_id or route_partition_key:
+            where.append("scope_assignment_status = 'scoped'")
         if conversation_scope_id:
             where.append("conversation_scope_id = ?")
             params.append(conversation_scope_id)
@@ -1283,6 +1348,8 @@ class SessionDB:
         )
         where = ["id LIKE ? ESCAPE '\\'"]
         params = [f"{escaped}%"]
+        if conversation_scope_id or route_partition_key:
+            where.append("scope_assignment_status = 'scoped'")
         if conversation_scope_id:
             where.append("conversation_scope_id = ?")
             params.append(conversation_scope_id)
@@ -1396,6 +1463,8 @@ class SessionDB:
         """Look up a session by exact title. Returns session dict or None."""
         where = ["title = ?"]
         params: list[Any] = [title]
+        if conversation_scope_id or route_partition_key:
+            where.append("scope_assignment_status = 'scoped'")
         if conversation_scope_id:
             where.append("conversation_scope_id = ?")
             params.append(conversation_scope_id)
@@ -1436,6 +1505,8 @@ class SessionDB:
         escaped = title.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         where = ["title LIKE ? ESCAPE '\\'"]
         params: list[Any] = [f"{escaped} #%"]
+        if conversation_scope_id or route_partition_key:
+            where.append("scope_assignment_status = 'scoped'")
         if conversation_scope_id:
             where.append("conversation_scope_id = ?")
             params.append(conversation_scope_id)
@@ -1508,68 +1579,198 @@ class SessionDB:
         input itself doesn't exist).
         """
         current = session_id
-        expected_scope = None
-        expected_route = None
-        parent_is_scoped = False
-        partial_legacy_parent = False
-        try:
-            with self._lock:
-                row = self._conn.execute(
-                    "SELECT conversation_scope_id, scope_assignment_status, route_partition_key FROM sessions WHERE id = ?",
-                    (session_id,),
-                ).fetchone()
-                expected_scope = row["conversation_scope_id"] if row else None
-                expected_route = row["route_partition_key"] if row else None
-                parent_is_scoped = bool(
-                    row
-                    and row["scope_assignment_status"] == "scoped"
-                    and expected_scope
-                    and expected_route
-                )
-                partial_legacy_parent = bool(row and not expected_scope and expected_route)
-        except Exception:
-            expected_scope = None
-            expected_route = None
-            parent_is_scoped = False
-            partial_legacy_parent = False
-        if partial_legacy_parent:
-            return current
         # Bound the walk defensively — compression chains this deep are
         # pathological and shouldn't happen in practice. 100 = plenty.
         for _ in range(100):
-            with self._lock:
-                scope_clause = ""
-                params: tuple[Any, ...]
-                if parent_is_scoped:
-                    scope_clause = (
-                        " AND child.scope_assignment_status = 'scoped'"
-                        " AND child.conversation_scope_id = ?"
-                        " AND child.route_partition_key = ?"
-                    )
-                    params = (current, current, expected_scope, expected_route)
-                else:
-                    scope_clause = (
-                        " AND child.conversation_scope_id IS NULL"
-                        " AND child.route_partition_key IS NULL"
-                        " AND (child.scope_assignment_status IS NULL"
-                        "      OR child.scope_assignment_status != 'scoped')"
-                    )
-                    params = (current, current)
-                cursor = self._conn.execute(
-                    "SELECT child.id FROM sessions child "
+            child_id = self._compatible_child_session_id(
+                current,
+                compression_only=True,
+            )
+            if not child_id:
+                return current
+            current = child_id
+        return current
+
+    @staticmethod
+    def _scope_state(row: Optional[Dict[str, Any]]) -> Optional[tuple[str, Optional[str], Optional[str], Optional[str]]]:
+        if not row:
+            return None
+        status = row.get("scope_assignment_status")
+        scope = row.get("conversation_scope_id")
+        route = row.get("route_partition_key")
+        snapshot = row.get("route_session_key_snapshot")
+        if status == "scoped":
+            if scope and route and snapshot:
+                return ("scoped", scope, route, snapshot)
+            return None
+        if status in (None, "legacy_unscoped") and scope is None and route is None and snapshot is None:
+            return ("legacy_unscoped", None, None, None)
+        return None
+
+    @classmethod
+    def _session_rows_scope_compatible(
+        cls,
+        parent_row: Optional[Dict[str, Any]],
+        child_row: Optional[Dict[str, Any]],
+    ) -> bool:
+        parent_state = cls._scope_state(parent_row)
+        child_state = cls._scope_state(child_row)
+        return bool(parent_state and child_state and parent_state == child_state)
+
+    def _session_lineage_parent(self, session_id: str, *, compression_only: bool = False) -> Optional[str]:
+        if not session_id:
+            return None
+        with self._lock:
+            child = self._conn.execute(
+                "SELECT id, parent_session_id, started_at, conversation_scope_id, "
+                "scope_assignment_status, route_session_key_snapshot, route_partition_key "
+                "FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if child is None:
+                return None
+            parent_id = child["parent_session_id"] if hasattr(child, "keys") else child[1]
+            if not parent_id:
+                return None
+            parent = self._conn.execute(
+                "SELECT id, parent_session_id, conversation_scope_id, "
+                "scope_assignment_status, route_session_key_snapshot, route_partition_key, "
+                "ended_at, end_reason "
+                "FROM sessions WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
+        if parent is None:
+            return None
+        child_dict = dict(child)
+        parent_dict = dict(parent)
+        if not self._session_rows_scope_compatible(parent_dict, child_dict):
+            return None
+        parent_ended_at = parent_dict.get("ended_at")
+        child_started_at = child_dict.get("started_at")
+        if parent_dict.get("end_reason") != "compression":
+            return None
+        if parent_ended_at is None or child_started_at is None:
+            return None
+        try:
+            if float(child_started_at) < float(parent_ended_at):
+                return None
+        except (TypeError, ValueError):
+            return None
+        return parent_id
+
+    def _compatible_child_session_id(
+        self,
+        parent_id: str,
+        *,
+        compression_only: bool = False,
+    ) -> Optional[str]:
+        if not parent_id:
+            return None
+        with self._lock:
+            parent = self._conn.execute(
+                "SELECT id, parent_session_id, conversation_scope_id, "
+                "scope_assignment_status, route_session_key_snapshot, route_partition_key "
+                "FROM sessions WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
+            if parent is None:
+                return None
+            if self._scope_state(dict(parent)) is None:
+                return None
+            if compression_only:
+                child_rows = self._conn.execute(
+                    "SELECT child.id, child.parent_session_id, child.conversation_scope_id, "
+                    "child.scope_assignment_status, child.route_session_key_snapshot, "
+                    "child.route_partition_key "
+                    "FROM sessions child "
                     "WHERE child.parent_session_id = ? "
                     "  AND child.started_at >= ("
-                    "      SELECT parent.ended_at FROM sessions parent "
-                    "      WHERE parent.id = ? AND parent.end_reason = 'compression'"
+                    "      SELECT p.ended_at FROM sessions p "
+                    "      WHERE p.id = ? AND p.end_reason = 'compression'"
                     "  ) "
-                    f"{scope_clause} "
-                    "ORDER BY started_at DESC LIMIT 1",
-                    params,
-                )
-                row = cursor.fetchone()
-            if row is None:
-                return current
-            current = row["id"]
+                    "ORDER BY child.started_at DESC, child.id DESC",
+                    (parent_id, parent_id),
+                ).fetchall()
+            else:
+                child_rows = self._conn.execute(
+                    "SELECT id, parent_session_id, conversation_scope_id, "
+                    "scope_assignment_status, route_session_key_snapshot, route_partition_key "
+                    "FROM sessions WHERE parent_session_id = ? "
+                    "ORDER BY started_at DESC, id DESC",
+                    (parent_id,),
+                ).fetchall()
+        parent_dict = dict(parent)
+        compatible_child_ids: list[str] = []
+        for child in child_rows:
+            child_dict = dict(child)
+            if self._session_rows_scope_compatible(parent_dict, child_dict):
+                compatible_child_ids.append(child_dict.get("id"))
+        if len(compatible_child_ids) == 1:
+            return compatible_child_ids[0]
+        return None
+
+    def _session_scope_row(self, session_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id, parent_session_id, started_at, ended_at, end_reason, "
+                "conversation_scope_id, scope_assignment_status, "
+                "route_session_key_snapshot, route_partition_key "
+                "FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def _compression_child_candidates(self, parent_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT child.id, child.parent_session_id, child.started_at,
+                       child.ended_at, child.end_reason,
+                       child.conversation_scope_id,
+                       child.scope_assignment_status,
+                       child.route_session_key_snapshot,
+                       child.route_partition_key
+                FROM sessions child
+                JOIN sessions parent ON parent.id = child.parent_session_id
+                WHERE parent.id = ?
+                  AND parent.end_reason = 'compression'
+                  AND parent.ended_at IS NOT NULL
+                  AND child.started_at >= parent.ended_at
+                ORDER BY child.started_at DESC, child.id DESC
+                """,
+                (parent_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _session_has_messages(self, session_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        return row is not None
+
+    def resolve_session_lineage_root(
+        self,
+        session_id: str,
+        *,
+        compression_only: bool = True,
+    ) -> str:
+        if not session_id:
+            return session_id
+        current = session_id
+        seen = set()
+        for _ in range(100):
+            if not current or current in seen:
+                break
+            seen.add(current)
+            parent_id = self._session_lineage_parent(
+                current,
+                compression_only=compression_only,
+            )
+            if not parent_id:
+                break
+            current = parent_id
         return current
 
     def list_sessions_rich(
@@ -1632,9 +1833,12 @@ class SessionDB:
             where_clauses.append("s.source = ?")
             params.append(source)
         if conversation_scope_id:
+            where_clauses.append("s.scope_assignment_status = 'scoped'")
             where_clauses.append("s.conversation_scope_id = ?")
             params.append(conversation_scope_id)
         if route_partition_key:
+            if not conversation_scope_id:
+                where_clauses.append("s.scope_assignment_status = 'scoped'")
             where_clauses.append("s.route_partition_key = ?")
             params.append(route_partition_key)
         if exclude_sources:
@@ -1671,20 +1875,24 @@ class SessionDB:
                           (
                               parent.scope_assignment_status = 'scoped'
                               AND parent.conversation_scope_id IS NOT NULL
+                              AND parent.route_session_key_snapshot IS NOT NULL
                               AND parent.route_partition_key IS NOT NULL
                               AND child.scope_assignment_status = 'scoped'
                               AND child.conversation_scope_id = parent.conversation_scope_id
+                              AND child.route_session_key_snapshot = parent.route_session_key_snapshot
                               AND child.route_partition_key = parent.route_partition_key
                           )
                           OR (
                               (parent.scope_assignment_status IS NULL
-                               OR parent.scope_assignment_status != 'scoped')
+                               OR parent.scope_assignment_status = 'legacy_unscoped')
                               AND parent.conversation_scope_id IS NULL
+                              AND parent.route_session_key_snapshot IS NULL
                               AND parent.route_partition_key IS NULL
-                              AND child.conversation_scope_id IS NULL
-                              AND child.route_partition_key IS NULL
                               AND (child.scope_assignment_status IS NULL
-                                   OR child.scope_assignment_status != 'scoped')
+                                   OR child.scope_assignment_status = 'legacy_unscoped')
+                              AND child.conversation_scope_id IS NULL
+                              AND child.route_session_key_snapshot IS NULL
+                              AND child.route_partition_key IS NULL
                           )
                       )
                 ),
@@ -1875,6 +2083,101 @@ class SessionDB:
                 return content
         return content
 
+    def _append_message_in_transaction(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        session_id: str,
+        role: str,
+        content: str = None,
+        tool_name: str = None,
+        tool_calls: Any = None,
+        tool_call_id: str = None,
+        token_count: int = None,
+        finish_reason: str = None,
+        reasoning: str = None,
+        reasoning_content: str = None,
+        reasoning_details: Any = None,
+        codex_reasoning_items: Any = None,
+        codex_message_items: Any = None,
+        platform_message_id: str = None,
+        observed: bool = False,
+        timestamp: Optional[float] = None,
+    ) -> int:
+        # Serialize structured fields to JSON before entering the write txn
+        reasoning_details_json = (
+            json.dumps(reasoning_details)
+            if reasoning_details else None
+        )
+        codex_items_json = (
+            json.dumps(codex_reasoning_items)
+            if codex_reasoning_items else None
+        )
+        codex_message_items_json = (
+            json.dumps(codex_message_items)
+            if codex_message_items else None
+        )
+        tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+        # Multimodal content (list of parts) must be JSON-encoded: sqlite3
+        # cannot bind list/dict parameters directly.
+        stored_content = self._encode_content(content)
+
+        # Pre-compute tool call count
+        num_tool_calls = 0
+        if tool_calls is not None:
+            num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
+
+        scope_row = conn.execute(
+            "SELECT conversation_scope_id FROM sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        conversation_scope_id = (
+            scope_row["conversation_scope_id"]
+            if scope_row and "conversation_scope_id" in scope_row.keys()
+            else None
+        )
+        cursor = conn.execute(
+            """INSERT INTO messages (session_id, role, content, tool_call_id,
+               tool_calls, tool_name, timestamp, token_count, finish_reason,
+               reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
+               codex_message_items, platform_message_id, observed, conversation_scope_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id,
+                role,
+                stored_content,
+                tool_call_id,
+                tool_calls_json,
+                tool_name,
+                time.time() if timestamp is None else timestamp,
+                token_count,
+                finish_reason,
+                reasoning,
+                reasoning_content,
+                reasoning_details_json,
+                codex_items_json,
+                codex_message_items_json,
+                platform_message_id,
+                1 if observed else 0,
+                conversation_scope_id,
+            ),
+        )
+        msg_id = cursor.lastrowid
+
+        # Update counters
+        if num_tool_calls > 0:
+            conn.execute(
+                """UPDATE sessions SET message_count = message_count + 1,
+                   tool_call_count = tool_call_count + ? WHERE id = ?""",
+                (num_tool_calls, session_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
+                (session_id,),
+            )
+        return msg_id
+
     def append_message(
         self,
         session_id: str,
@@ -1905,80 +2208,73 @@ class SessionDB:
         platform-specific flows like yuanbao's recall guard to redact a
         message by its platform-side identifier.
         """
-        # Serialize structured fields to JSON before entering the write txn
-        reasoning_details_json = (
-            json.dumps(reasoning_details)
-            if reasoning_details else None
-        )
-        codex_items_json = (
-            json.dumps(codex_reasoning_items)
-            if codex_reasoning_items else None
-        )
-        codex_message_items_json = (
-            json.dumps(codex_message_items)
-            if codex_message_items else None
-        )
-        tool_calls_json = json.dumps(tool_calls) if tool_calls else None
-        # Multimodal content (list of parts) must be JSON-encoded: sqlite3
-        # cannot bind list/dict parameters directly.
-        stored_content = self._encode_content(content)
-
-        # Pre-compute tool call count
-        num_tool_calls = 0
-        if tool_calls is not None:
-            num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
         def _do(conn):
-            scope_row = conn.execute(
-                "SELECT conversation_scope_id FROM sessions WHERE id = ?",
-                (session_id,),
-            ).fetchone()
-            conversation_scope_id = (
-                scope_row["conversation_scope_id"]
-                if scope_row and "conversation_scope_id" in scope_row.keys()
-                else None
+            return self._append_message_in_transaction(
+                conn,
+                session_id=session_id,
+                role=role,
+                content=content,
+                tool_name=tool_name,
+                tool_calls=tool_calls,
+                tool_call_id=tool_call_id,
+                token_count=token_count,
+                finish_reason=finish_reason,
+                reasoning=reasoning,
+                reasoning_content=reasoning_content,
+                reasoning_details=reasoning_details,
+                codex_reasoning_items=codex_reasoning_items,
+                codex_message_items=codex_message_items,
+                platform_message_id=platform_message_id,
+                observed=observed,
             )
-            cursor = conn.execute(
-                """INSERT INTO messages (session_id, role, content, tool_call_id,
-                   tool_calls, tool_name, timestamp, token_count, finish_reason,
-                   reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items, platform_message_id, observed, conversation_scope_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    session_id,
-                    role,
-                    stored_content,
-                    tool_call_id,
-                    tool_calls_json,
-                    tool_name,
-                    time.time(),
-                    token_count,
-                    finish_reason,
-                    reasoning,
-                    reasoning_content,
-                    reasoning_details_json,
-                    codex_items_json,
-                    codex_message_items_json,
-                    platform_message_id,
-                    1 if observed else 0,
-                    conversation_scope_id,
-                ),
-            )
-            msg_id = cursor.lastrowid
 
-            # Update counters
-            if num_tool_calls > 0:
-                conn.execute(
-                    """UPDATE sessions SET message_count = message_count + 1,
-                       tool_call_count = tool_call_count + ? WHERE id = ?""",
-                    (num_tool_calls, session_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
-                    (session_id,),
-                )
-            return msg_id
+        return self._execute_write(_do)
+
+    def append_messages(
+        self,
+        session_id: str,
+        messages: List[Tuple[int, Dict[str, Any]]],
+    ) -> Dict[int, int]:
+        """Atomically append a suffix of messages and return row ids by input index."""
+
+        def _do(conn):
+            row_ids_by_message_index: Dict[int, int] = {}
+            now_ts = time.time()
+            for offset, (message_index, msg) in enumerate(messages):
+                role = msg.get("role", "unknown")
+                try:
+                    row_ids_by_message_index[message_index] = (
+                        self._append_message_in_transaction(
+                            conn,
+                            session_id=session_id,
+                            role=role,
+                            content=msg.get("content"),
+                            tool_name=msg.get("tool_name"),
+                            tool_calls=msg.get("tool_calls"),
+                            tool_call_id=msg.get("tool_call_id"),
+                            token_count=msg.get("token_count"),
+                            finish_reason=msg.get("finish_reason"),
+                            reasoning=msg.get("reasoning"),
+                            reasoning_content=msg.get("reasoning_content"),
+                            reasoning_details=msg.get("reasoning_details"),
+                            codex_reasoning_items=msg.get("codex_reasoning_items"),
+                            codex_message_items=msg.get("codex_message_items"),
+                            platform_message_id=(
+                                msg.get("platform_message_id") or msg.get("message_id")
+                            ),
+                            observed=bool(msg.get("observed")),
+                            timestamp=now_ts + (offset * 1e-6),
+                        )
+                    )
+                except Exception as exc:
+                    raise SessionDBAppendMessagesError(
+                        str(exc),
+                        row_ids_by_message_index=row_ids_by_message_index,
+                        message_index=message_index,
+                        role=role,
+                    ) from exc
+            return row_ids_by_message_index
 
         return self._execute_write(_do)
 
@@ -2105,6 +2401,8 @@ class SessionDB:
         session_id: str,
         around_message_id: int,
         window: int = 5,
+        conversation_scope_id: str = None,
+        route_partition_key: str = None,
     ) -> Dict[str, Any]:
         """Load a window of messages anchored on a specific message id.
 
@@ -2129,9 +2427,28 @@ class SessionDB:
             window = 0
         with self._lock:
             # Confirm the anchor exists in this session.
+            session_scope_clauses = []
+            session_scope_params: list[Any] = []
+            if conversation_scope_id:
+                session_scope_clauses.append("s.scope_assignment_status = 'scoped'")
+                session_scope_clauses.append("s.conversation_scope_id = ?")
+                session_scope_params.append(conversation_scope_id)
+            if route_partition_key:
+                if not conversation_scope_id:
+                    session_scope_clauses.append("s.scope_assignment_status = 'scoped'")
+                session_scope_clauses.append("s.route_partition_key = ?")
+                session_scope_params.append(route_partition_key)
+            session_scope_sql = (
+                " AND " + " AND ".join(session_scope_clauses)
+                if session_scope_clauses
+                else ""
+            )
             anchor_exists = self._conn.execute(
-                "SELECT 1 FROM messages WHERE id = ? AND session_id = ? LIMIT 1",
-                (around_message_id, session_id),
+                "SELECT 1 FROM messages m "
+                "JOIN sessions s ON s.id = m.session_id "
+                "WHERE m.id = ? AND m.session_id = ?"
+                f"{session_scope_sql} LIMIT 1",
+                [around_message_id, session_id, *session_scope_params],
             ).fetchone()
             if not anchor_exists:
                 return {"window": [], "messages_before": 0, "messages_after": 0}
@@ -2185,6 +2502,8 @@ class SessionDB:
         window: int = 5,
         bookend: int = 3,
         keep_roles: Optional[Tuple[str, ...]] = ("user", "assistant"),
+        conversation_scope_id: str = None,
+        route_partition_key: str = None,
     ) -> Dict[str, Any]:
         """Return an anchored window plus session bookends.
 
@@ -2218,7 +2537,11 @@ class SessionDB:
         # Reuse the primitive — handles anchor-existence, content decoding,
         # tool_calls deserialisation, and boundary counts.
         primitive = self.get_messages_around(
-            session_id, around_message_id, window=window
+            session_id,
+            around_message_id,
+            window=window,
+            conversation_scope_id=conversation_scope_id,
+            route_partition_key=route_partition_key,
         )
         window_rows = primitive["window"]
         if not window_rows:
@@ -2299,105 +2622,36 @@ class SessionDB:
         }
 
     def resolve_resume_session_id(self, session_id: str) -> str:
-        """Redirect a resume target to the descendant session that holds the messages.
-
-        Context compression ends the current session and forks a new child session
-        (linked via ``parent_session_id``). The flush cursor is reset, so the
-        child is where new messages actually land — the parent ends up with
-        ``message_count = 0`` rows unless messages had already been flushed to
-        it before compression. See #15000.
-
-        This helper walks ``parent_session_id`` forward from ``session_id`` and
-        returns the first descendant in the chain that has at least one message
-        row. If the original session already has messages, or no descendant
-        has any, the original ``session_id`` is returned unchanged.
-
-        The chain is always walked via the child whose ``started_at`` is
-        latest; that matches the single-chain shape that compression creates.
-        A depth cap (32) guards against accidental loops in malformed data.
-        """
+        """Redirect a resume target to the compatible compression child with messages."""
         if not session_id:
             return session_id
-
-        with self._lock:
-            # If this session already has messages, nothing to redirect.
-            try:
+        try:
+            with self._lock:
                 row = self._conn.execute(
                     "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
                     (session_id,),
                 ).fetchone()
-            except Exception:
-                return session_id
             if row is not None:
                 return session_id
+        except Exception:
+            return session_id
 
-            # Walk descendants: at each step, pick the most-recently-started
-                # child session; stop once we find one with messages.
-            current = session_id
-            seen = {current}
-            try:
-                scope_row = self._conn.execute(
-                    "SELECT conversation_scope_id, scope_assignment_status, route_partition_key FROM sessions WHERE id = ?",
-                    (session_id,),
-                ).fetchone()
-                expected_scope = scope_row["conversation_scope_id"] if scope_row else None
-                expected_route = scope_row["route_partition_key"] if scope_row else None
-                parent_is_scoped = bool(
-                    scope_row
-                    and scope_row["scope_assignment_status"] == "scoped"
-                    and expected_scope
-                    and expected_route
-                )
-                partial_legacy_parent = bool(scope_row and not expected_scope and expected_route)
-            except Exception:
-                expected_scope = None
-                expected_route = None
-                parent_is_scoped = False
-                partial_legacy_parent = False
-            if partial_legacy_parent:
+        current = session_id
+        seen = {current}
+        for _ in range(32):
+            child_id = self._compatible_child_session_id(
+                current,
+                compression_only=True,
+            )
+            if not child_id or child_id in seen:
                 return session_id
-            for _ in range(32):
-                try:
-                    if parent_is_scoped:
-                        scope_clause = (
-                            "AND scope_assignment_status = 'scoped' "
-                            "AND conversation_scope_id = ? "
-                            "AND route_partition_key = ? "
-                        )
-                        params = (current, expected_scope, expected_route)
-                    else:
-                        scope_clause = (
-                            "AND conversation_scope_id IS NULL "
-                            "AND route_partition_key IS NULL "
-                            "AND (scope_assignment_status IS NULL "
-                            "     OR scope_assignment_status != 'scoped') "
-                        )
-                        params = (current,)
-                    child_row = self._conn.execute(
-                        "SELECT id FROM sessions "
-                        "WHERE parent_session_id = ? "
-                        f"{scope_clause}"
-                        "ORDER BY started_at DESC, id DESC LIMIT 1",
-                        params,
-                    ).fetchone()
-                except Exception:
-                    return session_id
-                if child_row is None:
-                    return session_id
-                child_id = child_row["id"] if hasattr(child_row, "keys") else child_row[0]
-                if not child_id or child_id in seen:
-                    return session_id
-                seen.add(child_id)
-                try:
-                    msg_row = self._conn.execute(
-                        "SELECT 1 FROM messages WHERE session_id = ? LIMIT 1",
-                        (child_id,),
-                    ).fetchone()
-                except Exception:
-                    return session_id
-                if msg_row is not None:
+            seen.add(child_id)
+            try:
+                if self._session_has_messages(child_id):
                     return child_id
-                current = child_id
+            except Exception:
+                return session_id
+            current = child_id
         return session_id
 
     def get_messages_as_conversation(
@@ -2486,19 +2740,18 @@ class SessionDB:
         chain = []
         current = session_id
         seen = set()
-        with self._lock:
-            for _ in range(100):
-                if not current or current in seen:
-                    break
-                seen.add(current)
-                chain.append(current)
-                row = self._conn.execute(
-                    "SELECT parent_session_id FROM sessions WHERE id = ?",
-                    (current,),
-                ).fetchone()
-                if row is None:
-                    break
-                current = row["parent_session_id"] if hasattr(row, "keys") else row[0]
+        for _ in range(100):
+            if not current or current in seen:
+                break
+            seen.add(current)
+            chain.append(current)
+            parent_id = self._session_lineage_parent(
+                current,
+                compression_only=False,
+            )
+            if not parent_id:
+                break
+            current = parent_id
         return list(reversed(chain)) or [session_id]
 
     @staticmethod
@@ -2612,6 +2865,8 @@ class SessionDB:
         limit: int = 20,
         offset: int = 0,
         sort: str = None,
+        conversation_scope_id: str = None,
+        route_partition_key: str = None,
     ) -> List[Dict[str, Any]]:
         """
         Full-text search across session messages using FTS5.
@@ -2664,6 +2919,22 @@ class SessionDB:
         where_clauses = ["messages_fts MATCH ?"]
         params: list = [query]
 
+        def _append_scope_predicates(clauses: list, query_params: list) -> None:
+            scope_clauses = []
+            if conversation_scope_id:
+                scope_clauses.append("s.scope_assignment_status = 'scoped'")
+                scope_clauses.append("s.conversation_scope_id = ?")
+                query_params.append(conversation_scope_id)
+            if route_partition_key:
+                if not conversation_scope_id:
+                    scope_clauses.append("s.scope_assignment_status = 'scoped'")
+                scope_clauses.append("s.route_partition_key = ?")
+                query_params.append(route_partition_key)
+            if not scope_clauses:
+                return
+            scoped_sql = " AND ".join(scope_clauses)
+            clauses.append(f"({scoped_sql})")
+
         if source_filter is not None:
             source_placeholders = ",".join("?" for _ in source_filter)
             where_clauses.append(f"s.source IN ({source_placeholders})")
@@ -2679,6 +2950,8 @@ class SessionDB:
             where_clauses.append(f"m.role IN ({role_placeholders})")
             params.extend(role_filter)
 
+        _append_scope_predicates(where_clauses, params)
+
         where_sql = " AND ".join(where_clauses)
         params.extend([limit, offset])
 
@@ -2693,7 +2966,10 @@ class SessionDB:
                 m.tool_name,
                 s.source,
                 s.model,
-                s.started_at AS session_started
+                s.started_at AS session_started,
+                s.conversation_scope_id,
+                s.route_partition_key,
+                s.scope_assignment_status
             FROM messages_fts
             JOIN messages m ON m.id = messages_fts.rowid
             JOIN sessions s ON s.id = m.session_id
@@ -2751,6 +3027,7 @@ class SessionDB:
                 if role_filter:
                     tri_where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")
                     tri_params.extend(role_filter)
+                _append_scope_predicates(tri_where, tri_params)
                 tri_sql = f"""
                     SELECT
                         m.id,
@@ -2762,7 +3039,10 @@ class SessionDB:
                         m.tool_name,
                         s.source,
                         s.model,
-                        s.started_at AS session_started
+                        s.started_at AS session_started,
+                        s.conversation_scope_id,
+                        s.route_partition_key,
+                        s.scope_assignment_status
                     FROM messages_fts_trigram
                     JOIN messages m ON m.id = messages_fts_trigram.rowid
                     JOIN sessions s ON s.id = m.session_id
@@ -2806,13 +3086,16 @@ class SessionDB:
                 if role_filter:
                     like_where.append(f"m.role IN ({','.join('?' for _ in role_filter)})")
                     like_params.extend(role_filter)
+                _append_scope_predicates(like_where, like_params)
                 like_sql = f"""
                     SELECT m.id, m.session_id, m.role,
                            substr(m.content,
                                   max(1, instr(m.content, ?) - 40),
                                   120) AS snippet,
                            m.content, m.timestamp, m.tool_name,
-                           s.source, s.model, s.started_at AS session_started
+                           s.source, s.model, s.started_at AS session_started,
+                           s.conversation_scope_id, s.route_partition_key,
+                           s.scope_assignment_status
                     FROM messages m
                     JOIN sessions s ON s.id = m.session_id
                     WHERE {' AND '.join(like_where)}

@@ -701,7 +701,15 @@ class TestAdapterBehavior(unittest.TestCase):
             adapter._on_reaction_event("im.message.reaction.created_v1", data)
         run_threadsafe.assert_called_once()
 
-    def _build_reaction_adapter(self, *, msg_sender_id: str):
+    def _build_reaction_adapter(
+        self,
+        *,
+        msg_sender_id: str,
+        msg_thread_id=None,
+        msg_parent_id=None,
+        msg_upper_message_id=None,
+        msg_root_id=None,
+    ):
         """Build a FeishuAdapter wired up to return a single GET-message result."""
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
@@ -715,6 +723,10 @@ class TestAdapterBehavior(unittest.TestCase):
             sender=SimpleNamespace(sender_type="app", id=msg_sender_id, id_type="app_id"),
             chat_id="oc_chat",
             chat_type="group",
+            thread_id=msg_thread_id,
+            parent_id=msg_parent_id,
+            upper_message_id=msg_upper_message_id,
+            root_id=msg_root_id,
         )
         response = SimpleNamespace(success=lambda: True, data=SimpleNamespace(items=[msg]))
         adapter._client = SimpleNamespace(
@@ -761,6 +773,49 @@ class TestAdapterBehavior(unittest.TestCase):
             adapter._handle_reaction_event("im.message.reaction.created_v1", data)
         )
         adapter._handle_message_with_guards.assert_awaited_once()
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_reaction_on_topic_message_preserves_thread_id(self):
+        adapter = self._build_reaction_adapter(
+            msg_sender_id="cli_self_app",
+            msg_thread_id="omt_topic",
+            msg_root_id="om_root",
+        )
+
+        event = SimpleNamespace(
+            message_id="om_self_topic_msg",
+            user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
+            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+        )
+        data = SimpleNamespace(event=event)
+        asyncio.run(
+            adapter._handle_reaction_event("im.message.reaction.created_v1", data)
+        )
+
+        synthetic_event = adapter._handle_message_with_guards.await_args.args[0]
+        self.assertEqual(synthetic_event.source.thread_id, "omt_topic")
+        self.assertEqual(synthetic_event.reply_to_message_id, "om_root")
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_reaction_on_reply_does_not_invent_thread_id_from_root(self):
+        adapter = self._build_reaction_adapter(
+            msg_sender_id="cli_self_app",
+            msg_root_id="om_root",
+        )
+
+        event = SimpleNamespace(
+            message_id="om_self_reply_msg",
+            user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
+            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+        )
+        data = SimpleNamespace(event=event)
+        asyncio.run(
+            adapter._handle_reaction_event("im.message.reaction.created_v1", data)
+        )
+
+        synthetic_event = adapter._handle_message_with_guards.await_args.args[0]
+        self.assertIsNone(synthetic_event.source.thread_id)
+        self.assertEqual(synthetic_event.reply_to_message_id, "om_root")
 
     @patch.dict(os.environ, {"FEISHU_GROUP_POLICY": "open"}, clear=True)
     def test_group_message_requires_mentions_even_when_policy_open(self):

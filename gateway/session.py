@@ -22,6 +22,53 @@ from typing import Dict, List, Optional, Any
 logger = logging.getLogger(__name__)
 
 
+_FEISHU_LIVE_CONVERSATION_CHAT_TYPES = frozenset({"dm", "group", "thread", "forum"})
+
+
+class InvalidLiveSessionSource(ValueError):
+    """Stable failure for live inbound events that lack routing identity."""
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(f"{reason}: {message}")
+        self.reason = reason
+
+
+class SessionPersistenceError(RuntimeError):
+    """Stable failure for gateway session persistence contract violations."""
+
+    def __init__(
+        self,
+        failure_class: str,
+        message: str,
+        *,
+        stage: str,
+        action: str,
+        role: Optional[str] = None,
+        cause: Optional[BaseException] = None,
+    ):
+        sanitized_reason = None
+        if cause is not None:
+            try:
+                from hermes_cli.persistence_contract import sanitize_persistence_failure_reason
+
+                sanitized_reason = sanitize_persistence_failure_reason(cause)
+            except Exception:
+                sanitized_reason = type(cause).__name__
+        detail = message
+        if sanitized_reason:
+            detail = f"{message}: {sanitized_reason}"
+        super().__init__(
+            f"{failure_class}: stage={stage} action={action}"
+            + (f" role={role}" if role else "")
+            + f" {detail}"
+        )
+        self.failure_class = failure_class
+        self.stage = stage
+        self.action = action
+        self.role = role
+        self.sanitized_reason = sanitized_reason
+
+
 def _now() -> datetime:
     """Return the current local time."""
     return datetime.now()
@@ -616,6 +663,7 @@ def build_session_key(
     source: SessionSource,
     group_sessions_per_user: bool = True,
     thread_sessions_per_user: bool = False,
+    require_conversation_identity: bool = False,
 ) -> str:
     """Build a deterministic session key from a message source.
 
@@ -630,7 +678,7 @@ def build_session_key(
     Group/channel rules:
       - chat_id identifies the parent group/channel.
       - user_id/user_id_alt isolates participants within that parent chat when available when
-        ``group_sessions_per_user`` is enabled.
+        ``group_sessions_per_user`` is enabled (default: enabled).
       - thread_id differentiates threads within that parent chat.  When
         ``thread_sessions_per_user`` is False (default), threads are *shared* across all
         participants — user_id is NOT appended, so every user in the thread
@@ -641,6 +689,16 @@ def build_session_key(
       - Without identifiers, messages fall back to one session per platform/chat_type.
     """
     platform = source.platform.value
+    if (
+        require_conversation_identity
+        and source.platform == Platform.FEISHU
+        and source.chat_type in _FEISHU_LIVE_CONVERSATION_CHAT_TYPES
+        and not source.chat_id
+    ):
+        raise InvalidLiveSessionSource(
+            "feishu_missing_chat_identity",
+            "live Feishu inbound source requires chat_id or equivalent conversation identity",
+        )
     if source.chat_type == "dm":
         dm_chat_id = source.chat_id
         if source.platform == Platform.WHATSAPP:
@@ -685,7 +743,7 @@ class SessionStore:
     Manages session storage and retrieval.
     
     Uses SQLite (via SessionDB) for session metadata and message transcripts.
-    Falls back to legacy JSONL files if SQLite is unavailable.
+    SQLite is mandatory for live gateway persistence.
     """
     
     def __init__(self, sessions_dir: Path, config: GatewayConfig,
@@ -703,7 +761,13 @@ class SessionStore:
             from hermes_state import SessionDB
             self._db = SessionDB()
         except Exception as e:
-            print(f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}")
+            raise SessionPersistenceError(
+                "session_db_init_failed",
+                "SQLite session store is unavailable",
+                stage="session_db_init",
+                action="initialize_session_store",
+                cause=e,
+            ) from None
     
     def _ensure_loaded(self) -> None:
         """Load sessions index from disk if not already loaded."""
@@ -758,17 +822,30 @@ class SessionStore:
     
     def _generate_session_key(self, source: SessionSource) -> str:
         """Generate a session key from a source."""
+        if (
+            source.platform == Platform.FEISHU
+            and source.chat_type in _FEISHU_LIVE_CONVERSATION_CHAT_TYPES
+            and not source.chat_id
+        ):
+            raise InvalidLiveSessionSource(
+                "feishu_missing_chat_identity",
+                "live Feishu inbound source requires chat_id or equivalent conversation identity",
+            )
+        if hasattr(self.config, "session_key_for_source"):
+            return self.config.session_key_for_source(source)
         return build_session_key(
             source,
             group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            require_conversation_identity=True,
         )
 
     def _scope_kwargs_for_source(self, source: Optional[SessionSource], session_key: str) -> Dict[str, Any]:
         """Return DB scope metadata for the current source.
 
-        PR1 only scopes Feishu sessions when current app identity evidence is
-        available. Other/unknown sources remain legacy-compatible.
+        Feishu inbound scope is fail-closed: missing account, chat, route, or
+        participant evidence is ambiguous, not legacy-global. Other/unknown
+        sources remain legacy-compatible.
         """
         if source is None or source.platform != Platform.FEISHU:
             return {
@@ -777,6 +854,12 @@ class SessionStore:
                 "route_session_key_snapshot": None,
                 "route_partition_key": None,
             }
+        feishu_ambiguous = {
+            "scope_assignment_status": "ambiguous",
+            "conversation_scope_id": None,
+            "route_session_key_snapshot": None,
+            "route_partition_key": None,
+        }
         from gateway.conversation_scope import (
             conversation_identity,
             feishu_platform_account_id,
@@ -786,22 +869,20 @@ class SessionStore:
         platform_cfg = (getattr(self.config, "platforms", {}) or {}).get(Platform.FEISHU)
         account_id = feishu_platform_account_id(config=platform_cfg)
         if not account_id:
-            return {
-                "scope_assignment_status": "legacy_unscoped",
-                "conversation_scope_id": None,
-                "route_session_key_snapshot": None,
-                "route_partition_key": None,
+            return feishu_ambiguous
+        isolation = (
+            self.config.effective_session_isolation(source.platform)
+            if hasattr(self.config, "effective_session_isolation")
+            else {
+                "group_sessions_per_user": getattr(self.config, "group_sessions_per_user", True),
+                "thread_sessions_per_user": getattr(self.config, "thread_sessions_per_user", False),
             }
-        route_key = route_partition_key(
-            source,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
         )
+        route_key = route_partition_key(source, **isolation)
         ident = conversation_identity(
             source,
             platform_account_id=account_id,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            **isolation,
             group_conversation_scope_per_user=getattr(
                 self.config, "group_conversation_scope_per_user", False
             ),
@@ -810,12 +891,7 @@ class SessionStore:
             ),
         )
         if not ident:
-            return {
-                "scope_assignment_status": "legacy_unscoped",
-                "conversation_scope_id": None,
-                "route_session_key_snapshot": None,
-                "route_partition_key": None,
-            }
+            return feishu_ambiguous
         return {
             "scope_assignment_status": "scoped",
             "conversation_scope_id": ident.id,
@@ -977,7 +1053,12 @@ class SessionStore:
         scope_kwargs: Dict[str, Any],
     ) -> None:
         if not self._db:
-            return
+            raise SessionPersistenceError(
+                "session_db_unavailable",
+                "SQLite session store is unavailable",
+                stage="scope_backfill",
+                action="upsert_scope_and_session_row",
+            )
         result = self._db.update_session_scope_if_missing(
             session_id=session_id,
             source=source.platform.value if source.platform else "unknown",
@@ -1271,7 +1352,13 @@ class SessionStore:
             try:
                 self._db.mark_session_scope_ambiguous(**db_mark_ambiguous)
             except Exception as e:
-                logger.debug("Session DB scope ambiguity mark failed: %s", e)
+                raise SessionPersistenceError(
+                    "session_db_scope_mark_failed",
+                    "failed to mark ambiguous session scope",
+                    stage="scope_mark",
+                    action="mark_session_scope_ambiguous",
+                    cause=e,
+                ) from None
             if not db_mark_ambiguous_and_detach:
                 return existing_entry
 
@@ -1287,14 +1374,28 @@ class SessionStore:
                             self._save()
                             existing_entry = entry_to_update
             except Exception as e:
-                logger.debug("Session DB scope backfill failed: %s", e)
+                if isinstance(e, SessionPersistenceError):
+                    raise
+                raise SessionPersistenceError(
+                    "session_db_scope_backfill_failed",
+                    "failed to backfill session scope",
+                    stage="scope_backfill",
+                    action="upsert_scope_and_session_row",
+                    cause=e,
+                ) from None
             return existing_entry
 
         if self._db and db_end_session_id:
             try:
                 self._db.end_session(db_end_session_id, "session_reset")
             except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
+                raise SessionPersistenceError(
+                    "session_db_end_failed",
+                    "failed to end previous session row",
+                    stage="create_session",
+                    action="end_session",
+                    cause=e,
+                ) from None
 
         if self._db and db_create_kwargs:
             try:
@@ -1303,7 +1404,13 @@ class SessionStore:
                     self._db.upsert_conversation_scope(identity)
                 self._db.create_session(**db_create_kwargs)
             except Exception as e:
-                print(f"[gateway] Warning: Failed to create SQLite session: {e}")
+                raise SessionPersistenceError(
+                    "session_db_create_failed",
+                    "failed to create SQLite session row",
+                    stage="create_session",
+                    action="create_session",
+                    cause=e,
+                ) from None
 
         return entry
 
@@ -1663,30 +1770,46 @@ class SessionStore:
                      _flush_messages_to_session_db(), preventing the
                      duplicate-write bug (#860).
         """
-        if self._db and not skip_db:
-            try:
-                self._db.append_message(
-                    session_id=session_id,
-                    role=message.get("role", "unknown"),
-                    content=message.get("content"),
-                    tool_name=message.get("tool_name"),
-                    tool_calls=message.get("tool_calls"),
-                    tool_call_id=message.get("tool_call_id"),
-                    reasoning=message.get("reasoning") if message.get("role") == "assistant" else None,
-                    reasoning_content=message.get("reasoning_content") if message.get("role") == "assistant" else None,
-                    reasoning_details=message.get("reasoning_details") if message.get("role") == "assistant" else None,
-                    codex_reasoning_items=message.get("codex_reasoning_items") if message.get("role") == "assistant" else None,
-                    codex_message_items=message.get("codex_message_items") if message.get("role") == "assistant" else None,
-                    # Platform-side message id (yuanbao msg_id, telegram update_id, …).
-                    # Accept either explicit ``platform_message_id`` or the legacy
-                    # ``message_id`` key the JSONL transcript used.
-                    platform_message_id=(
-                        message.get("platform_message_id") or message.get("message_id")
-                    ),
-                    observed=bool(message.get("observed")),
-                )
-            except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
+        if skip_db:
+            return
+        if not self._db:
+            raise SessionPersistenceError(
+                "session_db_unavailable",
+                "SQLite session store is unavailable",
+                stage="append_message",
+                action="append_to_transcript",
+                role=str(message.get("role", "unknown")),
+            )
+        try:
+            self._db.append_message(
+                session_id=session_id,
+                role=message.get("role", "unknown"),
+                content=message.get("content"),
+                tool_name=message.get("tool_name"),
+                tool_calls=message.get("tool_calls"),
+                tool_call_id=message.get("tool_call_id"),
+                reasoning=message.get("reasoning") if message.get("role") == "assistant" else None,
+                reasoning_content=message.get("reasoning_content") if message.get("role") == "assistant" else None,
+                reasoning_details=message.get("reasoning_details") if message.get("role") == "assistant" else None,
+                codex_reasoning_items=message.get("codex_reasoning_items") if message.get("role") == "assistant" else None,
+                codex_message_items=message.get("codex_message_items") if message.get("role") == "assistant" else None,
+                # Platform-side message id (yuanbao msg_id, telegram update_id, …).
+                # Accept either explicit ``platform_message_id`` or the legacy
+                # ``message_id`` key the JSONL transcript used.
+                platform_message_id=(
+                    message.get("platform_message_id") or message.get("message_id")
+                ),
+                observed=bool(message.get("observed")),
+            )
+        except Exception as e:
+            raise SessionPersistenceError(
+                "session_db_append_failed",
+                "failed to append transcript message",
+                stage="append_message",
+                action="append_to_transcript",
+                role=str(message.get("role", "unknown")),
+                cause=e,
+            ) from None
     
     def rewrite_transcript(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         """Replace the entire transcript for a session with new messages.
@@ -1694,11 +1817,23 @@ class SessionStore:
         Used by /retry, /undo, and /compress to persist modified conversation
         history. state.db is the canonical store.
         """
-        if self._db:
-            try:
-                self._db.replace_messages(session_id, messages)
-            except Exception as e:
-                logger.debug("Failed to rewrite transcript in DB: %s", e)
+        if not self._db:
+            raise SessionPersistenceError(
+                "session_db_unavailable",
+                "SQLite session store is unavailable",
+                stage="rewrite_transcript",
+                action="rewrite_transcript",
+            )
+        try:
+            self._db.replace_messages(session_id, messages)
+        except Exception as e:
+            raise SessionPersistenceError(
+                "session_db_rewrite_failed",
+                "failed to rewrite transcript",
+                stage="rewrite_transcript",
+                action="rewrite_transcript",
+                cause=e,
+            ) from None
 
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages from a session's transcript.
@@ -1708,12 +1843,22 @@ class SessionStore:
         migrated (their DB row holds the full message history).
         """
         if not self._db:
-            return []
+            raise SessionPersistenceError(
+                "session_db_unavailable",
+                "SQLite session store is unavailable",
+                stage="load_transcript",
+                action="load_transcript",
+            )
         try:
             return self._db.get_messages_as_conversation(session_id)
         except Exception as e:
-            logger.debug("Could not load messages from DB: %s", e)
-            return []
+            raise SessionPersistenceError(
+                "session_db_load_failed",
+                "failed to load transcript",
+                stage="load_transcript",
+                action="load_transcript",
+                cause=e,
+            ) from None
 
 
 def build_session_context(
@@ -1740,8 +1885,14 @@ def build_session_context(
         home_channels=home_channels,
         shared_multi_user_session=is_shared_multi_user_session(
             source,
-            group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
+            **(
+                config.effective_session_isolation(source.platform)
+                if hasattr(config, "effective_session_isolation")
+                else {
+                    "group_sessions_per_user": getattr(config, "group_sessions_per_user", True),
+                    "thread_sessions_per_user": getattr(config, "thread_sessions_per_user", False),
+                }
+            ),
         ),
     )
     

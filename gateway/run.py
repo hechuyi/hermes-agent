@@ -89,7 +89,9 @@ _TELEGRAM_NOISY_STATUS_RE = re.compile(
 _GATEWAY_PROVIDER_ERROR_RE = re.compile(
     r"("  # infrastructure/provider error preambles, not ordinary assistant prose
     r"api\s+(?:call\s+)?failed"
+    r"|(?:the\s+)?model\s+provider\s+failed"
     r"|provider\s+authentication\s+failed"
+    r"|billing\s+or\s+credits\s+exhausted"
     r"|non-retryable\s+error"
     r"|rate\s+limited\s+after\s+\d+\s+retries"
     r"|error\s+code\s*:"
@@ -134,10 +136,66 @@ _GATEWAY_SECRET_PATTERNS = (
     re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._\-]{20,}\b"),
 )
 
-
 def _gateway_platform_value(platform: Any) -> str:
     """Return a normalized gateway platform value for enums or raw strings."""
     return str(getattr(platform, "value", platform) or "").strip().lower()
+
+
+def _gateway_agent_persistence_covers_full_transcript(
+    persistence: Any,
+    new_messages: List[Dict[str, Any]],
+    *,
+    history_offset: int,
+) -> bool:
+    """Return True when run_agent already persisted this turn's DB rows."""
+    required_messages = [
+        (history_offset + idx, msg)
+        for idx, msg in enumerate(new_messages or [])
+        if isinstance(msg, dict) and msg.get("role") != "system"
+    ]
+    if not required_messages:
+        return False
+
+    for idx, msg in required_messages:
+        if not _gateway_agent_persistence_covers_message(
+            persistence,
+            absolute_message_index=idx,
+            message=msg,
+        ):
+            return False
+    return True
+
+
+def _gateway_agent_persistence_covered_row_ids(persistence: Any) -> Dict[Any, Any]:
+    """Return message-index row ids with explicit successful persistence proof."""
+    if not isinstance(persistence, dict):
+        return {}
+
+    covered: Dict[Any, Any] = {}
+    partial_row_ids = persistence.get("covered_row_ids_by_message_index")
+    if isinstance(partial_row_ids, dict):
+        covered.update(partial_row_ids)
+
+    row_ids = persistence.get("row_ids_by_message_index")
+    if persistence.get("attempted") and persistence.get("ok") and isinstance(row_ids, dict):
+        covered.update(row_ids)
+    return covered
+
+
+def _gateway_agent_persistence_covers_message(
+    persistence: Any,
+    *,
+    absolute_message_index: int,
+    message: Dict[str, Any],
+) -> bool:
+    """Return True when run_agent proved DB persistence for one transcript row."""
+    if not isinstance(message, dict) or message.get("role") == "system":
+        return False
+
+    row_ids = _gateway_agent_persistence_covered_row_ids(persistence)
+    if not row_ids:
+        return False
+    return row_ids.get(absolute_message_index, row_ids.get(str(absolute_message_index))) is not None
 
 
 def _is_transient_network_error(exc: BaseException) -> bool:
@@ -250,7 +308,9 @@ def _gateway_provider_error_reply(text: str) -> str:
 _GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(
     r"^\s*(\W*\s*)?("
     r"api\s+(?:call\s+)?failed"
+    r"|(?:the\s+)?model\s+provider\s+failed"
     r"|provider\s+authentication\s+failed"
+    r"|billing\s+or\s+credits\s+exhausted"
     r"|non-retryable\s+error"
     r"|rate\s+limited\s+after\s+\d+\s+retries"
     r"|error\s+code\s*:"
@@ -283,6 +343,20 @@ def _looks_like_gateway_provider_error(text: str) -> bool:
     if len(body) > 400 or body.count("\n") > 4:
         return False
     return bool(_GATEWAY_PROVIDER_ERROR_SHAPE_RE.search(body))
+
+
+def _gateway_failed_turn_should_persist_message(message: Dict[str, Any]) -> bool:
+    """Return whether a failed-turn message is durable model/user content."""
+    if not isinstance(message, dict):
+        return False
+    role = message.get("role")
+    if role == "system":
+        return False
+    if role == "assistant" and _looks_like_gateway_provider_error(
+        str(message.get("content") or "")
+    ):
+        return False
+    return True
 
 
 def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
@@ -1025,6 +1099,7 @@ from gateway.config import (
     load_gateway_config,
 )
 from gateway.session import (
+    InvalidLiveSessionSource,
     SessionStore,
     SessionSource,
     SessionContext,
@@ -1623,7 +1698,36 @@ def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
         return False
     if agent_result.get("completed") is False:
         return False
+    final_response = agent_result.get("final_response")
+    if not final_response or final_response == "(empty)":
+        return False
     return True
+
+
+def _should_confirm_final_stream_delivery(
+    response: dict,
+    stream_consumer: Any,
+) -> bool:
+    """Return whether gateway may suppress the normal final send.
+
+    Only true final delivery counts. Intermediate preview/status/progress text
+    must not suppress the final visible reply.
+    """
+    if not isinstance(response, dict) or response.get("failed"):
+        return False
+    final_response = response.get("final_response") or ""
+    if not final_response or final_response == "(empty)":
+        return False
+    if response.get("response_transformed"):
+        return False
+    streamed = bool(stream_consumer and getattr(stream_consumer, "final_response_sent", False))
+    content_delivered = bool(
+        stream_consumer and getattr(stream_consumer, "final_content_delivered", False)
+    )
+    previewed = bool(response.get("response_previewed"))
+    if stream_consumer is not None:
+        return streamed or content_delivered
+    return streamed or content_delivered or previewed
 
 
 def _preserve_queued_followup_history_offset(
@@ -1655,6 +1759,29 @@ def _preserve_queued_followup_history_offset(
 
     merged = dict(followup_result)
     merged["history_offset"] = current_offset
+    current_persistence = current_result.get("persistence")
+    followup_persistence = followup_result.get("persistence")
+    covered_row_ids = _gateway_agent_persistence_covered_row_ids(current_persistence)
+    covered_row_ids.update(_gateway_agent_persistence_covered_row_ids(followup_persistence))
+    if (
+        isinstance(current_persistence, dict)
+        and isinstance(followup_persistence, dict)
+        and current_persistence.get("attempted")
+        and current_persistence.get("ok")
+        and followup_persistence.get("attempted")
+        and followup_persistence.get("ok")
+        and isinstance(current_persistence.get("row_ids_by_message_index"), dict)
+        and isinstance(followup_persistence.get("row_ids_by_message_index"), dict)
+    ):
+        merged_persistence = dict(followup_persistence)
+        merged_row_ids = dict(current_persistence["row_ids_by_message_index"])
+        merged_row_ids.update(followup_persistence["row_ids_by_message_index"])
+        merged_persistence["row_ids_by_message_index"] = merged_row_ids
+        merged["persistence"] = merged_persistence
+    elif covered_row_ids:
+        merged_persistence = dict(followup_persistence) if isinstance(followup_persistence, dict) else {}
+        merged_persistence["covered_row_ids_by_message_index"] = covered_row_ids
+        merged["persistence"] = merged_persistence
     return merged
 
 
@@ -2175,18 +2302,31 @@ class GatewayRunner:
 
     def _session_key_for_source(self, source: SessionSource) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""
+        build_session_key(source, require_conversation_identity=True)
         if hasattr(self, "session_store") and self.session_store is not None:
             try:
                 session_key = self.session_store._generate_session_key(source)
                 if isinstance(session_key, str) and session_key:
                     return session_key
+            except InvalidLiveSessionSource:
+                raise
             except Exception:
                 pass
         config = getattr(self, "config", None)
+        if config is not None and hasattr(config, "session_key_for_source"):
+            try:
+                session_key = config.session_key_for_source(source)
+                if isinstance(session_key, str) and session_key:
+                    return session_key
+            except InvalidLiveSessionSource:
+                raise
+            except Exception:
+                pass
         return build_session_key(
             source,
             group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
+            require_conversation_identity=True,
         )
 
     def _telegram_topic_mode_enabled(self, source: SessionSource) -> bool:
@@ -4551,13 +4691,14 @@ class GatewayRunner:
         # entry. For thread destinations build_session_key keys without
         # user_id (thread_sessions_per_user defaults to False) — so the
         # next real user message in the thread shares this same session.
-        platform_cfg = self.config.platforms.get(platform)
-        extra = platform_cfg.extra if platform_cfg else {}
-        session_key = build_session_key(
-            dest_source,
-            group_sessions_per_user=extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
-        )
+        if hasattr(self.config, "session_key_for_source"):
+            session_key = self.config.session_key_for_source(dest_source)
+        else:
+            session_key = build_session_key(
+                dest_source,
+                group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
+                thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            )
 
         # Make sure there's an entry in the session_store for this key. If
         # the home channel has never been used, get_or_create_session
@@ -6241,15 +6382,10 @@ class GatewayRunner:
         Checks the platform_registry first (plugin adapters), then falls
         through to the built-in if/elif chain for core platforms.
         """
-        if hasattr(config, "extra") and isinstance(config.extra, dict):
-            config.extra.setdefault(
-                "group_sessions_per_user",
-                self.config.group_sessions_per_user,
-            )
-            config.extra.setdefault(
-                "thread_sessions_per_user",
-                getattr(self.config, "thread_sessions_per_user", False),
-            )
+        def _inject_session_isolation_config(adapter):
+            if isinstance(adapter, BasePlatformAdapter):
+                adapter._session_isolation_config = self.config
+            return adapter
 
         # ── Plugin-registered platforms (checked first) ───────────────────
         try:
@@ -6257,6 +6393,7 @@ class GatewayRunner:
             if platform_registry.is_registered(platform.value):
                 adapter = platform_registry.create_adapter(platform.value, config)
                 if adapter is not None:
+                    adapter = _inject_session_isolation_config(adapter)
                     # Adapters that need a back-reference to the gateway runner
                     # (e.g. for cross-platform admin alerts) declare a
                     # ``gateway_runner`` attribute. Inject it after creation so
@@ -6276,12 +6413,15 @@ class GatewayRunner:
             logger.debug("Platform registry lookup for '%s' failed: %s", platform.value, e)
         # Fall through to built-in adapters below
 
+        def _instantiate_adapter(adapter_cls):
+            return _inject_session_isolation_config(adapter_cls(config))
+
         if platform == Platform.TELEGRAM:
             from gateway.platforms.telegram import TelegramAdapter, check_telegram_requirements
             if not check_telegram_requirements():
                 logger.warning("Telegram: python-telegram-bot not installed")
                 return None
-            adapter = TelegramAdapter(config)
+            adapter = _instantiate_adapter(TelegramAdapter)
             # Apply Telegram notification mode from config.  Controls whether
             # intermediate messages (tool progress, streaming, status) trigger
             # push notifications.  Supports ENV override for quick testing.
@@ -6310,56 +6450,56 @@ class GatewayRunner:
             if not check_whatsapp_requirements():
                 logger.warning("WhatsApp: Node.js not installed or bridge not configured")
                 return None
-            return WhatsAppAdapter(config)
+            return _instantiate_adapter(WhatsAppAdapter)
         
         elif platform == Platform.SLACK:
             from gateway.platforms.slack import SlackAdapter, check_slack_requirements
             if not check_slack_requirements():
                 logger.warning("Slack: slack-bolt not installed. Run: pip install 'hermes-agent[slack]'")
                 return None
-            return SlackAdapter(config)
+            return _instantiate_adapter(SlackAdapter)
 
         elif platform == Platform.SIGNAL:
             from gateway.platforms.signal import SignalAdapter, check_signal_requirements
             if not check_signal_requirements():
                 logger.warning("Signal: SIGNAL_HTTP_URL or SIGNAL_ACCOUNT not configured")
                 return None
-            return SignalAdapter(config)
+            return _instantiate_adapter(SignalAdapter)
 
         elif platform == Platform.HOMEASSISTANT:
             from gateway.platforms.homeassistant import HomeAssistantAdapter, check_ha_requirements
             if not check_ha_requirements():
                 logger.warning("HomeAssistant: aiohttp not installed or HASS_TOKEN not set")
                 return None
-            return HomeAssistantAdapter(config)
+            return _instantiate_adapter(HomeAssistantAdapter)
 
         elif platform == Platform.EMAIL:
             from gateway.platforms.email import EmailAdapter, check_email_requirements
             if not check_email_requirements():
                 logger.warning("Email: EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_IMAP_HOST, or EMAIL_SMTP_HOST not set")
                 return None
-            return EmailAdapter(config)
+            return _instantiate_adapter(EmailAdapter)
 
         elif platform == Platform.SMS:
             from gateway.platforms.sms import SmsAdapter, check_sms_requirements
             if not check_sms_requirements():
                 logger.warning("SMS: aiohttp not installed or TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN not set")
                 return None
-            return SmsAdapter(config)
+            return _instantiate_adapter(SmsAdapter)
 
         elif platform == Platform.DINGTALK:
             from gateway.platforms.dingtalk import DingTalkAdapter, check_dingtalk_requirements
             if not check_dingtalk_requirements():
                 logger.warning("DingTalk: dingtalk-stream not installed or DINGTALK_CLIENT_ID/SECRET not set")
                 return None
-            return DingTalkAdapter(config)
+            return _instantiate_adapter(DingTalkAdapter)
 
         elif platform == Platform.FEISHU:
             from gateway.platforms.feishu import FeishuAdapter, check_feishu_requirements
             if not check_feishu_requirements():
                 logger.warning("Feishu: lark-oapi not installed or FEISHU_APP_ID/SECRET not set")
                 return None
-            return FeishuAdapter(config)
+            return _instantiate_adapter(FeishuAdapter)
 
         elif platform == Platform.WECOM_CALLBACK:
             from gateway.platforms.wecom_callback import (
@@ -6369,42 +6509,42 @@ class GatewayRunner:
             if not check_wecom_callback_requirements():
                 logger.warning("WeComCallback: aiohttp/httpx/defusedxml not installed")
                 return None
-            return WecomCallbackAdapter(config)
+            return _instantiate_adapter(WecomCallbackAdapter)
 
         elif platform == Platform.WECOM:
             from gateway.platforms.wecom import WeComAdapter, check_wecom_requirements
             if not check_wecom_requirements():
                 logger.warning("WeCom: aiohttp not installed or WECOM_BOT_ID/SECRET not set")
                 return None
-            return WeComAdapter(config)
+            return _instantiate_adapter(WeComAdapter)
 
         elif platform == Platform.WEIXIN:
             from gateway.platforms.weixin import WeixinAdapter, check_weixin_requirements
             if not check_weixin_requirements():
                 logger.warning("Weixin: aiohttp/cryptography not installed")
                 return None
-            return WeixinAdapter(config)
+            return _instantiate_adapter(WeixinAdapter)
 
         elif platform == Platform.MATRIX:
             from gateway.platforms.matrix import MatrixAdapter, check_matrix_requirements
             if not check_matrix_requirements():
                 logger.warning("Matrix: mautrix not installed or credentials not set. Run: pip install 'mautrix[encryption]'")
                 return None
-            return MatrixAdapter(config)
+            return _instantiate_adapter(MatrixAdapter)
 
         elif platform == Platform.API_SERVER:
             from gateway.platforms.api_server import APIServerAdapter, check_api_server_requirements
             if not check_api_server_requirements():
                 logger.warning("API Server: aiohttp not installed")
                 return None
-            return APIServerAdapter(config)
+            return _instantiate_adapter(APIServerAdapter)
 
         elif platform == Platform.WEBHOOK:
             from gateway.platforms.webhook import WebhookAdapter, check_webhook_requirements
             if not check_webhook_requirements():
                 logger.warning("Webhook: aiohttp not installed")
                 return None
-            adapter = WebhookAdapter(config)
+            adapter = _instantiate_adapter(WebhookAdapter)
             adapter.gateway_runner = self  # For cross-platform delivery
             return adapter
 
@@ -6416,28 +6556,28 @@ class GatewayRunner:
             if not check_msgraph_webhook_requirements():
                 logger.warning("MSGraph webhook: aiohttp not installed")
                 return None
-            return MSGraphWebhookAdapter(config)
+            return _instantiate_adapter(MSGraphWebhookAdapter)
 
         elif platform == Platform.BLUEBUBBLES:
             from gateway.platforms.bluebubbles import BlueBubblesAdapter, check_bluebubbles_requirements
             if not check_bluebubbles_requirements():
                 logger.warning("BlueBubbles: aiohttp/httpx missing or BLUEBUBBLES_SERVER_URL/BLUEBUBBLES_PASSWORD not configured")
                 return None
-            return BlueBubblesAdapter(config)
+            return _instantiate_adapter(BlueBubblesAdapter)
 
         elif platform == Platform.QQBOT:
             from gateway.platforms.qqbot import QQAdapter, check_qq_requirements
             if not check_qq_requirements():
                 logger.warning("QQBot: aiohttp/httpx missing or QQ_APP_ID/QQ_CLIENT_SECRET not configured")
                 return None
-            return QQAdapter(config)
+            return _instantiate_adapter(QQAdapter)
 
         elif platform == Platform.YUANBAO:
             from gateway.platforms.yuanbao import YuanbaoAdapter, WEBSOCKETS_AVAILABLE
             if not WEBSOCKETS_AVAILABLE:
                 logger.warning("Yuanbao: websockets not installed. Run: pip install websockets")
                 return None
-            return YuanbaoAdapter(config)
+            return _instantiate_adapter(YuanbaoAdapter)
 
         return None
     def _is_user_authorized(self, source: SessionSource) -> bool:
@@ -7938,8 +8078,14 @@ class GatewayRunner:
         """
         history = history or []
         message_text = event.text or ""
-        _group_sessions_per_user = getattr(self.config, "group_sessions_per_user", True)
-        _thread_sessions_per_user = getattr(self.config, "thread_sessions_per_user", False)
+        _isolation = (
+            self.config.effective_session_isolation(source.platform)
+            if hasattr(self.config, "effective_session_isolation")
+            else {
+                "group_sessions_per_user": getattr(self.config, "group_sessions_per_user", True),
+                "thread_sessions_per_user": getattr(self.config, "thread_sessions_per_user", False),
+            }
+        )
         # Use the same helper every other call site uses so the write key here
         # matches the consume key at the run_conversation site — even if the
         # session store overrides build_session_key's default behavior.
@@ -7950,8 +8096,7 @@ class GatewayRunner:
 
         _is_shared_multi_user = is_shared_multi_user_session(
             source,
-            group_sessions_per_user=_group_sessions_per_user,
-            thread_sessions_per_user=_thread_sessions_per_user,
+            **_isolation,
         )
         if _is_shared_multi_user and source.user_name:
             message_text = f"[{source.user_name}] {message_text}"
@@ -8222,7 +8367,11 @@ class GatewayRunner:
             except Exception:
                 pass
 
-        session_entry = self.session_store.get_or_create_session(source)
+        try:
+            session_entry = self.session_store.get_or_create_session(source)
+        except Exception:
+            logger.exception("Agent setup error in session %s", _quick_key)
+            raise
         session_key = session_entry.session_key
         self._cache_session_source(session_key, source)
         if self._is_telegram_topic_lane(source):
@@ -8603,8 +8752,18 @@ class GatewayRunner:
                                     skip_memory=True,
                                     enabled_toolsets=["memory"],
                                     session_id=session_entry.session_id,
+                                    gateway_session_key=session_key,
+                                    session_db=getattr(self, "_session_db", None),
                                 )
                                 try:
+                                    self._init_cached_agent_for_turn(
+                                        _hyg_agent,
+                                        0,
+                                        gateway_session_key=session_key,
+                                        conversation_scope_id=getattr(context, "conversation_scope_id", None),
+                                        platform_account_id=getattr(context, "platform_account_id", None),
+                                        route_partition_key=getattr(context, "route_partition_key", None),
+                                    )
                                     _hyg_agent._print_fn = lambda *a, **kw: None
 
                                     loop = asyncio.get_running_loop()
@@ -8723,9 +8882,16 @@ class GatewayRunner:
                 "Keep the introduction concise -- one or two sentences max.]"
             )
         
+        pending_platform_notices: list[tuple["SessionSource", str, Optional[str]]] = []
+
         # One-time prompt if no home channel is set for this platform
         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
-        if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
+        if (
+            not history
+            and source.platform
+            and source.platform != Platform.LOCAL
+            and source.platform != Platform.WEBHOOK
+        ):
             platform_name = source.platform.value
             env_key = _home_target_env_var(platform_name)
             if not os.getenv(env_key):
@@ -8744,10 +8910,8 @@ class GatewayRunner:
                     f"Type {sethome_cmd} to make this chat your home channel, "
                     f"or ignore to skip."
                 )
-                await self._deliver_platform_notice(
-                    source,
-                    notice,
-                    reply_to_message_id=self._reply_anchor_for_event(event),
+                pending_platform_notices.append(
+                    (source, notice, self._reply_anchor_for_event(event))
                 )
         
         # -----------------------------------------------------------------
@@ -8840,6 +9004,7 @@ class GatewayRunner:
                     _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
                 return None
 
+            raw_agent_result = dict(agent_result) if isinstance(agent_result, dict) else {}
             response = agent_result.get("final_response") or ""
 
             # Convert the agent's internal "(empty)" sentinel into a
@@ -8863,30 +9028,21 @@ class GatewayRunner:
                 _response_time, _api_calls, _resp_len,
             )
 
-            # Successful turn — clear any stuck-loop counter for this session.
-            # This ensures the counter only accumulates across CONSECUTIVE
-            # restarts where the session was active (never completed).
-            #
-            # Also clear the resume_pending flag (set by drain-timeout
-            # shutdown) — the turn ran to completion, so recovery
-            # succeeded and subsequent messages should no longer receive
-            # the restart-interruption system note.
-            if session_key and _should_clear_resume_pending_after_turn(agent_result):
-                self._clear_restart_failure_count(session_key)
-                try:
-                    self.session_store.clear_resume_pending(session_key)
-                except Exception as _e:
-                    logger.debug(
-                        "clear_resume_pending failed for %s: %s",
-                        session_key, _e,
-                    )
-
             # Normalize empty responses: surface errors, partial failures, and
             # the case where agent did work but returned no text. Fix for #18765.
             response = _normalize_empty_agent_response(
                 agent_result, response, history_len=len(history),
             )
             response = _sanitize_gateway_final_response(source.platform, response)
+            agent_result["final_response"] = response
+
+            if pending_platform_notices:
+                for notice_source, notice_text, notice_reply_to in pending_platform_notices:
+                    await self._deliver_platform_notice(
+                        notice_source,
+                        notice_text,
+                        reply_to_message_id=notice_reply_to,
+                    )
 
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
@@ -9055,7 +9211,7 @@ class GatewayRunner:
             # definitions as the first entry so the transcript is self-describing
             # -- the same list of dicts sent as tools=[...] in the API request.
             if is_context_overflow_failure:
-                pass  # Skip all transcript writes — don't grow a broken session
+                pass  # Skip all transcript writes — don't grow or fake progress.
             elif not history:
                 tool_defs = agent_result.get("tools", [])
                 self.session_store.append_to_transcript(
@@ -9073,24 +9229,52 @@ class GatewayRunner:
             # Use the filtered history length (history_offset) that was actually
             # passed to the agent, not len(history) which includes session_meta
             # entries that were stripped before the agent saw them.
+            history_len = agent_result.get("history_offset", len(history))
+            new_messages = agent_messages[history_len:] if len(agent_messages) > history_len else []
+            _persistence = agent_result.get("persistence") if isinstance(agent_result, dict) else None
             if is_context_overflow_failure:
                 pass  # handled above — skip all transcript writes
             elif agent_failed_early:
-                # Transient failure (429/timeout/5xx): persist only the user
-                # message so the next message can load a transcript that
-                # reflects what was said.  Skip the assistant error text since
-                # it's a gateway-generated hint, not model output. (#7100)
-                _user_entry = {"role": "user", "content": message_text, "timestamp": ts}
-                if event.message_id:
-                    _user_entry["message_id"] = str(event.message_id)
-                self.session_store.append_to_transcript(
-                    session_entry.session_id,
-                    _user_entry,
-                )
+                # Failed turns split into two cases:
+                # * transient provider failures keep only the user row, so a
+                #   retry has context without durable gateway error text;
+                # * content-policy / early-exit failures may already contain a
+                #   visible assistant final in ``messages``.  Persist any such
+                #   uncovered rows instead of dropping what the user saw.
+                _user_msg_id_attached = False
+                _persisted_or_covered_user = False
+                for _relative_idx, msg in enumerate(new_messages):
+                    if not _gateway_failed_turn_should_persist_message(msg):
+                        continue
+                    entry = {**msg, "timestamp": ts}
+                    if (
+                        not _user_msg_id_attached
+                        and msg.get("role") == "user"
+                        and event.message_id
+                        and "message_id" not in entry
+                    ):
+                        entry["message_id"] = str(event.message_id)
+                        _user_msg_id_attached = True
+                    if msg.get("role") == "user":
+                        _persisted_or_covered_user = True
+                    self.session_store.append_to_transcript(
+                        session_entry.session_id,
+                        entry,
+                        skip_db=_gateway_agent_persistence_covers_message(
+                            _persistence,
+                            absolute_message_index=history_len + _relative_idx,
+                            message=msg,
+                        ),
+                    )
+                if not _persisted_or_covered_user:
+                    _user_entry = {"role": "user", "content": message_text, "timestamp": ts}
+                    if event.message_id:
+                        _user_entry["message_id"] = str(event.message_id)
+                    self.session_store.append_to_transcript(
+                        session_entry.session_id,
+                        _user_entry,
+                    )
             else:
-                history_len = agent_result.get("history_offset", len(history))
-                new_messages = agent_messages[history_len:] if len(agent_messages) > history_len else []
-
                 # If no new messages found (edge case), fall back to simple user/assistant
                 if not new_messages:
                     _user_entry = {"role": "user", "content": message_text, "timestamp": ts}
@@ -9106,17 +9290,14 @@ class GatewayRunner:
                             {"role": "assistant", "content": response, "timestamp": ts}
                         )
                 else:
-                    # The agent already persisted these messages to SQLite via
-                    # _flush_messages_to_session_db(), so skip the DB write here
-                    # to prevent the duplicate-write bug (#860).  We still write
-                    # to JSONL for backward compatibility and as a backup.
-                    agent_persisted = self._session_db is not None
+                    # Skip DB only when the agent explicitly reports successful
+                    # DB persistence; do not infer success from DB availability.
                     # Attach the inbound platform message_id to the first user
                     # entry written this turn so platform-level quote-resolution
                     # (e.g. Yuanbao QuoteContextMiddleware's transcript fallback)
                     # can find earlier @bot messages by their original message_id.
                     _user_msg_id_attached = False
-                    for msg in new_messages:
+                    for _relative_idx, msg in enumerate(new_messages):
                         # Skip system messages (they're rebuilt each run)
                         if msg.get("role") == "system":
                             continue
@@ -9132,7 +9313,11 @@ class GatewayRunner:
                             _user_msg_id_attached = True
                         self.session_store.append_to_transcript(
                             session_entry.session_id, entry,
-                            skip_db=agent_persisted,
+                            skip_db=_gateway_agent_persistence_covers_message(
+                                _persistence,
+                                absolute_message_index=history_len + _relative_idx,
+                                message=msg,
+                            ),
                         )
             
             # Token counts and model are now persisted by the agent directly.
@@ -9143,9 +9328,28 @@ class GatewayRunner:
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
             )
 
+            # Successful turn — clear any stuck-loop counter for this session
+            # only after durable transcript persistence is proven.  If any
+            # append above raises SessionPersistenceError, resume_pending stays
+            # intact for restart recovery.
+            if session_key and _should_clear_resume_pending_after_turn(raw_agent_result):
+                self._clear_restart_failure_count(session_key)
+                try:
+                    self.session_store.clear_resume_pending(session_key)
+                except Exception as _e:
+                    logger.debug(
+                        "clear_resume_pending failed for %s: %s",
+                        session_key, _e,
+                    )
+
             # Auto voice reply: send TTS audio before the text response
             _already_sent = bool(agent_result.get("already_sent"))
-            if self._should_send_voice_reply(event, response, agent_messages, already_sent=_already_sent):
+            if self._should_send_voice_reply(
+                event,
+                response,
+                agent_messages,
+                already_sent=_already_sent,
+            ):
                 await self._send_voice_reply(event, response)
 
             # If streaming already delivered the response, extract and
@@ -11452,7 +11656,9 @@ class GatewayRunner:
           in which case the base adapter won't have text for auto-TTS so the
           runner must handle it.
         """
-        if not response or response.startswith("Error:"):
+        if not response:
+            return False
+        if str(response).startswith("Error:"):
             return False
 
         chat_id = event.source.chat_id
@@ -12324,8 +12530,18 @@ class GatewayRunner:
                 skip_memory=True,
                 enabled_toolsets=["memory"],
                 session_id=session_entry.session_id,
+                gateway_session_key=session_key,
+                session_db=getattr(self, "_session_db", None),
             )
             try:
+                self._init_cached_agent_for_turn(
+                    tmp_agent,
+                    0,
+                    gateway_session_key=session_key,
+                    conversation_scope_id=getattr(session_entry, "conversation_scope_id", None),
+                    platform_account_id=getattr(session_entry, "platform_account_id", None),
+                    route_partition_key=getattr(session_entry, "route_partition_key", None),
+                )
                 tmp_agent._print_fn = lambda *a, **kw: None
 
                 # Estimate with system prompt + tool schemas included so the
@@ -15817,43 +16033,9 @@ class GatewayRunner:
         _thread_metadata: Optional[Dict[str, Any]] = self._thread_metadata_for_source(source, event_message_id)
 
         if _streaming_enabled:
-            try:
-                from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig
-                _adapter = self.adapters.get(source.platform)
-                if _adapter:
-                    _adapter_supports_edit = getattr(_adapter, "SUPPORTS_MESSAGE_EDITING", True)
-                    _effective_cursor = _scfg.cursor if _adapter_supports_edit else ""
-                    _buffer_only = False
-                    if source.platform == Platform.MATRIX:
-                        _effective_cursor = ""
-                        _buffer_only = True
-                    # Fresh-final applies to Telegram only — other
-                    # platforms either edit in place cheaply (Discord,
-                    # Slack) or don't have the timestamp-on-edit
-                    # problem.  (Ported from openclaw/openclaw#72038.)
-                    _fresh_final_secs = (
-                        float(getattr(_scfg, "fresh_final_after_seconds", 0.0) or 0.0)
-                        if source.platform == Platform.TELEGRAM
-                        else 0.0
-                    )
-                    _consumer_cfg = StreamConsumerConfig(
-                        edit_interval=_scfg.edit_interval,
-                        buffer_threshold=_scfg.buffer_threshold,
-                        cursor=_effective_cursor,
-                        buffer_only=_buffer_only,
-                        fresh_final_after_seconds=_fresh_final_secs,
-                        transport=_scfg.transport or "edit",
-                        chat_type=getattr(source, "chat_type", "") or "",
-                    )
-                    _stream_consumer = GatewayStreamConsumer(
-                        adapter=_adapter,
-                        chat_id=source.chat_id,
-                        config=_consumer_cfg,
-                        metadata=_thread_metadata,
-                        initial_reply_to_id=event_message_id,
-                    )
-            except Exception as _sc_err:
-                logger.debug("Proxy: could not set up stream consumer: %s", _sc_err)
+            logger.debug(
+                "Proxy: platform assistant streaming preview disabled; final reply will use durable local send path."
+            )
 
         # Run the stream consumer task in the background
         stream_task = None
@@ -15980,7 +16162,7 @@ class GatewayRunner:
             proxy_url, (session_id or "")[:20], _elapsed, len(full_response),
         )
 
-        return {
+        result = {
             "final_response": full_response or "(No response from remote agent)",
             "messages": [
                 {"role": "user", "content": message},
@@ -15990,8 +16172,9 @@ class GatewayRunner:
             "tools": [],
             "history_offset": len(history),
             "session_id": session_id,
-            "response_previewed": _stream_consumer is not None and bool(full_response),
+            "response_previewed": False,
         }
+        return result
 
     # ------------------------------------------------------------------
 
@@ -16043,6 +16226,54 @@ class GatewayRunner:
         
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
+        try:
+            from gateway.session_context import get_session_env as _get_session_env
+            _gateway_conversation_scope_id = _get_session_env("HERMES_CONVERSATION_SCOPE_ID", "") or None
+            _gateway_platform_account_id = _get_session_env("HERMES_PLATFORM_ACCOUNT_ID", "") or None
+            _gateway_route_partition_key = _get_session_env("HERMES_ROUTE_PARTITION_KEY", "") or None
+        except Exception:
+            _gateway_conversation_scope_id = None
+            _gateway_platform_account_id = None
+            _gateway_route_partition_key = None
+        _scope_entry = None
+        try:
+            _entries = getattr(self.session_store, "_entries", None)
+            if session_key and isinstance(_entries, dict):
+                _scope_entry = _entries.get(session_key)
+            if _scope_entry is None and hasattr(self.session_store, "get_or_create_session"):
+                _scope_entry = self.session_store.get_or_create_session(source)
+        except Exception:
+            _scope_entry = None
+        if _scope_entry is not None:
+            _gateway_conversation_scope_id = (
+                getattr(_scope_entry, "conversation_scope_id", None)
+                or _gateway_conversation_scope_id
+            )
+            _gateway_platform_account_id = (
+                getattr(_scope_entry, "platform_account_id", None)
+                or _gateway_platform_account_id
+            )
+            _gateway_route_partition_key = (
+                getattr(_scope_entry, "route_partition_key", None)
+                or _gateway_route_partition_key
+            )
+        if (
+            getattr(self, "_session_db", None) is not None
+            and session_id
+            and (not _gateway_conversation_scope_id or not _gateway_route_partition_key)
+        ):
+            try:
+                _scope_row = self._session_db.get_session(session_id) or {}
+            except Exception:
+                _scope_row = {}
+            _gateway_conversation_scope_id = (
+                _gateway_conversation_scope_id
+                or _scope_row.get("conversation_scope_id")
+            )
+            _gateway_route_partition_key = (
+                _gateway_route_partition_key
+                or _scope_row.get("route_partition_key")
+            )
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
@@ -16092,7 +16323,10 @@ class GatewayRunner:
         # Disable tool progress for webhooks - they don't support message editing,
         # so each progress line would be sent as a separate message.
         from gateway.config import Platform
-        tool_progress_enabled = progress_mode != "off" and source.platform != Platform.WEBHOOK
+        tool_progress_enabled = (
+            progress_mode != "off"
+            and source.platform != Platform.WEBHOOK
+        )
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
         # in chat platforms while opting into concise mid-turn updates.
@@ -16605,6 +16839,7 @@ class GatewayRunner:
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
+        final_stream_delivery_gate = asyncio.Event()
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()
@@ -16806,6 +17041,9 @@ class GatewayRunner:
                             fresh_final_after_seconds=_fresh_final_secs,
                             transport=_scfg.transport or "edit",
                             chat_type=getattr(source, "chat_type", "") or "",
+                            wait_for_final_delivery=(
+                                final_stream_delivery_gate.wait if _want_stream_deltas else None
+                            ),
                         )
                         _stream_consumer = GatewayStreamConsumer(
                             adapter=_adapter,
@@ -16882,9 +17120,9 @@ class GatewayRunner:
                             agent,
                             _interrupt_depth,
                             gateway_session_key=session_key,
-                            conversation_scope_id=getattr(context, "conversation_scope_id", None),
-                            platform_account_id=getattr(context, "platform_account_id", None),
-                            route_partition_key=getattr(context, "route_partition_key", None),
+                            conversation_scope_id=_gateway_conversation_scope_id,
+                            platform_account_id=_gateway_platform_account_id,
+                            route_partition_key=_gateway_route_partition_key,
                         )
                         logger.debug("Reusing cached agent for session %s", session_key)
 
@@ -16919,8 +17157,16 @@ class GatewayRunner:
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
-                    session_db=self._session_db,
+                    session_db=getattr(self, "_session_db", None),
                     fallback_model=self._fallback_model,
+                )
+                self._init_cached_agent_for_turn(
+                    agent,
+                    _interrupt_depth,
+                    gateway_session_key=session_key,
+                    conversation_scope_id=_gateway_conversation_scope_id,
+                    platform_account_id=_gateway_platform_account_id,
+                    route_partition_key=_gateway_route_partition_key,
                 )
                 if _cache_lock and _cache is not None:
                     with _cache_lock:
@@ -17347,6 +17593,12 @@ class GatewayRunner:
 
             # Signal the stream consumer that the agent is done
             if _stream_consumer is not None:
+                if _gateway_agent_persistence_covers_full_transcript(
+                    result.get("persistence") if isinstance(result, dict) else None,
+                    result.get("messages", []) if isinstance(result, dict) else [],
+                    history_offset=len(agent_history),
+                ):
+                    _loop_for_step.call_soon_threadsafe(final_stream_delivery_gate.set)
                 _stream_consumer.finish()
             
             # Return final response, or a message if something went wrong
@@ -17367,7 +17619,7 @@ class GatewayRunner:
 
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
-                return {
+                empty_result = {
                     "final_response": error_msg,
                     "messages": result.get("messages", []),
                     "api_calls": result.get("api_calls", 0),
@@ -17386,6 +17638,17 @@ class GatewayRunner:
                     "model": _resolved_model,
                     "context_length": _context_length,
                 }
+                for _proof_key in (
+                    "persistence",
+                    "response_previewed",
+                    "response_transformed",
+                    "session_id",
+                    "pending_steer",
+                ):
+                    if _proof_key in result:
+                        empty_result[_proof_key] = result.get(_proof_key)
+                return empty_result
+
             
             # Scan tool results for MEDIA:<path> tags that need to be delivered
             # as native audio/file attachments.  The TTS tool embeds MEDIA: tags
@@ -17534,9 +17797,11 @@ class GatewayRunner:
                 "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
                 "api_calls": result_holder[0].get("api_calls", 0) if result_holder[0] else 0,
                 "completed": result_holder[0].get("completed") if result_holder[0] else None,
+                "failed": result_holder[0].get("failed", False) if result_holder[0] else False,
                 "interrupted": result_holder[0].get("interrupted", False) if result_holder[0] else False,
                 "partial": result_holder[0].get("partial", False) if result_holder[0] else False,
                 "error": result_holder[0].get("error") if result_holder[0] else None,
+                "persistence": result_holder[0].get("persistence") if result_holder[0] else None,
                 "interrupt_message": result_holder[0].get("interrupt_message") if result_holder[0] else None,
                 "tools": tools_holder[0] or [],
                 "history_offset": _effective_history_offset,
@@ -17737,6 +18002,23 @@ class GatewayRunner:
         _notify_task = asyncio.create_task(_notify_long_running())
 
         try:
+            def _local_control_failure_result(exc: BaseException) -> Dict[str, Any]:
+                error_type = type(exc).__name__
+                logger.exception("Agent executor failed in session %s", session_key)
+                return {
+                    "final_response": (
+                        f"Sorry, I encountered an error ({error_type}).\n"
+                        f"{str(exc)[:300] if str(exc) else 'no details available'}\n"
+                        "Try again or use /reset to start a fresh session."
+                    ),
+                    "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
+                    "api_calls": 0,
+                    "tools": tools_holder[0] or [],
+                    "history_offset": len(history),
+                    "failed": True,
+                    "error": str(exc) or error_type,
+                }
+
             # Run in thread pool to not block.  Use an *inactivity*-based
             # timeout instead of a wall-clock limit: the agent can run for
             # hours if it's actively calling tools / receiving stream tokens,
@@ -17767,7 +18049,10 @@ class GatewayRunner:
                         {_executor_task}, timeout=_POLL_INTERVAL
                     )
                     if done:
-                        response = _executor_task.result()
+                        try:
+                            response = _executor_task.result()
+                        except Exception as exc:
+                            response = _local_control_failure_result(exc)
                         break
                     # Backup interrupt check: if the monitor task died or
                     # missed the interrupt, catch it here.
@@ -17797,7 +18082,10 @@ class GatewayRunner:
                         {_executor_task}, timeout=_POLL_INTERVAL
                     )
                     if done:
-                        response = _executor_task.result()
+                        try:
+                            response = _executor_task.result()
+                        except Exception as exc:
+                            response = _local_control_failure_result(exc)
                         break
                     # Agent still running — check inactivity.
                     _agent_ref = agent_holder[0]
@@ -17930,9 +18218,8 @@ class GatewayRunner:
                     self._evict_cached_agent(session_key)
 
             # Check if we were interrupted OR have a queued message (/queue).
-            result = result_holder[0]
+            result = response if isinstance(response, dict) else result_holder[0]
             adapter = self.adapters.get(source.platform)
-            
             # Get pending message from adapter.
             # Use session_key (not source.chat_id) to match adapter's storage keys.
             pending_event = None
@@ -18042,12 +18329,7 @@ class GatewayRunner:
                                 pass
                         except Exception as e:
                             logger.debug("Stream consumer wait before queued message failed: %s", e)
-                    _previewed = bool(result.get("response_previewed"))
-                    _already_streamed = bool(
-                        (_sc and getattr(_sc, "final_response_sent", False))
-                        or _previewed
-                        or (_sc and getattr(_sc, "final_content_delivered", False))
-                    )
+                    _already_streamed = _should_confirm_final_stream_delivery(result, _sc)
                     first_response = result.get("final_response", "")
                     if first_response and not _already_streamed:
                         try:
@@ -18171,14 +18453,21 @@ class GatewayRunner:
                     except asyncio.CancelledError:
                         pass
                 else:
-                    try:
-                        await asyncio.wait_for(stream_task, timeout=5.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                    if not final_stream_delivery_gate.is_set():
                         stream_task.cancel()
                         try:
                             await stream_task
                         except asyncio.CancelledError:
                             pass
+                    else:
+                        try:
+                            await asyncio.wait_for(stream_task, timeout=5.0)
+                        except (asyncio.TimeoutError, asyncio.CancelledError):
+                            stream_task.cancel()
+                            try:
+                                await stream_task
+                            except asyncio.CancelledError:
+                                pass
             
             # Clean up tracking
             tracking_task.cancel()
@@ -18217,22 +18506,13 @@ class GatewayRunner:
         # at silence.  (#10xxx — "agent stops after web search")
         _sc = stream_consumer_holder[0]
         if isinstance(response, dict) and not response.get("failed"):
-            _final = response.get("final_response") or ""
-            _is_empty_sentinel = not _final or _final == "(empty)"
-            _streamed = bool(
-                _sc and getattr(_sc, "final_response_sent", False)
-            )
-            # response_previewed means the interim_assistant_callback already
-            # sent the final text via the adapter (non-streaming path).
+            _streamed = bool(_sc and getattr(_sc, "final_response_sent", False))
             _previewed = bool(response.get("response_previewed"))
             _content_delivered = bool(
                 _sc and getattr(_sc, "final_content_delivered", False)
             )
-            # Plugin hooks (e.g. transform_llm_output) may have appended content
-            # after streaming finished — when the response was transformed, always
-            # send the final version so the appended content reaches the client.
             _transformed = bool(response.get("response_transformed"))
-            if not _is_empty_sentinel and not _transformed and (_streamed or _previewed or _content_delivered):
+            if _should_confirm_final_stream_delivery(response, _sc):
                 logger.info(
                     "Suppressing normal final send for session %s: final delivery already confirmed (streamed=%s previewed=%s content_delivered=%s).",
                     session_key or "?",
@@ -18241,7 +18521,12 @@ class GatewayRunner:
                     _content_delivered,
                 )
                 response["already_sent"] = True
-            elif not _is_empty_sentinel and _transformed and _sc is not None:
+            elif (
+                response.get("final_response")
+                and response.get("final_response") != "(empty)"
+                and _transformed
+                and _sc is not None
+            ):
                 # Plugin hooks transformed the response after streaming — edit the
                 # existing streamed message instead of sending a duplicate.
                 _sc_msg_id = _sc.message_id

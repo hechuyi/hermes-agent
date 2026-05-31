@@ -133,6 +133,167 @@ class TestFinalizeCapabilityGate:
         assert picky.edit_message.call_args[1]["finalize"] is True
 
 
+class TestDurableFinalDeliveryGate:
+    @pytest.mark.asyncio
+    async def test_final_answer_waits_for_persistence_gate(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        gate = asyncio.Event()
+        config = StreamConsumerConfig(
+            edit_interval=100.0,
+            buffer_threshold=100,
+            cursor="",
+            wait_for_final_delivery=gate.wait,
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("durable final answer")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.02)
+        consumer.finish()
+        await asyncio.sleep(0.05)
+
+        adapter.send.assert_not_called()
+        assert consumer.final_response_sent is False
+        assert consumer.final_content_delivered is False
+        assert task.done() is False
+
+        gate.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+        adapter.send.assert_called_once()
+        assert adapter.send.call_args.kwargs["content"] == "durable final answer"
+        assert consumer.final_response_sent is True
+        assert consumer.final_content_delivered is True
+
+    @pytest.mark.asyncio
+    async def test_threshold_preview_waits_for_persistence_gate(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        gate = asyncio.Event()
+        config = StreamConsumerConfig(
+            edit_interval=0.01,
+            buffer_threshold=1,
+            cursor="",
+            wait_for_final_delivery=gate.wait,
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("preview-sized content")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.08)
+
+        adapter.send.assert_not_called()
+        adapter.edit_message.assert_not_called()
+        assert consumer.already_sent is False
+
+        consumer.finish()
+        await asyncio.sleep(0.05)
+        adapter.send.assert_not_called()
+        assert task.done() is False
+
+        gate.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+        adapter.send.assert_called_once()
+        assert adapter.send.call_args.kwargs["content"] == "preview-sized content"
+        assert consumer.final_response_sent is True
+
+    @pytest.mark.asyncio
+    async def test_segment_break_waits_for_persistence_gate(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        gate = asyncio.Event()
+        config = StreamConsumerConfig(
+            edit_interval=0.01,
+            buffer_threshold=1,
+            cursor="",
+            wait_for_final_delivery=gate.wait,
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_delta("assistant text before tool")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.05)
+        consumer.on_delta(None)
+        await asyncio.sleep(0.08)
+
+        adapter.send.assert_not_called()
+        adapter.edit_message.assert_not_called()
+        assert consumer.already_sent is False
+        assert task.done() is False
+
+        consumer.on_delta("assistant final")
+        consumer.finish()
+        await asyncio.sleep(0.05)
+        adapter.send.assert_not_called()
+
+        gate.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+        sent_texts = [call.kwargs["content"] for call in adapter.send.call_args_list]
+        assert sent_texts == ["assistant text before tool", "assistant final"]
+        assert consumer.final_response_sent is True
+
+    @pytest.mark.asyncio
+    async def test_commentary_waits_for_persistence_gate(self):
+        adapter = MagicMock()
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_1")
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        gate = asyncio.Event()
+        config = StreamConsumerConfig(
+            edit_interval=0.01,
+            buffer_threshold=1,
+            cursor="",
+            wait_for_final_delivery=gate.wait,
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        consumer.on_commentary("I'll inspect the repository first.")
+        task = asyncio.create_task(consumer.run())
+        await asyncio.sleep(0.08)
+
+        adapter.send.assert_not_called()
+        adapter.edit_message.assert_not_called()
+        assert consumer.already_sent is False
+        assert task.done() is False
+
+        consumer.on_delta("Done.")
+        consumer.finish()
+        await asyncio.sleep(0.05)
+        adapter.send.assert_not_called()
+
+        gate.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+        sent_texts = [call.kwargs["content"] for call in adapter.send.call_args_list]
+        assert sent_texts == ["I'll inspect the repository first.", "Done."]
+        assert consumer.final_response_sent is True
+
+
 class TestEditMessageFinalizeSignature:
     """Every concrete platform adapter must accept the ``finalize`` kwarg.
 
@@ -1907,4 +2068,3 @@ class TestUtf16OverflowDetection:
         # auto-attr mock. Verified indirectly by all the other tests in
         # this file passing — they all use MagicMock adapters.
         assert consumer is not None
-

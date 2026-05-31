@@ -73,6 +73,10 @@ class StreamConsumerConfig:
     # "group", "supergroup", "forum").  Used to gate native draft streaming,
     # which is platform-specific (Telegram drafts are DM-only).
     chat_type: str = ""
+    # Optional async gate for durable-persistence callers.  When set, the
+    # consumer may emit intermediate previews, but it must not deliver or
+    # mark the final visible answer until this awaitable completes.
+    wait_for_final_delivery: Optional[Callable[[], Any]] = None
 
 
 class GatewayStreamConsumer:
@@ -181,6 +185,7 @@ class GatewayStreamConsumer:
         # first failure we permanently disable drafts for the remainder of
         # this response and route through edit-based for graceful degradation.
         self._draft_failures = 0
+        self._final_delivery_gate_satisfied = False
 
     @property
     def already_sent(self) -> bool:
@@ -250,6 +255,16 @@ class GatewayStreamConsumer:
             cb()
         except Exception:
             logger.debug("on_new_message callback error", exc_info=True)
+
+    async def _wait_for_final_delivery_gate(self) -> None:
+        wait_fn = self.cfg.wait_for_final_delivery
+        if wait_fn is None:
+            self._final_delivery_gate_satisfied = True
+            return
+        result = wait_fn()
+        if inspect.isawaitable(result):
+            await result
+        self._final_delivery_gate_satisfied = True
 
     def _reset_segment_state(self, *, preserve_no_edit: bool = False) -> None:
         if preserve_no_edit and self._message_id == "__no_edit__":
@@ -444,11 +459,16 @@ class GatewayStreamConsumer:
                     except queue.Empty:
                         break
 
+                gate_active = self.cfg.wait_for_final_delivery is not None
+
                 # Flush any held-back partial-tag buffer on stream end
                 # so trailing text that was waiting for a potential open
                 # tag is not lost.
                 if got_done:
                     self._flush_think_buffer()
+                    await self._wait_for_final_delivery_gate()
+                elif gate_active and (got_segment_break or commentary_text is not None):
+                    await self._wait_for_final_delivery_gate()
 
                 # Decide whether to flush an edit
                 now = time.monotonic()
@@ -458,7 +478,8 @@ class GatewayStreamConsumer:
                     or got_segment_break
                     or commentary_text is not None
                 )
-                if not self.cfg.buffer_only:
+                final_gate_active = gate_active and not self._final_delivery_gate_satisfied
+                if not self.cfg.buffer_only and not final_gate_active:
                     should_edit = should_edit or (
                         (elapsed >= self._current_edit_interval
                             and self._accumulated)
@@ -627,7 +648,14 @@ class GatewayStreamConsumer:
         except asyncio.CancelledError:
             # Best-effort final edit on cancellation
             _best_effort_ok = False
-            if self._accumulated and self._message_id:
+            if (
+                self._accumulated
+                and self._message_id
+                and (
+                    self.cfg.wait_for_final_delivery is None
+                    or self._final_delivery_gate_satisfied
+                )
+            ):
                 try:
                     _best_effort_ok = bool(await self._send_or_edit(self._accumulated))
                 except Exception:

@@ -37,6 +37,8 @@ from typing import Any, Dict, List, Optional, Union
 # Third-party integrations tag their sessions with HERMES_SESSION_SOURCE=tool
 # so they don't clutter the user's session history.
 _HIDDEN_SESSION_SOURCES = ("tool",)
+_IMPLICIT_SCOPE = "__implicit__"
+_VALID_SCOPES = {"current_chat", "current_route", "global"}
 
 
 def _format_timestamp(ts: Union[int, float, str, None]) -> str:
@@ -65,25 +67,39 @@ def _format_timestamp(ts: Union[int, float, str, None]) -> str:
 
 
 def _resolve_to_parent(db, session_id: str) -> str:
-    """Walk parent_session_id chain to the lineage root. Falls back to input on errors."""
+    """Resolve a session lineage root only through the DB's scope-aware contract."""
     if not session_id:
         return session_id
-    visited = set()
-    cur = session_id
-    while cur and cur not in visited:
-        visited.add(cur)
+    resolver = getattr(db, "resolve_session_lineage_root", None)
+    if callable(resolver):
         try:
-            s = db.get_session(cur)
-            if not s:
-                break
-            parent = s.get("parent_session_id")
-            if not parent:
-                break
-            cur = parent
+            return resolver(session_id)
         except Exception as e:
-            logging.debug("Error resolving parent for %s: %s", cur, e, exc_info=True)
-            break
-    return cur
+            logging.debug("scope-aware lineage resolution failed for %s: %s", session_id, e, exc_info=True)
+    return session_id
+
+
+def _compression_root(db, session_id: str) -> str:
+    if not session_id:
+        return session_id
+    resolver = getattr(db, "resolve_session_lineage_root", None)
+    if callable(resolver):
+        try:
+            return resolver(session_id, compression_only=True)
+        except TypeError:
+            try:
+                return resolver(session_id)
+            except Exception:
+                logging.debug("compression lineage resolution failed for %s", session_id, exc_info=True)
+        except Exception:
+            logging.debug("compression lineage resolution failed for %s", session_id, exc_info=True)
+    return session_id
+
+
+def _same_compression_lineage(db, left_session_id: str, right_session_id: str) -> bool:
+    if not left_session_id or not right_session_id:
+        return False
+    return _compression_root(db, left_session_id) == _compression_root(db, right_session_id)
 
 
 def _shape_message(m: Dict[str, Any], anchor_id: Optional[int] = None) -> Dict[str, Any]:
@@ -107,13 +123,89 @@ def _shape_message(m: Dict[str, Any], anchor_id: Optional[int] = None) -> Dict[s
     return {k: v for k, v in entry.items() if v is not None or k in ("content",)}
 
 
-def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
+def _scope_filter_kwargs(
+    scope: str,
+    current_conversation_scope_id: Optional[str] = None,
+    current_route_partition_key: Optional[str] = None,
+) -> Dict[str, Optional[str]]:
+    """Translate tool scope selection into DB filter kwargs.
+
+    Gateway callers with runtime scope default to ``current_chat``. Local/CLI
+    callers without injected runtime scope keep the historical global default.
+    """
+    scope_norm = _effective_scope(
+        scope,
+        current_conversation_scope_id=current_conversation_scope_id,
+    )
+    if scope_norm == "global":
+        return {}
+    if scope_norm == "current_route":
+        return {
+            "conversation_scope_id": current_conversation_scope_id,
+            "route_partition_key": current_route_partition_key,
+        }
+    return {"conversation_scope_id": current_conversation_scope_id}
+
+
+def _scope_error(
+    scope: str,
+    current_conversation_scope_id: Optional[str] = None,
+    current_route_partition_key: Optional[str] = None,
+    current_platform_account_id: Optional[str] = None,
+) -> Optional[str]:
+    scope_norm = _effective_scope(
+        scope,
+        current_conversation_scope_id=current_conversation_scope_id,
+    )
+    if scope_norm == "global":
+        return None
+    if scope_norm == "current_chat":
+        if not current_conversation_scope_id:
+            return "current_chat requires a runtime conversation scope"
+        return None
+    if not current_conversation_scope_id or not current_route_partition_key:
+        return "current_route requires a runtime conversation and route scope"
+    return None
+
+
+def _effective_scope(
+    scope: str,
+    *,
+    current_conversation_scope_id: Optional[str] = None,
+) -> str:
+    if scope is None or scope == _IMPLICIT_SCOPE:
+        return "current_chat" if current_conversation_scope_id else "global"
+    return scope if scope in _VALID_SCOPES else "current_chat"
+
+
+def _scope_provenance(meta: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "conversation_scope_id": meta.get("conversation_scope_id"),
+        "route_partition_key": meta.get("route_partition_key"),
+        "scope_assignment_status": meta.get("scope_assignment_status"),
+    }
+
+
+def _list_recent_sessions(
+    db,
+    limit: int,
+    current_session_id: str = None,
+    scope: str = "current_chat",
+    current_conversation_scope_id: Optional[str] = None,
+    current_route_partition_key: Optional[str] = None,
+) -> str:
     """Return metadata for the most recent sessions (no LLM calls, no FTS5)."""
     try:
+        scope_kwargs = _scope_filter_kwargs(
+            scope,
+            current_conversation_scope_id=current_conversation_scope_id,
+            current_route_partition_key=current_route_partition_key,
+        )
         sessions = db.list_sessions_rich(
             limit=limit + 5,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
             order_by_last_active=True,
+            **scope_kwargs,
         )  # fetch extra so we can skip current
 
         current_root = _resolve_to_parent(db, current_session_id) if current_session_id else None
@@ -134,6 +226,7 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str
                 "last_active": s.get("last_active", ""),
                 "message_count": s.get("message_count", 0),
                 "preview": s.get("preview", ""),
+                **_scope_provenance(s),
             })
             if len(results) >= limit:
                 break
@@ -156,6 +249,9 @@ def _scroll(
     around_message_id: int,
     window: int = 5,
     current_session_id: str = None,
+    scope: str = "current_chat",
+    current_conversation_scope_id: Optional[str] = None,
+    current_route_partition_key: Optional[str] = None,
 ) -> str:
     """Scroll shape: return a window of messages centered on an anchor.
 
@@ -180,17 +276,6 @@ def _scroll(
             window = 5
     window = max(1, min(window, 20))
 
-    # Reject scrolling inside the active session lineage — those messages are
-    # already in context.
-    if current_session_id:
-        a_root = _resolve_to_parent(db, session_id)
-        c_root = _resolve_to_parent(db, current_session_id)
-        if a_root and c_root and a_root == c_root:
-            return tool_error(
-                "scroll rejected: anchor lives in the current session lineage (already in your active context)",
-                success=False,
-            )
-
     # Session existence check
     try:
         session_meta = db.get_session(session_id) or {}
@@ -200,9 +285,61 @@ def _scroll(
     if not session_meta:
         return tool_error(f"session_id not found: {session_id}", success=False)
 
+    scope_norm = scope if scope in {"current_chat", "current_route", "global"} else "current_chat"
+    if scope_norm != "global":
+        target_scope = session_meta.get("conversation_scope_id")
+        target_route = session_meta.get("route_partition_key")
+        if current_conversation_scope_id and target_scope != current_conversation_scope_id:
+            return tool_error(
+                "scroll rejected: target session is outside the current conversation scope",
+                success=False,
+            )
+        if session_meta.get("scope_assignment_status") != "scoped":
+            return tool_error(
+                "scroll rejected: target session is not scoped to the current conversation",
+                success=False,
+            )
+        if (
+            scope_norm == "current_route"
+            and current_route_partition_key
+            and target_route != current_route_partition_key
+        ):
+            return tool_error(
+                "scroll rejected: target session is outside the current route scope",
+                success=False,
+            )
+
+    owning = None
+    try:
+        conn = getattr(db, "_conn", None)
+        if conn is not None:
+            row = conn.execute(
+                "SELECT session_id FROM messages WHERE id = ?",
+                (around_message_id,),
+            ).fetchone()
+            owning = row[0] if row else None
+    except Exception as e:
+        logging.debug("owning-session lookup failed: %s", e, exc_info=True)
+        owning = None
+
+    if current_session_id and owning == current_session_id:
+        return tool_error(
+            "scroll rejected: anchor lives in the current session (already in your active context)",
+            success=False,
+        )
+
     # Fetch the window
     try:
-        view = db.get_messages_around(session_id, around_message_id, window=window)
+        view = db.get_messages_around(
+            session_id,
+            around_message_id,
+            window=window,
+            **_scope_filter_kwargs(
+                scope,
+                current_conversation_scope_id=current_conversation_scope_id,
+                current_route_partition_key=current_route_partition_key,
+            ),
+        )
     except Exception as e:
         logging.error("get_messages_around failed: %s", e, exc_info=True)
         return tool_error(f"failed to load messages: {e}", success=False)
@@ -214,24 +351,51 @@ def _scroll(
     # child sessions). Locate the real owning session and refetch.
     rebind_warning = None
     if not messages:
-        owning = None
-        try:
-            conn = getattr(db, "_conn", None)
-            if conn is not None:
-                row = conn.execute(
-                    "SELECT session_id FROM messages WHERE id = ?",
-                    (around_message_id,),
-                ).fetchone()
-                owning = row[0] if row else None
-        except Exception as e:
-            logging.debug("owning-session lookup failed: %s", e, exc_info=True)
-            owning = None
         if owning and owning != session_id:
-            a_root = _resolve_to_parent(db, session_id)
-            o_root = _resolve_to_parent(db, owning)
-            if a_root and o_root and a_root == o_root:
+            if not _same_compression_lineage(db, session_id, owning):
+                return tool_error(
+                    "around_message_id belongs to a session outside the compatible compression lineage",
+                    success=False,
+                )
+            else:
+                owning_meta = {}
                 try:
-                    rebind_view = db.get_messages_around(owning, around_message_id, window=window)
+                    owning_meta = db.get_session(owning) or {}
+                except Exception:
+                    owning_meta = {}
+                if scope_norm != "global":
+                    owning_scope = owning_meta.get("conversation_scope_id")
+                    owning_route = owning_meta.get("route_partition_key")
+                    if current_conversation_scope_id and owning_scope != current_conversation_scope_id:
+                        return tool_error(
+                            "scroll rejected: owning session is outside the current conversation scope",
+                            success=False,
+                        )
+                    if owning_meta.get("scope_assignment_status") != "scoped":
+                        return tool_error(
+                            "scroll rejected: owning session is not scoped to the current conversation",
+                            success=False,
+                        )
+                    if (
+                        scope_norm == "current_route"
+                        and current_route_partition_key
+                        and owning_route != current_route_partition_key
+                    ):
+                        return tool_error(
+                            "scroll rejected: owning session is outside the current route scope",
+                            success=False,
+                        )
+                try:
+                    rebind_view = db.get_messages_around(
+                        owning,
+                        around_message_id,
+                        window=window,
+                        **_scope_filter_kwargs(
+                            scope,
+                            current_conversation_scope_id=current_conversation_scope_id,
+                            current_route_partition_key=current_route_partition_key,
+                        ),
+                    )
                     messages = rebind_view.get("window") or []
                     if messages:
                         view = rebind_view
@@ -240,7 +404,7 @@ def _scroll(
                             f"(child of {session_id}); rebound transparently"
                         )
                         try:
-                            session_meta = db.get_session(owning) or session_meta
+                            session_meta = owning_meta or db.get_session(owning) or session_meta
                         except Exception:
                             pass
                         session_id = owning
@@ -263,6 +427,7 @@ def _scroll(
             "source": session_meta.get("source"),
             "model": session_meta.get("model"),
             "title": session_meta.get("title"),
+            **_scope_provenance(session_meta),
         },
         "window": window,
         "messages": [_shape_message(m, anchor_id=around_message_id) for m in messages],
@@ -281,11 +446,19 @@ def _discover(
     limit: int,
     sort: Optional[str],
     current_session_id: str = None,
+    scope: str = "current_chat",
+    current_conversation_scope_id: Optional[str] = None,
+    current_route_partition_key: Optional[str] = None,
 ) -> str:
     """Discovery shape: FTS5 + anchored window + bookends per hit. Single call."""
     role_list = role_filter if role_filter else ["user", "assistant"]
 
     try:
+        scope_kwargs = _scope_filter_kwargs(
+            scope,
+            current_conversation_scope_id=current_conversation_scope_id,
+            current_route_partition_key=current_route_partition_key,
+        )
         raw_results = db.search_messages(
             query=query,
             role_filter=role_list,
@@ -293,6 +466,7 @@ def _discover(
             limit=50,  # widen so dedup-by-lineage can find distinct sessions
             offset=0,
             sort=sort,
+            **scope_kwargs,
         )
     except Exception as e:
         logging.error("FTS5 search failed: %s", e, exc_info=True)
@@ -334,7 +508,17 @@ def _discover(
         hit_sid = match_info.get("session_id") or lineage_root
         msg_id = match_info.get("id")
         try:
-            view = db.get_anchored_view(hit_sid, msg_id, window=5, bookend=3)
+            view = db.get_anchored_view(
+                hit_sid,
+                msg_id,
+                window=5,
+                bookend=3,
+                **_scope_filter_kwargs(
+                    scope,
+                    current_conversation_scope_id=current_conversation_scope_id,
+                    current_route_partition_key=current_route_partition_key,
+                ),
+            )
         except Exception as e:
             logging.warning("get_anchored_view failed for %s/%s: %s", hit_sid, msg_id, e, exc_info=True)
             continue
@@ -355,6 +539,9 @@ def _discover(
             "matched_role": match_info.get("role"),
             "match_message_id": msg_id,
             "snippet": match_info.get("snippet") or "",
+            "conversation_scope_id": match_info.get("conversation_scope_id"),
+            "route_partition_key": match_info.get("route_partition_key"),
+            "scope_assignment_status": match_info.get("scope_assignment_status"),
             "bookend_start": [_shape_message(m) for m in (view.get("bookend_start") or [])],
             "messages": [_shape_message(m, anchor_id=msg_id) for m in (view.get("window") or [])],
             "bookend_end": [_shape_message(m) for m in (view.get("bookend_end") or [])],
@@ -381,6 +568,10 @@ def session_search(
     limit: int = 3,
     db=None,
     current_session_id: str = None,
+    current_conversation_scope_id: str = None,
+    current_route_partition_key: str = None,
+    current_platform_account_id: str = None,
+    scope: str = _IMPLICIT_SCOPE,
     # Scroll shape
     session_id: str = None,
     around_message_id: int = None,
@@ -406,6 +597,20 @@ def session_search(
             from hermes_state import format_session_db_unavailable
             return tool_error(format_session_db_unavailable(), success=False)
 
+    scope_norm = _effective_scope(
+        scope,
+        current_conversation_scope_id=current_conversation_scope_id,
+    )
+
+    scope_failure = _scope_error(
+        scope_norm,
+        current_conversation_scope_id=current_conversation_scope_id,
+        current_route_partition_key=current_route_partition_key,
+        current_platform_account_id=current_platform_account_id,
+    )
+    if scope_failure:
+        return tool_error(scope_failure, success=False)
+
     # Scroll shape takes precedence — explicit anchor beats any query.
     if (isinstance(session_id, str) and session_id.strip()) and around_message_id is not None:
         return _scroll(
@@ -414,6 +619,9 @@ def session_search(
             around_message_id=around_message_id,
             window=window,
             current_session_id=current_session_id,
+            scope=scope_norm,
+            current_conversation_scope_id=current_conversation_scope_id,
+            current_route_partition_key=current_route_partition_key,
         )
 
     # Limit clamp [1, 10]
@@ -426,7 +634,14 @@ def session_search(
 
     # Browse shape: no query → recent sessions.
     if not query or not isinstance(query, str) or not query.strip():
-        return _list_recent_sessions(db, limit, current_session_id)
+        return _list_recent_sessions(
+            db,
+            limit,
+            current_session_id,
+            scope=scope_norm,
+            current_conversation_scope_id=current_conversation_scope_id,
+            current_route_partition_key=current_route_partition_key,
+        )
 
     # Parse role_filter
     role_list: Optional[List[str]] = None
@@ -447,6 +662,9 @@ def session_search(
         limit=limit,
         sort=sort_norm,
         current_session_id=current_session_id,
+        scope=scope_norm,
+        current_conversation_scope_id=current_conversation_scope_id,
+        current_route_partition_key=current_route_partition_key,
     )
 
 
@@ -539,6 +757,19 @@ SESSION_SEARCH_SCHEMA = {
                     "and browse shapes."
                 ),
             },
+            "scope": {
+                "type": "string",
+                "enum": ["current_chat", "current_route", "global"],
+                "default": "current_chat",
+                "description": (
+                    "Recall boundary. Defaults to current_chat, which searches only "
+                    "the current gateway conversation scope when the runtime provides "
+                    "one. current_route narrows further to the current topic/thread "
+                    "route. Use global only when the user explicitly asks to search "
+                    "across chats or all history. The runtime injects the actual "
+                    "current scope; do not invent conversation ids."
+                ),
+            },
             "session_id": {
                 "type": "string",
                 "description": (
@@ -594,8 +825,12 @@ registry.register(
         around_message_id=args.get("around_message_id"),
         window=args.get("window", 5),
         sort=args.get("sort"),
+        scope=args["scope"] if "scope" in args else _IMPLICIT_SCOPE,
         db=kw.get("db"),
         current_session_id=kw.get("current_session_id"),
+        current_conversation_scope_id=kw.get("current_conversation_scope_id"),
+        current_route_partition_key=kw.get("current_route_partition_key"),
+        current_platform_account_id=kw.get("current_platform_account_id"),
     ),
     check_fn=check_session_search_requirements,
     emoji="🔍",

@@ -59,12 +59,14 @@ def _make_card_action_data(
     chat_id: str = "oc_12345",
     open_id: str = "ou_user1",
     token: str = "tok_abc",
+    thread_id: str | None = None,
+    root_id: str | None = None,
 ) -> SimpleNamespace:
     """Create a mock Feishu card action callback data object."""
     return SimpleNamespace(
         event=SimpleNamespace(
             token=token,
-            context=SimpleNamespace(open_chat_id=chat_id),
+            context=SimpleNamespace(open_chat_id=chat_id, thread_id=thread_id, root_id=root_id),
             operator=SimpleNamespace(open_id=open_id),
             action=SimpleNamespace(
                 tag="button",
@@ -436,6 +438,84 @@ class TestNonApprovalCardAction:
         mock_handle.assert_called_once()
         event = mock_handle.call_args[0][0]
         assert "/card button" in event.text
+
+    @pytest.mark.asyncio
+    async def test_dm_card_action_routes_to_dm_source(self):
+        adapter = _make_adapter()
+
+        data = _make_card_action_data(
+            action_value={"custom_action": "something_else"},
+            chat_id="oc_dm",
+            token="tok_dm_card",
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ),
+            patch.object(
+                adapter,
+                "get_chat_info",
+                new_callable=AsyncMock,
+                return_value={"name": "Dave", "type": "dm"},
+            ),
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        event = mock_handle.call_args[0][0]
+        assert event.source.chat_type == "dm"
+        assert event.source.chat_id == "oc_dm"
+
+    @pytest.mark.asyncio
+    async def test_preserves_context_thread_id(self):
+        adapter = _make_adapter()
+
+        data = _make_card_action_data(
+            action_value={"custom_action": "something_else"},
+            token="tok_thread",
+            thread_id="omt_topic",
+            root_id="om_root",
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ),
+            patch.object(adapter, "get_chat_info", new_callable=AsyncMock, return_value={"name": "Test Chat"}),
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        event = mock_handle.call_args[0][0]
+        assert event.source.thread_id == "omt_topic"
+        assert event.reply_to_message_id == "om_root"
+
+    @pytest.mark.asyncio
+    async def test_context_root_id_is_not_used_as_thread_id(self):
+        adapter = _make_adapter()
+
+        data = _make_card_action_data(
+            action_value={"custom_action": "something_else"},
+            token="tok_root_only",
+            root_id="om_root",
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ),
+            patch.object(adapter, "get_chat_info", new_callable=AsyncMock, return_value={"name": "Test Chat"}),
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        event = mock_handle.call_args[0][0]
+        assert event.source.thread_id is None
+        assert event.reply_to_message_id == "om_root"
 
 
 # ===========================================================================

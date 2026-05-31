@@ -34,6 +34,20 @@ def _make_chain(db: SessionDB, ids_with_parent):
     db._conn.commit()
 
 
+def _mark_compression_edge(db: SessionDB, parent: str, child: str, offset: int) -> None:
+    base = int(time.time()) - 10_000
+    ended_at = base + offset
+    db._conn.execute(
+        "UPDATE sessions SET ended_at = ?, end_reason = 'compression' WHERE id = ?",
+        (ended_at, parent),
+    )
+    db._conn.execute(
+        "UPDATE sessions SET started_at = ? WHERE id = ?",
+        (ended_at + 1, child),
+    )
+    db._conn.commit()
+
+
 def test_redirects_from_empty_head_to_descendant_with_messages(db):
     # Reproducer shape from #15000: 6 sessions, only the 5th holds messages.
     _make_chain(db, [
@@ -44,6 +58,10 @@ def test_redirects_from_empty_head_to_descendant_with_messages(db):
         ("bulk",   "mid3"),    # has messages
         ("tail",   "bulk"),    # empty tail after another compression
     ])
+    _mark_compression_edge(db, "head", "mid1", 100)
+    _mark_compression_edge(db, "mid1", "mid2", 200)
+    _mark_compression_edge(db, "mid2", "mid3", 300)
+    _mark_compression_edge(db, "mid3", "bulk", 400)
     for i in range(5):
         db.append_message("bulk", role="user", content=f"msg {i}")
 
@@ -78,19 +96,92 @@ def test_empty_session_id_passthrough(db):
 def test_walks_from_middle_of_chain(db):
     # If the user happens to know an intermediate ID, we still find the msg-bearing descendant.
     _make_chain(db, [("a", None), ("b", "a"), ("c", "b"), ("d", "c")])
+    _mark_compression_edge(db, "a", "b", 100)
+    _mark_compression_edge(db, "b", "c", 200)
+    _mark_compression_edge(db, "c", "d", 300)
     db.append_message("d", role="user", content="x")
     assert db.resolve_resume_session_id("b") == "d"
     assert db.resolve_resume_session_id("c") == "d"
 
 
-def test_prefers_most_recent_child_when_fork_exists(db):
-    # If a session was somehow forked (two children), pick the latest one.
-    # In practice, compression only produces single-chain shape, but the helper
-    # should degrade gracefully.
+def test_does_not_redirect_through_non_compression_child(db):
+    _make_chain(db, [("root", None), ("child", "root")])
+    db.append_message("child", role="user", content="branch output")
+
+    assert db.resolve_resume_session_id("root") == "root"
+
+
+def test_fails_closed_when_multiple_compression_children_exist(db):
     _make_chain(db, [
         ("parent", None),
         ("older_fork", "parent"),
         ("newer_fork", "parent"),
     ])
+    base = int(time.time()) - 10_000
+    db._conn.execute(
+        "UPDATE sessions SET ended_at = ?, end_reason = 'compression' WHERE id = ?",
+        (base + 100, "parent"),
+    )
+    db._conn.execute(
+        "UPDATE sessions SET started_at = ? WHERE id = ?",
+        (base + 101, "older_fork"),
+    )
+    db._conn.execute(
+        "UPDATE sessions SET started_at = ? WHERE id = ?",
+        (base + 102, "newer_fork"),
+    )
+    db._conn.commit()
     db.append_message("newer_fork", role="user", content="x")
-    assert db.resolve_resume_session_id("parent") == "newer_fork"
+    assert db.resolve_resume_session_id("parent") == "parent"
+
+
+def test_route_session_key_snapshot_mismatch_blocks_resume(db):
+    base = int(time.time()) - 10_000
+    db.create_session(
+        "root",
+        source="feishu",
+        conversation_scope_id="cs",
+        scope_assignment_status="scoped",
+        route_session_key_snapshot="snapshot-a",
+        route_partition_key="route",
+    )
+    db.create_session(
+        "child",
+        source="feishu",
+        parent_session_id="root",
+        conversation_scope_id="cs",
+        scope_assignment_status="scoped",
+        route_session_key_snapshot="snapshot-b",
+        route_partition_key="route",
+    )
+    db._conn.execute(
+        "UPDATE sessions SET started_at=?, ended_at=?, end_reason='compression' WHERE id=?",
+        (base, base + 100, "root"),
+    )
+    db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (base + 101, "child"))
+    db._conn.commit()
+    db.append_message("child", role="user", content="wrong route-session snapshot")
+
+    assert db.resolve_resume_session_id("root") == "root"
+
+
+def test_legacy_null_unscoped_compression_chain_still_resumes(db):
+    base = int(time.time()) - 10_000
+    db.create_session("root", source="cli")
+    db.create_session("child", source="cli", parent_session_id="root")
+    db._conn.execute(
+        "UPDATE sessions SET started_at=?, ended_at=?, end_reason='compression', "
+        "scope_assignment_status=NULL, conversation_scope_id=NULL, "
+        "route_session_key_snapshot=NULL, route_partition_key=NULL WHERE id=?",
+        (base, base + 100, "root"),
+    )
+    db._conn.execute(
+        "UPDATE sessions SET started_at=?, scope_assignment_status=NULL, "
+        "conversation_scope_id=NULL, route_session_key_snapshot=NULL, "
+        "route_partition_key=NULL WHERE id=?",
+        (base + 101, "child"),
+    )
+    db._conn.commit()
+    db.append_message("child", role="user", content="historical continuation")
+
+    assert db.resolve_resume_session_id("root") == "child"

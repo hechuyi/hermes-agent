@@ -1,5 +1,9 @@
 """Regression tests for empty-response recovery transcript persistence."""
 
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
 from run_agent import AIAgent
 
 
@@ -92,3 +96,78 @@ def test_persist_session_strips_marked_terminal_empty_sentinel():
     assert messages == [{"role": "user", "content": "continue"}]
     assert agent.flushed_session_db_messages[-1] == messages
     assert all(not msg.get("_empty_terminal_sentinel") for msg in messages)
+
+
+def test_run_conversation_empty_exhaustion_does_not_persist_unmarked_empty_final(tmp_path):
+    """The real terminal empty path must not turn the private sentinel into
+    durable assistant content or a strict-deliverable proof.
+    """
+    from hermes_state import SessionDB
+
+    class _EmptyCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="",
+                            reasoning=None,
+                            reasoning_content=None,
+                            tool_calls=None,
+                        ),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+                model="test/model",
+            )
+
+    class _FakeClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=_EmptyCompletions())
+
+        def close(self):
+            return None
+
+    db = SessionDB(db_path=Path(tmp_path) / "state.db")
+    with (
+        patch("run_agent.OpenAI", lambda **kwargs: _FakeClient()),
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+    ):
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://example.com/v1",
+            model="test/model",
+            max_iterations=8,
+            quiet_mode=True,
+            session_db=db,
+            session_id="empty-terminal-real-path",
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent._disable_streaming = True
+
+        result = agent.run_conversation("produce no visible content")
+    rows = db.get_messages(agent.session_id)
+
+    assert result["final_response"] == "(empty)"
+    assert [row["role"] for row in rows] == ["user"]
+    assert [row["content"] for row in rows] == ["produce no visible content"]
+    assert all(row["content"] != "(empty)" for row in rows)
+    assert all(
+        not (
+            msg.get("role") == "assistant"
+            and msg.get("content") == "(empty)"
+            and not msg.get("_empty_terminal_sentinel")
+        )
+        for msg in result["messages"]
+    )
+    assert not (
+        result["persistence"].get("ok")
+        and result["persistence"].get("assistant_message_row_id") is not None
+    )

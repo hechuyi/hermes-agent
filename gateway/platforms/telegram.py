@@ -401,8 +401,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Telegram measures message length in UTF-16 code units."""
         return utf16_len
 
-    def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform.TELEGRAM)
+    def __init__(self, config: PlatformConfig, session_isolation_config: Optional[Any] = None):
+        super().__init__(config, Platform.TELEGRAM, session_isolation_config=session_isolation_config)
         self._app: Optional[Application] = None
         self._bot: Optional[Bot] = None
         self._webhook_mode: bool = False
@@ -5028,12 +5028,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
     def _text_batch_key(self, event: MessageEvent) -> str:
         """Session-scoped key for text message batching."""
-        from gateway.session import build_session_key
-        return build_session_key(
-            event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-        )
+        return self._session_guard_key(event.source)
 
     def _enqueue_text_event(self, event: MessageEvent) -> None:
         """Buffer a text event and reset the flush timer.
@@ -5117,12 +5112,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
     def _photo_batch_key(self, event: MessageEvent, msg: Message) -> str:
         """Return a batching key for Telegram photos/albums."""
-        from gateway.session import build_session_key
-        session_key = build_session_key(
-            event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-        )
+        session_key = self._session_guard_key(event.source)
         media_group_id = getattr(msg, "media_group_id", None)
         if media_group_id:
             return f"{session_key}:album:{media_group_id}"

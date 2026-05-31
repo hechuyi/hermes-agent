@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gateway.config import Platform, StreamingConfig
+from gateway.platforms.base import SendResult
 from gateway.platforms.base import resolve_proxy_url
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
@@ -84,6 +85,41 @@ class _FakeSession:
 
     async def __aexit__(self, *args):
         pass
+
+
+class _CapturingAdapter:
+    SUPPORTS_MESSAGE_EDITING = True
+    MAX_MESSAGE_LENGTH = 4096
+
+    def __init__(self):
+        self.sent = []
+        self.edits = []
+        self.typing = []
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "content": content,
+                "reply_to": reply_to,
+                "metadata": metadata,
+            }
+        )
+        return SendResult(success=True, message_id=f"msg-{len(self.sent)}")
+
+    async def edit_message(self, chat_id, message_id, content, **kwargs):
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "content": content,
+                "kwargs": kwargs,
+            }
+        )
+        return SendResult(success=True, message_id=message_id)
+
+    async def send_typing(self, chat_id, metadata=None):
+        self.typing.append({"chat_id": chat_id, "metadata": metadata})
 
 
 def _patch_aiohttp(session):
@@ -282,6 +318,42 @@ class TestRunAgentViaProxy:
 
         # Verify response was assembled
         assert result["final_response"] == "Hello world"
+
+    @pytest.mark.asyncio
+    async def test_proxy_sse_deltas_do_not_preview_to_platform(self, monkeypatch):
+        monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
+        monkeypatch.delenv("GATEWAY_PROXY_KEY", raising=False)
+        runner = _make_runner()
+        runner.config.streaming = StreamingConfig(enabled=True, edit_interval=0.01, buffer_threshold=1)
+        adapter = _CapturingAdapter()
+        runner.adapters[Platform.MATRIX] = adapter
+        source = _make_source()
+
+        resp = _FakeSSEResponse(
+            status=200,
+            sse_chunks=[
+                'data: {"choices":[{"delta":{"content":"durable"}}]}\n\n',
+                'data: {"choices":[{"delta":{"content":" answer"}}]}\n\n',
+                "data: [DONE]\n\n",
+            ],
+        )
+        session = _FakeSession(resp)
+
+        with patch("gateway.run._load_gateway_config", return_value={}):
+            with _patch_aiohttp(session):
+                with patch("aiohttp.ClientTimeout"):
+                    result = await runner._run_agent_via_proxy(
+                        message="hi",
+                        context_prompt="",
+                        history=[],
+                        source=source,
+                        session_id="sess-proxy",
+                    )
+
+        assert result["final_response"] == "durable answer"
+        assert result.get("response_previewed") is False
+        assert adapter.sent == []
+        assert adapter.edits == []
 
     @pytest.mark.asyncio
     async def test_handles_http_error(self, monkeypatch):

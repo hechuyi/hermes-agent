@@ -636,10 +636,24 @@ class TestMessageStorage:
         assert "message_id" not in next(m for m in conv if m["role"] == "assistant")
 
     def test_get_messages_as_conversation_includes_ancestor_chain(self, db):
-        db.create_session("root", "tui")
+        db.create_session("root", "tui", scope_assignment_status="legacy_unscoped")
         db.append_message("root", role="user", content="first prompt")
         db.append_message("root", role="assistant", content="first answer")
-        db.create_session("child", "tui", parent_session_id="root")
+        db._conn.execute(
+            "UPDATE sessions SET ended_at = ?, end_reason = 'compression' WHERE id = ?",
+            (123.0, "root"),
+        )
+        db.create_session(
+            "child",
+            "tui",
+            parent_session_id="root",
+            scope_assignment_status="legacy_unscoped",
+        )
+        db._conn.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?",
+            (124.0, "child"),
+        )
+        db._conn.commit()
         db.append_message("child", role="user", content="second prompt")
         db.append_message("child", role="assistant", content="second answer")
 
@@ -652,12 +666,51 @@ class TestMessageStorage:
             "second answer",
         ]
 
+    def test_get_messages_as_conversation_does_not_merge_cross_scope_ancestor(self, db):
+        db.create_session(
+            "root",
+            "feishu",
+            conversation_scope_id="cs_a",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-a",
+            route_partition_key="route-a",
+        )
+        db.append_message("root", role="user", content="root scoped secret")
+        db.create_session(
+            "child",
+            "feishu",
+            parent_session_id="root",
+            conversation_scope_id="cs_b",
+            scope_assignment_status="scoped",
+            route_session_key_snapshot="route-b",
+            route_partition_key="route-b",
+        )
+        db.append_message("child", role="user", content="child scoped prompt")
+
+        conv = db.get_messages_as_conversation("child", include_ancestors=True)
+
+        assert [m["content"] for m in conv] == ["child scoped prompt"]
+
     def test_get_messages_as_conversation_avoids_repeated_resume_prompts_from_ancestors(self, db):
-        db.create_session("root", "tui")
+        db.create_session("root", "tui", scope_assignment_status="legacy_unscoped")
         db.append_message("root", role="user", content="same prompt")
         db.append_message("root", role="user", content="same prompt")
         db.append_message("root", role="assistant", content="answer")
-        db.create_session("child", "tui", parent_session_id="root")
+        db._conn.execute(
+            "UPDATE sessions SET ended_at = ?, end_reason = 'compression' WHERE id = ?",
+            (123.0, "root"),
+        )
+        db.create_session(
+            "child",
+            "tui",
+            parent_session_id="root",
+            scope_assignment_status="legacy_unscoped",
+        )
+        db._conn.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?",
+            (124.0, "child"),
+        )
+        db._conn.commit()
         db.append_message("child", role="user", content="next prompt")
 
         conv = db.get_messages_as_conversation("child", include_ancestors=True)
@@ -2467,7 +2520,7 @@ class TestListSessionsRich:
         the SQL page before post-projection could promote it.
         """
         t0 = 1709500000.0
-        db.create_session("root1", "cli")
+        db.create_session("root1", "cli", scope_assignment_status="legacy_unscoped")
         with db._lock:
             db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "root1"))
             db._conn.execute(
@@ -2477,7 +2530,12 @@ class TestListSessionsRich:
         db.append_message("root1", "user", "old ask")
 
         # Continuation tip created after root ended; last activity much later.
-        db.create_session("tip1", "cli", parent_session_id="root1")
+        db.create_session(
+            "tip1",
+            "cli",
+            parent_session_id="root1",
+            scope_assignment_status="legacy_unscoped",
+        )
         with db._lock:
             db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 101, "tip1"))
         db.append_message("tip1", "user", "latest message")
@@ -2590,12 +2648,17 @@ class TestCompressionChainProjection:
         """
         import time as _time
         # Root that gets compressed
-        db.create_session("root1", "cli")
+        db.create_session("root1", "cli", scope_assignment_status="legacy_unscoped")
         db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "root1"))
         db.append_message("root1", "user", "help me refactor auth")
 
         # Delegate subagent spawned while root1 was live (before it ended)
-        db.create_session("delegate1", "cli", parent_session_id="root1")
+        db.create_session(
+            "delegate1",
+            "cli",
+            parent_session_id="root1",
+            scope_assignment_status="legacy_unscoped",
+        )
         db._conn.execute(
             "UPDATE sessions SET started_at=?, ended_at=? WHERE id=?",
             (t0 + 600, t0 + 650, "delegate1"),
@@ -2610,7 +2673,12 @@ class TestCompressionChainProjection:
         )
 
         # Continuation mid created 1s after parent ended
-        db.create_session("mid1", "cli", parent_session_id="root1")
+        db.create_session(
+            "mid1",
+            "cli",
+            parent_session_id="root1",
+            scope_assignment_status="legacy_unscoped",
+        )
         db._conn.execute(
             "UPDATE sessions SET started_at=? WHERE id=?",
             (t_compress_root + 1, "mid1"),
@@ -2625,7 +2693,12 @@ class TestCompressionChainProjection:
         )
 
         # Tip — latest continuation
-        db.create_session("tip1", "cli", parent_session_id="mid1")
+        db.create_session(
+            "tip1",
+            "cli",
+            parent_session_id="mid1",
+            scope_assignment_status="legacy_unscoped",
+        )
         db._conn.execute(
             "UPDATE sessions SET started_at=? WHERE id=?",
             (t_compress_mid + 1, "tip1"),
@@ -3065,6 +3138,37 @@ class TestCompressionChainProjection:
         row = next(s for s in sessions if s["id"] == "legacy-root")
         assert row["conversation_scope_id"] is None
         assert row["scope_assignment_status"] in {None, "legacy_unscoped"}
+        assert row["route_session_key_snapshot"] is None
+        assert row["route_partition_key"] is None
+
+    def test_unfiltered_legacy_null_compression_chain_projects_to_tip(self, db):
+        import time as _time
+
+        t0 = _time.time() - 3600
+        db.create_session("legacy-root", "cli")
+        db.create_session("legacy-tip", "cli", parent_session_id="legacy-root")
+        db._conn.execute(
+            "UPDATE sessions SET started_at=?, ended_at=?, end_reason='compression', "
+            "scope_assignment_status=NULL, conversation_scope_id=NULL, "
+            "route_session_key_snapshot=NULL, route_partition_key=NULL WHERE id=?",
+            (t0, t0 + 10, "legacy-root"),
+        )
+        db._conn.execute(
+            "UPDATE sessions SET started_at=?, scope_assignment_status=NULL, "
+            "conversation_scope_id=NULL, route_session_key_snapshot=NULL, "
+            "route_partition_key=NULL WHERE id=?",
+            (t0 + 11, "legacy-tip"),
+        )
+        db.append_message("legacy-tip", "user", "legacy null tip preview")
+        db._conn.commit()
+
+        sessions = db.list_sessions_rich(source="cli", limit=10, project_compression_tips=True)
+
+        assert [s["id"] for s in sessions] == ["legacy-tip"]
+        row = sessions[0]
+        assert row["_lineage_root_id"] == "legacy-root"
+        assert row["scope_assignment_status"] is None
+        assert row["conversation_scope_id"] is None
         assert row["route_session_key_snapshot"] is None
         assert row["route_partition_key"] is None
 
