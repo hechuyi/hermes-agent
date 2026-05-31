@@ -17595,7 +17595,11 @@ class GatewayRunner:
             if _stream_consumer is not None:
                 if _gateway_agent_persistence_covers_full_transcript(
                     result.get("persistence") if isinstance(result, dict) else None,
-                    result.get("messages", []) if isinstance(result, dict) else [],
+                    (
+                        (result.get("messages", []) or [])[len(agent_history):]
+                        if isinstance(result, dict)
+                        else []
+                    ),
                     history_offset=len(agent_history),
                 ):
                     _loop_for_step.call_soon_threadsafe(final_stream_delivery_gate.set)

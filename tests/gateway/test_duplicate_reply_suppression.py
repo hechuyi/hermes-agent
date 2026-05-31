@@ -193,6 +193,23 @@ def test_agent_persistence_proof_suppresses_only_covered_gateway_db_rewrites():
         [{"role": "system", "content": "skip"}, {"role": "user", "content": "hello"}],
         history_offset=4,
     ) is True
+    history = [
+        {"role": "user", "content": "before"},
+        {"role": "assistant", "content": "old"},
+    ]
+    turn = [
+        {"role": "user", "content": "continue"},
+        {"role": "assistant", "content": "continued"},
+    ]
+    assert _gateway_agent_persistence_covers_full_transcript(
+        {
+            "attempted": True,
+            "ok": True,
+            "row_ids_by_message_index": {2: 21, 3: 22},
+        },
+        (history + turn)[len(history):],
+        history_offset=len(history),
+    ) is True
 
     history = [
         {"role": "user", "content": "before"},
