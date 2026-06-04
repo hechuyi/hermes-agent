@@ -6,6 +6,7 @@ and implement the required methods.
 """
 
 import asyncio
+import hashlib
 import inspect
 import ipaddress
 import logging
@@ -33,6 +34,17 @@ _AUDIO_EXTS = frozenset({'.ogg', '.opus', '.mp3', '.wav', '.m4a', '.flac'})
 # delivered as a regular document.
 _TELEGRAM_AUDIO_ATTACHMENT_EXTS = frozenset({'.mp3', '.m4a'})
 _TELEGRAM_VOICE_EXTS = frozenset({'.ogg', '.opus'})
+_DELIVERY_METADATA_KEYS = frozenset(
+    {
+        "delivery_operation_hint",
+        "delivery_id",
+        "inbound_id",
+        "session_id",
+        "correlation_id",
+    }
+)
+_DELIVERY_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,127}$")
+_QUEUED_FOLLOWUP_FIRST_REPLY_OPERATION = "queued_followup_first_reply"
 
 
 def _platform_name(platform) -> str:
@@ -76,6 +88,69 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
         if anchor is not None:
             metadata["telegram_reply_to_message_id"] = str(anchor)
     return metadata
+
+
+def _delivery_identifier_component(
+    field: str,
+    value: object,
+    *,
+    max_len: int = 80,
+) -> str:
+    text = str(value if value is not None else "").strip()
+    if (
+        text
+        and len(text) <= max_len
+        and _DELIVERY_IDENTIFIER_RE.fullmatch(text)
+    ):
+        return text
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
+    return f"{field}-{digest}"
+
+
+def _queued_followup_first_reply_metadata(event, session_key: str) -> dict:
+    source = getattr(event, "source", None)
+    inbound_seed = (
+        getattr(event, "message_id", None)
+        or getattr(source, "message_id", None)
+        or "\x1f".join(
+            [
+                "missing-inbound",
+                str(session_key or ""),
+                _platform_name(getattr(source, "platform", None)),
+                str(getattr(source, "chat_id", "") or ""),
+                hashlib.sha256(
+                    str(getattr(event, "text", "") or "").encode("utf-8")
+                ).hexdigest()[:24],
+            ]
+        )
+    )
+    inbound_id = _delivery_identifier_component("inbound", inbound_seed)
+    session_id = _delivery_identifier_component("session", session_key)
+    delivery_id = f"{_QUEUED_FOLLOWUP_FIRST_REPLY_OPERATION}:{inbound_id}"
+    correlation_id = _delivery_identifier_component(
+        "correlation",
+        f"{session_id}:{inbound_id}",
+        max_len=96,
+    )
+    return {
+        "delivery_operation_hint": _QUEUED_FOLLOWUP_FIRST_REPLY_OPERATION,
+        "delivery_id": delivery_id,
+        "inbound_id": inbound_id,
+        "session_id": session_id,
+        "correlation_id": correlation_id,
+    }
+
+
+def _merge_event_delivery_metadata(metadata: dict | None, event) -> dict | None:
+    delivery_metadata = getattr(event, "_hermes_delivery_metadata", None)
+    if not isinstance(delivery_metadata, dict):
+        return metadata
+    merged = dict(metadata) if metadata is not None else {}
+    for key in _DELIVERY_METADATA_KEYS:
+        value = delivery_metadata.get(key)
+        if isinstance(value, str) and value:
+            merged[key] = value
+    return merged or None
 
 
 def _reply_anchor_for_event(event) -> str | None:
@@ -3729,11 +3804,15 @@ class BasePlatformAdapter(ABC):
                         _thread_metadata["notify"] = True
                     else:
                         _thread_metadata = {"notify": True}
+                    _send_metadata = _merge_event_delivery_metadata(
+                        _thread_metadata,
+                        event,
+                    )
                     result = await self._send_with_retry(
                         chat_id=event.source.chat_id,
                         content=text_content,
                         reply_to=_reply_anchor,
-                        metadata=_thread_metadata,
+                        metadata=_send_metadata,
                     )
                     _record_delivery(result)
 
@@ -3877,6 +3956,12 @@ class BasePlatformAdapter(ABC):
             if session_key in self._pending_messages:
                 pending_event = self._pending_messages.pop(session_key)
                 logger.debug("[%s] Processing queued follow-up message", self.name)
+                pending_event._hermes_delivery_metadata = (
+                    _queued_followup_first_reply_metadata(
+                        pending_event,
+                        session_key,
+                    )
+                )
                 # Keep the _active_sessions entry live across the turn chain
                 # and only CLEAR the interrupt Event — do NOT delete the entry.
                 # If we deleted here, a concurrent inbound message arriving

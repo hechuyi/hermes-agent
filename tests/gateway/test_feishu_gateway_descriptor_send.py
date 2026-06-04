@@ -160,6 +160,31 @@ async def test_audited_send_uses_allowlisted_stream_fresh_final_hint(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_audited_send_uses_allowlisted_queued_followup_first_reply_hint(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+    base_delivery_id = "queued_followup_first_reply:om_followup"
+    metadata = {
+        **_metadata(base_delivery_id),
+        "inbound_id": "om_followup",
+        "delivery_operation_hint": "queued_followup_first_reply",
+    }
+
+    result = await adapter.send("oc_chat", "hello", metadata=metadata)
+
+    assert result.success is True
+    assert result.message_id == "om_created"
+    assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert events[0]["operation"] == "queued_followup_first_reply"
+    assert events[1]["operation"] == "queued_followup_first_reply"
+    assert events[0]["delivery_id"] != base_delivery_id
+    assert events[1]["delivery_id"] == events[0]["delivery_id"]
+    assert message_api.create_calls[0].request_body.uuid == adapter._idempotency_key_for_delivery(
+        events[0]["delivery_id"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_audited_send_rejects_unsupported_operation_hint_before_sdk(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)

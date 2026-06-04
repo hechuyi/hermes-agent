@@ -1423,7 +1423,9 @@ class FeishuAdapter(BasePlatformAdapter):
 
     MAX_MESSAGE_LENGTH = 8000
     _DELIVERY_OPERATION_HINT_KEY = "delivery_operation_hint"
-    _SEND_DELIVERY_OPERATION_HINTS = frozenset({"stream_fresh_final"})
+    _SEND_DELIVERY_OPERATION_HINTS = frozenset(
+        {"queued_followup_first_reply", "stream_fresh_final"}
+    )
     # Threshold for detecting Feishu client-side message splits.
     # When a chunk is near the ~4096-char practical limit, a continuation
     # is almost certain.

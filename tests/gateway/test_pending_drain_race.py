@@ -22,6 +22,7 @@ dropping it.
 """
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -60,6 +61,21 @@ def _make_event(text="hi", chat_id="42"):
         text=text,
         message_type=MessageType.TEXT,
         source=SessionSource(platform=Platform.TELEGRAM, chat_id=chat_id, chat_type="dm"),
+    )
+
+
+def _make_feishu_event(text="hi", chat_id="oc_chat", message_id="om_inbound"):
+    return MessageEvent(
+        text=text,
+        message_type=MessageType.TEXT,
+        source=SessionSource(
+            platform=Platform.FEISHU,
+            chat_id=chat_id,
+            chat_type="dm",
+            thread_id="thread-a",
+            message_id=message_id,
+        ),
+        message_id=message_id,
     )
 
 
@@ -210,3 +226,47 @@ async def test_no_pending_cleans_up_normally():
     assert sk not in adapter._pending_messages
 
     await adapter.cancel_background_tasks()
+
+
+@pytest.mark.asyncio
+async def test_pending_drain_first_reply_carries_queued_followup_delivery_metadata():
+    adapter = _make_adapter()
+    sk = build_session_key(_make_feishu_event().source)
+    sent = []
+
+    async def send_with_retry(**kwargs):
+        sent.append(kwargs)
+        return SimpleNamespace(success=True, message_id=f"sent-{len(sent)}")
+
+    adapter._send_with_retry = send_with_retry
+
+    processed = []
+
+    async def handler(event):
+        processed.append(event.text)
+        if event.text == "M1":
+            adapter._pending_messages[sk] = _make_feishu_event(
+                text="M2",
+                message_id="om_followup",
+            )
+        return f"reply-{event.text}"
+
+    adapter._message_handler = handler
+
+    await adapter._process_message_background(_make_feishu_event(text="M1"), sk)
+
+    for _ in range(50):
+        if processed == ["M1", "M2"]:
+            break
+        await asyncio.sleep(0.01)
+
+    await adapter.cancel_background_tasks()
+
+    assert processed == ["M1", "M2"]
+    assert len(sent) == 2
+    first_metadata = sent[0]["metadata"]
+    followup_metadata = sent[1]["metadata"]
+    assert first_metadata.get("delivery_operation_hint") != "queued_followup_first_reply"
+    assert followup_metadata["delivery_operation_hint"] == "queued_followup_first_reply"
+    assert followup_metadata["delivery_id"] == "queued_followup_first_reply:om_followup"
+    assert followup_metadata["inbound_id"] == "om_followup"
