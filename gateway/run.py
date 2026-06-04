@@ -571,7 +571,7 @@ async def _emit_hermes_task_status(
         logger.warning(
             "Hermes status_card execute blocker: state=%s failure_class=%s",
             state,
-            getattr(send_result, "error", None) or "status_card_execute_failed",
+            "status_card_execute_failed",
         )
         return True
 
@@ -601,10 +601,19 @@ async def _run_stale_pending_scan_for_adapters(
     scan_now = int(now if now is not None else time.time())
     scan_max_age = int(max_age_seconds or _gateway_stale_pending_max_age_seconds())
 
+    unique_state_dirs: List[Path] = []
+    seen_state_dirs: set[str] = set()
     for adapter in list(adapter_values):
         state_dir = _adapter_hermes_tools_state_dir(adapter)
         if state_dir is None:
             continue
+        state_dir_key = str(state_dir)
+        if state_dir_key in seen_state_dirs:
+            continue
+        seen_state_dirs.add(state_dir_key)
+        unique_state_dirs.append(state_dir)
+
+    for state_dir in unique_state_dirs:
         event = {
             "type": "stale_pending_scan",
             "now": scan_now,
@@ -19500,12 +19509,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     except Exception as e:
         logger.debug("MCP tool discovery failed: %s", e)
 
-    await _run_stale_pending_scan_for_adapters(runner.adapters)
-
     # Start the gateway
     success = await runner.start()
     if not success:
         return False
+    await _run_stale_pending_scan_for_adapters(runner.adapters)
     if runner.should_exit_cleanly:
         if runner.exit_reason:
             logger.error("Gateway exiting cleanly: %s", runner.exit_reason)

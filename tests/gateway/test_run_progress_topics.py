@@ -60,12 +60,19 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
 
 
 class StatusCardProgressAdapter(ProgressCaptureAdapter):
-    def __init__(self, platform=Platform.FEISHU, state_dir=None, fail_status_card_execute=False):
+    def __init__(
+        self,
+        platform=Platform.FEISHU,
+        state_dir=None,
+        fail_status_card_execute=False,
+        status_card_error="status_card_execute_failed",
+    ):
         super().__init__(platform=platform)
         self._hermes_tools_state_dir = state_dir
         self.status_card_actions = []
         self._status_card_counter = 0
         self.fail_status_card_execute = fail_status_card_execute
+        self.status_card_error = status_card_error
 
     async def execute_status_card_action(
         self,
@@ -86,7 +93,7 @@ class StatusCardProgressAdapter(ProgressCaptureAdapter):
             }
         )
         if self.fail_status_card_execute:
-            return SendResult(success=False, error="status_card_execute_failed")
+            return SendResult(success=False, error=self.status_card_error)
         card_action = action.get("card_action", {}) if isinstance(action, dict) else {}
         if card_action.get("type") == "create":
             self._status_card_counter += 1
@@ -770,7 +777,35 @@ async def test_run_agent_feishu_status_card_execute_failure_suppresses_progress_
 
 
 @pytest.mark.asyncio
-async def test_start_gateway_runs_stale_pending_scan_before_runner_start(monkeypatch, tmp_path):
+async def test_run_agent_feishu_status_card_execute_failure_logs_stable_failure_class(
+    monkeypatch, tmp_path, caplog
+):
+    raw_error = "POST /private/raw/path token=sk-sensitive-user-text"
+    adapter = StatusCardProgressAdapter(
+        state_dir=tmp_path / "hermes-tools-state",
+        fail_status_card_execute=True,
+        status_card_error=raw_error,
+    )
+
+    adapter, events, result = await _run_feishu_status_card_agent(
+        monkeypatch,
+        tmp_path,
+        adapter=adapter,
+    )
+
+    assert result["final_response"] == "done"
+    assert [event for event in events if event.get("type") == "task_status"]
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "failure_class=status_card_execute_failed" in log_text
+    assert raw_error not in log_text
+    assert "/private/raw/path" not in log_text
+    assert "sk-sensitive-user-text" not in log_text
+
+
+@pytest.mark.asyncio
+async def test_start_gateway_runs_stale_pending_scan_after_runner_start_before_wait(
+    monkeypatch, tmp_path
+):
     gateway_run = importlib.import_module("gateway.run")
     calls = []
     adapter = ProgressCaptureAdapter(platform=Platform.FEISHU)
@@ -779,19 +814,23 @@ async def test_start_gateway_runs_stale_pending_scan_before_runner_start(monkeyp
     class _CleanExitRunner:
         def __init__(self, config):
             self.config = config
-            self.adapters = {Platform.FEISHU: adapter}
+            self.adapters = {}
             self.should_exit_cleanly = True
             self.exit_reason = None
 
         async def start(self):
             calls.append("start")
+            self.adapters = {Platform.FEISHU: adapter}
             return True
 
         async def stop(self):
             return None
 
+        async def wait_for_shutdown(self):
+            calls.append("wait")
+
     async def fake_scan(adapters, **kwargs):
-        calls.append("scan")
+        calls.append(("scan", dict(adapters)))
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
@@ -809,9 +848,48 @@ async def test_start_gateway_runs_stale_pending_scan_before_runner_start(monkeyp
     ok = await gateway_run.start_gateway(config=GatewayConfig(), replace=False, verbosity=None)
 
     assert ok is True
-    assert calls[:2] == ["scan", "start"]
+    assert calls[:2] == ["start", ("scan", {Platform.FEISHU: adapter})]
+    assert "wait" not in calls
     assert adapter.sent == []
     assert adapter.edits == []
+
+
+@pytest.mark.asyncio
+async def test_stale_pending_scan_deduplicates_shared_state_dir(monkeypatch, tmp_path):
+    gateway_run = importlib.import_module("gateway.run")
+    shared_state_dir = tmp_path / "shared-hermes-tools-state"
+    adapter_a = ProgressCaptureAdapter(platform=Platform.FEISHU)
+    adapter_b = ProgressCaptureAdapter(platform=Platform.SLACK)
+    adapter_a._hermes_tools_state_dir = shared_state_dir
+    adapter_b._hermes_tools_state_dir = shared_state_dir
+    calls = []
+
+    async def fake_apply_gateway_event_async(event, state_dir, **kwargs):
+        calls.append((dict(event), state_dir))
+        return SimpleNamespace(
+            ok=True,
+            event_type="stale_pending_scan",
+            action={
+                "type": "stale_pending_alert",
+                "alert_required": False,
+                "resend_permitted": False,
+                "count": 0,
+                "records": [],
+            },
+            failure_class=None,
+            reason=None,
+            diagnostics="",
+        )
+
+    monkeypatch.setattr(gateway_run, "apply_gateway_event_async", fake_apply_gateway_event_async, raising=False)
+
+    await gateway_run._run_stale_pending_scan_for_adapters(
+        {Platform.FEISHU: adapter_a, Platform.SLACK: adapter_b}
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0]["type"] == "stale_pending_scan"
+    assert calls[0][1] == shared_state_dir
 
 
 @pytest.mark.asyncio
