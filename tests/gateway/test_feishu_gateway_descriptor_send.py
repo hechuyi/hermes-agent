@@ -600,7 +600,7 @@ def _status_card_update_action(**overrides):
     action = {
         "type": "update",
         "card_id": "task-1",
-        "state": "succeeded",
+        "state": "completed",
         "text": "preflight complete",
         "requires_final_reply": False,
         "fallback_text": "task succeeded: preflight complete",

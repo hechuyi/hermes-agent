@@ -87,7 +87,6 @@ _STATUS_CARD_CREATE_UPDATE_KEYS = frozenset(
         "card_id",
         "state",
         "text",
-        "message_id",
         "requires_final_reply",
         "fallback_text",
         "feishu_card",
@@ -118,7 +117,9 @@ _STATUS_CARD_SUPPRESSED_KEYS = frozenset(
 _STATUS_CARD_SUPPRESSED_REQUIRED_KEYS = frozenset(
     {"type", "reason", "fallback_text", "feishu_card"}
 )
-_STATUS_CARD_STATES = frozenset({"queued", "running", "succeeded", "failed"})
+_STATUS_CARD_STATES = frozenset(
+    {"started", "running", "waiting_approval", "completed", "failed"}
+)
 _STATUS_CARD_ACTION_TYPES = frozenset({"create", "update", "suppressed"})
 _PREFLIGHT_CHECK_KEYS = frozenset({"name", "ok", "detail"})
 _PREFLIGHT_FEISHU_REQUEST_KEYS = frozenset(
@@ -617,13 +618,11 @@ def _validated_status_card_action(value: Any) -> dict[str, Any] | None:
         state = _string_or_none(value.get("state"))
         text = _string_or_none(value.get("text"))
         fallback_text = _string_or_none(value.get("fallback_text"))
-        message_id = _validated_optional_identifier_field(value.get("message_id"))
         requires_final_reply = value.get("requires_final_reply")
         feishu_card = value.get("feishu_card")
         feishu_request = _validated_feishu_request(value.get("feishu_request"))
         if (
             card_id is None
-            or message_id is _INVALID
             or state not in _STATUS_CARD_STATES
             or text is None
             or len(text) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS
@@ -643,8 +642,6 @@ def _validated_status_card_action(value: Any) -> dict[str, Any] | None:
             "fallback_text": fallback_text,
             "feishu_card": feishu_card,
         }
-        if message_id is not None:
-            sanitized["message_id"] = message_id
         if feishu_request is not None:
             sanitized["feishu_request"] = feishu_request
         return sanitized

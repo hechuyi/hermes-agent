@@ -1161,7 +1161,7 @@ def _status_card_update_action(**overrides):
     action = {
         "type": "update",
         "card_id": "task-1",
-        "state": "succeeded",
+        "state": "completed",
         "text": "preflight complete",
         "requires_final_reply": False,
         "fallback_text": "task succeeded: preflight complete",
@@ -1219,6 +1219,71 @@ def test_apply_gateway_event_rejects_status_card_create_update_missing_rust_requ
 ):
     action = action_factory()
     action.pop(missing_field)
+
+    def fake_run(*args, **kwargs):
+        return _completed(stdout=json.dumps(_status_card_action(action)))
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "task_status"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["started", "running", "waiting_approval", "completed", "failed"],
+)
+def test_apply_gateway_event_accepts_rust_status_card_states(
+    monkeypatch, tmp_path, state
+):
+    action = _status_card_create_action(state=state)
+
+    def fake_run(*args, **kwargs):
+        return _completed(stdout=json.dumps(_status_card_action(action)))
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "task_status"}, tmp_path)
+
+    assert result.ok is True
+    assert result.action["card_action"]["state"] == state
+
+
+@pytest.mark.parametrize("state", ["queued", "succeeded"])
+def test_apply_gateway_event_rejects_non_rust_status_card_states(
+    monkeypatch, tmp_path, state
+):
+    action = _status_card_create_action(state=state)
+
+    def fake_run(*args, **kwargs):
+        return _completed(stdout=json.dumps(_status_card_action(action)))
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "task_status"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+
+
+@pytest.mark.parametrize("action_factory", [_status_card_create_action, _status_card_update_action])
+def test_apply_gateway_event_rejects_status_card_create_update_top_level_message_id(
+    monkeypatch, tmp_path, action_factory
+):
+    action = action_factory(message_id="om_status")
 
     def fake_run(*args, **kwargs):
         return _completed(stdout=json.dumps(_status_card_action(action)))
