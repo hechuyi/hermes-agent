@@ -3,13 +3,14 @@
 import asyncio
 import importlib
 import sys
+import threading
 import time
 import types
 from types import SimpleNamespace
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig, StreamingConfig
+from gateway.config import GatewayConfig, Platform, PlatformConfig, StreamingConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.session import SessionSource
 
@@ -56,6 +57,38 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id: str):
         return {"id": chat_id}
+
+
+class StatusCardProgressAdapter(ProgressCaptureAdapter):
+    def __init__(self, platform=Platform.FEISHU, state_dir=None):
+        super().__init__(platform=platform)
+        self._hermes_tools_state_dir = state_dir
+        self.status_card_actions = []
+        self._status_card_counter = 0
+
+    async def execute_status_card_action(
+        self,
+        action,
+        *,
+        delivery_id,
+        inbound_id,
+        session_id,
+        correlation_id,
+    ) -> SendResult:
+        self.status_card_actions.append(
+            {
+                "action": action,
+                "delivery_id": delivery_id,
+                "inbound_id": inbound_id,
+                "session_id": session_id,
+                "correlation_id": correlation_id,
+            }
+        )
+        card_action = action.get("card_action", {}) if isinstance(action, dict) else {}
+        if card_action.get("type") == "create":
+            self._status_card_counter += 1
+            return SendResult(success=True, message_id=f"status-card-{self._status_card_counter}")
+        return SendResult(success=True, message_id="status-card-1")
 
 
 
@@ -255,6 +288,90 @@ def _make_runner(adapter):
         stt_enabled=False,
     )
     return runner
+
+
+def _status_card_apply_result(action_type: str, state: str):
+    return SimpleNamespace(
+        ok=True,
+        event_type="task_status",
+        action={
+            "type": "status_card",
+            "card_action": {
+                "type": action_type,
+                "card_id": "task-card",
+                "state": state,
+                "text": f"{state} text",
+                "requires_final_reply": state in {"completed", "failed"},
+                "fallback_text": f"{state} fallback",
+                "feishu_card": {"config": {"wide_screen_mode": True}},
+                "feishu_request": {
+                    "operation": (
+                        "send_interactive_message"
+                        if action_type == "create"
+                        else "patch_interactive_message"
+                    ),
+                    "method": "POST" if action_type == "create" else "PATCH",
+                    "path": (
+                        "/open-apis/im/v1/messages"
+                        if action_type == "create"
+                        else "/open-apis/im/v1/messages/status-card-1"
+                    ),
+                    "params": {"receive_id_type": "chat_id"} if action_type == "create" else {},
+                    "body": {"content": "{}"},
+                },
+            },
+        },
+        failure_class=None,
+        reason=None,
+        diagnostics="",
+    )
+
+
+def _install_fake_agent(monkeypatch, agent_cls):
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = agent_cls
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+
+async def _run_feishu_status_card_agent(monkeypatch, tmp_path, agent_cls=FakeAgent):
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+    _install_fake_agent(monkeypatch, agent_cls)
+
+    events = []
+
+    async def fake_apply_gateway_event_async(event, state_dir, **kwargs):
+        events.append(dict(event))
+        action_type = "update" if event.get("message_id") else "create"
+        return _status_card_apply_result(action_type, event["state"])
+
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "apply_gateway_event_async", fake_apply_gateway_event_async, raising=False)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+
+    adapter = StatusCardProgressAdapter(state_dir=tmp_path / "hermes-tools-state")
+    runner = _make_runner(adapter)
+    source = SessionSource(
+        platform=Platform.FEISHU,
+        chat_id="oc_chat",
+        chat_type="group",
+        thread_id="topic_17585",
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-feishu-status",
+        session_key="agent:main:feishu:group:oc_chat:topic_17585",
+        event_message_id="om_triggering_user_message",
+    )
+    return adapter, events, result
 
 
 @pytest.mark.asyncio
@@ -479,6 +596,137 @@ async def test_run_agent_feishu_progress_replies_inside_existing_thread(monkeypa
     }
     assert adapter.edits
     assert adapter.edits[0]["message_id"] == "progress-1"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_feishu_progress_emits_task_status_create_then_patch(monkeypatch, tmp_path):
+    adapter, events, result = await _run_feishu_status_card_agent(monkeypatch, tmp_path)
+
+    assert result["final_response"] == "done"
+    task_status_events = [event for event in events if event.get("type") == "task_status"]
+    assert len(task_status_events) >= 2
+    assert task_status_events[0]["state"] == "running"
+    assert task_status_events[0]["receive_id_type"] == "chat_id"
+    assert task_status_events[0]["receive_id"] == "oc_chat"
+    assert task_status_events[0].get("message_id") is None
+    assert task_status_events[0]["idempotency_key"]
+    assert task_status_events[1]["state"] in {"running", "completed"}
+    assert task_status_events[1]["message_id"] == "status-card-1"
+    assert [call["action"]["card_action"]["type"] for call in adapter.status_card_actions[:2]] == [
+        "create",
+        "update",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_terminal_task_status_requires_final_reply_without_suppressing_normal_final(
+    monkeypatch, tmp_path
+):
+    adapter, events, result = await _run_feishu_status_card_agent(monkeypatch, tmp_path)
+
+    terminal_events = [
+        event for event in events if event.get("type") == "task_status" and event.get("state") == "completed"
+    ]
+    assert terminal_events
+    assert terminal_events[-1]["message_id"] == "status-card-1"
+    terminal_actions = [
+        call["action"]["card_action"]
+        for call in adapter.status_card_actions
+        if call["action"]["card_action"]["state"] == "completed"
+    ]
+    assert terminal_actions
+    assert terminal_actions[-1]["requires_final_reply"] is True
+    assert result["final_response"] == "done"
+    assert result.get("already_sent") is not True
+
+
+@pytest.mark.asyncio
+async def test_start_gateway_runs_stale_pending_scan_before_runner_start(monkeypatch, tmp_path):
+    gateway_run = importlib.import_module("gateway.run")
+    calls = []
+    adapter = ProgressCaptureAdapter(platform=Platform.FEISHU)
+    adapter._hermes_tools_state_dir = tmp_path / "hermes-tools-state"
+
+    class _CleanExitRunner:
+        def __init__(self, config):
+            self.config = config
+            self.adapters = {Platform.FEISHU: adapter}
+            self.should_exit_cleanly = True
+            self.exit_reason = None
+
+        async def start(self):
+            calls.append("start")
+            return True
+
+        async def stop(self):
+            return None
+
+    async def fake_scan(adapters, **kwargs):
+        calls.append("scan")
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("gateway.status.get_running_pid", lambda: None)
+    monkeypatch.setattr("gateway.status.acquire_gateway_runtime_lock", lambda: True)
+    monkeypatch.setattr("gateway.status.release_gateway_runtime_lock", lambda: None)
+    monkeypatch.setattr("gateway.status.write_pid_file", lambda: None)
+    monkeypatch.setattr("gateway.status.remove_pid_file", lambda: None)
+    monkeypatch.setattr("tools.skills_sync.sync_skills", lambda quiet=True: None)
+    monkeypatch.setattr("hermes_logging.setup_logging", lambda hermes_home, mode: tmp_path)
+    monkeypatch.setattr("tools.mcp_tool.discover_mcp_tools", lambda: None, raising=False)
+    monkeypatch.setattr(gateway_run, "_run_planned_stop_watcher", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gateway_run, "GatewayRunner", _CleanExitRunner)
+    monkeypatch.setattr(gateway_run, "_run_stale_pending_scan_for_adapters", fake_scan, raising=False)
+
+    ok = await gateway_run.start_gateway(config=GatewayConfig(), replace=False, verbosity=None)
+
+    assert ok is True
+    assert calls[:2] == ["scan", "start"]
+    assert adapter.sent == []
+    assert adapter.edits == []
+
+
+@pytest.mark.asyncio
+async def test_cron_ticker_runs_periodic_stale_pending_scan_without_resend(monkeypatch, tmp_path):
+    gateway_run = importlib.import_module("gateway.run")
+    adapter = ProgressCaptureAdapter(platform=Platform.FEISHU)
+    adapter._hermes_tools_state_dir = tmp_path / "hermes-tools-state"
+    stop_event = threading.Event()
+    applied_events = []
+
+    async def fake_apply_gateway_event_async(event, state_dir, **kwargs):
+        applied_events.append(dict(event))
+        return SimpleNamespace(
+            ok=True,
+            event_type="stale_pending_scan",
+            action={"type": "stale_pending_alert", "alert_required": False, "resend_permitted": False, "count": 0, "records": []},
+            failure_class=None,
+            reason=None,
+            diagnostics="",
+        )
+
+    monkeypatch.setattr("cron.scheduler.tick", lambda **kwargs: None)
+    monkeypatch.setattr(gateway_run, "apply_gateway_event_async", fake_apply_gateway_event_async, raising=False)
+
+    thread = threading.Thread(
+        target=gateway_run._start_cron_ticker,
+        args=(stop_event,),
+        kwargs={
+            "adapters": {Platform.FEISHU: adapter},
+            "loop": asyncio.get_running_loop(),
+            "interval": 0.01,
+            "stale_scan_interval_ticks": 1,
+        },
+    )
+    thread.start()
+    await asyncio.sleep(0.05)
+    stop_event.set()
+    thread.join(timeout=1)
+
+    stale_events = [event for event in applied_events if event.get("type") == "stale_pending_scan"]
+    assert stale_events
+    assert all(event["max_age_seconds"] > 0 for event in stale_events)
+    assert adapter.sent == []
+    assert adapter.edits == []
 
 
 # ---------------------------------------------------------------------------

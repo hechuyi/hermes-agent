@@ -406,6 +406,231 @@ async def _send_or_update_status_coro(adapter, chat_id, status_key, content, met
     return await adapter.send(chat_id, content, metadata=metadata)
 
 
+_HERMES_STATUS_CARD_MIN_UPDATE_INTERVAL_SECONDS = 1
+_HERMES_STALE_PENDING_SCAN_MAX_AGE_SECONDS = 3600
+_HERMES_STALE_PENDING_SCAN_INTERVAL_TICKS = 5
+_HERMES_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+@dataclasses.dataclass
+class _HermesTaskStatusContext:
+    task_id: str
+    session_id: str
+    inbound_id: str
+    correlation_id: str
+    receive_id_type: str
+    receive_id: str
+    idempotency_key: str
+    message_id: Optional[str] = None
+
+
+def _stable_gateway_material(prefix: str, *parts: Any) -> str:
+    raw = "-".join(str(part) for part in (prefix, *parts) if part is not None and str(part) != "")
+    stable = _HERMES_SAFE_ID_RE.sub("-", raw).strip("-")
+    return stable[:160] or prefix
+
+
+def _adapter_hermes_tools_state_dir(adapter: Any, platform: Any = None, config: Any = None) -> Optional[Path]:
+    state_dir = getattr(adapter, "_hermes_tools_state_dir", None)
+    if state_dir:
+        return Path(state_dir)
+
+    adapter_config = getattr(adapter, "config", None)
+    adapter_extra = getattr(adapter_config, "extra", None)
+    if isinstance(adapter_extra, dict) and adapter_extra.get("hermes_tools_state_dir"):
+        return Path(str(adapter_extra["hermes_tools_state_dir"]))
+
+    platforms = getattr(config, "platforms", None)
+    if platform is not None and isinstance(platforms, dict):
+        platform_config = platforms.get(platform)
+        platform_extra = getattr(platform_config, "extra", None)
+        if isinstance(platform_extra, dict) and platform_extra.get("hermes_tools_state_dir"):
+            return Path(str(platform_extra["hermes_tools_state_dir"]))
+
+    env_state_dir = os.getenv("HERMES_TOOLS_STATE_DIR", "")
+    return Path(env_state_dir) if env_state_dir else None
+
+
+def _make_hermes_task_status_context(
+    *,
+    source: Any,
+    session_id: str,
+    session_key: Optional[str],
+    event_message_id: Optional[str],
+    run_generation: Optional[int],
+) -> _HermesTaskStatusContext:
+    task_material = event_message_id or run_generation or session_id or session_key or source.chat_id
+    task_id = _stable_gateway_material("task-status", session_id, task_material)
+    inbound_id = _stable_gateway_material("inbound", event_message_id or session_key or session_id or source.chat_id)
+    correlation_id = _stable_gateway_material("corr", session_id, event_message_id or run_generation or source.chat_id)
+    return _HermesTaskStatusContext(
+        task_id=task_id,
+        session_id=_stable_gateway_material("session", session_id),
+        inbound_id=inbound_id,
+        correlation_id=correlation_id,
+        receive_id_type="chat_id",
+        receive_id=str(source.chat_id or ""),
+        idempotency_key=_stable_gateway_material("status-card-create", task_id),
+    )
+
+
+async def _emit_hermes_task_status(
+    adapter: Any,
+    context: _HermesTaskStatusContext,
+    *,
+    state: str,
+    text: str,
+    config: Any = None,
+    platform: Any = None,
+    timestamp: Optional[int] = None,
+    min_update_interval_seconds: int = _HERMES_STATUS_CARD_MIN_UPDATE_INTERVAL_SECONDS,
+) -> bool:
+    """Emit a Hermes task_status event and execute a validated status-card action.
+
+    Returns True when the adapter is eligible for Hermes status handling, even
+    if apply/execute fails closed. Callers use that to avoid creating fallback
+    heartbeat cards when the audited path is configured but unhealthy.
+    """
+    if not adapter or not callable(getattr(adapter, "execute_status_card_action", None)):
+        return False
+    state_dir = _adapter_hermes_tools_state_dir(adapter, platform=platform, config=config)
+    if state_dir is None:
+        return False
+
+    event: Dict[str, Any] = {
+        "type": "task_status",
+        "task_id": context.task_id,
+        "state": state,
+        "text": str(text or ""),
+        "timestamp": int(timestamp if timestamp is not None else time.time()),
+        "min_update_interval_seconds": int(min_update_interval_seconds),
+    }
+    if context.message_id:
+        event["message_id"] = context.message_id
+    elif context.receive_id and context.receive_id_type:
+        event["receive_id_type"] = context.receive_id_type
+        event["receive_id"] = context.receive_id
+        event["idempotency_key"] = context.idempotency_key
+
+    try:
+        result = await apply_gateway_event_async(event, state_dir)
+    except Exception as exc:
+        logger.warning(
+            "Hermes task_status apply failed closed: event_type=task_status state=%s failure_class=%s",
+            state,
+            type(exc).__name__,
+        )
+        return True
+
+    if not getattr(result, "ok", False):
+        logger.warning(
+            "Hermes task_status blocker: failure_class=%s reason=%s state=%s",
+            getattr(result, "failure_class", None) or "unknown",
+            getattr(result, "reason", None) or "",
+            state,
+        )
+        return True
+
+    action = getattr(result, "action", None)
+    if not isinstance(action, dict) or action.get("type") != "status_card":
+        logger.warning(
+            "Hermes task_status blocker: failure_class=missing_status_card_action state=%s event_type=%s",
+            state,
+            getattr(result, "event_type", None) or "unknown",
+        )
+        return True
+
+    delivery_kind = "patch" if context.message_id else "create"
+    delivery_id = _stable_gateway_material("status-card", context.task_id, delivery_kind)
+    try:
+        send_result = await adapter.execute_status_card_action(
+            action,
+            delivery_id=delivery_id,
+            inbound_id=context.inbound_id,
+            session_id=context.session_id,
+            correlation_id=context.correlation_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Hermes status_card execute failed closed: state=%s failure_class=%s",
+            state,
+            type(exc).__name__,
+        )
+        return True
+
+    if not getattr(send_result, "success", False):
+        logger.warning(
+            "Hermes status_card execute blocker: state=%s failure_class=%s",
+            state,
+            getattr(send_result, "error", None) or "status_card_execute_failed",
+        )
+        return True
+
+    message_id = getattr(send_result, "message_id", None)
+    if message_id:
+        context.message_id = str(message_id)
+    return True
+
+
+def _gateway_stale_pending_max_age_seconds() -> int:
+    try:
+        value = int(os.getenv("HERMES_STALE_PENDING_MAX_AGE_SECONDS", ""))
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else _HERMES_STALE_PENDING_SCAN_MAX_AGE_SECONDS
+
+
+async def _run_stale_pending_scan_for_adapters(
+    adapters: Any,
+    *,
+    now: Optional[int] = None,
+    max_age_seconds: Optional[int] = None,
+) -> None:
+    if not adapters:
+        return
+    adapter_values = adapters.values() if isinstance(adapters, dict) else adapters
+    scan_now = int(now if now is not None else time.time())
+    scan_max_age = int(max_age_seconds or _gateway_stale_pending_max_age_seconds())
+
+    for adapter in list(adapter_values):
+        state_dir = _adapter_hermes_tools_state_dir(adapter)
+        if state_dir is None:
+            continue
+        event = {
+            "type": "stale_pending_scan",
+            "now": scan_now,
+            "max_age_seconds": scan_max_age,
+        }
+        try:
+            result = await apply_gateway_event_async(event, state_dir)
+        except Exception as exc:
+            logger.warning(
+                "Hermes stale_pending_scan failed closed: failure_class=%s",
+                type(exc).__name__,
+            )
+            continue
+        if not getattr(result, "ok", False):
+            logger.warning(
+                "Hermes stale_pending_scan blocker: failure_class=%s reason=%s",
+                getattr(result, "failure_class", None) or "unknown",
+                getattr(result, "reason", None) or "",
+            )
+            continue
+        action = getattr(result, "action", None)
+        if isinstance(action, dict) and action.get("type") == "stale_pending_alert":
+            try:
+                count = int(action.get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if action.get("alert_required") or count > 0:
+                logger.warning(
+                    "Hermes stale_pending_scan blocker: alert_required=%s count=%d resend_permitted=%s",
+                    bool(action.get("alert_required")),
+                    count,
+                    bool(action.get("resend_permitted")),
+                )
+
+
 def _telegramize_command_mentions(text: str, platform: Any) -> str:
     """Rewrite slash-command mentions to Telegram-valid command names.
 
@@ -1118,6 +1343,7 @@ from gateway.platforms.base import (
     _reply_anchor_for_event,
     merge_pending_message_event,
 )
+from gateway.hermes_tools_gateway_event import apply_gateway_event_async
 from gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
@@ -16523,6 +16749,42 @@ class GatewayRunner:
             if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
             else None
         )
+        _hermes_status_context: Optional[_HermesTaskStatusContext] = None
+        _hermes_status_lock = asyncio.Lock()
+        _hermes_status_adapter = self.adapters.get(source.platform)
+        if (
+            source.platform == Platform.FEISHU
+            and _hermes_status_adapter is not None
+            and _adapter_hermes_tools_state_dir(
+                _hermes_status_adapter,
+                platform=source.platform,
+                config=getattr(self, "config", None),
+            )
+            is not None
+        ):
+            _hermes_status_context = _make_hermes_task_status_context(
+                source=source,
+                session_id=session_id,
+                session_key=session_key,
+                event_message_id=event_message_id,
+                run_generation=run_generation,
+            )
+
+        async def _emit_turn_task_status(state: str, text: str) -> bool:
+            if _hermes_status_context is None:
+                return False
+            adapter = self.adapters.get(source.platform)
+            if adapter is None:
+                return False
+            async with _hermes_status_lock:
+                return await _emit_hermes_task_status(
+                    adapter,
+                    _hermes_status_context,
+                    state=state,
+                    text=text,
+                    config=getattr(self, "config", None),
+                    platform=source.platform,
+                )
 
         async def send_progress_messages():
             if not progress_queue:
@@ -16715,6 +16977,14 @@ class GatewayRunner:
                         msg = raw
                         progress_lines.append(msg)
 
+                    try:
+                        await _emit_turn_task_status("running", _progress_text(progress_lines))
+                    except Exception as _hts_err:
+                        logger.warning(
+                            "Hermes task_status progress blocker: failure_class=%s",
+                            type(_hts_err).__name__,
+                        )
+
                     if await _roll_progress_overflow_if_needed():
                         _last_edit_ts = time.monotonic()
                         await asyncio.sleep(0.3)
@@ -16836,6 +17106,10 @@ class GatewayRunner:
                                 repeat_count[0] = 0
                             else:
                                 progress_lines.append(raw)
+                                try:
+                                    await _emit_turn_task_status("running", _progress_text(progress_lines))
+                                except Exception:
+                                    pass
                                 await _roll_progress_overflow_if_needed()
                         except Exception:
                             break
@@ -17996,6 +18270,8 @@ class GatewayRunner:
                         pass
                 _heartbeat_text = f"⏳ Working — {_elapsed_mins} min{_status_detail}"
                 try:
+                    if await _emit_turn_task_status("running", _heartbeat_text):
+                        continue
                     _notify_res = None
                     if _heartbeat_msg_id:
                         try:
@@ -18242,6 +18518,17 @@ class GatewayRunner:
 
             # Check if we were interrupted OR have a queued message (/queue).
             result = response if isinstance(response, dict) else result_holder[0]
+            if isinstance(result, dict):
+                _terminal_state = "failed" if result.get("failed") else "completed"
+                _terminal_text = result.get("final_response") or _terminal_state
+                try:
+                    await _emit_turn_task_status(_terminal_state, _terminal_text)
+                except Exception as _terminal_status_err:
+                    logger.warning(
+                        "Hermes task_status terminal blocker: state=%s failure_class=%s",
+                        _terminal_state,
+                        type(_terminal_status_err).__name__,
+                    )
             adapter = self.adapters.get(source.platform)
             # Get pending message from adapter.
             # Use session_key (not source.chat_id) to match adapter's storage keys.
@@ -18687,7 +18974,13 @@ def _run_planned_stop_watcher(
         stop_event.wait(poll_interval)
 
 
-def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60):
+def _start_cron_ticker(
+    stop_event: threading.Event,
+    adapters=None,
+    loop=None,
+    interval: int = 60,
+    stale_scan_interval_ticks: Optional[int] = None,
+):
     """
     Background thread that ticks the cron scheduler at a regular interval.
     
@@ -18709,6 +19002,10 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     CHANNEL_DIR_EVERY = 5    # ticks — every 5 minutes
     PASTE_SWEEP_EVERY = 60   # ticks — once per hour
     CURATOR_EVERY = 60       # ticks — poll hourly (inner gate handles the real cadence)
+    STALE_SCAN_EVERY = max(
+        1,
+        int(stale_scan_interval_ticks or _HERMES_STALE_PENDING_SCAN_INTERVAL_TICKS),
+    )
 
     logger.info("Cron ticker started (interval=%ds)", interval)
     tick_count = 0
@@ -18719,6 +19016,22 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
             logger.debug("Cron tick error: %s", e)
 
         tick_count += 1
+
+        if tick_count % STALE_SCAN_EVERY == 0 and adapters and loop is not None:
+            try:
+                fut = safe_schedule_threadsafe(
+                    _run_stale_pending_scan_for_adapters(adapters),
+                    loop,
+                    logger=logger,
+                    log_message="Hermes stale_pending_scan scheduling error",
+                )
+                if fut is not None:
+                    fut.result(timeout=30)
+            except Exception as e:
+                logger.warning(
+                    "Hermes stale_pending_scan ticker blocker: failure_class=%s",
+                    type(e).__name__,
+                )
 
         if tick_count % CHANNEL_DIR_EVERY == 0 and adapters:
             try:
@@ -19156,6 +19469,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         await _loop.run_in_executor(None, discover_mcp_tools)
     except Exception as e:
         logger.debug("MCP tool discovery failed: %s", e)
+
+    await _run_stale_pending_scan_for_adapters(runner.adapters)
 
     # Start the gateway
     success = await runner.start()
