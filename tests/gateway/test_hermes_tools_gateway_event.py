@@ -952,3 +952,146 @@ def test_preflight_gateway_event_rejects_generic_feishu_request_path(
     assert result.ok is False
     assert result.failure_class == "hermes_tools_invalid_envelope"
     assert result.action is None
+
+
+def test_apply_gateway_event_exposes_status_card_create_feishu_request(
+    monkeypatch, tmp_path
+):
+    feishu_request = {
+        "operation": "send_interactive_message",
+        "method": "POST",
+        "path": "/open-apis/im/v1/messages",
+        "params": {"receive_id_type": "chat_id"},
+        "body": {
+            "receive_id": "oc_status",
+            "msg_type": "interactive",
+            "content": '{"config":{"wide_screen_mode":true}}',
+            "uuid": "task-status-create",
+        },
+    }
+
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "task_status",
+                    "action": {
+                        "type": "status_card",
+                        "card_action": {
+                            "type": "create",
+                            "card_id": "task-1",
+                            "requires_final_reply": True,
+                            "feishu_request": feishu_request,
+                        },
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "task_status"}, tmp_path)
+
+    assert result.ok is True
+    assert result.action == {
+        "type": "status_card",
+        "card_action": {
+            "type": "create",
+            "card_id": "task-1",
+            "requires_final_reply": True,
+            "feishu_request": feishu_request,
+        },
+    }
+
+
+def test_apply_gateway_event_exposes_status_card_patch_feishu_request(
+    monkeypatch, tmp_path
+):
+    feishu_request = {
+        "operation": "patch_interactive_message",
+        "method": "PATCH",
+        "path": "/open-apis/im/v1/messages/om_status",
+        "params": {},
+        "body": {"content": '{"config":{"wide_screen_mode":true}}'},
+    }
+
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "task_status",
+                    "action": {
+                        "type": "status_card",
+                        "card_action": {
+                            "type": "update",
+                            "card_id": "task-1",
+                            "message_id": "om_status",
+                            "requires_final_reply": False,
+                            "feishu_request": feishu_request,
+                        },
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "task_status"}, tmp_path)
+
+    assert result.ok is True
+    assert result.action["card_action"]["feishu_request"] == feishu_request
+
+
+def test_apply_gateway_event_rejects_status_card_descriptor_extra_fields(
+    monkeypatch, tmp_path
+):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "task_status",
+                    "action": {
+                        "type": "status_card",
+                        "card_action": {
+                            "type": "create",
+                            "card_id": "task-1",
+                            "requires_final_reply": True,
+                            "feishu_request": {
+                                "operation": "send_interactive_message",
+                                "method": "POST",
+                                "path": "/open-apis/im/v1/messages",
+                                "params": {"receive_id_type": "chat_id"},
+                                "body": {
+                                    "receive_id": "oc_status",
+                                    "msg_type": "interactive",
+                                    "content": '{"config":{"wide_screen_mode":true}}',
+                                    "uuid": "task-status-create",
+                                    "headers": {"authorization": "Bearer raw-secret"},
+                                },
+                            },
+                        },
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "task_status"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+    assert "raw-secret" not in result.diagnostics

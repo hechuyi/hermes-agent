@@ -164,6 +164,18 @@ _MARKDOWN_FENCE_CLOSE_RE = re.compile(r"^```\s*$")
 _MENTION_RE = re.compile(r"@_user_\d+")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)
+_FEISHU_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
+_DELIVERY_FAILURE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+_FEISHU_DESCRIPTOR_PATCH_PATH_RE = re.compile(r"^/open-apis/im/v1/messages/([A-Za-z0-9_]+)$")
+_FEISHU_AMBIGUOUS_NON_ACCEPTANCE_CODES = frozenset(
+    {
+        99991400,
+        99991663,
+        99991664,
+        230020,
+        230021,
+    }
+)
 # ---------------------------------------------------------------------------
 # Media type sets and upload constants
 # ---------------------------------------------------------------------------
@@ -1787,6 +1799,38 @@ class FeishuAdapter(BasePlatformAdapter):
         try:
             for chunk in chunks:
                 msg_type, payload = self._build_outbound_payload(chunk)
+                if self._hermes_tools_state_dir is not None:
+                    operation = "reply" if reply_to else "normal_final_reply"
+                    delivery_id = self._delivery_id_for(
+                        operation,
+                        metadata=metadata,
+                        parts=[chat_id, reply_to or "", msg_type, payload],
+                    )
+                    response_or_result = await self._audited_delivery(
+                        delivery_id=delivery_id,
+                        operation=operation,
+                        target=f"feishu:chat:{chat_id}",
+                        inbound_id=self._delivery_metadata(
+                            metadata, "inbound_id", reply_to or chat_id
+                        ),
+                        session_id=self._delivery_metadata(metadata, "session_id", "session"),
+                        correlation_id=self._delivery_metadata(
+                            metadata, "correlation_id", delivery_id
+                        ),
+                        network_call=lambda uuid_value: self._send_raw_message(
+                            chat_id=chat_id,
+                            msg_type=msg_type,
+                            payload=payload,
+                            reply_to=reply_to,
+                            metadata=metadata,
+                            uuid_value=uuid_value,
+                        ),
+                        require_returned_message_id=True,
+                    )
+                    if isinstance(response_or_result, SendResult):
+                        return response_or_result
+                    last_response = response_or_result
+                    continue
                 try:
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
@@ -1833,17 +1877,45 @@ class FeishuAdapter(BasePlatformAdapter):
         content: str,
         *,
         finalize: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Edit a previously sent Feishu text/post message."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
+        if not self._valid_feishu_message_id(message_id):
+            return SendResult(success=False, error="Invalid Feishu message_id")
 
         content = self.format_message(content)
         try:
             msg_type, payload = self._build_outbound_payload(content)
             body = self._build_update_message_body(msg_type=msg_type, content=payload)
             request = self._build_update_message_request(message_id=message_id, request_body=body)
-            response = await asyncio.to_thread(self._client.im.v1.message.update, request)
+            if self._hermes_tools_state_dir is not None:
+                delivery_id = self._delivery_id_for(
+                    "message_edit",
+                    metadata=metadata,
+                    parts=[chat_id, message_id, msg_type, payload],
+                )
+                response_or_result = await self._audited_delivery(
+                    delivery_id=delivery_id,
+                    operation="message_edit",
+                    target=f"feishu:message:{message_id}",
+                    inbound_id=self._delivery_metadata(metadata, "inbound_id", message_id),
+                    session_id=self._delivery_metadata(metadata, "session_id", "session"),
+                    correlation_id=self._delivery_metadata(
+                        metadata, "correlation_id", delivery_id
+                    ),
+                    network_call=lambda _uuid_value: asyncio.to_thread(
+                        self._client.im.v1.message.update, request
+                    ),
+                    require_returned_message_id=False,
+                    existing_message_id=message_id,
+                )
+                if isinstance(response_or_result, SendResult):
+                    return response_or_result
+                response = response_or_result
+            else:
+                response = await asyncio.to_thread(self._client.im.v1.message.update, request)
             result = self._finalize_send_result(response, "update failed")
             if not result.success and msg_type == "post" and _POST_CONTENT_INVALID_RE.search(result.error or ""):
                 logger.warning("[Feishu] Invalid post update payload rejected by API; falling back to plain text")
@@ -4723,6 +4795,404 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.error("[Feishu] Failed to send file %s: %s", file_path, exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
 
+    async def execute_feishu_request_descriptor(
+        self,
+        descriptor: Dict[str, Any],
+        *,
+        delivery_id: str,
+        inbound_id: str,
+        session_id: str,
+        correlation_id: str,
+    ) -> SendResult:
+        """Execute a Rust-emitted Feishu request descriptor through SDK builders."""
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+
+        validated = self._validate_feishu_request_descriptor(descriptor)
+        target = "feishu:descriptor"
+        if validated is None:
+            if await self._apply_delivery_pending(
+                delivery_id=delivery_id,
+                inbound_id=inbound_id,
+                target=target,
+                session_id=session_id,
+                correlation_id=correlation_id,
+            ):
+                await self._apply_delivery_failed(
+                    delivery_id,
+                    "invalid_feishu_request_descriptor",
+                )
+            return SendResult(
+                success=False,
+                error="invalid Feishu request descriptor",
+            )
+
+        operation = validated["operation"]
+        body = validated["body"]
+        if operation == "send_interactive_message":
+            receive_id = body["receive_id"]
+            receive_id_type = validated["params"]["receive_id_type"]
+            uuid_value = body.get("uuid") or delivery_id
+            request_body = self._build_create_message_body(
+                receive_id=receive_id,
+                msg_type="interactive",
+                content=body["content"],
+                uuid_value=uuid_value,
+            )
+            request = self._build_create_message_request(receive_id_type, request_body)
+            response_or_result = await self._audited_delivery(
+                delivery_id=delivery_id,
+                operation="status_card_create",
+                target=f"feishu:chat:{receive_id}",
+                inbound_id=inbound_id,
+                session_id=session_id,
+                correlation_id=correlation_id,
+                network_call=lambda _uuid_value: asyncio.to_thread(
+                    self._client.im.v1.message.create, request
+                ),
+                require_returned_message_id=True,
+            )
+        else:
+            message_id = validated["message_id"]
+            request_body = self._build_update_message_body(
+                msg_type="interactive",
+                content=body["content"],
+            )
+            request = self._build_update_message_request(
+                message_id=message_id,
+                request_body=request_body,
+            )
+            response_or_result = await self._audited_delivery(
+                delivery_id=delivery_id,
+                operation="status_card_patch",
+                target=f"feishu:message:{message_id}",
+                inbound_id=inbound_id,
+                session_id=session_id,
+                correlation_id=correlation_id,
+                network_call=lambda _uuid_value: asyncio.to_thread(
+                    self._client.im.v1.message.update, request
+                ),
+                require_returned_message_id=False,
+                existing_message_id=message_id,
+            )
+
+        if isinstance(response_or_result, SendResult):
+            return response_or_result
+        result = self._finalize_send_result(response_or_result, "descriptor request failed")
+        if operation == "patch_interactive_message" and result.success:
+            result.message_id = validated["message_id"]
+        return result
+
+    async def _audited_delivery(
+        self,
+        *,
+        delivery_id: str,
+        operation: str,
+        target: str,
+        inbound_id: str,
+        session_id: str,
+        correlation_id: str,
+        network_call: Any,
+        require_returned_message_id: bool,
+        existing_message_id: Optional[str] = None,
+    ) -> Any | SendResult:
+        if not await self._apply_delivery_pending(
+            delivery_id=delivery_id,
+            inbound_id=inbound_id,
+            target=target,
+            session_id=session_id,
+            correlation_id=correlation_id,
+        ):
+            return SendResult(
+                success=False,
+                error="delivery_pending apply failed",
+            )
+
+        try:
+            response = await network_call(self._idempotency_key_for_delivery(delivery_id))
+        except Exception as exc:
+            await self._apply_unknown_delivery_state(
+                delivery_id,
+                "sdk_exception_after_admission",
+                message_id=existing_message_id,
+            )
+            return SendResult(success=False, error=exc.__class__.__name__)
+
+        if self._response_is_ambiguous_non_acceptance(response):
+            await self._apply_unknown_delivery_state(
+                delivery_id,
+                "retryable_non_acceptance_after_admission",
+                message_id=existing_message_id,
+            )
+            return self._response_error_result(
+                response,
+                default_message=f"{operation} ambiguous",
+            )
+
+        if not self._response_succeeded(response):
+            await self._apply_delivery_failed(
+                delivery_id,
+                "feishu_terminal_non_acceptance",
+            )
+            return self._response_error_result(
+                response,
+                default_message=f"{operation} failed",
+            )
+
+        message_id = (
+            self._extract_response_field(response, "message_id")
+            if require_returned_message_id
+            else existing_message_id
+        )
+        if not message_id or not self._valid_feishu_message_id(str(message_id)):
+            await self._apply_unknown_delivery_state(
+                delivery_id,
+                "missing_message_id_after_sdk_success",
+                message_id=existing_message_id,
+            )
+            return SendResult(
+                success=False,
+                error="Feishu SDK success missing message_id",
+                raw_response=response,
+            )
+
+        if not await self._apply_delivery_sent(delivery_id, str(message_id)):
+            await self._apply_unknown_delivery_state(
+                delivery_id,
+                "delivery_sent_apply_failed",
+                message_id=existing_message_id,
+            )
+            return SendResult(
+                success=False,
+                error="delivery_sent apply failed",
+                raw_response=response,
+            )
+
+        return response
+
+    async def _apply_delivery_pending(
+        self,
+        *,
+        delivery_id: str,
+        inbound_id: str,
+        target: str,
+        session_id: str,
+        correlation_id: str,
+    ) -> bool:
+        return await self._apply_gateway_event(
+            {
+                "type": "delivery_pending",
+                "delivery_id": delivery_id,
+                "inbound_id": inbound_id,
+                "target": target,
+                "session_id": session_id,
+                "correlation_id": correlation_id,
+                "timestamp": int(time.time()),
+            }
+        )
+
+    async def _apply_delivery_sent(self, delivery_id: str, message_id: str) -> bool:
+        return await self._apply_gateway_event(
+            {
+                "type": "delivery_sent",
+                "delivery_id": delivery_id,
+                "message_id": message_id,
+                "timestamp": int(time.time()),
+            }
+        )
+
+    async def _apply_delivery_failed(
+        self,
+        delivery_id: str,
+        failure_class: str,
+    ) -> bool:
+        return await self._apply_gateway_event(
+            {
+                "type": "delivery_failed",
+                "delivery_id": delivery_id,
+                "failure_class": self._stable_failure_class(failure_class),
+                "timestamp": int(time.time()),
+            }
+        )
+
+    async def _apply_unknown_delivery_state(
+        self,
+        delivery_id: str,
+        failure_class: str,
+        *,
+        message_id: Optional[str] = None,
+    ) -> bool:
+        event = {
+            "type": "unknown_delivery_state",
+            "delivery_id": delivery_id,
+            "failure_class": self._stable_failure_class(failure_class),
+            "timestamp": int(time.time()),
+        }
+        if message_id:
+            event["message_id"] = str(message_id)
+        return await self._apply_gateway_event(event)
+
+    @classmethod
+    def _stable_failure_class(cls, value: str) -> str:
+        return value if _DELIVERY_FAILURE_CLASS_RE.fullmatch(value) else "feishu_delivery_error"
+
+    @staticmethod
+    def _idempotency_key_for_delivery(delivery_id: str) -> str:
+        return delivery_id
+
+    @staticmethod
+    def _delivery_metadata(
+        metadata: Optional[Dict[str, Any]],
+        key: str,
+        fallback: str,
+    ) -> str:
+        value = (metadata or {}).get(key)
+        text = str(value if value is not None else fallback).strip()
+        if re.fullmatch(r"^[A-Za-z0-9_.:-]{1,127}$", text):
+            return text
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        return f"{key}-{digest}"
+
+    def _delivery_id_for(
+        self,
+        operation: str,
+        *,
+        metadata: Optional[Dict[str, Any]],
+        parts: Sequence[str],
+    ) -> str:
+        explicit = (metadata or {}).get("delivery_id")
+        if explicit is not None:
+            explicit_text = str(explicit).strip()
+            if re.fullmatch(r"^[A-Za-z0-9_.:-]{1,127}$", explicit_text):
+                return explicit_text
+        seed = "\x1f".join([operation, *(str(part) for part in parts)])
+        digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+        return f"{operation}-{digest}"
+
+    @staticmethod
+    def _valid_feishu_message_id(message_id: str) -> bool:
+        return bool(_FEISHU_MESSAGE_ID_RE.fullmatch(str(message_id or "")))
+
+    def _validate_feishu_request_descriptor(
+        self,
+        descriptor: Any,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(descriptor, dict) or set(descriptor.keys()) != {
+            "operation",
+            "method",
+            "path",
+            "params",
+            "body",
+        }:
+            return None
+        operation = descriptor.get("operation")
+        if operation == "send_interactive_message":
+            return self._validate_send_interactive_descriptor(descriptor)
+        if operation == "patch_interactive_message":
+            return self._validate_patch_interactive_descriptor(descriptor)
+        return None
+
+    def _validate_send_interactive_descriptor(
+        self,
+        descriptor: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if (
+            descriptor.get("method") != "POST"
+            or descriptor.get("path") != "/open-apis/im/v1/messages"
+        ):
+            return None
+        params = descriptor.get("params")
+        if not isinstance(params, dict) or set(params.keys()) != {"receive_id_type"}:
+            return None
+        receive_id_type = params.get("receive_id_type")
+        if receive_id_type not in {"open_id", "union_id", "user_id", "email", "chat_id"}:
+            return None
+        body = descriptor.get("body")
+        if not isinstance(body, dict) or not {"receive_id", "msg_type", "content"}.issubset(
+            body.keys()
+        ):
+            return None
+        if not set(body.keys()).issubset({"receive_id", "msg_type", "content", "uuid"}):
+            return None
+        receive_id = str(body.get("receive_id") or "").strip()
+        content = body.get("content")
+        uuid_value = body.get("uuid")
+        if (
+            not receive_id
+            or body.get("msg_type") != "interactive"
+            or not self._valid_descriptor_content(content)
+            or (uuid_value is not None and not str(uuid_value).strip())
+        ):
+            return None
+        sanitized_body = {
+            "receive_id": receive_id,
+            "msg_type": "interactive",
+            "content": content,
+        }
+        if uuid_value is not None:
+            sanitized_body["uuid"] = str(uuid_value).strip()
+        return {
+            "operation": "send_interactive_message",
+            "method": "POST",
+            "path": "/open-apis/im/v1/messages",
+            "params": {"receive_id_type": receive_id_type},
+            "body": sanitized_body,
+        }
+
+    def _validate_patch_interactive_descriptor(
+        self,
+        descriptor: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if descriptor.get("method") != "PATCH":
+            return None
+        path = descriptor.get("path")
+        path_match = _FEISHU_DESCRIPTOR_PATCH_PATH_RE.fullmatch(path) if isinstance(path, str) else None
+        if path_match is None:
+            return None
+        params = descriptor.get("params")
+        body = descriptor.get("body")
+        if not isinstance(params, dict) or params:
+            return None
+        if not isinstance(body, dict) or set(body.keys()) != {"content"}:
+            return None
+        content = body.get("content")
+        if not self._valid_descriptor_content(content):
+            return None
+        message_id = path_match.group(1)
+        if not self._valid_feishu_message_id(message_id):
+            return None
+        return {
+            "operation": "patch_interactive_message",
+            "method": "PATCH",
+            "path": f"/open-apis/im/v1/messages/{message_id}",
+            "params": {},
+            "body": {"content": content},
+            "message_id": message_id,
+        }
+
+    @staticmethod
+    def _valid_descriptor_content(content: Any) -> bool:
+        if not isinstance(content, str) or not content:
+            return False
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(parsed, dict)
+
+    @staticmethod
+    def _response_is_ambiguous_non_acceptance(response: Any) -> bool:
+        if FeishuAdapter._response_succeeded(response):
+            return False
+        if bool(getattr(response, "retryable", False)):
+            return True
+        code = getattr(response, "code", None)
+        try:
+            numeric_code = int(code)
+        except (TypeError, ValueError):
+            return False
+        return numeric_code in _FEISHU_AMBIGUOUS_NON_ACCEPTANCE_CODES
+
     async def _send_raw_message(
         self,
         *,
@@ -4731,7 +5201,9 @@ class FeishuAdapter(BasePlatformAdapter):
         payload: str,
         reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]],
+        uuid_value: Optional[str] = None,
     ) -> Any:
+        stable_uuid = uuid_value or str(uuid.uuid4())
         effective_reply_to = reply_to
         if not effective_reply_to and metadata and metadata.get("thread_id"):
             effective_reply_to = metadata.get("reply_to_message_id")
@@ -4741,7 +5213,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 content=payload,
                 msg_type=msg_type,
                 reply_in_thread=reply_in_thread,
-                uuid_value=str(uuid.uuid4()),
+                uuid_value=stable_uuid,
             )
             request = self._build_reply_message_request(effective_reply_to, body)
             return await asyncio.to_thread(self._client.im.v1.message.reply, request)
@@ -4750,7 +5222,7 @@ class FeishuAdapter(BasePlatformAdapter):
             receive_id=chat_id,
             msg_type=msg_type,
             content=payload,
-            uuid_value=str(uuid.uuid4()),
+            uuid_value=stable_uuid,
         )
         # Detect whether chat_id is a user open_id (DM) or a chat_id (group).
         if chat_id.startswith("ou_"):

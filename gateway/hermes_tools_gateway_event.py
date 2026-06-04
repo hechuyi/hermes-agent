@@ -77,18 +77,46 @@ _DELIVERY_RECORD_KEYS = frozenset(
     }
 )
 _DELIVERY_STATUSES = frozenset({"pending", "sent", "failed", "acked"})
+_STATUS_CARD_CREATE_UPDATE_KEYS = frozenset(
+    {
+        "type",
+        "card_id",
+        "state",
+        "text",
+        "message_id",
+        "requires_final_reply",
+        "fallback_text",
+        "feishu_card",
+        "feishu_request",
+    }
+)
+_STATUS_CARD_SUPPRESSED_KEYS = frozenset(
+    {
+        "type",
+        "card_id",
+        "reason",
+        "fallback_text",
+        "feishu_card",
+        "feishu_request",
+    }
+)
+_STATUS_CARD_STATES = frozenset({"queued", "running", "succeeded", "failed"})
+_STATUS_CARD_ACTION_TYPES = frozenset({"create", "update", "suppressed"})
 _PREFLIGHT_CHECK_KEYS = frozenset({"name", "ok", "detail"})
 _PREFLIGHT_FEISHU_REQUEST_KEYS = frozenset(
     {"operation", "method", "path", "params", "body"}
 )
 _PREFLIGHT_FEISHU_PARAMS_KEYS = frozenset({"receive_id_type"})
+_PATCH_FEISHU_PARAMS_KEYS = frozenset()
 _PREFLIGHT_FEISHU_BODY_REQUIRED_KEYS = frozenset(
     {"receive_id", "msg_type", "content"}
 )
 _PREFLIGHT_FEISHU_BODY_OPTIONAL_KEYS = frozenset({"uuid"})
+_PATCH_FEISHU_BODY_KEYS = frozenset({"content"})
 _PREFLIGHT_FEISHU_RECEIVE_ID_TYPES = frozenset(
     {"open_id", "union_id", "user_id", "email", "chat_id"}
 )
+_FEISHU_PATCH_PATH_RE = re.compile(r"^/open-apis/im/v1/messages/([A-Za-z0-9_]+)$")
 
 
 @dataclass(frozen=True)
@@ -520,10 +548,20 @@ def _validated_action(action: dict[str, Any]) -> dict[str, Any] | None:
             return None
         return {"type": action_type, "record": record}
 
-    if action_type in {"stale_pending_alert", "session_state", "status_card"}:
+    if action_type in {"stale_pending_alert", "session_state"}:
         if not _has_only_keys(action, {"type"}):
             return None
         return {"type": action_type}
+
+    if action_type == "status_card":
+        if not _has_only_keys(action, {"type", "card_action"}):
+            return None
+        if "card_action" not in action:
+            return {"type": action_type}
+        card_action = _validated_status_card_action(action.get("card_action"))
+        if card_action is None:
+            return None
+        return {"type": action_type, "card_action": card_action}
 
     if action_type == "inbound_admission":
         if not _has_exact_keys(action, _INBOUND_ADMISSION_ACTION_KEYS):
@@ -542,6 +580,87 @@ def _validated_action(action: dict[str, Any]) -> dict[str, Any] | None:
         }
 
     return None
+
+
+def _validated_status_card_action(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    action_type = _string_or_none(value.get("type"))
+    if action_type not in _STATUS_CARD_ACTION_TYPES:
+        return None
+
+    if action_type in {"create", "update"}:
+        if not _has_only_keys(value, _STATUS_CARD_CREATE_UPDATE_KEYS):
+            return None
+        card_id = _validated_identifier_field(value.get("card_id"))
+        state = _string_or_none(value.get("state"))
+        text = _string_or_none(value.get("text"))
+        fallback_text = _string_or_none(value.get("fallback_text"))
+        message_id = _validated_optional_identifier_field(value.get("message_id"))
+        requires_final_reply = value.get("requires_final_reply")
+        feishu_card = value.get("feishu_card")
+        feishu_request = _validated_feishu_request(value.get("feishu_request"))
+        if (
+            card_id is None
+            or message_id is _INVALID
+            or (state is not None and state not in _STATUS_CARD_STATES)
+            or (text is not None and len(text) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS)
+            or not isinstance(requires_final_reply, bool)
+            or (
+                fallback_text is not None
+                and len(fallback_text) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS
+            )
+            or (feishu_card is not None and not isinstance(feishu_card, dict))
+            or feishu_request is _INVALID
+        ):
+            return None
+        sanitized: dict[str, Any] = {
+            "type": action_type,
+            "card_id": card_id,
+            "requires_final_reply": requires_final_reply,
+        }
+        if state is not None:
+            sanitized["state"] = state
+        if text is not None:
+            sanitized["text"] = text
+        if fallback_text is not None:
+            sanitized["fallback_text"] = fallback_text
+        if message_id is not None:
+            sanitized["message_id"] = message_id
+        if feishu_card is not None:
+            sanitized["feishu_card"] = feishu_card
+        if feishu_request is not None:
+            sanitized["feishu_request"] = feishu_request
+        return sanitized
+
+    if not _has_only_keys(value, _STATUS_CARD_SUPPRESSED_KEYS):
+        return None
+    card_id = _validated_optional_identifier_field(value.get("card_id"))
+    reason = _validated_failure_class(value.get("reason"), fallback="")
+    fallback_text = _string_or_none(value.get("fallback_text"))
+    feishu_card = value.get("feishu_card")
+    feishu_request = _validated_feishu_request(value.get("feishu_request"))
+    if (
+        card_id is _INVALID
+        or not reason
+        or (
+            fallback_text is not None
+            and len(fallback_text) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS
+        )
+        or (feishu_card is not None and not isinstance(feishu_card, dict))
+        or feishu_request is _INVALID
+    ):
+        return None
+    sanitized = {"type": "suppressed", "reason": reason}
+    if card_id is not None:
+        sanitized["card_id"] = card_id
+    if fallback_text is not None:
+        sanitized["fallback_text"] = fallback_text
+    if feishu_card is not None:
+        sanitized["feishu_card"] = feishu_card
+    if feishu_request is not None:
+        sanitized["feishu_request"] = feishu_request
+    return sanitized
 
 
 def _validated_delivery_record(value: Any) -> dict[str, Any] | None:
@@ -647,8 +766,13 @@ def _validated_feishu_request(value: Any) -> dict[str, Any] | None | _InvalidSen
         value, _PREFLIGHT_FEISHU_REQUEST_KEYS
     ):
         return _INVALID
+
+    operation = value.get("operation")
+    if operation == "patch_interactive_message":
+        return _validated_patch_interactive_request(value)
+
     if (
-        value.get("operation") != "send_interactive_message"
+        operation != "send_interactive_message"
         or value.get("method") != "POST"
         or value.get("path") != "/open-apis/im/v1/messages"
     ):
@@ -700,6 +824,37 @@ def _validated_feishu_request(value: Any) -> dict[str, Any] | None | _InvalidSen
         "path": "/open-apis/im/v1/messages",
         "params": {"receive_id_type": receive_id_type},
         "body": sanitized_body,
+    }
+
+
+def _validated_patch_interactive_request(
+    value: dict[str, Any],
+) -> dict[str, Any] | _InvalidSentinel:
+    path = value.get("path")
+    path_match = _FEISHU_PATCH_PATH_RE.fullmatch(path) if isinstance(path, str) else None
+    if value.get("method") != "PATCH" or path_match is None:
+        return _INVALID
+
+    params = value.get("params")
+    if not isinstance(params, dict) or not _has_exact_keys(
+        params, _PATCH_FEISHU_PARAMS_KEYS
+    ):
+        return _INVALID
+
+    body = value.get("body")
+    if not isinstance(body, dict) or not _has_exact_keys(body, _PATCH_FEISHU_BODY_KEYS):
+        return _INVALID
+    content = body.get("content")
+    if not _is_valid_preflight_card_content(content):
+        return _INVALID
+
+    message_id = path_match.group(1)
+    return {
+        "operation": "patch_interactive_message",
+        "method": "PATCH",
+        "path": f"/open-apis/im/v1/messages/{message_id}",
+        "params": {},
+        "body": {"content": content},
     }
 
 
