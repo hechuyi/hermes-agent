@@ -5028,6 +5028,7 @@ class FeishuAdapter(BasePlatformAdapter):
             return self._response_error_result(
                 response,
                 default_message=f"{operation} ambiguous",
+                override_error="retryable_non_acceptance_after_admission",
             )
 
         if not self._response_succeeded(response):

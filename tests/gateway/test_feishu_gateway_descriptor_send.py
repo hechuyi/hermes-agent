@@ -266,6 +266,34 @@ async def test_audited_send_falls_back_to_text_on_post_rejection_exception(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_audited_send_does_not_fallback_on_ambiguous_invalid_post_response(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    def create(request):
+        message_api.create_calls.append(request)
+        return _FakeResponse(
+            ok=False,
+            code=99991400,
+            msg="content format of the post type is incorrect",
+        )
+
+    message_api.create = create
+
+    result = await adapter.send(
+        "oc_chat",
+        "可以用 **粗体** 和 *斜体*。",
+        metadata=_metadata("delivery-post-ambiguous"),
+    )
+
+    assert result.success is False
+    assert _event_types(events) == ["delivery_pending", "unknown_delivery_state"]
+    assert events[-1]["failure_class"] == "retryable_non_acceptance_after_admission"
+    assert len(message_api.create_calls) == 1
+    assert message_api.create_calls[0].request_body.msg_type == "post"
+
+
+@pytest.mark.asyncio
 async def test_terminal_non_acceptance_records_delivery_failed(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
@@ -383,6 +411,35 @@ async def test_audited_edit_falls_back_to_text_on_post_rejection_exception(tmp_p
         "delivery_sent",
     ]
     assert "unknown_delivery_state" not in _event_types(events)
+
+
+@pytest.mark.asyncio
+async def test_audited_edit_does_not_fallback_on_ambiguous_invalid_post_response(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    def update(request):
+        message_api.update_calls.append(request)
+        return _FakeResponse(
+            ok=False,
+            code=99991400,
+            msg="content format of the post type is incorrect",
+        )
+
+    message_api.update = update
+
+    result = await adapter.edit_message(
+        "oc_chat",
+        "om_existing",
+        "可以用 **粗体** 和 *斜体*。",
+        metadata=_metadata("delivery-edit-post-ambiguous"),
+    )
+
+    assert result.success is False
+    assert _event_types(events) == ["delivery_pending", "unknown_delivery_state"]
+    assert events[-1]["failure_class"] == "retryable_non_acceptance_after_admission"
+    assert len(message_api.update_calls) == 1
+    assert message_api.update_calls[0].request_body.msg_type == "post"
 
 
 def _create_descriptor(content):
