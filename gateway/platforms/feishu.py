@@ -2849,9 +2849,11 @@ class FeishuAdapter(BasePlatformAdapter):
     def _on_card_action_trigger(self, data: Any) -> Any:
         """Handle card-action callback from the Feishu SDK (synchronous).
 
-        For approval actions: parses the event once, returns the resolved card
-        inline (the only reliable way to sync all clients), and schedules a
-        lightweight async method to actually unblock the agent.
+        For approval and update-prompt actions: parses the event once and
+        schedules async resolution. Audited mode returns no inline resolved
+        card because the visible update must go through ledgered Feishu
+        ``message.update`` first; non-audited mode still returns an inline
+        callback card for the legacy synchronous UX.
 
         For other card actions: delegates to ``_handle_card_action_event``.
         """
@@ -3105,6 +3107,31 @@ class FeishuAdapter(BasePlatformAdapter):
             response.card = card
         return response
 
+    @staticmethod
+    def _claim_audited_prompt_resolution(
+        state: Dict[str, Any],
+        *,
+        choice: str,
+        user_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        if state.get("resolution_claim") is not None:
+            return None
+        claim = {
+            "choice": str(choice),
+            "user_name": str(user_name),
+            "timestamp": int(time.time()),
+        }
+        state["resolution_claim"] = claim
+        return claim
+
+    @staticmethod
+    def _release_audited_prompt_resolution_claim(
+        state: Dict[str, Any],
+        claim: Dict[str, Any],
+    ) -> None:
+        if state.get("resolution_claim") == claim:
+            state.pop("resolution_claim", None)
+
     async def _audited_resolved_prompt_card_update(
         self,
         *,
@@ -3185,6 +3212,14 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             return
         if self._hermes_tools_state_dir is not None:
+            claim = self._claim_audited_prompt_resolution(
+                state,
+                choice=choice,
+                user_name=user_name,
+            )
+            if claim is None:
+                logger.debug("[Feishu] Approval %s resolution already in progress", approval_id)
+                return
             card_updated = await self._audited_resolved_prompt_card_update(
                 operation="approval_prompt_card_update",
                 state=state,
@@ -3193,6 +3228,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 card=self._build_resolved_approval_card(choice=choice, user_name=user_name),
             )
             if not card_updated:
+                self._release_audited_prompt_resolution_claim(state, claim)
                 return
         state = self._approval_state.pop(approval_id, None)
         if not state:
@@ -3215,6 +3251,14 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] Update prompt %s already resolved or unknown", prompt_id)
             return
         if self._hermes_tools_state_dir is not None:
+            claim = self._claim_audited_prompt_resolution(
+                state,
+                choice=answer,
+                user_name=user_name,
+            )
+            if claim is None:
+                logger.debug("[Feishu] Update prompt %s resolution already in progress", prompt_id)
+                return
             card_updated = await self._audited_resolved_prompt_card_update(
                 operation="update_prompt_card_update",
                 state=state,
@@ -3223,6 +3267,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 card=self._build_resolved_update_prompt_card(answer=answer, user_name=user_name),
             )
             if not card_updated:
+                self._release_audited_prompt_resolution_claim(state, claim)
                 return
         state = self._update_prompt_state.pop(prompt_id, None)
         if not state:

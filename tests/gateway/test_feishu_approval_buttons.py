@@ -1,9 +1,11 @@
 """Tests for Feishu interactive card approval buttons."""
 
+import asyncio
 import importlib.util
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -91,13 +93,21 @@ class _FakeResponse:
 
 
 class _FakeMessageApi:
-    def __init__(self):
+    def __init__(self, *, update_delay=0):
         self.update_calls = []
         self.update_response = _FakeResponse(message_id="om_updated")
+        self.update_delay = update_delay
 
     def update(self, request):
+        if self.update_delay:
+            time.sleep(self.update_delay)
         self.update_calls.append(request)
         return self.update_response
+
+
+def _interactive_card_title_from_update_request(request) -> str:
+    card = json.loads(request.request_body.content)
+    return card["header"]["title"]["content"]
 
 
 def _make_card_action_data(
@@ -618,6 +628,57 @@ class TestResolveApproval:
         assert request.request_body.msg_type == "interactive"
         mock_resolve.assert_called_once_with("agent:main:feishu:group:oc_12345", "once")
         assert 10 not in adapter._approval_state
+
+    @pytest.mark.asyncio
+    async def test_approval_audited_conflicting_concurrent_resolutions_single_card_update_matches_side_effect(
+        self,
+        tmp_path,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi(update_delay=0.05)
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        events = _install_event_recorder(adapter)
+        adapter._approval_state[11] = {
+            "session_key": "agent:main:feishu:group:oc_12345",
+            "message_id": "om_approval_11",
+            "chat_id": "oc_12345",
+            "inbound_id": "inbound-approval",
+            "session_id": "session-approval",
+            "correlation_id": "corr-approval",
+        }
+        resolved_choices = []
+
+        def resolve(_session_key, choice):
+            resolved_choices.append(choice)
+            return 1
+
+        with patch("tools.approval.resolve_gateway_approval", side_effect=resolve):
+            await asyncio.gather(
+                adapter._resolve_approval(
+                    11,
+                    "once",
+                    "Alice",
+                    open_id="ou_user1",
+                    chat_id="oc_12345",
+                ),
+                adapter._resolve_approval(
+                    11,
+                    "deny",
+                    "Bob",
+                    open_id="ou_user1",
+                    chat_id="oc_12345",
+                ),
+            )
+
+        assert len(message_api.update_calls) == 1
+        assert [event["operation"] for event in events if event["type"] == "delivery_sent"] == [
+            "approval_prompt_card_update"
+        ]
+        assert len(resolved_choices) == 1
+        title = _interactive_card_title_from_update_request(message_api.update_calls[0])
+        expected_title = "Denied" if resolved_choices[0] == "deny" else "Approved once"
+        assert expected_title in title
+        assert 11 not in adapter._approval_state
 
     @pytest.mark.asyncio
     async def test_resolves_once(self):
@@ -1377,6 +1438,45 @@ class TestResolveUpdatePrompt:
         assert message_api.update_calls == []
         assert not (hermes_home / ".update_response").exists()
         assert 10 in adapter._update_prompt_state
+        assert "resolution_claim" not in adapter._update_prompt_state[10]
+
+    @pytest.mark.asyncio
+    async def test_update_prompt_audited_conflicting_concurrent_resolutions_single_card_update_matches_response(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi(update_delay=0.05)
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        events = _install_event_recorder(adapter)
+        adapter._update_prompt_state[11] = {
+            "session_key": "agent:main:feishu:group:oc_12345",
+            "message_id": "om_update_11",
+            "chat_id": "oc_12345",
+            "inbound_id": "inbound-update",
+            "session_id": "session-update",
+            "correlation_id": "corr-update",
+        }
+
+        await asyncio.gather(
+            adapter._resolve_update_prompt(11, "y", "Alice"),
+            adapter._resolve_update_prompt(11, "n", "Bob"),
+        )
+
+        assert len(message_api.update_calls) == 1
+        assert [event["operation"] for event in events if event["type"] == "delivery_sent"] == [
+            "update_prompt_card_update"
+        ]
+        response = (hermes_home / ".update_response").read_text()
+        assert response in {"y", "n"}
+        title = _interactive_card_title_from_update_request(message_api.update_calls[0])
+        expected_title = "answered: Yes" if response == "y" else "answered: No"
+        assert expected_title in title
+        assert 11 not in adapter._update_prompt_state
 
     @pytest.mark.asyncio
     async def test_writes_response_file(self, tmp_path, monkeypatch):
