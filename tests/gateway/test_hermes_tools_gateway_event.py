@@ -295,7 +295,8 @@ def test_apply_gateway_event_unsupported_action_fails_closed(
     assert result.failure_class == "unsupported_action"
     assert result.reason == "unsupported action"
     assert result.action is None
-    assert "raw_http_request" in result.diagnostics
+    assert "type_present=true" in result.diagnostics
+    assert "raw_http_request" not in result.diagnostics
     assert "https://example.test" not in result.diagnostics
 
 
@@ -325,7 +326,36 @@ def test_apply_gateway_event_unsupported_token_like_action_type_is_not_diagnosti
     assert result.ok is False
     assert result.failure_class == "unsupported_action"
     assert token_like_type not in result.diagnostics
-    assert "type=<invalid>" in result.diagnostics
+    assert "type_present=true" in result.diagnostics
+
+
+def test_apply_gateway_event_unsupported_identifier_action_type_is_not_diagnostic(
+    monkeypatch, tmp_path
+):
+    identifier_type = "secret_token_value"
+
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "delivery_pending",
+                    "action": {"type": identifier_type},
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "delivery_pending"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "unsupported_action"
+    assert identifier_type not in result.diagnostics
+    assert "type_present=true" in result.diagnostics
 
 
 def test_diagnostics_do_not_include_sensitive_output_or_state_dir(monkeypatch, tmp_path):

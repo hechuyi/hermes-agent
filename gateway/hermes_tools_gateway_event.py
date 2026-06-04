@@ -31,7 +31,6 @@ _MAX_DIAGNOSTIC_CHARS = 1200
 _SAFE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 _SAFE_EVENT_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_SAFE_DIAGNOSTIC_TOKEN_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _APPLY_SUCCESS_KEYS = frozenset({"ok", "event_type", "action"})
 _APPLY_ERROR_KEYS = frozenset({"ok", "event_type", "error"})
 _APPLY_ERROR_OBJECT_KEYS = frozenset({"reason", "message"})
@@ -312,7 +311,10 @@ def _success_from_apply_envelope(
             "unsupported_action",
             "unsupported action",
             event_type=event_type,
-            diagnostics=f"unsupported action type={_safe_diagnostic_token(action_type)}",
+            diagnostics=(
+                "unsupported action "
+                f"type_present={str(action_type is not None).lower()}"
+            ),
             state_dir=state_dir,
         )
 
@@ -497,12 +499,6 @@ def _is_safe_event_type(value: str) -> bool:
 
 def _is_safe_identifier(value: str) -> bool:
     return bool(_SAFE_IDENTIFIER_RE.fullmatch(value))
-
-
-def _safe_diagnostic_token(value: str | None) -> str:
-    if value and _SAFE_DIAGNOSTIC_TOKEN_RE.fullmatch(value):
-        return value
-    return "<invalid>"
 
 
 def _byte_count(value: str) -> int:
