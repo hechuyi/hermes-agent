@@ -2090,13 +2090,45 @@ class FeishuAdapter(BasePlatformAdapter):
             }
 
             payload = json.dumps(card, ensure_ascii=False)
-            response = await self._feishu_send_with_retry(
-                chat_id=chat_id,
-                msg_type="interactive",
-                payload=payload,
-                reply_to=None,
-                metadata=metadata,
-            )
+            if self._hermes_tools_state_dir is not None:
+                operation = "approval_prompt_card_create"
+                delivery_id = self._delivery_id_for(
+                    operation,
+                    metadata=metadata,
+                    parts=[chat_id, session_key, str(approval_id), payload],
+                )
+                response_or_result = await self._audited_delivery(
+                    delivery_id=delivery_id,
+                    operation=operation,
+                    target=f"feishu:chat:{chat_id}",
+                    inbound_id=self._delivery_metadata(metadata, "inbound_id", chat_id),
+                    session_id=self._delivery_metadata(
+                        metadata, "session_id", session_key or "session"
+                    ),
+                    correlation_id=self._delivery_metadata(
+                        metadata, "correlation_id", delivery_id
+                    ),
+                    network_call=lambda uuid_value: self._send_raw_message(
+                        chat_id=chat_id,
+                        msg_type="interactive",
+                        payload=payload,
+                        reply_to=None,
+                        metadata=metadata,
+                        uuid_value=uuid_value,
+                    ),
+                    require_returned_message_id=True,
+                )
+                if isinstance(response_or_result, SendResult):
+                    return response_or_result
+                response = response_or_result
+            else:
+                response = await self._feishu_send_with_retry(
+                    chat_id=chat_id,
+                    msg_type="interactive",
+                    payload=payload,
+                    reply_to=None,
+                    metadata=metadata,
+                )
 
             result = self._finalize_send_result(response, "send_exec_approval failed")
             if result.success:
@@ -2174,13 +2206,45 @@ class FeishuAdapter(BasePlatformAdapter):
                 payload = json.dumps(card_payload, ensure_ascii=False)
             except Exception:
                 logger.debug("[Feishu] Failed to attach update prompt card scope metadata", exc_info=True)
-            response = await self._feishu_send_with_retry(
-                chat_id=chat_id,
-                msg_type="interactive",
-                payload=payload,
-                reply_to=None,
-                metadata=metadata,
-            )
+            if self._hermes_tools_state_dir is not None:
+                operation = "update_prompt_card_create"
+                delivery_id = self._delivery_id_for(
+                    operation,
+                    metadata=metadata,
+                    parts=[chat_id, session_key, str(prompt_id), payload],
+                )
+                response_or_result = await self._audited_delivery(
+                    delivery_id=delivery_id,
+                    operation=operation,
+                    target=f"feishu:chat:{chat_id}",
+                    inbound_id=self._delivery_metadata(metadata, "inbound_id", chat_id),
+                    session_id=self._delivery_metadata(
+                        metadata, "session_id", session_key or "session"
+                    ),
+                    correlation_id=self._delivery_metadata(
+                        metadata, "correlation_id", delivery_id
+                    ),
+                    network_call=lambda uuid_value: self._send_raw_message(
+                        chat_id=chat_id,
+                        msg_type="interactive",
+                        payload=payload,
+                        reply_to=None,
+                        metadata=metadata,
+                        uuid_value=uuid_value,
+                    ),
+                    require_returned_message_id=True,
+                )
+                if isinstance(response_or_result, SendResult):
+                    return response_or_result
+                response = response_or_result
+            else:
+                response = await self._feishu_send_with_retry(
+                    chat_id=chat_id,
+                    msg_type="interactive",
+                    payload=payload,
+                    reply_to=None,
+                    metadata=metadata,
+                )
 
             result = self._finalize_send_result(response, "send_update_prompt failed")
             if result.success:

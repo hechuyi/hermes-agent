@@ -54,6 +54,41 @@ def _make_adapter() -> FeishuAdapter:
     return adapter
 
 
+def _make_audited_adapter(tmp_path) -> FeishuAdapter:
+    """Create a FeishuAdapter with hermes-tools delivery auditing enabled."""
+    config = PlatformConfig(enabled=True, extra={"hermes_tools_state_dir": str(tmp_path)})
+    adapter = FeishuAdapter(config)
+    adapter._client = MagicMock()
+    return adapter
+
+
+def _install_event_recorder(adapter, *, fail_event_types=()):
+    calls = []
+    fail_event_types = set(fail_event_types)
+
+    async def apply(event):
+        calls.append(event)
+        return event.get("type") not in fail_event_types
+
+    adapter._apply_gateway_event = apply
+    return calls
+
+
+def _event_types(calls):
+    return [call.get("type") for call in calls if "type" in call]
+
+
+class _FakeResponse:
+    def __init__(self, *, ok=True, message_id="om_sent", code=0, msg="ok"):
+        self.code = code
+        self.msg = msg
+        self.data = SimpleNamespace(message_id=message_id) if ok else None
+        self._ok = ok
+
+    def success(self):
+        return self._ok
+
+
 def _make_card_action_data(
     action_value: dict,
     chat_id: str = "oc_12345",
@@ -88,6 +123,116 @@ def _close_submitted_coro(coro, _loop):
 
 class TestFeishuExecApproval:
     """Test send_exec_approval sends an interactive card."""
+
+    @pytest.mark.asyncio
+    async def test_audited_success_writes_pending_sent_and_stores_approval_state(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        events = _install_event_recorder(adapter)
+
+        with (
+            patch.object(
+                adapter,
+                "_send_raw_message",
+                new_callable=AsyncMock,
+                return_value=_FakeResponse(message_id="om_approval"),
+            ) as mock_send_raw,
+            patch.object(adapter, "_feishu_send_with_retry", new_callable=AsyncMock) as mock_legacy_send,
+        ):
+            result = await adapter.send_exec_approval(
+                chat_id="oc_12345",
+                command="rm -rf /important",
+                session_key="agent:main:feishu:group:oc_12345",
+                description="dangerous deletion",
+                metadata={
+                    "inbound_id": "inbound-1",
+                    "session_id": "session-a",
+                    "correlation_id": "corr-a",
+                },
+            )
+
+        assert result.success is True
+        assert result.message_id == "om_approval"
+        mock_send_raw.assert_awaited_once()
+        mock_legacy_send.assert_not_awaited()
+        assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+        assert events[0]["operation"] == "approval_prompt_card_create"
+        assert events[0]["target"] == "feishu:chat:oc_12345"
+        assert events[0]["inbound_id"] == "inbound-1"
+        assert events[0]["session_id"] == "session-a"
+        assert events[0]["correlation_id"] == "corr-a"
+        assert events[1]["delivery_id"] == events[0]["delivery_id"]
+        assert events[1]["message_id"] == "om_approval"
+
+        kwargs = mock_send_raw.call_args.kwargs
+        assert kwargs["chat_id"] == "oc_12345"
+        assert kwargs["msg_type"] == "interactive"
+        assert kwargs["reply_to"] is None
+        assert kwargs["uuid_value"] == events[0]["delivery_id"]
+        card = json.loads(kwargs["payload"])
+        actions = card["elements"][1]["actions"]
+        assert actions[0]["value"]["hermes_card_scope"]["chat_type"] == "group"
+
+        assert len(adapter._approval_state) == 1
+        state = next(iter(adapter._approval_state.values()))
+        assert state["session_key"] == "agent:main:feishu:group:oc_12345"
+        assert state["message_id"] == "om_approval"
+        assert state["chat_id"] == "oc_12345"
+        assert state["chat_type"] == "group"
+
+    @pytest.mark.asyncio
+    async def test_audited_pending_apply_failure_aborts_before_sdk_and_does_not_store_state(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        events = _install_event_recorder(adapter, fail_event_types={"delivery_pending"})
+
+        with (
+            patch.object(adapter, "_send_raw_message", new_callable=AsyncMock) as mock_send_raw,
+            patch.object(adapter, "_feishu_send_with_retry", new_callable=AsyncMock) as mock_legacy_send,
+        ):
+            result = await adapter.send_exec_approval(
+                chat_id="oc_12345",
+                command="echo test",
+                session_key="my-session-key",
+            )
+
+        assert result.success is False
+        assert result.error == "delivery_pending apply failed"
+        assert _event_types(events) == ["delivery_pending"]
+        mock_send_raw.assert_not_awaited()
+        mock_legacy_send.assert_not_awaited()
+        assert adapter._approval_state == {}
+
+    @pytest.mark.asyncio
+    async def test_audited_sent_apply_failure_returns_unknown_and_does_not_store_state(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        events = _install_event_recorder(adapter, fail_event_types={"delivery_sent"})
+
+        with (
+            patch.object(
+                adapter,
+                "_send_raw_message",
+                new_callable=AsyncMock,
+                return_value=_FakeResponse(message_id="om_unreconciled"),
+            ) as mock_send_raw,
+            patch.object(adapter, "_feishu_send_with_retry", new_callable=AsyncMock) as mock_legacy_send,
+        ):
+            result = await adapter.send_exec_approval(
+                chat_id="oc_12345",
+                command="echo test",
+                session_key="my-session-key",
+            )
+
+        assert result.success is False
+        assert result.error == "delivery_sent apply failed"
+        assert _event_types(events) == [
+            "delivery_pending",
+            "delivery_sent",
+            "unknown_delivery_state",
+        ]
+        assert events[-1]["failure_class"] == "delivery_sent_apply_failed"
+        assert events[-1]["message_id"] == "om_unreconciled"
+        mock_send_raw.assert_awaited_once()
+        mock_legacy_send.assert_not_awaited()
+        assert adapter._approval_state == {}
 
     @pytest.mark.asyncio
     async def test_sends_interactive_card(self):
@@ -216,6 +361,83 @@ class TestFeishuExecApproval:
 
 class TestFeishuUpdatePrompt:
     """Test send_update_prompt sends an interactive card."""
+
+    @pytest.mark.asyncio
+    async def test_audited_success_writes_pending_sent_and_stores_prompt_state(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        events = _install_event_recorder(adapter)
+
+        with (
+            patch.object(
+                adapter,
+                "_send_raw_message",
+                new_callable=AsyncMock,
+                return_value=_FakeResponse(message_id="om_update_prompt"),
+            ) as mock_send_raw,
+            patch.object(adapter, "_feishu_send_with_retry", new_callable=AsyncMock) as mock_legacy_send,
+        ):
+            result = await adapter.send_update_prompt(
+                chat_id="oc_12345",
+                prompt="Restore stashed changes after update?",
+                default="y",
+                session_key="agent:main:feishu:group:oc_12345",
+                metadata={
+                    "thread_id": "th_1",
+                    "inbound_id": "inbound-2",
+                    "session_id": "session-b",
+                    "correlation_id": "corr-b",
+                },
+            )
+
+        assert result.success is True
+        assert result.message_id == "om_update_prompt"
+        mock_send_raw.assert_awaited_once()
+        mock_legacy_send.assert_not_awaited()
+        assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+        assert events[0]["operation"] == "update_prompt_card_create"
+        assert events[0]["target"] == "feishu:chat:oc_12345"
+        assert events[0]["inbound_id"] == "inbound-2"
+        assert events[0]["session_id"] == "session-b"
+        assert events[0]["correlation_id"] == "corr-b"
+        assert events[1]["message_id"] == "om_update_prompt"
+
+        kwargs = mock_send_raw.call_args.kwargs
+        assert kwargs["chat_id"] == "oc_12345"
+        assert kwargs["msg_type"] == "interactive"
+        assert kwargs["metadata"]["thread_id"] == "th_1"
+        assert kwargs["uuid_value"] == events[0]["delivery_id"]
+        card = json.loads(kwargs["payload"])
+        actions = card["elements"][1]["actions"]
+        assert actions[0]["value"]["hermes_card_scope"]["thread_id"] == "th_1"
+
+        assert len(adapter._update_prompt_state) == 1
+        state = next(iter(adapter._update_prompt_state.values()))
+        assert state["session_key"] == "agent:main:feishu:group:oc_12345"
+        assert state["message_id"] == "om_update_prompt"
+        assert state["chat_id"] == "oc_12345"
+        assert state["thread_id"] == "th_1"
+
+    @pytest.mark.asyncio
+    async def test_audited_pending_apply_failure_aborts_before_sdk_and_does_not_store_prompt_state(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        events = _install_event_recorder(adapter, fail_event_types={"delivery_pending"})
+
+        with (
+            patch.object(adapter, "_send_raw_message", new_callable=AsyncMock) as mock_send_raw,
+            patch.object(adapter, "_feishu_send_with_retry", new_callable=AsyncMock) as mock_legacy_send,
+        ):
+            result = await adapter.send_update_prompt(
+                chat_id="oc_12345",
+                prompt="Continue update?",
+                session_key="my-session-key",
+            )
+
+        assert result.success is False
+        assert result.error == "delivery_pending apply failed"
+        assert _event_types(events) == ["delivery_pending"]
+        mock_send_raw.assert_not_awaited()
+        mock_legacy_send.assert_not_awaited()
+        assert adapter._update_prompt_state == {}
 
     @pytest.mark.asyncio
     async def test_sends_interactive_card(self):
