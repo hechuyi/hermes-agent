@@ -111,7 +111,6 @@ _STATUS_CARD_SUPPRESSED_KEYS = frozenset(
         "reason",
         "fallback_text",
         "feishu_card",
-        "feishu_request",
     }
 )
 _STATUS_CARD_SUPPRESSED_REQUIRED_KEYS = frozenset(
@@ -654,14 +653,12 @@ def _validated_status_card_action(value: Any) -> dict[str, Any] | None:
     reason = _validated_failure_class(value.get("reason"), fallback="")
     fallback_text = _string_or_none(value.get("fallback_text"))
     feishu_card = value.get("feishu_card")
-    feishu_request = value.get("feishu_request")
     if (
         card_id is _INVALID
         or not reason
         or fallback_text is None
         or len(fallback_text) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS
         or not isinstance(feishu_card, dict)
-        or feishu_request is not None
     ):
         return None
     sanitized = {

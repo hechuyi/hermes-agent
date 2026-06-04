@@ -1345,6 +1345,26 @@ def test_apply_gateway_event_rejects_status_card_suppressed_feishu_request(
     assert result.action is None
 
 
+def test_apply_gateway_event_rejects_status_card_suppressed_null_feishu_request(
+    monkeypatch, tmp_path
+):
+    action = _status_card_suppressed_action(feishu_request=None)
+
+    def fake_run(*args, **kwargs):
+        return _completed(stdout=json.dumps(_status_card_action(action)))
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "task_status"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+
+
 def test_apply_gateway_event_exposes_status_card_create_feishu_request(
     monkeypatch, tmp_path
 ):
