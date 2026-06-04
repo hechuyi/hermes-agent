@@ -232,6 +232,36 @@ async def test_audited_send_falls_back_to_text_on_post_rejection_response(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_audited_send_invalid_post_response_does_not_fallback_when_failed_apply_fails(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter, fail_event_types={"delivery_failed"})
+
+    def create(request):
+        message_api.create_calls.append(request)
+        if len(message_api.create_calls) == 1:
+            return _FakeResponse(
+                ok=False,
+                code=230001,
+                msg="content format of the post type is incorrect",
+            )
+        return _FakeResponse(message_id="om_text_fallback")
+
+    message_api.create = create
+
+    result = await adapter.send(
+        "oc_chat",
+        "可以用 **粗体** 和 *斜体*。",
+        metadata=_metadata("delivery-post-response"),
+    )
+
+    assert result.success is False
+    assert result.error == "delivery_failed apply failed"
+    assert _event_types(events) == ["delivery_pending", "delivery_failed"]
+    assert len(message_api.create_calls) == 1
+    assert message_api.create_calls[0].request_body.msg_type == "post"
+
+
+@pytest.mark.asyncio
 async def test_audited_send_falls_back_to_text_on_post_rejection_exception(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
@@ -263,6 +293,32 @@ async def test_audited_send_falls_back_to_text_on_post_rejection_exception(tmp_p
         "delivery_sent",
     ]
     assert "unknown_delivery_state" not in _event_types(events)
+
+
+@pytest.mark.asyncio
+async def test_audited_send_invalid_post_exception_does_not_fallback_when_failed_apply_fails(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter, fail_event_types={"delivery_failed"})
+
+    def create(request):
+        message_api.create_calls.append(request)
+        if len(message_api.create_calls) == 1:
+            raise ValueError("content format of the post type is incorrect")
+        return _FakeResponse(message_id="om_text_fallback")
+
+    message_api.create = create
+
+    result = await adapter.send(
+        "oc_chat",
+        "可以用 **粗体** 和 *斜体*。",
+        metadata=_metadata("delivery-post-exception"),
+    )
+
+    assert result.success is False
+    assert result.error == "delivery_failed apply failed"
+    assert _event_types(events) == ["delivery_pending", "delivery_failed"]
+    assert len(message_api.create_calls) == 1
+    assert message_api.create_calls[0].request_body.msg_type == "post"
 
 
 @pytest.mark.asyncio
@@ -379,6 +435,37 @@ async def test_audited_edit_falls_back_to_text_on_post_rejection_response(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_audited_edit_invalid_post_response_does_not_fallback_when_failed_apply_fails(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter, fail_event_types={"delivery_failed"})
+
+    def update(request):
+        message_api.update_calls.append(request)
+        if len(message_api.update_calls) == 1:
+            return _FakeResponse(
+                ok=False,
+                code=230001,
+                msg="content format of the post type is incorrect",
+            )
+        return _FakeResponse(message_id=None)
+
+    message_api.update = update
+
+    result = await adapter.edit_message(
+        "oc_chat",
+        "om_existing",
+        "可以用 **粗体** 和 *斜体*。",
+        metadata=_metadata("delivery-edit-post-response"),
+    )
+
+    assert result.success is False
+    assert result.error == "delivery_failed apply failed"
+    assert _event_types(events) == ["delivery_pending", "delivery_failed"]
+    assert len(message_api.update_calls) == 1
+    assert message_api.update_calls[0].request_body.msg_type == "post"
+
+
+@pytest.mark.asyncio
 async def test_audited_edit_falls_back_to_text_on_post_rejection_exception(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
@@ -411,6 +498,33 @@ async def test_audited_edit_falls_back_to_text_on_post_rejection_exception(tmp_p
         "delivery_sent",
     ]
     assert "unknown_delivery_state" not in _event_types(events)
+
+
+@pytest.mark.asyncio
+async def test_audited_edit_invalid_post_exception_does_not_fallback_when_failed_apply_fails(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter, fail_event_types={"delivery_failed"})
+
+    def update(request):
+        message_api.update_calls.append(request)
+        if len(message_api.update_calls) == 1:
+            raise ValueError("content format of the post type is incorrect")
+        return _FakeResponse(message_id=None)
+
+    message_api.update = update
+
+    result = await adapter.edit_message(
+        "oc_chat",
+        "om_existing",
+        "可以用 **粗体** 和 *斜体*。",
+        metadata=_metadata("delivery-edit-post-exception"),
+    )
+
+    assert result.success is False
+    assert result.error == "delivery_failed apply failed"
+    assert _event_types(events) == ["delivery_pending", "delivery_failed"]
+    assert len(message_api.update_calls) == 1
+    assert message_api.update_calls[0].request_body.msg_type == "post"
 
 
 @pytest.mark.asyncio

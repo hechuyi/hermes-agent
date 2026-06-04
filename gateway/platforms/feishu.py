@@ -5004,10 +5004,14 @@ class FeishuAdapter(BasePlatformAdapter):
             response = await network_call(self._idempotency_key_for_delivery(delivery_id))
         except Exception as exc:
             if terminal_exception_matcher is not None and terminal_exception_matcher(exc):
-                await self._apply_delivery_failed(
+                if not await self._apply_delivery_failed(
                     delivery_id,
                     "feishu_terminal_non_acceptance",
-                )
+                ):
+                    return SendResult(
+                        success=False,
+                        error="delivery_failed apply failed",
+                    )
                 return SendResult(
                     success=False,
                     error="content format of the post type is incorrect",
@@ -5032,10 +5036,14 @@ class FeishuAdapter(BasePlatformAdapter):
             )
 
         if not self._response_succeeded(response):
-            await self._apply_delivery_failed(
+            if not await self._apply_delivery_failed(
                 delivery_id,
                 "feishu_terminal_non_acceptance",
-            )
+            ):
+                return SendResult(
+                    success=False,
+                    error="delivery_failed apply failed",
+                )
             return self._response_error_result(
                 response,
                 default_message=f"{operation} failed",
