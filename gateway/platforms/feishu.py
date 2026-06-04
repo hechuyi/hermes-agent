@@ -2440,22 +2440,22 @@ class FeishuAdapter(BasePlatformAdapter):
                     caption=caption,
                     media_tag={"tag": "img", "image_key": image_key},
                 )
-                message_response = await self._feishu_send_with_retry(
+                return await self._send_audited_or_legacy_message(
                     chat_id=chat_id,
                     msg_type="post",
                     payload=post_payload,
                     reply_to=reply_to,
                     metadata=metadata,
+                    default_message="image send failed",
                 )
-            else:
-                message_response = await self._feishu_send_with_retry(
-                    chat_id=chat_id,
-                    msg_type="image",
-                    payload=json.dumps({"image_key": image_key}, ensure_ascii=False),
-                    reply_to=reply_to,
-                    metadata=metadata,
-                )
-            return self._finalize_send_result(message_response, "image send failed")
+            return await self._send_audited_or_legacy_message(
+                chat_id=chat_id,
+                msg_type="image",
+                payload=json.dumps({"image_key": image_key}, ensure_ascii=False),
+                reply_to=reply_to,
+                metadata=metadata,
+                default_message="image send failed",
+            )
         except Exception as exc:
             logger.error("[Feishu] Failed to send image %s: %s", image_path, exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
@@ -5106,25 +5106,77 @@ class FeishuAdapter(BasePlatformAdapter):
                     "file_key": file_key,
                     "file_name": display_name,
                 }
-                message_response = await self._feishu_send_with_retry(
+                return await self._send_audited_or_legacy_message(
                     chat_id=chat_id,
                     msg_type="post",
                     payload=self._build_media_post_payload(caption=caption, media_tag=media_tag),
                     reply_to=reply_to,
                     metadata=metadata,
+                    default_message="file send failed",
                 )
-            else:
-                message_response = await self._feishu_send_with_retry(
-                    chat_id=chat_id,
-                    msg_type=resolved_message_type,
-                    payload=json.dumps({"file_key": file_key}, ensure_ascii=False),
-                    reply_to=reply_to,
-                    metadata=metadata,
-                )
-            return self._finalize_send_result(message_response, "file send failed")
+            return await self._send_audited_or_legacy_message(
+                chat_id=chat_id,
+                msg_type=resolved_message_type,
+                payload=json.dumps({"file_key": file_key}, ensure_ascii=False),
+                reply_to=reply_to,
+                metadata=metadata,
+                default_message="file send failed",
+            )
         except Exception as exc:
             logger.error("[Feishu] Failed to send file %s: %s", file_path, exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
+
+    async def _send_audited_or_legacy_message(
+        self,
+        *,
+        chat_id: str,
+        msg_type: str,
+        payload: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        default_message: str,
+    ) -> SendResult:
+        if self._hermes_tools_state_dir is None:
+            response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type=msg_type,
+                payload=payload,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+            return self._finalize_send_result(response, default_message)
+
+        operation, operation_error = self._send_delivery_operation(
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+        if operation_error is not None:
+            return SendResult(success=False, error=operation_error)
+        delivery_id = self._delivery_id_for(
+            operation,
+            metadata=metadata,
+            parts=[chat_id, reply_to or "", msg_type, payload],
+        )
+        response_or_result = await self._audited_delivery(
+            delivery_id=delivery_id,
+            operation=operation,
+            target=f"feishu:chat:{chat_id}",
+            inbound_id=self._delivery_metadata(metadata, "inbound_id", reply_to or chat_id),
+            session_id=self._delivery_metadata(metadata, "session_id", "session"),
+            correlation_id=self._delivery_metadata(metadata, "correlation_id", delivery_id),
+            network_call=lambda uuid_value: self._send_raw_message(
+                chat_id=chat_id,
+                msg_type=msg_type,
+                payload=payload,
+                reply_to=reply_to,
+                metadata=metadata,
+                uuid_value=uuid_value,
+            ),
+            require_returned_message_id=True,
+        )
+        if isinstance(response_or_result, SendResult):
+            return response_or_result
+        return self._finalize_send_result(response_or_result, default_message)
 
     async def execute_feishu_request_descriptor(
         self,
