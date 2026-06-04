@@ -49,6 +49,32 @@ class _FakeMessageApi:
         return self.update_response
 
 
+class _FakeImageApi:
+    def __init__(self):
+        self.create_calls = []
+        self.create_response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(image_key="img_uploaded"),
+        )
+
+    def create(self, request):
+        self.create_calls.append(request)
+        return self.create_response
+
+
+class _FakeFileApi:
+    def __init__(self):
+        self.create_calls = []
+        self.create_response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(file_key="file_uploaded"),
+        )
+
+    def create(self, request):
+        self.create_calls.append(request)
+        return self.create_response
+
+
 def _adapter(tmp_path):
     adapter = FeishuAdapter(
         PlatformConfig(extra={"hermes_tools_state_dir": str(tmp_path)})
@@ -92,6 +118,160 @@ def _install_event_recorder(adapter, *, fail_event_types=()):
 
 def _event_types(calls):
     return [call.get("type") for call in calls if "type" in call]
+
+
+@pytest.mark.asyncio
+async def test_audited_image_file_records_pending_and_sent_after_upload(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    image_api = _FakeImageApi()
+    ordered = []
+
+    async def apply(event):
+        ordered.append(("event", event))
+        return True
+
+    def upload(request):
+        ordered.append(("image_upload", request))
+        return image_api.create_response
+
+    def create(request):
+        ordered.append(("sdk_create", request))
+        return _FakeResponse(message_id="om_image_msg")
+
+    adapter._client.im.v1.image = image_api
+    adapter._apply_gateway_event = apply
+    image_api.create = upload
+    message_api.create = create
+    image_path = tmp_path / "audit.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    result = await adapter.send_image_file(
+        chat_id="oc_chat",
+        image_path=str(image_path),
+        metadata=_metadata("delivery-image"),
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_image_msg"
+    assert [kind for kind, _ in ordered] == [
+        "image_upload",
+        "event",
+        "sdk_create",
+        "event",
+    ]
+    pending = ordered[1][1]
+    sent = ordered[3][1]
+    request = ordered[2][1]
+    assert pending["type"] == "delivery_pending"
+    assert pending["operation"] == "normal_final_reply"
+    assert pending["target"] == "feishu:chat:oc_chat"
+    assert request.request_body.msg_type == "image"
+    assert request.request_body.uuid == "delivery-image"
+    assert sent["type"] == "delivery_sent"
+    assert sent["delivery_id"] == "delivery-image"
+    assert sent["message_id"] == "om_image_msg"
+
+
+@pytest.mark.asyncio
+async def test_audited_uploaded_file_records_pending_and_sent_after_upload(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    file_api = _FakeFileApi()
+    ordered = []
+
+    async def apply(event):
+        ordered.append(("event", event))
+        return True
+
+    def upload(request):
+        ordered.append(("file_upload", request))
+        return file_api.create_response
+
+    def create(request):
+        ordered.append(("sdk_create", request))
+        return _FakeResponse(message_id="om_file_msg")
+
+    adapter._client.im.v1.file = file_api
+    adapter._apply_gateway_event = apply
+    file_api.create = upload
+    message_api.create = create
+    file_path = tmp_path / "audit.pdf"
+    file_path.write_bytes(b"%PDF-1.4 test")
+
+    result = await adapter.send_document(
+        chat_id="oc_chat",
+        file_path=str(file_path),
+        metadata=_metadata("delivery-file"),
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_file_msg"
+    assert [kind for kind, _ in ordered] == [
+        "file_upload",
+        "event",
+        "sdk_create",
+        "event",
+    ]
+    pending = ordered[1][1]
+    request = ordered[2][1]
+    sent = ordered[3][1]
+    assert pending["type"] == "delivery_pending"
+    assert pending["operation"] == "normal_final_reply"
+    assert pending["target"] == "feishu:chat:oc_chat"
+    assert request.request_body.msg_type == "file"
+    assert request.request_body.uuid == "delivery-file"
+    assert sent["type"] == "delivery_sent"
+    assert sent["message_id"] == "om_file_msg"
+
+
+@pytest.mark.asyncio
+async def test_audited_image_pending_apply_failure_aborts_message_send_after_upload(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    image_api = _FakeImageApi()
+    events = _install_event_recorder(adapter, fail_event_types={"delivery_pending"})
+    adapter._client.im.v1.image = image_api
+    image_path = tmp_path / "audit.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    result = await adapter.send_image_file(
+        chat_id="oc_chat",
+        image_path=str(image_path),
+        metadata=_metadata("delivery-image-pending-fail"),
+    )
+
+    assert result.success is False
+    assert result.error == "delivery_pending apply failed"
+    assert len(image_api.create_calls) == 1
+    assert message_api.create_calls == []
+    assert message_api.reply_calls == []
+    assert _event_types(events) == ["delivery_pending"]
+
+
+@pytest.mark.asyncio
+async def test_audited_uploaded_file_sent_apply_failure_records_unknown_with_message_id(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    file_api = _FakeFileApi()
+    events = _install_event_recorder(adapter, fail_event_types={"delivery_sent"})
+    adapter._client.im.v1.file = file_api
+    message_api.create_response = _FakeResponse(message_id="om_file_msg")
+    file_path = tmp_path / "audit.pdf"
+    file_path.write_bytes(b"%PDF-1.4 test")
+
+    result = await adapter.send_document(
+        chat_id="oc_chat",
+        file_path=str(file_path),
+        metadata=_metadata("delivery-file-sent-fail"),
+    )
+
+    assert result.success is False
+    assert len(file_api.create_calls) == 1
+    assert len(message_api.create_calls) == 1
+    assert _event_types(events) == [
+        "delivery_pending",
+        "delivery_sent",
+        "unknown_delivery_state",
+    ]
+    assert events[-1]["failure_class"] == "delivery_sent_apply_failed"
+    assert events[-1]["message_id"] == "om_file_msg"
 
 
 @pytest.mark.asyncio
