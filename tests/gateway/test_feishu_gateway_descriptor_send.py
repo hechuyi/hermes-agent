@@ -129,21 +129,34 @@ async def test_create_persists_pending_before_sdk_and_sent_after_message_id(tmp_
 async def test_audited_send_uses_allowlisted_stream_fresh_final_hint(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
+    base_delivery_id = "delivery-stream-final"
     metadata = {
-        **_metadata("delivery-stream-final"),
+        **_metadata(base_delivery_id),
         "delivery_operation_hint": "stream_fresh_final",
     }
 
-    result = await adapter.send("oc_chat", "hello", metadata=metadata)
+    first = await adapter.send("oc_chat", "hello", metadata=metadata)
+    second = await adapter.send("oc_chat", "hello", metadata=metadata)
 
-    assert result.success is True
-    assert result.message_id == "om_created"
-    assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert first.success is True
+    assert first.message_id == "om_created"
+    assert second.success is True
+    assert _event_types(events) == [
+        "delivery_pending",
+        "delivery_sent",
+        "delivery_pending",
+        "delivery_sent",
+    ]
     assert events[0]["operation"] == "stream_fresh_final"
     assert events[1]["operation"] == "stream_fresh_final"
-    assert events[0]["delivery_id"] == "delivery-stream-final"
-    assert events[1]["delivery_id"] == "delivery-stream-final"
-    assert message_api.create_calls[0].request_body.uuid == "delivery-stream-final"
+    assert events[2]["operation"] == "stream_fresh_final"
+    assert events[3]["operation"] == "stream_fresh_final"
+    assert events[0]["delivery_id"] != base_delivery_id
+    assert events[1]["delivery_id"] == events[0]["delivery_id"]
+    assert events[2]["delivery_id"] == events[0]["delivery_id"]
+    assert events[3]["delivery_id"] == events[0]["delivery_id"]
+    assert message_api.create_calls[0].request_body.uuid == events[0]["delivery_id"]
+    assert message_api.create_calls[1].request_body.uuid == events[0]["delivery_id"]
 
 
 @pytest.mark.asyncio

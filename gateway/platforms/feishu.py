@@ -5254,6 +5254,11 @@ class FeishuAdapter(BasePlatformAdapter):
         if explicit is not None:
             explicit_text = str(explicit).strip()
             if re.fullmatch(r"^[A-Za-z0-9_.:-]{1,127}$", explicit_text):
+                if operation in self._SEND_DELIVERY_OPERATION_HINTS:
+                    digest = hashlib.sha256(
+                        f"{operation}\x1f{explicit_text}".encode("utf-8")
+                    ).hexdigest()[:24]
+                    return f"{operation}-{digest}"
                 return explicit_text
         seed = "\x1f".join([operation, *(str(part) for part in parts)])
         digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
