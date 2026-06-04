@@ -36,7 +36,8 @@ _MAX_DIAGNOSTIC_CHARS = 1200
 _SAFE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 _SAFE_EVENT_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_SHA256_HEX_RE = re.compile(r"^[a-f0-9]{64}$")
+_STABLE_SANITIZED_HASH_RE = re.compile(r"^fnv1a64:[a-f0-9]{16}$")
+_MAX_PREFLIGHT_FEISHU_CONTENT_CHARS = 32768
 _APPLY_SUCCESS_KEYS = frozenset({"ok", "event_type", "action"})
 _APPLY_ERROR_KEYS = frozenset({"ok", "event_type", "error"})
 _APPLY_ERROR_OBJECT_KEYS = frozenset({"reason", "message"})
@@ -77,6 +78,17 @@ _DELIVERY_RECORD_KEYS = frozenset(
 )
 _DELIVERY_STATUSES = frozenset({"pending", "sent", "failed", "acked"})
 _PREFLIGHT_CHECK_KEYS = frozenset({"name", "ok", "detail"})
+_PREFLIGHT_FEISHU_REQUEST_KEYS = frozenset(
+    {"operation", "method", "path", "params", "body"}
+)
+_PREFLIGHT_FEISHU_PARAMS_KEYS = frozenset({"receive_id_type"})
+_PREFLIGHT_FEISHU_BODY_REQUIRED_KEYS = frozenset(
+    {"receive_id", "msg_type", "content"}
+)
+_PREFLIGHT_FEISHU_BODY_OPTIONAL_KEYS = frozenset({"uuid"})
+_PREFLIGHT_FEISHU_RECEIVE_ID_TYPES = frozenset(
+    {"open_id", "union_id", "user_id", "email", "chat_id"}
+)
 
 
 @dataclass(frozen=True)
@@ -593,8 +605,8 @@ def _validated_inbound_admission_record(value: Any) -> dict[str, Any] | None:
     if (
         inbound_id_hash is None
         or message_id_hash is None
-        or not _SHA256_HEX_RE.fullmatch(inbound_id_hash)
-        or not _SHA256_HEX_RE.fullmatch(message_id_hash)
+        or not _STABLE_SANITIZED_HASH_RE.fullmatch(inbound_id_hash)
+        or not _STABLE_SANITIZED_HASH_RE.fullmatch(message_id_hash)
         or message_type is None
         or not _is_json_int(first_seen_at)
     ):
@@ -631,16 +643,78 @@ def _validated_preflight_checks(value: Any) -> list[dict[str, Any]] | None:
 def _validated_feishu_request(value: Any) -> dict[str, Any] | None | _InvalidSentinel:
     if value is None:
         return None
-    if not isinstance(value, dict) or not _has_only_keys(value, {"operation", "body"}):
+    if not isinstance(value, dict) or not _has_exact_keys(
+        value, _PREFLIGHT_FEISHU_REQUEST_KEYS
+    ):
         return _INVALID
-    if value.get("operation") != "feishu.card.create":
+    if (
+        value.get("operation") != "send_interactive_message"
+        or value.get("method") != "POST"
+        or value.get("path") != "/open-apis/im/v1/messages"
+    ):
         return _INVALID
+
+    params = value.get("params")
+    if not isinstance(params, dict) or not _has_exact_keys(
+        params, _PREFLIGHT_FEISHU_PARAMS_KEYS
+    ):
+        return _INVALID
+    receive_id_type = params.get("receive_id_type")
+    if receive_id_type not in _PREFLIGHT_FEISHU_RECEIVE_ID_TYPES:
+        return _INVALID
+
     body = value.get("body")
-    if not isinstance(body, dict) or not _has_only_keys(body, {"msg_type"}):
+    if not isinstance(body, dict):
         return _INVALID
-    if body.get("msg_type") != "interactive":
+    body_keys = set(body.keys())
+    if (
+        not _PREFLIGHT_FEISHU_BODY_REQUIRED_KEYS.issubset(body_keys)
+        or not body_keys.issubset(
+            _PREFLIGHT_FEISHU_BODY_REQUIRED_KEYS
+            | _PREFLIGHT_FEISHU_BODY_OPTIONAL_KEYS
+        )
+    ):
         return _INVALID
-    return {"operation": "feishu.card.create", "body": {"msg_type": "interactive"}}
+
+    receive_id = _validated_identifier_field(body.get("receive_id"))
+    content = body.get("content")
+    uuid = _validated_optional_identifier_field(body.get("uuid"))
+    if (
+        body.get("msg_type") != "interactive"
+        or receive_id is None
+        or not _is_valid_preflight_card_content(content)
+        or uuid is _INVALID
+    ):
+        return _INVALID
+
+    sanitized_body = {
+        "receive_id": receive_id,
+        "msg_type": "interactive",
+        "content": content,
+    }
+    if uuid is not None:
+        sanitized_body["uuid"] = uuid
+    return {
+        "operation": "send_interactive_message",
+        "method": "POST",
+        "path": "/open-apis/im/v1/messages",
+        "params": {"receive_id_type": receive_id_type},
+        "body": sanitized_body,
+    }
+
+
+def _is_valid_preflight_card_content(value: Any) -> bool:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS
+    ):
+        return False
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict)
 
 
 def _validated_failure_class(value: Any, *, fallback: str) -> str:

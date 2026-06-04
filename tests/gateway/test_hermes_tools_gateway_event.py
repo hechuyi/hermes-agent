@@ -45,14 +45,8 @@ def _rust_inbound_admission_action(*, duplicate=False):
         "decision": "continue",
         "duplicate": duplicate,
         "record": {
-            "inbound_id_hash": (
-                "0123456789abcdef0123456789abcdef"
-                "0123456789abcdef0123456789abcdef"
-            ),
-            "message_id_hash": (
-                "fedcba9876543210fedcba9876543210"
-                "fedcba9876543210fedcba9876543210"
-            ),
+            "inbound_id_hash": "fnv1a64:d5793e6083fe7f82",
+            "message_id_hash": "fnv1a64:234d09b47b7872c9",
             "message_type": "text",
             "first_seen_at": 100,
         },
@@ -259,6 +253,39 @@ def test_apply_gateway_event_rejects_inbound_admission_non_continue(monkeypatch,
     assert "raw user text" not in result.diagnostics
 
 
+def test_apply_gateway_event_rejects_raw_inbound_admission_ids(monkeypatch, tmp_path):
+    action = _rust_inbound_admission_action()
+    action["record"] = {
+        **action["record"],
+        "inbound_id_hash": "ev_1",
+        "message_id_hash": "om_1",
+    }
+
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "feishu_inbound",
+                    "action": action,
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "feishu_inbound"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+    assert "ev_1" not in result.diagnostics
+    assert "om_1" not in result.diagnostics
+
+
 @pytest.mark.asyncio
 async def test_apply_gateway_event_async_runs_sync_apply_in_worker(monkeypatch, tmp_path):
     calls = []
@@ -330,6 +357,63 @@ async def test_apply_gateway_event_async_fails_closed_when_worker_slots_are_satu
 
 
 def test_preflight_gateway_event_success_invokes_preflight(monkeypatch, tmp_path):
+    checks = [
+        {
+            "name": "state_dir_writable",
+            "ok": True,
+            "detail": "state directory accepts create/write/remove",
+        },
+        {
+            "name": "feishu_inbound",
+            "ok": True,
+            "detail": "inbound admission persisted",
+        },
+        {
+            "name": "delivery_lifecycle",
+            "ok": True,
+            "detail": "delivery_pending and delivery_sent persisted",
+        },
+        {
+            "name": "feishu_ack",
+            "ok": True,
+            "detail": "read-event ack updated the sent delivery",
+        },
+        {
+            "name": "stale_pending_scan",
+            "ok": True,
+            "detail": "stale pending count=1",
+        },
+        {
+            "name": "session_guard",
+            "ok": True,
+            "detail": "compression mismatch is rejected with implicit_session_switch",
+        },
+        {
+            "name": "status_card_request_descriptor",
+            "ok": True,
+            "detail": "task_status produced a Feishu send request descriptor",
+        },
+    ]
+    feishu_request = {
+        "body": {
+            "content": (
+                '{"config":{"update_multi":true,"wide_screen_mode":true},'
+                '"elements":[{"tag":"div","text":{"content":"**State:** running\\n'
+                'preflight started","tag":"lark_md"}},{"tag":"hr"},{"elements":'
+                '[{"content":"task running: preflight started","tag":"plain_text"}],'
+                '"tag":"note"}],"header":{"template":"blue","title":{"content":'
+                '"Hermes task running","tag":"plain_text"}}}'
+            ),
+            "msg_type": "interactive",
+            "receive_id": "oc_preflight",
+            "uuid": "preflight-task-create",
+        },
+        "method": "POST",
+        "operation": "send_interactive_message",
+        "params": {"receive_id_type": "chat_id"},
+        "path": "/open-apis/im/v1/messages",
+    }
+
     def fake_run(*args, **kwargs):
         assert args[0] == [
             "hermes-tools",
@@ -344,17 +428,8 @@ def test_preflight_gateway_event_success_invokes_preflight(monkeypatch, tmp_path
                 {
                     "ok": True,
                     "state_dir_writable": True,
-                    "checks": [
-                        {
-                            "name": "delivery_lifecycle",
-                            "ok": True,
-                            "detail": "delivery_pending and delivery_sent persisted",
-                        }
-                    ],
-                    "feishu_request": {
-                        "operation": "feishu.card.create",
-                        "body": {"msg_type": "interactive"},
-                    },
+                    "checks": checks,
+                    "feishu_request": feishu_request,
                 }
             )
         )
@@ -370,11 +445,10 @@ def test_preflight_gateway_event_success_invokes_preflight(monkeypatch, tmp_path
     assert result.event_type == "preflight"
     assert result.action["type"] == "preflight_report"
     assert result.action["state_dir_writable"] is True
-    assert result.action["checks"] == [{"name": "delivery_lifecycle", "ok": True}]
-    assert result.action["feishu_request"] == {
-        "operation": "feishu.card.create",
-        "body": {"msg_type": "interactive"},
-    }
+    assert result.action["checks"] == [
+        {"name": check["name"], "ok": check["ok"]} for check in checks
+    ]
+    assert result.action["feishu_request"] == feishu_request
     assert result.failure_class is None
     assert result.diagnostics == ""
 
@@ -840,3 +914,41 @@ def test_preflight_gateway_event_rejects_malformed_feishu_request(
     assert result.failure_class == "hermes_tools_invalid_envelope"
     assert result.action is None
     assert "ou_sensitive" not in result.diagnostics
+
+
+def test_preflight_gateway_event_rejects_generic_feishu_request_path(
+    monkeypatch, tmp_path
+):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "state_dir_writable": True,
+                    "checks": [{"name": "delivery_lifecycle", "ok": True}],
+                    "feishu_request": {
+                        "operation": "send_interactive_message",
+                        "method": "POST",
+                        "path": "/open-apis/contact/v3/users",
+                        "params": {"receive_id_type": "chat_id"},
+                        "body": {
+                            "receive_id": "oc_preflight",
+                            "msg_type": "interactive",
+                            "content": '{"config":{"wide_screen_mode":true}}',
+                            "uuid": "preflight-task-create",
+                        },
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = preflight_gateway_event(tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
