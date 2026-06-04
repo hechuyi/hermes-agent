@@ -2143,12 +2143,27 @@ class FeishuAdapter(BasePlatformAdapter):
 
             result = self._finalize_send_result(response, "send_exec_approval failed")
             if result.success:
-                self._approval_state[approval_id] = {
+                approval_state = {
                     "session_key": session_key,
                     "message_id": result.message_id or "",
                     "chat_id": chat_id,
                     **card_scope,
                 }
+                if self._hermes_tools_state_dir is not None:
+                    approval_state.update(
+                        {
+                            "inbound_id": self._delivery_metadata(metadata, "inbound_id", chat_id),
+                            "session_id": self._delivery_metadata(
+                                metadata, "session_id", session_key or "session"
+                            ),
+                            "correlation_id": self._delivery_metadata(
+                                metadata,
+                                "correlation_id",
+                                result.message_id or str(approval_id),
+                            ),
+                        }
+                    )
+                self._approval_state[approval_id] = approval_state
             return result
         except Exception as exc:
             logger.warning("[Feishu] send_exec_approval failed: %s", exc)
@@ -2259,12 +2274,27 @@ class FeishuAdapter(BasePlatformAdapter):
 
             result = self._finalize_send_result(response, "send_update_prompt failed")
             if result.success:
-                self._update_prompt_state[prompt_id] = {
+                prompt_state = {
                     "session_key": session_key,
                     "message_id": result.message_id or "",
                     "chat_id": chat_id,
                     **card_scope,
                 }
+                if self._hermes_tools_state_dir is not None:
+                    prompt_state.update(
+                        {
+                            "inbound_id": self._delivery_metadata(metadata, "inbound_id", chat_id),
+                            "session_id": self._delivery_metadata(
+                                metadata, "session_id", session_key or "session"
+                            ),
+                            "correlation_id": self._delivery_metadata(
+                                metadata,
+                                "correlation_id",
+                                result.message_id or str(prompt_id),
+                            ),
+                        }
+                    )
+                self._update_prompt_state[prompt_id] = prompt_state
             return result
         except Exception as exc:
             logger.warning("[Feishu] send_update_prompt failed: %s", exc)
@@ -3029,6 +3059,8 @@ class FeishuAdapter(BasePlatformAdapter):
         if P2CardActionTriggerResponse is None:
             return None
         response = P2CardActionTriggerResponse()
+        if self._hermes_tools_state_dir is not None:
+            return response
         if CallBackCard is not None:
             card = CallBackCard()
             card.type = "raw"
@@ -3064,12 +3096,69 @@ class FeishuAdapter(BasePlatformAdapter):
         if P2CardActionTriggerResponse is None:
             return None
         response = P2CardActionTriggerResponse()
+        if self._hermes_tools_state_dir is not None:
+            return response
         if CallBackCard is not None:
             card = CallBackCard()
             card.type = "raw"
             card.data = self._build_resolved_update_prompt_card(answer=answer, user_name=user_name)
             response.card = card
         return response
+
+    async def _audited_resolved_prompt_card_update(
+        self,
+        *,
+        operation: str,
+        state: Dict[str, Any],
+        prompt_id: Any,
+        choice: str,
+        card: Dict[str, Any],
+    ) -> bool:
+        """Patch a resolved prompt card through the delivery ledger before side effects."""
+        if not self._client:
+            logger.warning("[Feishu] Cannot audit %s: client not connected", operation)
+            return False
+
+        message_id = str(state.get("message_id") or "").strip()
+        if not self._valid_feishu_message_id(message_id):
+            logger.warning(
+                "[Feishu] Cannot audit %s: invalid or missing message_id for prompt %s",
+                operation,
+                prompt_id,
+            )
+            return False
+
+        session_key = str(state.get("session_key") or "").strip()
+        payload = json.dumps(card, ensure_ascii=False)
+        body = self._build_update_message_body(msg_type="interactive", content=payload)
+        request = self._build_update_message_request(message_id=message_id, request_body=body)
+        delivery_id = self._delivery_id_for(
+            operation,
+            metadata=None,
+            parts=[message_id, session_key, str(prompt_id), choice],
+        )
+        response_or_result = await self._audited_delivery(
+            delivery_id=delivery_id,
+            operation=operation,
+            target=f"feishu:message:{message_id}",
+            inbound_id=self._delivery_metadata(state, "inbound_id", message_id),
+            session_id=self._delivery_metadata(state, "session_id", session_key or "session"),
+            correlation_id=self._delivery_metadata(state, "correlation_id", delivery_id),
+            network_call=lambda _uuid_value: asyncio.to_thread(
+                self._client.im.v1.message.update,
+                request,
+            ),
+            require_returned_message_id=False,
+            existing_message_id=message_id,
+        )
+        if isinstance(response_or_result, SendResult):
+            logger.warning(
+                "[Feishu] Audited %s failed before prompt side effect: %s",
+                operation,
+                response_or_result.error or "unknown",
+            )
+            return False
+        return True
 
     async def _resolve_approval(
         self,
@@ -3095,6 +3184,16 @@ class FeishuAdapter(BasePlatformAdapter):
                 approval_id, expected_chat_id, chat_id,
             )
             return
+        if self._hermes_tools_state_dir is not None:
+            card_updated = await self._audited_resolved_prompt_card_update(
+                operation="approval_prompt_card_update",
+                state=state,
+                prompt_id=approval_id,
+                choice=choice,
+                card=self._build_resolved_approval_card(choice=choice, user_name=user_name),
+            )
+            if not card_updated:
+                return
         state = self._approval_state.pop(approval_id, None)
         if not state:
             logger.debug("[Feishu] Approval %s already resolved while validating callback", approval_id)
@@ -3111,9 +3210,23 @@ class FeishuAdapter(BasePlatformAdapter):
 
     async def _resolve_update_prompt(self, prompt_id: Any, answer: str, user_name: str) -> None:
         """Persist an update prompt answer for the detached update process."""
-        state = self._update_prompt_state.pop(prompt_id, None)
+        state = self._update_prompt_state.get(prompt_id)
         if not state:
             logger.debug("[Feishu] Update prompt %s already resolved or unknown", prompt_id)
+            return
+        if self._hermes_tools_state_dir is not None:
+            card_updated = await self._audited_resolved_prompt_card_update(
+                operation="update_prompt_card_update",
+                state=state,
+                prompt_id=prompt_id,
+                choice=answer,
+                card=self._build_resolved_update_prompt_card(answer=answer, user_name=user_name),
+            )
+            if not card_updated:
+                return
+        state = self._update_prompt_state.pop(prompt_id, None)
+        if not state:
+            logger.debug("[Feishu] Update prompt %s already resolved while validating callback", prompt_id)
             return
         try:
             self._write_update_prompt_response(answer)

@@ -90,6 +90,16 @@ class _FakeResponse:
         return self._ok
 
 
+class _FakeMessageApi:
+    def __init__(self):
+        self.update_calls = []
+        self.update_response = _FakeResponse(message_id="om_updated")
+
+    def update(self, request):
+        self.update_calls.append(request)
+        return self.update_response
+
+
 def _make_card_action_data(
     action_value: dict,
     chat_id: str = "oc_12345",
@@ -558,6 +568,56 @@ class TestFeishuIdempotencyKeys:
 
 class TestResolveApproval:
     """Test _resolve_approval pops state and calls resolve_gateway_approval."""
+
+    @pytest.mark.asyncio
+    async def test_approval_audited_resolution_patches_card_before_resolving_gateway_approval(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        timeline = []
+
+        async def apply(event):
+            timeline.append((event["type"], event))
+            return True
+
+        adapter._apply_gateway_event = apply
+        adapter._approval_state[10] = {
+            "session_key": "agent:main:feishu:group:oc_12345",
+            "message_id": "om_approval_10",
+            "chat_id": "oc_12345",
+            "inbound_id": "inbound-approval",
+            "session_id": "session-approval",
+            "correlation_id": "corr-approval",
+        }
+
+        def resolve(session_key, choice):
+            timeline.append(("resolver", (session_key, choice)))
+            return 1
+
+        with patch("tools.approval.resolve_gateway_approval", side_effect=resolve) as mock_resolve:
+            await adapter._resolve_approval(
+                10,
+                "once",
+                "Alice",
+                open_id="ou_user1",
+                chat_id="oc_12345",
+            )
+
+        assert [entry[0] for entry in timeline] == [
+            "delivery_pending",
+            "delivery_sent",
+            "resolver",
+        ]
+        assert timeline[0][1]["operation"] == "approval_prompt_card_update"
+        assert timeline[0][1]["target"] == "feishu:message:om_approval_10"
+        assert timeline[1][1]["operation"] == "approval_prompt_card_update"
+        assert timeline[1][1]["message_id"] == "om_approval_10"
+        assert message_api.update_calls
+        request = message_api.update_calls[0]
+        assert request.message_id == "om_approval_10"
+        assert request.request_body.msg_type == "interactive"
+        mock_resolve.assert_called_once_with("agent:main:feishu:group:oc_12345", "once")
+        assert 10 not in adapter._approval_state
 
     @pytest.mark.asyncio
     async def test_resolves_once(self):
@@ -1109,6 +1169,35 @@ class TestCardActionCallbackResponse:
         assert "answered: Yes" in card["header"]["title"]["content"]
         assert "Bob" in card["elements"][0]["content"]
 
+    def test_update_prompt_audited_click_returns_no_inline_card_and_schedules_resolution(
+        self,
+        tmp_path,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._update_prompt_state[8] = {
+            "session_key": "sess-up-8",
+            "message_id": "om_update_8",
+            "chat_id": "oc_12345",
+            "inbound_id": "inbound-up-8",
+            "session_id": "session-up-8",
+            "correlation_id": "corr-up-8",
+        }
+        data = _make_card_action_data(
+            {"hermes_update_prompt_action": "y", "update_prompt_id": 8},
+            open_id="ou_bob",
+        )
+        adapter._sender_name_cache["ou_bob"] = ("Bob", 9999999999)
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro) as mock_submit:
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is None
+        mock_submit.assert_called_once()
+
     def test_returns_card_for_update_prompt_no(self, _patch_callback_card_types):
         adapter = _make_adapter()
         adapter._loop = MagicMock()
@@ -1203,6 +1292,91 @@ class TestCardActionCallbackResponse:
 
 class TestResolveUpdatePrompt:
     """Test update prompt resolution persists the response file."""
+
+    @pytest.mark.asyncio
+    async def test_update_prompt_audited_resolution_patches_card_before_writing_response(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        timeline = []
+
+        async def apply(event):
+            timeline.append((event["type"], event))
+            return True
+
+        adapter._apply_gateway_event = apply
+        original_write_response = adapter._write_update_prompt_response
+
+        def write_response(answer):
+            timeline.append(("write_response", answer))
+            original_write_response(answer)
+
+        monkeypatch.setattr(adapter, "_write_update_prompt_response", write_response)
+        adapter._update_prompt_state[9] = {
+            "session_key": "agent:main:feishu:group:oc_12345",
+            "message_id": "om_update_9",
+            "chat_id": "oc_12345",
+            "inbound_id": "inbound-update",
+            "session_id": "session-update",
+            "correlation_id": "corr-update",
+        }
+
+        await adapter._resolve_update_prompt(9, "y", "Alice")
+
+        assert [entry[0] for entry in timeline] == [
+            "delivery_pending",
+            "delivery_sent",
+            "write_response",
+        ]
+        assert timeline[0][1]["operation"] == "update_prompt_card_update"
+        assert timeline[0][1]["target"] == "feishu:message:om_update_9"
+        assert timeline[0][1]["inbound_id"] == "inbound-update"
+        assert timeline[0][1]["session_id"] == "session-update"
+        assert timeline[0][1]["correlation_id"] == "corr-update"
+        assert timeline[1][1]["delivery_id"] == timeline[0][1]["delivery_id"]
+        assert timeline[1][1]["message_id"] == "om_update_9"
+        assert message_api.update_calls
+        request = message_api.update_calls[0]
+        assert request.message_id == "om_update_9"
+        assert request.request_body.msg_type == "interactive"
+        assert (hermes_home / ".update_response").read_text() == "y"
+        assert 9 not in adapter._update_prompt_state
+
+    @pytest.mark.asyncio
+    async def test_update_prompt_audited_patch_pending_failure_does_not_write_response(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        events = _install_event_recorder(adapter, fail_event_types={"delivery_pending"})
+        adapter._update_prompt_state[10] = {
+            "session_key": "agent:main:feishu:group:oc_12345",
+            "message_id": "om_update_10",
+            "chat_id": "oc_12345",
+            "inbound_id": "inbound-update",
+            "session_id": "session-update",
+            "correlation_id": "corr-update",
+        }
+
+        await adapter._resolve_update_prompt(10, "n", "Alice")
+
+        assert _event_types(events) == ["delivery_pending"]
+        assert message_api.update_calls == []
+        assert not (hermes_home / ".update_response").exists()
+        assert 10 in adapter._update_prompt_state
 
     @pytest.mark.asyncio
     async def test_writes_response_file(self, tmp_path, monkeypatch):
