@@ -105,6 +105,11 @@ def test_preflight_gateway_event_success_invokes_preflight(monkeypatch, tmp_path
     assert result.event_type == "preflight"
     assert result.action["type"] == "preflight_report"
     assert result.action["state_dir_writable"] is True
+    assert result.action["checks"] == [{"name": "delivery_lifecycle", "ok": True}]
+    assert result.action["feishu_request"] == {
+        "operation": "feishu.card.create",
+        "body": {"msg_type": "interactive"},
+    }
     assert result.failure_class is None
     assert result.diagnostics == ""
 
@@ -147,8 +152,11 @@ def test_apply_gateway_event_timeout_fails_closed(monkeypatch, tmp_path):
 def test_apply_gateway_event_nonzero_without_envelope_fails_closed(
     monkeypatch, tmp_path
 ):
+    raw_stdout = "user text: reset my password; open_id=ou_sensitive"
+    raw_stderr = "panic for https://tenant.example/callback token=secret-token"
+
     def fake_run(*args, **kwargs):
-        return _completed(stdout="not json", stderr="panic", returncode=7)
+        return _completed(stdout=raw_stdout, stderr=raw_stderr, returncode=7)
 
     monkeypatch.setattr(
         "gateway.hermes_tools_gateway_event.subprocess.run",
@@ -161,12 +169,22 @@ def test_apply_gateway_event_nonzero_without_envelope_fails_closed(
     assert result.failure_class == "hermes_tools_nonzero_exit"
     assert result.reason == "hermes-tools exited nonzero"
     assert "returncode=7" in result.diagnostics
-    assert "panic" in result.diagnostics
+    assert "stdout_bytes=" in result.diagnostics
+    assert "stderr_bytes=" in result.diagnostics
+    assert "stdout_json=invalid" in result.diagnostics
+    assert "stderr_json=invalid" in result.diagnostics
+    assert raw_stdout not in result.diagnostics
+    assert raw_stderr not in result.diagnostics
+    assert "ou_sensitive" not in result.diagnostics
+    assert "tenant.example" not in result.diagnostics
+    assert "secret-token" not in result.diagnostics
 
 
 def test_apply_gateway_event_invalid_json_fails_closed(monkeypatch, tmp_path):
+    raw_stdout = "not json: arbitrary user message om_sensitive_msg"
+
     def fake_run(*args, **kwargs):
-        return _completed(stdout="{not json", returncode=0)
+        return _completed(stdout=raw_stdout, returncode=0)
 
     monkeypatch.setattr(
         "gateway.hermes_tools_gateway_event.subprocess.run",
@@ -178,6 +196,9 @@ def test_apply_gateway_event_invalid_json_fails_closed(monkeypatch, tmp_path):
     assert result.ok is False
     assert result.failure_class == "hermes_tools_invalid_json"
     assert result.reason == "invalid hermes-tools JSON envelope"
+    assert "stdout_json=invalid" in result.diagnostics
+    assert raw_stdout not in result.diagnostics
+    assert "om_sensitive_msg" not in result.diagnostics
 
 
 def test_apply_gateway_event_ok_false_envelope_uses_stable_reason(
@@ -191,7 +212,10 @@ def test_apply_gateway_event_ok_false_envelope_uses_stable_reason(
                     "event_type": "delivery_pending",
                     "error": {
                         "reason": "state_io_error",
-                        "message": "state_io_error: permission denied",
+                        "message": (
+                            "state_io_error: permission denied for "
+                            "ou_sensitive https://tenant.example"
+                        ),
                     },
                 }
             ),
@@ -210,7 +234,9 @@ def test_apply_gateway_event_ok_false_envelope_uses_stable_reason(
     assert result.failure_class == "state_io_error"
     assert result.reason == "state_io_error"
     assert result.action is None
-    assert "permission denied" in result.diagnostics
+    assert "permission denied" not in result.diagnostics
+    assert "ou_sensitive" not in result.diagnostics
+    assert "tenant.example" not in result.diagnostics
 
 
 def test_preflight_ok_false_envelope_uses_failure_class(monkeypatch, tmp_path):
@@ -222,7 +248,7 @@ def test_preflight_ok_false_envelope_uses_failure_class(monkeypatch, tmp_path):
                     "state_dir_writable": False,
                     "checks": [{"name": "state_dir_writable", "ok": False}],
                     "failure_class": "state_dir_unusable",
-                    "failure_detail": "state_dir_writable failed",
+                    "failure_detail": "state_dir_writable failed for ou_sensitive",
                     "feishu_request": None,
                 }
             ),
@@ -240,7 +266,8 @@ def test_preflight_ok_false_envelope_uses_failure_class(monkeypatch, tmp_path):
     assert result.event_type == "preflight"
     assert result.failure_class == "state_dir_unusable"
     assert result.reason == "state_dir_unusable"
-    assert "state_dir_writable failed" in result.diagnostics
+    assert "state_dir_writable failed" not in result.diagnostics
+    assert "ou_sensitive" not in result.diagnostics
 
 
 def test_apply_gateway_event_unsupported_action_fails_closed(
@@ -272,7 +299,36 @@ def test_apply_gateway_event_unsupported_action_fails_closed(
     assert "https://example.test" not in result.diagnostics
 
 
-def test_diagnostics_redact_sensitive_output_and_state_dir(monkeypatch, tmp_path):
+def test_apply_gateway_event_unsupported_token_like_action_type_is_not_diagnostic(
+    monkeypatch, tmp_path
+):
+    token_like_type = "sk-test-abcdefghijklmnopqrstuvwxyz"
+
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "delivery_pending",
+                    "action": {"type": token_like_type},
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "delivery_pending"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "unsupported_action"
+    assert token_like_type not in result.diagnostics
+    assert "type=<invalid>" in result.diagnostics
+
+
+def test_diagnostics_do_not_include_sensitive_output_or_state_dir(monkeypatch, tmp_path):
     raw_secret = "sk-test-abcdefghijklmnopqrstuvwxyz"
     raw_output = (
         f"state_dir={tmp_path} OPENAI_API_KEY={raw_secret} "
@@ -295,5 +351,195 @@ def test_diagnostics_redact_sensitive_output_and_state_dir(monkeypatch, tmp_path
     assert raw_secret not in combined
     assert "super-secret-token-value" not in combined
     assert str(tmp_path) not in combined
-    assert "<state-dir>" in combined
-    assert "***" in combined
+    assert "stdout_bytes=" in combined
+    assert "stderr_bytes=" in combined
+    assert "access_token" not in combined
+
+
+def test_apply_gateway_event_rejects_extra_top_level_fields(monkeypatch, tmp_path):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "delivery_pending",
+                    "debug": {"text": "arbitrary user text ou_sensitive"},
+                    "action": {
+                        "type": "delivery_record",
+                        "record": {"delivery_id": "delivery-1"},
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "delivery_pending"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+    assert "arbitrary user text" not in result.diagnostics
+    assert "ou_sensitive" not in result.diagnostics
+
+
+def test_apply_gateway_event_rejects_unknown_action_fields(monkeypatch, tmp_path):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "delivery_pending",
+                    "action": {
+                        "type": "delivery_record",
+                        "record": {"delivery_id": "delivery-1"},
+                        "feishu_message_id": "om_sensitive",
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "delivery_pending"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+    assert "om_sensitive" not in result.diagnostics
+
+
+def test_apply_gateway_event_rejects_sensitive_nested_action_values(
+    monkeypatch, tmp_path
+):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "delivery_pending",
+                    "action": {
+                        "type": "delivery_record",
+                        "record": {
+                            "delivery_id": "delivery-1",
+                            "metadata": {"token": "secret-token-value"},
+                        },
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "delivery_pending"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+    assert "secret-token-value" not in result.diagnostics
+
+
+def test_apply_gateway_event_rejects_fields_under_supported_action_type(
+    monkeypatch, tmp_path
+):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "status_update",
+                    "action": {
+                        "type": "status_card",
+                        "title": "raw platform text",
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "status_update"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+    assert "raw platform text" not in result.diagnostics
+
+
+def test_preflight_gateway_event_rejects_malformed_checks(monkeypatch, tmp_path):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "state_dir_writable": True,
+                    "checks": [
+                        {
+                            "name": "delivery_lifecycle",
+                            "ok": True,
+                            "detail": "raw platform text om_sensitive",
+                        }
+                    ],
+                    "feishu_request": None,
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = preflight_gateway_event(tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+    assert "raw platform text" not in result.diagnostics
+    assert "om_sensitive" not in result.diagnostics
+
+
+def test_preflight_gateway_event_rejects_malformed_feishu_request(
+    monkeypatch, tmp_path
+):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "state_dir_writable": True,
+                    "checks": [{"name": "delivery_lifecycle", "ok": True}],
+                    "feishu_request": {
+                        "operation": "feishu.card.create",
+                        "body": {
+                            "msg_type": "interactive",
+                            "open_id": "ou_sensitive",
+                        },
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = preflight_gateway_event(tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+    assert "ou_sensitive" not in result.diagnostics
