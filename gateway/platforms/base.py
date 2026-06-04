@@ -4099,6 +4099,12 @@ class BasePlatformAdapter(ABC):
                     _active = self._active_sessions.get(session_key)
                     if _active is not None:
                         _active.clear()
+                    late_pending._hermes_delivery_metadata = (
+                        _queued_followup_first_reply_metadata(
+                            late_pending,
+                            session_key,
+                        )
+                    )
                     drain_task = asyncio.create_task(
                         self._process_message_background(late_pending, session_key)
                     )

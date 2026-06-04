@@ -270,3 +270,59 @@ async def test_pending_drain_first_reply_carries_queued_followup_delivery_metada
     assert followup_metadata["delivery_operation_hint"] == "queued_followup_first_reply"
     assert followup_metadata["delivery_id"] == "queued_followup_first_reply:om_followup"
     assert followup_metadata["inbound_id"] == "om_followup"
+
+
+@pytest.mark.asyncio
+async def test_late_pending_drain_first_reply_carries_queued_followup_delivery_metadata():
+    adapter = _make_adapter()
+    first_event = _make_feishu_event(text="M1", message_id="om_first")
+    sk = build_session_key(first_event.source)
+    sent = []
+
+    async def send_with_retry(**kwargs):
+        sent.append(kwargs)
+        return SimpleNamespace(success=True, message_id=f"sent-{len(sent)}")
+
+    adapter._send_with_retry = send_with_retry
+    processed = []
+
+    async def handler(event):
+        processed.append(event.text)
+        return f"reply-{event.text}"
+
+    adapter._message_handler = handler
+
+    original_stop = adapter.stop_typing if hasattr(adapter, "stop_typing") else None
+    injected = {"done": False}
+
+    async def stop_typing_injects_late_pending(*args, **kwargs):
+        await asyncio.sleep(0)
+        if not injected["done"]:
+            adapter._pending_messages[sk] = _make_feishu_event(
+                text="M2",
+                message_id="om_late",
+            )
+            injected["done"] = True
+        if original_stop:
+            return await original_stop(*args, **kwargs)
+        return None
+
+    adapter.stop_typing = stop_typing_injects_late_pending
+
+    await adapter._process_message_background(first_event, sk)
+
+    for _ in range(50):
+        if processed == ["M1", "M2"] and len(sent) == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    await adapter.cancel_background_tasks()
+
+    assert processed == ["M1", "M2"]
+    assert len(sent) == 2
+    first_metadata = sent[0]["metadata"]
+    late_metadata = sent[1]["metadata"]
+    assert first_metadata.get("delivery_operation_hint") != "queued_followup_first_reply"
+    assert late_metadata["delivery_operation_hint"] == "queued_followup_first_reply"
+    assert late_metadata["delivery_id"] == "queued_followup_first_reply:om_late"
+    assert late_metadata["inbound_id"] == "om_late"
