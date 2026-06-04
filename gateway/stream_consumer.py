@@ -1091,11 +1091,13 @@ class GatewayStreamConsumer:
         Ported from openclaw/openclaw#72038.
         """
         old_message_id = self._message_id
+        metadata = dict(self.metadata) if self.metadata else {}
+        metadata["delivery_operation_hint"] = "stream_fresh_final"
         try:
             result = await self.adapter.send(
                 chat_id=self.chat_id,
                 content=text,
-                metadata=self.metadata,
+                metadata=metadata,
             )
         except Exception as e:
             logger.debug("Fresh-final send failed, falling back to edit: %s", e)

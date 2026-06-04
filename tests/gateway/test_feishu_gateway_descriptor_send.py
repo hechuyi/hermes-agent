@@ -60,6 +60,15 @@ def _adapter(tmp_path):
     return adapter, message_api
 
 
+def _non_audited_adapter():
+    adapter = FeishuAdapter(PlatformConfig(extra={}))
+    message_api = _FakeMessageApi()
+    adapter._client = SimpleNamespace(
+        im=SimpleNamespace(v1=SimpleNamespace(message=message_api))
+    )
+    return adapter, message_api
+
+
 def _metadata(delivery_id="delivery-create"):
     return {
         "delivery_id": delivery_id,
@@ -114,6 +123,61 @@ async def test_create_persists_pending_before_sdk_and_sent_after_message_id(tmp_
     assert events[2][1]["type"] == "delivery_sent"
     assert events[2][1]["delivery_id"] == "delivery-create"
     assert events[2][1]["message_id"] == "om_created"
+
+
+@pytest.mark.asyncio
+async def test_audited_send_uses_allowlisted_stream_fresh_final_hint(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+    metadata = {
+        **_metadata("delivery-stream-final"),
+        "delivery_operation_hint": "stream_fresh_final",
+    }
+
+    result = await adapter.send("oc_chat", "hello", metadata=metadata)
+
+    assert result.success is True
+    assert result.message_id == "om_created"
+    assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert events[0]["operation"] == "stream_fresh_final"
+    assert events[1]["operation"] == "stream_fresh_final"
+    assert events[0]["delivery_id"] == "delivery-stream-final"
+    assert events[1]["delivery_id"] == "delivery-stream-final"
+    assert message_api.create_calls[0].request_body.uuid == "delivery-stream-final"
+
+
+@pytest.mark.asyncio
+async def test_audited_send_rejects_unsupported_operation_hint_before_sdk(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+    metadata = {
+        **_metadata("delivery-bad-hint"),
+        "delivery_operation_hint": "raw_payload_override",
+    }
+
+    result = await adapter.send("oc_chat", "hello", metadata=metadata)
+
+    assert result.success is False
+    assert result.error == "unsupported delivery operation hint"
+    assert events == []
+    assert message_api.create_calls == []
+    assert message_api.reply_calls == []
+
+
+@pytest.mark.asyncio
+async def test_non_audited_send_ignores_operation_hint_for_legacy_behavior():
+    adapter, message_api = _non_audited_adapter()
+    metadata = {
+        **_metadata("delivery-dev-mode"),
+        "delivery_operation_hint": "raw_payload_override",
+    }
+
+    result = await adapter.send("oc_chat", "hello", metadata=metadata)
+
+    assert result.success is True
+    assert result.message_id == "om_created"
+    assert len(message_api.create_calls) == 1
+    assert message_api.reply_calls == []
 
 
 @pytest.mark.asyncio

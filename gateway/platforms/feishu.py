@@ -1422,6 +1422,8 @@ class FeishuAdapter(BasePlatformAdapter):
     """Feishu/Lark bot adapter."""
 
     MAX_MESSAGE_LENGTH = 8000
+    _DELIVERY_OPERATION_HINT_KEY = "delivery_operation_hint"
+    _SEND_DELIVERY_OPERATION_HINTS = frozenset({"stream_fresh_final"})
     # Threshold for detecting Feishu client-side message splits.
     # When a chunk is near the ~4096-char practical limit, a continuation
     # is almost certain.
@@ -1800,7 +1802,12 @@ class FeishuAdapter(BasePlatformAdapter):
             for chunk in chunks:
                 msg_type, payload = self._build_outbound_payload(chunk)
                 if self._hermes_tools_state_dir is not None:
-                    operation = "reply" if reply_to else "normal_final_reply"
+                    operation, operation_error = self._send_delivery_operation(
+                        reply_to=reply_to,
+                        metadata=metadata,
+                    )
+                    if operation_error is not None:
+                        return SendResult(success=False, error=operation_error)
                     delivery_id = self._delivery_id_for(
                         operation,
                         metadata=metadata,
@@ -4904,6 +4911,7 @@ class FeishuAdapter(BasePlatformAdapter):
         if validated is None:
             if await self._apply_delivery_pending(
                 delivery_id=delivery_id,
+                operation="invalid_feishu_request_descriptor",
                 inbound_id=inbound_id,
                 target=target,
                 session_id=session_id,
@@ -5039,6 +5047,7 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> Any | SendResult:
         if not await self._apply_delivery_pending(
             delivery_id=delivery_id,
+            operation=operation,
             inbound_id=inbound_id,
             target=target,
             session_id=session_id,
@@ -5115,7 +5124,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 raw_response=response,
             )
 
-        if not await self._apply_delivery_sent(delivery_id, str(message_id)):
+        if not await self._apply_delivery_sent(delivery_id, str(message_id), operation):
             await self._apply_unknown_delivery_state(
                 delivery_id,
                 "delivery_sent_apply_failed",
@@ -5133,6 +5142,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self,
         *,
         delivery_id: str,
+        operation: str,
         inbound_id: str,
         target: str,
         session_id: str,
@@ -5142,6 +5152,7 @@ class FeishuAdapter(BasePlatformAdapter):
             {
                 "type": "delivery_pending",
                 "delivery_id": delivery_id,
+                "operation": operation,
                 "inbound_id": inbound_id,
                 "target": target,
                 "session_id": session_id,
@@ -5150,11 +5161,17 @@ class FeishuAdapter(BasePlatformAdapter):
             }
         )
 
-    async def _apply_delivery_sent(self, delivery_id: str, message_id: str) -> bool:
+    async def _apply_delivery_sent(
+        self,
+        delivery_id: str,
+        message_id: str,
+        operation: str,
+    ) -> bool:
         return await self._apply_gateway_event(
             {
                 "type": "delivery_sent",
                 "delivery_id": delivery_id,
+                "operation": operation,
                 "message_id": message_id,
                 "timestamp": int(time.time()),
             }
@@ -5211,6 +5228,20 @@ class FeishuAdapter(BasePlatformAdapter):
             return text
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
         return f"{key}-{digest}"
+
+    @classmethod
+    def _send_delivery_operation(
+        cls,
+        *,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> tuple[str, Optional[str]]:
+        if metadata and cls._DELIVERY_OPERATION_HINT_KEY in metadata:
+            hint = metadata.get(cls._DELIVERY_OPERATION_HINT_KEY)
+            if isinstance(hint, str) and hint in cls._SEND_DELIVERY_OPERATION_HINTS:
+                return hint, None
+            return "", "unsupported delivery operation hint"
+        return ("reply" if reply_to else "normal_final_reply"), None
 
     def _delivery_id_for(
         self,

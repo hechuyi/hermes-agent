@@ -100,6 +100,40 @@ class TestFreshFinalForLongLivedPreviews:
         assert consumer._final_response_sent is True
 
     @pytest.mark.asyncio
+    async def test_fresh_final_send_metadata_has_operation_hint_without_mutating_original(self):
+        """Only the fresh-final send carries the audited operation hint."""
+        adapter = _make_adapter()
+        adapter.send.side_effect = [
+            SimpleNamespace(success=True, message_id="initial_preview"),
+            SimpleNamespace(success=True, message_id="fresh_final"),
+        ]
+        metadata = {
+            "delivery_id": "delivery-stream-final",
+            "session_id": "session-a",
+        }
+        consumer = GatewayStreamConsumer(
+            adapter=adapter,
+            chat_id="chat",
+            config=StreamConsumerConfig(fresh_final_after_seconds=60.0),
+            metadata=metadata,
+        )
+
+        await consumer._send_or_edit("hello")
+        consumer._message_created_ts = 0.0
+        await consumer._send_or_edit("hello world", finalize=True)
+
+        first_metadata = adapter.send.await_args_list[0].kwargs["metadata"]
+        second_metadata = adapter.send.await_args_list[1].kwargs["metadata"]
+        assert first_metadata == metadata
+        assert "delivery_operation_hint" not in first_metadata
+        assert second_metadata["delivery_operation_hint"] == "stream_fresh_final"
+        assert second_metadata["delivery_id"] == "delivery-stream-final"
+        assert metadata == {
+            "delivery_id": "delivery-stream-final",
+            "session_id": "session-a",
+        }
+
+    @pytest.mark.asyncio
     async def test_fresh_final_without_delete_support_is_best_effort(self):
         """Adapter lacking ``delete_message`` still gets the fresh send."""
         adapter = _make_adapter(supports_delete=False)
