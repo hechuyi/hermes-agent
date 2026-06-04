@@ -683,6 +683,68 @@ async def test_run_agent_feishu_status_card_delivery_ids_distinguish_patch_seque
 
 
 @pytest.mark.asyncio
+async def test_hermes_status_card_delivery_ids_keep_sequence_when_task_id_is_max_length(
+    monkeypatch, tmp_path
+):
+    gateway_run = importlib.import_module("gateway.run")
+    events = []
+
+    async def fake_apply_gateway_event_async(event, state_dir, **kwargs):
+        events.append(dict(event))
+        action_type = "update" if event.get("message_id") else "create"
+        return _status_card_apply_result(action_type, event["state"])
+
+    monkeypatch.setattr(
+        gateway_run,
+        "apply_gateway_event_async",
+        fake_apply_gateway_event_async,
+        raising=False,
+    )
+
+    adapter = StatusCardProgressAdapter(state_dir=tmp_path / "hermes-tools-state")
+    task_id = "t" * 160
+    context = gateway_run._HermesTaskStatusContext(
+        task_id=task_id,
+        session_id="session-long-task-id",
+        inbound_id="inbound-long-task-id",
+        correlation_id="corr-long-task-id",
+        receive_id_type="chat_id",
+        receive_id="oc_chat",
+        idempotency_key="status-card-create-long-task-id",
+    )
+
+    assert await gateway_run._emit_hermes_task_status(
+        adapter,
+        context,
+        state="running",
+        text="started",
+        allow_create=True,
+    )
+    assert await gateway_run._emit_hermes_task_status(
+        adapter,
+        context,
+        state="running",
+        text="progress",
+    )
+    assert await gateway_run._emit_hermes_task_status(
+        adapter,
+        context,
+        state="completed",
+        text="done",
+    )
+
+    assert [event["state"] for event in events] == ["running", "running", "completed"]
+    delivery_ids = [call["delivery_id"] for call in adapter.status_card_actions]
+    assert len(delivery_ids) == 3
+    assert len(delivery_ids) == len(set(delivery_ids))
+    assert all(re.match(r"^[A-Za-z0-9_-]+$", delivery_id) for delivery_id in delivery_ids)
+    assert all(len(delivery_id) <= 160 for delivery_id in delivery_ids)
+    assert delivery_ids[0].startswith("status-card-create-")
+    assert delivery_ids[1].startswith("status-card-patch-1-")
+    assert delivery_ids[2].startswith("status-card-patch-2-")
+
+
+@pytest.mark.asyncio
 async def test_run_agent_terminal_task_status_requires_final_reply_without_suppressing_normal_final(
     monkeypatch, tmp_path
 ):

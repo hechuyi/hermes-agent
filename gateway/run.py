@@ -26,6 +26,7 @@ except ModuleNotFoundError:
 
 import asyncio
 import dataclasses
+import hashlib
 import inspect
 import json
 import logging
@@ -432,6 +433,18 @@ def _stable_gateway_material(prefix: str, *parts: Any) -> str:
     return stable[:160] or prefix
 
 
+def _status_card_delivery_id(
+    task_id: str,
+    *,
+    kind: str,
+    patch_sequence: Optional[int] = None,
+) -> str:
+    task_hash = hashlib.sha256(str(task_id or "").encode("utf-8")).hexdigest()[:24]
+    if kind == "patch":
+        return _stable_gateway_material("status-card", "patch", patch_sequence, task_hash)
+    return _stable_gateway_material("status-card", "create", task_hash)
+
+
 def _adapter_hermes_tools_state_dir(adapter: Any, platform: Any = None, config: Any = None) -> Optional[Path]:
     state_dir = getattr(adapter, "_hermes_tools_state_dir", None)
     if state_dir:
@@ -552,14 +565,13 @@ async def _emit_hermes_task_status(
 
     if context.message_id:
         context.patch_sequence += 1
-        delivery_id = _stable_gateway_material(
-            "status-card",
+        delivery_id = _status_card_delivery_id(
             context.task_id,
-            "patch",
-            context.patch_sequence,
+            kind="patch",
+            patch_sequence=context.patch_sequence,
         )
     else:
-        delivery_id = _stable_gateway_material("status-card", context.task_id, "create")
+        delivery_id = _status_card_delivery_id(context.task_id, kind="create")
     try:
         send_result = await adapter.execute_status_card_action(
             action,
