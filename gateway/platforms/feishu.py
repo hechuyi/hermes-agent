@@ -165,7 +165,7 @@ _MENTION_RE = re.compile(r"@_user_\d+")
 _MULTISPACE_RE = re.compile(r"[ \t]{2,}")
 _POST_CONTENT_INVALID_RE = re.compile(r"content format of the post type is incorrect", re.IGNORECASE)
 _FEISHU_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
-_DELIVERY_FAILURE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+_DELIVERY_FAILURE_CLASS_RE = re.compile(r"^[a-z0-9_-]{1,128}$")
 _FEISHU_DESCRIPTOR_PATCH_PATH_RE = re.compile(r"^/open-apis/im/v1/messages/([A-Za-z0-9_]+)$")
 _FEISHU_AMBIGUOUS_NON_ACCEPTANCE_CODES = frozenset(
     {
@@ -1826,8 +1826,53 @@ class FeishuAdapter(BasePlatformAdapter):
                             uuid_value=uuid_value,
                         ),
                         require_returned_message_id=True,
+                        terminal_exception_matcher=(
+                            self._is_post_content_invalid_exception
+                            if msg_type == "post"
+                            else None
+                        ),
                     )
                     if isinstance(response_or_result, SendResult):
+                        if msg_type == "post" and self._is_post_content_invalid_result(
+                            response_or_result
+                        ):
+                            logger.warning(
+                                "[Feishu] Audited post payload rejected by API; falling back to plain text"
+                            )
+                            fallback_payload = json.dumps(
+                                {"text": _strip_markdown_to_plain_text(chunk)},
+                                ensure_ascii=False,
+                            )
+                            response_or_result = await self._audited_delivery(
+                                delivery_id=self._derived_delivery_id(
+                                    delivery_id,
+                                    "post_text_fallback",
+                                ),
+                                operation=f"{operation}_text_fallback",
+                                target=f"feishu:chat:{chat_id}",
+                                inbound_id=self._delivery_metadata(
+                                    metadata, "inbound_id", reply_to or chat_id
+                                ),
+                                session_id=self._delivery_metadata(
+                                    metadata, "session_id", "session"
+                                ),
+                                correlation_id=self._delivery_metadata(
+                                    metadata, "correlation_id", delivery_id
+                                ),
+                                network_call=lambda uuid_value: self._send_raw_message(
+                                    chat_id=chat_id,
+                                    msg_type="text",
+                                    payload=fallback_payload,
+                                    reply_to=reply_to,
+                                    metadata=metadata,
+                                    uuid_value=uuid_value,
+                                ),
+                                require_returned_message_id=True,
+                            )
+                            if isinstance(response_or_result, SendResult):
+                                return response_or_result
+                            last_response = response_or_result
+                            continue
                         return response_or_result
                     last_response = response_or_result
                     continue
@@ -1910,9 +1955,55 @@ class FeishuAdapter(BasePlatformAdapter):
                     ),
                     require_returned_message_id=False,
                     existing_message_id=message_id,
+                    terminal_exception_matcher=(
+                        self._is_post_content_invalid_exception
+                        if msg_type == "post"
+                        else None
+                    ),
                 )
                 if isinstance(response_or_result, SendResult):
-                    return response_or_result
+                    if msg_type != "post" or not self._is_post_content_invalid_result(
+                        response_or_result
+                    ):
+                        return response_or_result
+                    logger.warning(
+                        "[Feishu] Audited post update payload rejected by API; falling back to plain text"
+                    )
+                    fallback_body = self._build_update_message_body(
+                        msg_type="text",
+                        content=json.dumps(
+                            {"text": _strip_markdown_to_plain_text(content)},
+                            ensure_ascii=False,
+                        ),
+                    )
+                    fallback_request = self._build_update_message_request(
+                        message_id=message_id,
+                        request_body=fallback_body,
+                    )
+                    response_or_result = await self._audited_delivery(
+                        delivery_id=self._derived_delivery_id(
+                            delivery_id,
+                            "post_text_fallback",
+                        ),
+                        operation="message_edit_text_fallback",
+                        target=f"feishu:message:{message_id}",
+                        inbound_id=self._delivery_metadata(
+                            metadata, "inbound_id", message_id
+                        ),
+                        session_id=self._delivery_metadata(
+                            metadata, "session_id", "session"
+                        ),
+                        correlation_id=self._delivery_metadata(
+                            metadata, "correlation_id", delivery_id
+                        ),
+                        network_call=lambda _uuid_value: asyncio.to_thread(
+                            self._client.im.v1.message.update, fallback_request
+                        ),
+                        require_returned_message_id=False,
+                        existing_message_id=message_id,
+                    )
+                    if isinstance(response_or_result, SendResult):
+                        return response_or_result
                 response = response_or_result
             else:
                 response = await asyncio.to_thread(self._client.im.v1.message.update, request)
@@ -4895,6 +4986,7 @@ class FeishuAdapter(BasePlatformAdapter):
         network_call: Any,
         require_returned_message_id: bool,
         existing_message_id: Optional[str] = None,
+        terminal_exception_matcher: Any = None,
     ) -> Any | SendResult:
         if not await self._apply_delivery_pending(
             delivery_id=delivery_id,
@@ -4911,6 +5003,15 @@ class FeishuAdapter(BasePlatformAdapter):
         try:
             response = await network_call(self._idempotency_key_for_delivery(delivery_id))
         except Exception as exc:
+            if terminal_exception_matcher is not None and terminal_exception_matcher(exc):
+                await self._apply_delivery_failed(
+                    delivery_id,
+                    "feishu_terminal_non_acceptance",
+                )
+                return SendResult(
+                    success=False,
+                    error="content format of the post type is incorrect",
+                )
             await self._apply_unknown_delivery_state(
                 delivery_id,
                 "sdk_exception_after_admission",
@@ -4960,7 +5061,7 @@ class FeishuAdapter(BasePlatformAdapter):
             await self._apply_unknown_delivery_state(
                 delivery_id,
                 "delivery_sent_apply_failed",
-                message_id=existing_message_id,
+                message_id=str(message_id),
             )
             return SendResult(
                 success=False,
@@ -5077,108 +5178,41 @@ class FeishuAdapter(BasePlatformAdapter):
         self,
         descriptor: Any,
     ) -> Optional[Dict[str, Any]]:
-        if not isinstance(descriptor, dict) or set(descriptor.keys()) != {
-            "operation",
-            "method",
-            "path",
-            "params",
-            "body",
-        }:
+        validated = hermes_tools_gateway_event._validated_feishu_request(descriptor)
+        if not isinstance(validated, dict):
             return None
-        operation = descriptor.get("operation")
+        operation = validated.get("operation")
         if operation == "send_interactive_message":
-            return self._validate_send_interactive_descriptor(descriptor)
+            return validated
         if operation == "patch_interactive_message":
-            return self._validate_patch_interactive_descriptor(descriptor)
+            path = validated.get("path")
+            path_match = (
+                _FEISHU_DESCRIPTOR_PATCH_PATH_RE.fullmatch(path)
+                if isinstance(path, str)
+                else None
+            )
+            if path_match is None:
+                return None
+            message_id = path_match.group(1)
+            if not self._valid_feishu_message_id(message_id):
+                return None
+            return {**validated, "message_id": message_id}
         return None
 
-    def _validate_send_interactive_descriptor(
-        self,
-        descriptor: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
-        if (
-            descriptor.get("method") != "POST"
-            or descriptor.get("path") != "/open-apis/im/v1/messages"
-        ):
-            return None
-        params = descriptor.get("params")
-        if not isinstance(params, dict) or set(params.keys()) != {"receive_id_type"}:
-            return None
-        receive_id_type = params.get("receive_id_type")
-        if receive_id_type not in {"open_id", "union_id", "user_id", "email", "chat_id"}:
-            return None
-        body = descriptor.get("body")
-        if not isinstance(body, dict) or not {"receive_id", "msg_type", "content"}.issubset(
-            body.keys()
-        ):
-            return None
-        if not set(body.keys()).issubset({"receive_id", "msg_type", "content", "uuid"}):
-            return None
-        receive_id = str(body.get("receive_id") or "").strip()
-        content = body.get("content")
-        uuid_value = body.get("uuid")
-        if (
-            not receive_id
-            or body.get("msg_type") != "interactive"
-            or not self._valid_descriptor_content(content)
-            or (uuid_value is not None and not str(uuid_value).strip())
-        ):
-            return None
-        sanitized_body = {
-            "receive_id": receive_id,
-            "msg_type": "interactive",
-            "content": content,
-        }
-        if uuid_value is not None:
-            sanitized_body["uuid"] = str(uuid_value).strip()
-        return {
-            "operation": "send_interactive_message",
-            "method": "POST",
-            "path": "/open-apis/im/v1/messages",
-            "params": {"receive_id_type": receive_id_type},
-            "body": sanitized_body,
-        }
-
-    def _validate_patch_interactive_descriptor(
-        self,
-        descriptor: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
-        if descriptor.get("method") != "PATCH":
-            return None
-        path = descriptor.get("path")
-        path_match = _FEISHU_DESCRIPTOR_PATCH_PATH_RE.fullmatch(path) if isinstance(path, str) else None
-        if path_match is None:
-            return None
-        params = descriptor.get("params")
-        body = descriptor.get("body")
-        if not isinstance(params, dict) or params:
-            return None
-        if not isinstance(body, dict) or set(body.keys()) != {"content"}:
-            return None
-        content = body.get("content")
-        if not self._valid_descriptor_content(content):
-            return None
-        message_id = path_match.group(1)
-        if not self._valid_feishu_message_id(message_id):
-            return None
-        return {
-            "operation": "patch_interactive_message",
-            "method": "PATCH",
-            "path": f"/open-apis/im/v1/messages/{message_id}",
-            "params": {},
-            "body": {"content": content},
-            "message_id": message_id,
-        }
+    @staticmethod
+    def _is_post_content_invalid_exception(exc: BaseException) -> bool:
+        return bool(_POST_CONTENT_INVALID_RE.search(str(exc)))
 
     @staticmethod
-    def _valid_descriptor_content(content: Any) -> bool:
-        if not isinstance(content, str) or not content:
-            return False
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError:
-            return False
-        return isinstance(parsed, dict)
+    def _is_post_content_invalid_result(result: SendResult) -> bool:
+        return bool(result.error and _POST_CONTENT_INVALID_RE.search(result.error))
+
+    @staticmethod
+    def _derived_delivery_id(delivery_id: str, purpose: str) -> str:
+        digest = hashlib.sha256(
+            f"{purpose}\x1f{delivery_id}".encode("utf-8")
+        ).hexdigest()[:24]
+        return f"{purpose}-{digest}"
 
     @staticmethod
     def _response_is_ambiguous_non_acceptance(response: Any) -> bool:

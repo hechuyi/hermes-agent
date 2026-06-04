@@ -27,6 +27,8 @@ class _FakeMessageApi:
         self.reply_response = _FakeResponse(message_id="om_reply")
         self.update_response = _FakeResponse(message_id="om_updated")
         self.create_exception = None
+        self.reply_exception = None
+        self.update_exception = None
 
     def create(self, request):
         self.create_calls.append(request)
@@ -36,10 +38,14 @@ class _FakeMessageApi:
 
     def reply(self, request):
         self.reply_calls.append(request)
+        if self.reply_exception is not None:
+            raise self.reply_exception
         return self.reply_response
 
     def update(self, request):
         self.update_calls.append(request)
+        if self.update_exception is not None:
+            raise self.update_exception
         return self.update_response
 
 
@@ -111,19 +117,31 @@ async def test_create_persists_pending_before_sdk_and_sent_after_message_id(tmp_
 
 
 @pytest.mark.asyncio
-async def test_reply_uses_stable_delivery_id_and_uuid_for_repeated_logical_call(tmp_path):
+async def test_repeat_pending_delivery_does_not_call_sdk_twice(tmp_path):
     adapter, message_api = _adapter(tmp_path)
-    _install_event_recorder(adapter)
+    events = []
+    pending_count = 0
+
+    async def apply(event):
+        nonlocal pending_count
+        events.append(event)
+        if event.get("type") == "delivery_pending":
+            pending_count += 1
+            return pending_count == 1
+        return True
+
+    adapter._apply_gateway_event = apply
 
     metadata = _metadata("delivery-reply")
     first = await adapter.send("oc_chat", "hello", reply_to="om_parent", metadata=metadata)
     second = await adapter.send("oc_chat", "hello", reply_to="om_parent", metadata=metadata)
 
     assert first.success is True
-    assert second.success is True
-    assert len(message_api.reply_calls) == 2
+    assert second.success is False
+    assert second.error == "delivery_pending apply failed"
+    assert _event_types(events) == ["delivery_pending", "delivery_sent", "delivery_pending"]
+    assert len(message_api.reply_calls) == 1
     assert message_api.reply_calls[0].request_body.uuid == "delivery-reply"
-    assert message_api.reply_calls[1].request_body.uuid == "delivery-reply"
 
 
 @pytest.mark.asyncio
@@ -167,6 +185,84 @@ async def test_sent_apply_failure_after_sdk_success_applies_unknown_and_does_not
     ]
     assert message_api.create_calls and len(message_api.create_calls) == 1
     assert events[-1]["failure_class"] == "delivery_sent_apply_failed"
+    assert events[-1]["message_id"] == "om_created"
+
+
+@pytest.mark.asyncio
+async def test_audited_send_falls_back_to_text_on_post_rejection_response(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+    message_api.create_response = _FakeResponse(
+        ok=False,
+        code=230001,
+        msg="content format of the post type is incorrect",
+    )
+
+    def create(request):
+        message_api.create_calls.append(request)
+        if len(message_api.create_calls) == 1:
+            return _FakeResponse(
+                ok=False,
+                code=230001,
+                msg="content format of the post type is incorrect",
+            )
+        return _FakeResponse(message_id="om_text_fallback")
+
+    message_api.create = create
+
+    result = await adapter.send(
+        "oc_chat",
+        "可以用 **粗体** 和 *斜体*。",
+        metadata=_metadata("delivery-post-response"),
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_text_fallback"
+    assert [call.request_body.msg_type for call in message_api.create_calls] == [
+        "post",
+        "text",
+    ]
+    assert _event_types(events) == [
+        "delivery_pending",
+        "delivery_failed",
+        "delivery_pending",
+        "delivery_sent",
+    ]
+    assert events[2]["delivery_id"] != "delivery-post-response"
+
+
+@pytest.mark.asyncio
+async def test_audited_send_falls_back_to_text_on_post_rejection_exception(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    def create(request):
+        message_api.create_calls.append(request)
+        if len(message_api.create_calls) == 1:
+            raise ValueError("content format of the post type is incorrect")
+        return _FakeResponse(message_id="om_text_fallback")
+
+    message_api.create = create
+
+    result = await adapter.send(
+        "oc_chat",
+        "可以用 **粗体** 和 *斜体*。",
+        metadata=_metadata("delivery-post-exception"),
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_text_fallback"
+    assert [call.request_body.msg_type for call in message_api.create_calls] == [
+        "post",
+        "text",
+    ]
+    assert _event_types(events) == [
+        "delivery_pending",
+        "delivery_failed",
+        "delivery_pending",
+        "delivery_sent",
+    ]
+    assert "unknown_delivery_state" not in _event_types(events)
 
 
 @pytest.mark.asyncio
@@ -213,6 +309,80 @@ async def test_edit_validates_existing_message_id_and_records_sent_with_same_id(
     assert message_api.update_calls[0].message_id == "om_existing"
     assert _event_types(events) == ["delivery_pending", "delivery_sent"]
     assert events[-1]["message_id"] == "om_existing"
+
+
+@pytest.mark.asyncio
+async def test_audited_edit_falls_back_to_text_on_post_rejection_response(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    def update(request):
+        message_api.update_calls.append(request)
+        if len(message_api.update_calls) == 1:
+            return _FakeResponse(
+                ok=False,
+                code=230001,
+                msg="content format of the post type is incorrect",
+            )
+        return _FakeResponse(message_id=None)
+
+    message_api.update = update
+
+    result = await adapter.edit_message(
+        "oc_chat",
+        "om_existing",
+        "可以用 **粗体** 和 *斜体*。",
+        metadata=_metadata("delivery-edit-post-response"),
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_existing"
+    assert [call.request_body.msg_type for call in message_api.update_calls] == [
+        "post",
+        "text",
+    ]
+    assert _event_types(events) == [
+        "delivery_pending",
+        "delivery_failed",
+        "delivery_pending",
+        "delivery_sent",
+    ]
+    assert events[-1]["message_id"] == "om_existing"
+
+
+@pytest.mark.asyncio
+async def test_audited_edit_falls_back_to_text_on_post_rejection_exception(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    def update(request):
+        message_api.update_calls.append(request)
+        if len(message_api.update_calls) == 1:
+            raise ValueError("content format of the post type is incorrect")
+        return _FakeResponse(message_id=None)
+
+    message_api.update = update
+
+    result = await adapter.edit_message(
+        "oc_chat",
+        "om_existing",
+        "可以用 **粗体** 和 *斜体*。",
+        metadata=_metadata("delivery-edit-post-exception"),
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_existing"
+    assert [call.request_body.msg_type for call in message_api.update_calls] == [
+        "post",
+        "text",
+    ]
+    assert _event_types(events) == [
+        "delivery_pending",
+        "delivery_failed",
+        "delivery_pending",
+        "delivery_sent",
+    ]
+    assert "unknown_delivery_state" not in _event_types(events)
 
 
 def _create_descriptor(content):
@@ -293,6 +463,44 @@ async def test_descriptor_rejects_extra_fields_before_network(tmp_path):
     result = await adapter.execute_feishu_request_descriptor(
         descriptor,
         delivery_id="delivery-bad-descriptor",
+        inbound_id="inbound-1",
+        session_id="session-a",
+        correlation_id="corr-a",
+    )
+
+    assert result.success is False
+    assert _event_types(events) == ["delivery_pending", "delivery_failed"]
+    assert events[1]["failure_class"] == "invalid_feishu_request_descriptor"
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        {**_create_descriptor("{}"), "body": {**_create_descriptor("{}")["body"], "receive_id": "oc chat"}},
+        {**_create_descriptor("{}"), "body": {**_create_descriptor("{}")["body"], "uuid": "bad uuid"}},
+        _create_descriptor(
+            json.dumps(
+                {"config": {"wide_screen_mode": True}, "pad": "x" * 32768}
+            )
+        ),
+        {
+            **_patch_descriptor("{}"),
+            "path": "/open-apis/im/v1/messages/om.card",
+        },
+    ],
+)
+async def test_descriptor_rejects_values_looser_than_gateway_envelope_validator(
+    tmp_path, descriptor
+):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    result = await adapter.execute_feishu_request_descriptor(
+        descriptor,
+        delivery_id="delivery-bad-descriptor-values",
         inbound_id="inbound-1",
         session_id="session-a",
         correlation_id="corr-a",

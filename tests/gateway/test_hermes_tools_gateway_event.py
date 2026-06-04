@@ -171,6 +171,15 @@ def test_apply_gateway_event_accepts_inbound_admission_action(monkeypatch, tmp_p
                 ack_event_id="read-event-1",
             ),
         ),
+        (
+            "unknown_delivery_state",
+            _rust_delivery_record(
+                "unknown",
+                updated_at=111,
+                feishu_message_id="om_123",
+                failure_class="delivery-sent-apply-failed",
+            ),
+        ),
     ],
 )
 def test_apply_gateway_event_accepts_rust_delivery_record_shapes(
@@ -197,6 +206,77 @@ def test_apply_gateway_event_accepts_rust_delivery_record_shapes(
     assert result.ok is True
     assert result.event_type == event_type
     assert result.action == {"type": "delivery_record", "record": record}
+
+
+def test_apply_gateway_event_accepts_rust_stale_pending_alert_shape(
+    monkeypatch, tmp_path
+):
+    stale_record = _rust_delivery_record(
+        "unknown",
+        updated_at=111,
+        failure_class="sdk-exception-after-admission",
+    )
+    action = {
+        "type": "stale_pending_alert",
+        "alert_required": True,
+        "resend_permitted": False,
+        "count": 1,
+        "records": [stale_record],
+    }
+
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "stale_pending_scan",
+                    "action": action,
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "stale_pending_scan"}, tmp_path)
+
+    assert result.ok is True
+    assert result.event_type == "stale_pending_scan"
+    assert result.action == action
+
+
+def test_apply_gateway_event_rejects_stale_pending_alert_without_blocker_contract(
+    monkeypatch, tmp_path
+):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "stale_pending_scan",
+                    "action": {
+                        "type": "stale_pending_alert",
+                        "alert_required": True,
+                        "resend_permitted": True,
+                        "count": 0,
+                        "records": [],
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "stale_pending_scan"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
 
 
 def test_apply_gateway_event_rejects_inbound_admission_extra_fields(monkeypatch, tmp_path):

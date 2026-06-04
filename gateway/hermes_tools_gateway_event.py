@@ -33,7 +33,7 @@ _ABSOLUTE_PATH_RE = re.compile(
 )
 _URL_RE = re.compile(r"\b(?:https?|wss?|ftp)://[^\s\"'<>]+")
 _MAX_DIAGNOSTIC_CHARS = 1200
-_SAFE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+_SAFE_CLASS_RE = re.compile(r"^[a-z0-9_-]{1,128}$")
 _SAFE_EVENT_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _STABLE_SANITIZED_HASH_RE = re.compile(r"^fnv1a64:[a-f0-9]{16}$")
@@ -76,7 +76,11 @@ _DELIVERY_RECORD_KEYS = frozenset(
         "ack_event_id",
     }
 )
-_DELIVERY_STATUSES = frozenset({"pending", "sent", "failed", "acked"})
+_DELIVERY_STATUSES = frozenset({"pending", "sent", "failed", "acked", "unknown"})
+_STALE_PENDING_STATUSES = frozenset({"pending", "unknown"})
+_STALE_PENDING_ALERT_KEYS = frozenset(
+    {"type", "alert_required", "resend_permitted", "count", "records"}
+)
 _STATUS_CARD_CREATE_UPDATE_KEYS = frozenset(
     {
         "type",
@@ -548,7 +552,10 @@ def _validated_action(action: dict[str, Any]) -> dict[str, Any] | None:
             return None
         return {"type": action_type, "record": record}
 
-    if action_type in {"stale_pending_alert", "session_state"}:
+    if action_type == "stale_pending_alert":
+        return _validated_stale_pending_alert_action(action)
+
+    if action_type == "session_state":
         if not _has_only_keys(action, {"type"}):
             return None
         return {"type": action_type}
@@ -663,7 +670,43 @@ def _validated_status_card_action(value: Any) -> dict[str, Any] | None:
     return sanitized
 
 
-def _validated_delivery_record(value: Any) -> dict[str, Any] | None:
+def _validated_stale_pending_alert_action(action: dict[str, Any]) -> dict[str, Any] | None:
+    if not _has_exact_keys(action, _STALE_PENDING_ALERT_KEYS):
+        return None
+    alert_required = action.get("alert_required")
+    resend_permitted = action.get("resend_permitted")
+    count = action.get("count")
+    records_value = action.get("records")
+    if (
+        not isinstance(alert_required, bool)
+        or resend_permitted is not False
+        or not _is_json_int(count)
+        or count < 0
+        or not isinstance(records_value, list)
+        or count != len(records_value)
+        or alert_required != bool(records_value)
+    ):
+        return None
+    records: list[dict[str, Any]] = []
+    for item in records_value:
+        record = _validated_delivery_record(item, allowed_statuses=_STALE_PENDING_STATUSES)
+        if record is None:
+            return None
+        records.append(record)
+    return {
+        "type": "stale_pending_alert",
+        "alert_required": alert_required,
+        "resend_permitted": False,
+        "count": count,
+        "records": records,
+    }
+
+
+def _validated_delivery_record(
+    value: Any,
+    *,
+    allowed_statuses: frozenset[str] = _DELIVERY_STATUSES,
+) -> dict[str, Any] | None:
     if not isinstance(value, dict) or not _has_exact_keys(value, _DELIVERY_RECORD_KEYS):
         return None
 
@@ -687,7 +730,7 @@ def _validated_delivery_record(value: Any) -> dict[str, Any] | None:
         or target is None
         or session_id is None
         or correlation_id is None
-        or status not in _DELIVERY_STATUSES
+        or status not in allowed_statuses
         or not _is_json_int(created_at)
         or not _is_json_int(updated_at)
         or feishu_message_id is _INVALID
