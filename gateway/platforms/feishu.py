@@ -69,6 +69,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from gateway import hermes_tools_gateway_event
 # aiohttp/websockets are independent optional deps — import outside lark_oapi
 # so they remain available for tests and webhook mode even if lark_oapi is missing.
 try:
@@ -1433,6 +1434,13 @@ class FeishuAdapter(BasePlatformAdapter):
         self._seen_message_ids: Dict[str, float] = {}  # message_id → seen_at (time.time())
         self._seen_message_order: List[str] = []
         self._dedup_state_path = get_hermes_home() / "feishu_seen_message_ids.json"
+        hermes_tools_state_dir = (
+            config.extra.get("hermes_tools_state_dir")
+            or os.getenv("HERMES_TOOLS_STATE_DIR", "")
+        )
+        self._hermes_tools_state_dir = (
+            Path(str(hermes_tools_state_dir)) if hermes_tools_state_dir else None
+        )
         self._dedup_lock = threading.Lock()
         self._sender_name_cache: Dict[str, tuple[str, float]] = {}  # sender_id → (name, expire_at)
         self._webhook_rate_counts: Dict[str, tuple[int, float]] = {}  # rate_key → (count, window_start)
@@ -2455,11 +2463,33 @@ class FeishuAdapter(BasePlatformAdapter):
         )
 
     def _on_message_read_event(self, data: P2ImMessageMessageReadV1) -> None:
-        """Ignore read-receipt events that Hermes does not act on."""
+        """Record Feishu read acknowledgements through the Hermes event ledger."""
         event = getattr(data, "event", None)
         message = getattr(event, "message", None)
-        message_id = getattr(message, "message_id", None) or ""
-        logger.debug("[Feishu] Ignoring message_read event: %s", message_id)
+        message_id = self._string_field(message, "message_id")
+        ack_event_id = self._feishu_event_id(data)
+        if not message_id:
+            logger.warning(
+                "[Feishu] Dropping malformed read event: reason=feishu_read_ack_missing_message_id "
+                "ack_event_id_present=%s",
+                bool(ack_event_id),
+            )
+            return
+        if not ack_event_id:
+            logger.warning(
+                "[Feishu] Dropping malformed read event: reason=feishu_read_ack_missing_event_id "
+                "message_id_present=true",
+            )
+            return
+
+        self._apply_gateway_event(
+            {
+                "type": "feishu_ack",
+                "message_id": message_id,
+                "ack_event_id": ack_event_id,
+                "timestamp": int(time.time()),
+            }
+        )
 
     def _on_bot_added_to_chat(self, data: Any) -> None:
         """Handle bot being added to a group chat."""
@@ -3014,9 +3044,88 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_lock = self._get_chat_lock(chat_id)
         async with chat_lock:
             try:
+                if not self._apply_inbound_gateway_event(event):
+                    return
                 await self.handle_message(event)
             except InvalidLiveSessionSource as exc:
                 logger.warning("[Feishu] Ignoring invalid live inbound source: reason=%s", exc.reason)
+
+    @staticmethod
+    def _string_field(obj: Any, field: str) -> str:
+        if isinstance(obj, dict):
+            value = obj.get(field)
+        else:
+            value = getattr(obj, field, None)
+        return str(value).strip() if value is not None else ""
+
+    @classmethod
+    def _feishu_event_id(cls, data: Any) -> str:
+        header = getattr(data, "header", None)
+        if isinstance(data, dict):
+            header = data.get("header")
+        for owner, field in (
+            (header, "event_id"),
+            (data, "event_id"),
+            (getattr(data, "event", None), "event_id"),
+        ):
+            value = cls._string_field(owner, field)
+            if value:
+                return value
+        return ""
+
+    def _apply_inbound_gateway_event(self, event: MessageEvent) -> bool:
+        if self._hermes_tools_state_dir is None:
+            return True
+        inbound_id = str(getattr(event, "message_id", "") or "").strip()
+        if not inbound_id:
+            logger.warning(
+                "[Feishu] Dropping inbound apply without reliable id: "
+                "reason=feishu_inbound_missing_message_id"
+            )
+            return False
+        timestamp = self._event_timestamp_seconds(getattr(event, "timestamp", None))
+        event_payload = {
+            "type": "feishu_inbound",
+            "inbound_id": inbound_id,
+            "message_id": inbound_id,
+            "message_type": getattr(getattr(event, "message_type", None), "value", "unknown"),
+            "timestamp": timestamp,
+        }
+        return self._apply_gateway_event(event_payload)
+
+    @staticmethod
+    def _event_timestamp_seconds(timestamp: Any) -> int:
+        if isinstance(timestamp, datetime):
+            return int(timestamp.timestamp())
+        if isinstance(timestamp, (int, float)):
+            return int(timestamp)
+        return int(time.time())
+
+    def _apply_gateway_event(self, event_payload: Dict[str, Any]) -> bool:
+        if self._hermes_tools_state_dir is None:
+            return True
+        try:
+            result = hermes_tools_gateway_event.apply_gateway_event(
+                event_payload,
+                self._hermes_tools_state_dir,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Feishu] gateway-event apply failed: event_type=%s failure_class=%s",
+                event_payload.get("type") or "unknown",
+                exc.__class__.__name__,
+            )
+            return False
+        if getattr(result, "ok", False):
+            return True
+        logger.warning(
+            "[Feishu] gateway-event apply failed: event_type=%s failure_class=%s reason=%s diagnostics=%s",
+            getattr(result, "event_type", None) or event_payload.get("type") or "unknown",
+            getattr(result, "failure_class", None) or "gateway_event_apply_failed",
+            getattr(result, "reason", None) or "",
+            getattr(result, "diagnostics", None) or "",
+        )
+        return False
 
     # =========================================================================
     # Processing status reactions
