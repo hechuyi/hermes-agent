@@ -1106,10 +1106,8 @@ def test_preflight_gateway_event_rejects_generic_feishu_request_path(
     assert result.action is None
 
 
-def test_apply_gateway_event_exposes_status_card_create_feishu_request(
-    monkeypatch, tmp_path
-):
-    feishu_request = {
+def _status_card_feishu_create_request():
+    return {
         "operation": "send_interactive_message",
         "method": "POST",
         "path": "/open-apis/im/v1/messages",
@@ -1122,22 +1120,175 @@ def test_apply_gateway_event_exposes_status_card_create_feishu_request(
         },
     }
 
+
+def _status_card_feishu_patch_request():
+    return {
+        "operation": "patch_interactive_message",
+        "method": "PATCH",
+        "path": "/open-apis/im/v1/messages/om_status",
+        "params": {},
+        "body": {"content": '{"config":{"wide_screen_mode":true}}'},
+    }
+
+
+def _status_card_action(action):
+    return {
+        "ok": True,
+        "event_type": "task_status",
+        "action": {
+            "type": "status_card",
+            "card_action": action,
+        },
+    }
+
+
+def _status_card_create_action(**overrides):
+    action = {
+        "type": "create",
+        "card_id": "task-1",
+        "state": "running",
+        "text": "preflight started",
+        "requires_final_reply": True,
+        "fallback_text": "task running: preflight started",
+        "feishu_card": {"config": {"wide_screen_mode": True}},
+        "feishu_request": _status_card_feishu_create_request(),
+    }
+    action.update(overrides)
+    return action
+
+
+def _status_card_update_action(**overrides):
+    action = {
+        "type": "update",
+        "card_id": "task-1",
+        "state": "succeeded",
+        "text": "preflight complete",
+        "requires_final_reply": False,
+        "fallback_text": "task succeeded: preflight complete",
+        "feishu_card": {"config": {"wide_screen_mode": True}},
+        "feishu_request": _status_card_feishu_patch_request(),
+    }
+    action.update(overrides)
+    return action
+
+
+def _status_card_suppressed_action(**overrides):
+    action = {
+        "type": "suppressed",
+        "reason": "status_card_throttled",
+        "fallback_text": "task running: preflight started",
+        "feishu_card": {"config": {"wide_screen_mode": True}},
+    }
+    action.update(overrides)
+    return action
+
+
+def test_apply_gateway_event_rejects_status_card_missing_card_action(
+    monkeypatch, tmp_path
+):
     def fake_run(*args, **kwargs):
         return _completed(
             stdout=json.dumps(
                 {
                     "ok": True,
                     "event_type": "task_status",
-                    "action": {
-                        "type": "status_card",
-                        "card_action": {
-                            "type": "create",
-                            "card_id": "task-1",
-                            "requires_final_reply": True,
-                            "feishu_request": feishu_request,
-                        },
-                    },
+                    "action": {"type": "status_card"},
                 }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "task_status"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+
+
+@pytest.mark.parametrize("action_factory", [_status_card_create_action, _status_card_update_action])
+@pytest.mark.parametrize(
+    "missing_field",
+    ["card_id", "state", "text", "requires_final_reply", "fallback_text", "feishu_card"],
+)
+def test_apply_gateway_event_rejects_status_card_create_update_missing_rust_required_fields(
+    monkeypatch, tmp_path, action_factory, missing_field
+):
+    action = action_factory()
+    action.pop(missing_field)
+
+    def fake_run(*args, **kwargs):
+        return _completed(stdout=json.dumps(_status_card_action(action)))
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "task_status"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+
+
+@pytest.mark.parametrize(
+    "action_factory",
+    [_status_card_create_action, _status_card_update_action, _status_card_suppressed_action],
+)
+def test_apply_gateway_event_accepts_complete_rust_status_card_actions(
+    monkeypatch, tmp_path, action_factory
+):
+    action = action_factory()
+
+    def fake_run(*args, **kwargs):
+        return _completed(stdout=json.dumps(_status_card_action(action)))
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "task_status"}, tmp_path)
+
+    assert result.ok is True
+    assert result.action == {"type": "status_card", "card_action": action}
+
+
+def test_apply_gateway_event_rejects_status_card_suppressed_feishu_request(
+    monkeypatch, tmp_path
+):
+    action = _status_card_suppressed_action(
+        feishu_request=_status_card_feishu_patch_request()
+    )
+
+    def fake_run(*args, **kwargs):
+        return _completed(stdout=json.dumps(_status_card_action(action)))
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "task_status"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+
+
+def test_apply_gateway_event_exposes_status_card_create_feishu_request(
+    monkeypatch, tmp_path
+):
+    feishu_request = _status_card_feishu_create_request()
+
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                _status_card_action(_status_card_create_action(feishu_request=feishu_request))
             )
         )
 
@@ -1154,7 +1305,11 @@ def test_apply_gateway_event_exposes_status_card_create_feishu_request(
         "card_action": {
             "type": "create",
             "card_id": "task-1",
+            "state": "running",
+            "text": "preflight started",
             "requires_final_reply": True,
+            "fallback_text": "task running: preflight started",
+            "feishu_card": {"config": {"wide_screen_mode": True}},
             "feishu_request": feishu_request,
         },
     }
@@ -1163,31 +1318,12 @@ def test_apply_gateway_event_exposes_status_card_create_feishu_request(
 def test_apply_gateway_event_exposes_status_card_patch_feishu_request(
     monkeypatch, tmp_path
 ):
-    feishu_request = {
-        "operation": "patch_interactive_message",
-        "method": "PATCH",
-        "path": "/open-apis/im/v1/messages/om_status",
-        "params": {},
-        "body": {"content": '{"config":{"wide_screen_mode":true}}'},
-    }
+    feishu_request = _status_card_feishu_patch_request()
 
     def fake_run(*args, **kwargs):
         return _completed(
             stdout=json.dumps(
-                {
-                    "ok": True,
-                    "event_type": "task_status",
-                    "action": {
-                        "type": "status_card",
-                        "card_action": {
-                            "type": "update",
-                            "card_id": "task-1",
-                            "message_id": "om_status",
-                            "requires_final_reply": False,
-                            "feishu_request": feishu_request,
-                        },
-                    },
-                }
+                _status_card_action(_status_card_update_action(feishu_request=feishu_request))
             )
         )
 
@@ -1216,7 +1352,11 @@ def test_apply_gateway_event_rejects_status_card_descriptor_extra_fields(
                         "card_action": {
                             "type": "create",
                             "card_id": "task-1",
+                            "state": "running",
+                            "text": "preflight started",
                             "requires_final_reply": True,
+                            "fallback_text": "task running: preflight started",
+                            "feishu_card": {"config": {"wide_screen_mode": True}},
                             "feishu_request": {
                                 "operation": "send_interactive_message",
                                 "method": "POST",

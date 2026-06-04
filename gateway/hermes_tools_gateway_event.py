@@ -94,6 +94,17 @@ _STATUS_CARD_CREATE_UPDATE_KEYS = frozenset(
         "feishu_request",
     }
 )
+_STATUS_CARD_CREATE_UPDATE_REQUIRED_KEYS = frozenset(
+    {
+        "type",
+        "card_id",
+        "state",
+        "text",
+        "requires_final_reply",
+        "fallback_text",
+        "feishu_card",
+    }
+)
 _STATUS_CARD_SUPPRESSED_KEYS = frozenset(
     {
         "type",
@@ -103,6 +114,9 @@ _STATUS_CARD_SUPPRESSED_KEYS = frozenset(
         "feishu_card",
         "feishu_request",
     }
+)
+_STATUS_CARD_SUPPRESSED_REQUIRED_KEYS = frozenset(
+    {"type", "reason", "fallback_text", "feishu_card"}
 )
 _STATUS_CARD_STATES = frozenset({"queued", "running", "succeeded", "failed"})
 _STATUS_CARD_ACTION_TYPES = frozenset({"create", "update", "suppressed"})
@@ -561,10 +575,8 @@ def _validated_action(action: dict[str, Any]) -> dict[str, Any] | None:
         return {"type": action_type}
 
     if action_type == "status_card":
-        if not _has_only_keys(action, {"type", "card_action"}):
+        if not _has_exact_keys(action, {"type", "card_action"}):
             return None
-        if "card_action" not in action:
-            return {"type": action_type}
         card_action = _validated_status_card_action(action.get("card_action"))
         if card_action is None:
             return None
@@ -599,6 +611,8 @@ def _validated_status_card_action(value: Any) -> dict[str, Any] | None:
     if action_type in {"create", "update"}:
         if not _has_only_keys(value, _STATUS_CARD_CREATE_UPDATE_KEYS):
             return None
+        if not _STATUS_CARD_CREATE_UPDATE_REQUIRED_KEYS.issubset(value.keys()):
+            return None
         card_id = _validated_identifier_field(value.get("card_id"))
         state = _string_or_none(value.get("state"))
         text = _string_or_none(value.get("text"))
@@ -610,63 +624,57 @@ def _validated_status_card_action(value: Any) -> dict[str, Any] | None:
         if (
             card_id is None
             or message_id is _INVALID
-            or (state is not None and state not in _STATUS_CARD_STATES)
-            or (text is not None and len(text) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS)
+            or state not in _STATUS_CARD_STATES
+            or text is None
+            or len(text) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS
             or not isinstance(requires_final_reply, bool)
-            or (
-                fallback_text is not None
-                and len(fallback_text) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS
-            )
-            or (feishu_card is not None and not isinstance(feishu_card, dict))
+            or fallback_text is None
+            or len(fallback_text) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS
+            or not isinstance(feishu_card, dict)
             or feishu_request is _INVALID
         ):
             return None
         sanitized: dict[str, Any] = {
             "type": action_type,
             "card_id": card_id,
+            "state": state,
+            "text": text,
             "requires_final_reply": requires_final_reply,
+            "fallback_text": fallback_text,
+            "feishu_card": feishu_card,
         }
-        if state is not None:
-            sanitized["state"] = state
-        if text is not None:
-            sanitized["text"] = text
-        if fallback_text is not None:
-            sanitized["fallback_text"] = fallback_text
         if message_id is not None:
             sanitized["message_id"] = message_id
-        if feishu_card is not None:
-            sanitized["feishu_card"] = feishu_card
         if feishu_request is not None:
             sanitized["feishu_request"] = feishu_request
         return sanitized
 
     if not _has_only_keys(value, _STATUS_CARD_SUPPRESSED_KEYS):
         return None
+    if not _STATUS_CARD_SUPPRESSED_REQUIRED_KEYS.issubset(value.keys()):
+        return None
     card_id = _validated_optional_identifier_field(value.get("card_id"))
     reason = _validated_failure_class(value.get("reason"), fallback="")
     fallback_text = _string_or_none(value.get("fallback_text"))
     feishu_card = value.get("feishu_card")
-    feishu_request = _validated_feishu_request(value.get("feishu_request"))
+    feishu_request = value.get("feishu_request")
     if (
         card_id is _INVALID
         or not reason
-        or (
-            fallback_text is not None
-            and len(fallback_text) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS
-        )
-        or (feishu_card is not None and not isinstance(feishu_card, dict))
-        or feishu_request is _INVALID
+        or fallback_text is None
+        or len(fallback_text) > _MAX_PREFLIGHT_FEISHU_CONTENT_CHARS
+        or not isinstance(feishu_card, dict)
+        or feishu_request is not None
     ):
         return None
-    sanitized = {"type": "suppressed", "reason": reason}
+    sanitized = {
+        "type": "suppressed",
+        "reason": reason,
+        "fallback_text": fallback_text,
+        "feishu_card": feishu_card,
+    }
     if card_id is not None:
         sanitized["card_id"] = card_id
-    if fallback_text is not None:
-        sanitized["fallback_text"] = fallback_text
-    if feishu_card is not None:
-        sanitized["feishu_card"] = feishu_card
-    if feishu_request is not None:
-        sanitized["feishu_request"] = feishu_request
     return sanitized
 
 

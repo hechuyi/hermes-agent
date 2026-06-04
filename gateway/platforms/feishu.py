@@ -4974,6 +4974,55 @@ class FeishuAdapter(BasePlatformAdapter):
             result.message_id = validated["message_id"]
         return result
 
+    async def execute_status_card_action(
+        self,
+        action: Dict[str, Any],
+        *,
+        delivery_id: str,
+        inbound_id: str,
+        session_id: str,
+        correlation_id: str,
+    ) -> SendResult:
+        """Execute the Feishu request embedded in a validated status_card action."""
+        card_action = self._validated_status_card_action_for_send(action)
+        if card_action is None:
+            return SendResult(success=False, error="invalid status_card action")
+
+        feishu_request = card_action.get("feishu_request")
+        if feishu_request is None:
+            return SendResult(
+                success=True,
+                raw_response={
+                    "type": "status_card_noop",
+                    "reason": card_action["type"],
+                },
+            )
+
+        return await self.execute_feishu_request_descriptor(
+            feishu_request,
+            delivery_id=delivery_id,
+            inbound_id=inbound_id,
+            session_id=session_id,
+            correlation_id=correlation_id,
+        )
+
+    @staticmethod
+    def _validated_status_card_action_for_send(
+        action: Any,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(action, dict):
+            return None
+        if action.get("type") == "status_card":
+            validated = hermes_tools_gateway_event._validated_action(action)
+        else:
+            validated = hermes_tools_gateway_event._validated_action(
+                {"type": "status_card", "card_action": action}
+            )
+        if not isinstance(validated, dict) or validated.get("type") != "status_card":
+            return None
+        card_action = validated.get("card_action")
+        return card_action if isinstance(card_action, dict) else None
+
     async def _audited_delivery(
         self,
         *,

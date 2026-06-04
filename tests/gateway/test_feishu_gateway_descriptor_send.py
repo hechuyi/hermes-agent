@@ -581,10 +581,51 @@ def _patch_descriptor(content):
     }
 
 
+def _status_card_create_action(**overrides):
+    action = {
+        "type": "create",
+        "card_id": "task-1",
+        "state": "running",
+        "text": "preflight started",
+        "requires_final_reply": True,
+        "fallback_text": "task running: preflight started",
+        "feishu_card": {"config": {"wide_screen_mode": True}},
+        "feishu_request": _create_descriptor('{"config":{"wide_screen_mode":true}}'),
+    }
+    action.update(overrides)
+    return action
+
+
+def _status_card_update_action(**overrides):
+    action = {
+        "type": "update",
+        "card_id": "task-1",
+        "state": "succeeded",
+        "text": "preflight complete",
+        "requires_final_reply": False,
+        "fallback_text": "task succeeded: preflight complete",
+        "feishu_card": {"config": {"wide_screen_mode": True}},
+        "feishu_request": _patch_descriptor('{"config":{"wide_screen_mode":true}}'),
+    }
+    action.update(overrides)
+    return action
+
+
+def _status_card_suppressed_action(**overrides):
+    action = {
+        "type": "suppressed",
+        "reason": "status_card_throttled",
+        "fallback_text": "task running: preflight started",
+        "feishu_card": {"config": {"wide_screen_mode": True}},
+    }
+    action.update(overrides)
+    return action
+
+
 @pytest.mark.asyncio
 async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_http(tmp_path):
     adapter, message_api = _adapter(tmp_path)
-    _install_event_recorder(adapter)
+    events = _install_event_recorder(adapter)
 
     result = await adapter.execute_feishu_request_descriptor(
         _create_descriptor('{"config":{"wide_screen_mode":true}}'),
@@ -601,6 +642,112 @@ async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_htt
     assert request.request_body.receive_id == "oc_chat"
     assert request.request_body.msg_type == "interactive"
     assert request.request_body.uuid == "delivery-card-create"
+    assert events[-1]["type"] == "delivery_sent"
+    assert events[-1]["message_id"] == "om_created"
+
+
+@pytest.mark.asyncio
+async def test_status_card_create_action_executes_descriptor_and_writes_delivery_sent(
+    tmp_path,
+):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    result = await adapter.execute_status_card_action(
+        {"type": "status_card", "card_action": _status_card_create_action()},
+        delivery_id="delivery-card-create",
+        inbound_id="inbound-1",
+        session_id="session-a",
+        correlation_id="corr-a",
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_created"
+    assert len(message_api.create_calls) == 1
+    assert message_api.update_calls == []
+    assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert events[-1]["message_id"] == "om_created"
+
+
+@pytest.mark.asyncio
+async def test_status_card_update_action_executes_patch_descriptor(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    result = await adapter.execute_status_card_action(
+        _status_card_update_action(),
+        delivery_id="delivery-card-patch",
+        inbound_id="inbound-1",
+        session_id="session-a",
+        correlation_id="corr-a",
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_card"
+    assert message_api.create_calls == []
+    assert len(message_api.update_calls) == 1
+    assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert events[-1]["message_id"] == "om_card"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action",
+    [
+        _status_card_suppressed_action(),
+        _status_card_create_action(feishu_request=None),
+        _status_card_update_action(feishu_request=None),
+    ],
+)
+async def test_status_card_action_without_feishu_request_returns_noop_without_delivery(
+    tmp_path, action
+):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    result = await adapter.execute_status_card_action(
+        action,
+        delivery_id="delivery-card-noop",
+        inbound_id="inbound-1",
+        session_id="session-a",
+        correlation_id="corr-a",
+    )
+
+    assert result.success is True
+    assert result.message_id is None
+    assert result.raw_response == {"type": "status_card_noop", "reason": action["type"]}
+    assert events == []
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"type": "status_card"},
+        {"type": "unknown"},
+        _status_card_create_action(state="not_a_task_state"),
+        _status_card_suppressed_action(feishu_request=_patch_descriptor("{}")),
+    ],
+)
+async def test_status_card_malformed_or_unsupported_action_fails_closed(tmp_path, action):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    result = await adapter.execute_status_card_action(
+        action,
+        delivery_id="delivery-card-bad",
+        inbound_id="inbound-1",
+        session_id="session-a",
+        correlation_id="corr-a",
+    )
+
+    assert result.success is False
+    assert result.error == "invalid status_card action"
+    assert events == []
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
 
 
 @pytest.mark.asyncio
