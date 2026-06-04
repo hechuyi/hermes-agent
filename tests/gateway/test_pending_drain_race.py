@@ -326,3 +326,53 @@ async def test_late_pending_drain_first_reply_carries_queued_followup_delivery_m
     assert late_metadata["delivery_operation_hint"] == "queued_followup_first_reply"
     assert late_metadata["delivery_id"] == "queued_followup_first_reply:om_late"
     assert late_metadata["inbound_id"] == "om_late"
+
+
+@pytest.mark.asyncio
+async def test_command_pending_drain_first_reply_carries_queued_followup_delivery_metadata():
+    adapter = _make_adapter()
+    command_event = _make_feishu_event(text="/new", message_id="om_command")
+    sk = build_session_key(command_event.source)
+    sent = []
+
+    async def send_with_retry(**kwargs):
+        sent.append(kwargs)
+        return SimpleNamespace(success=True, message_id=f"sent-{len(sent)}")
+
+    adapter._send_with_retry = send_with_retry
+    processed = []
+
+    async def handler(event):
+        processed.append(event.text)
+        if event.text == "/new":
+            adapter._pending_messages[sk] = _make_feishu_event(
+                text="M2",
+                message_id="om_command_followup",
+            )
+            return "command-reply"
+        return f"reply-{event.text}"
+
+    adapter._message_handler = handler
+
+    adapter._active_sessions[sk] = asyncio.Event()
+
+    await adapter.handle_message(command_event)
+
+    for _ in range(50):
+        if processed == ["/new", "M2"] and len(sent) == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    await adapter.cancel_background_tasks()
+
+    assert processed == ["/new", "M2"]
+    assert len(sent) == 2
+    command_metadata = sent[0]["metadata"]
+    followup_metadata = sent[1]["metadata"]
+    assert command_metadata.get("delivery_operation_hint") != "queued_followup_first_reply"
+    assert followup_metadata["delivery_operation_hint"] == "queued_followup_first_reply"
+    assert (
+        followup_metadata["delivery_id"]
+        == "queued_followup_first_reply:om_command_followup"
+    )
+    assert followup_metadata["inbound_id"] == "om_command_followup"

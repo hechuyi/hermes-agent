@@ -3339,6 +3339,12 @@ class BasePlatformAdapter(ABC):
         self._release_session_guard(session_key, guard=command_guard)
         if pending_event is None:
             return
+        pending_event._hermes_delivery_metadata = (
+            _queued_followup_first_reply_metadata(
+                pending_event,
+                session_key,
+            )
+        )
         self._start_session_processing(pending_event, session_key)
 
     async def _dispatch_active_session_command(
