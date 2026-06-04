@@ -39,7 +39,7 @@ def _message_event(adapter, *, message_id="om_inbound", message_type=MessageType
 def _read_event(*, message_id="om_sent", event_id="ev_read_1"):
     return SimpleNamespace(
         header=SimpleNamespace(event_id=event_id),
-        event=SimpleNamespace(message=SimpleNamespace(message_id=message_id)),
+        event=SimpleNamespace(message_id_list=[message_id]),
     )
 
 
@@ -47,7 +47,7 @@ def _ok(event_type):
     return HermesToolsGatewayEventResult(
         ok=True,
         event_type=event_type,
-        action={"type": "delivery_record", "record": {"delivery_id": "delivery-1"}},
+        action={"type": "inbound_admission", "decision": "continue"},
     )
 
 
@@ -61,12 +61,37 @@ def _failure(event_type, failure_class):
     )
 
 
+def _reaction_adapter(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._app_id = "cli_self_app"
+    msg = SimpleNamespace(
+        sender=SimpleNamespace(sender_type="app", id="cli_self_app", id_type="app_id"),
+        chat_id="oc_chat",
+        chat_type="group",
+        thread_id=None,
+        parent_id=None,
+        upper_message_id=None,
+        root_id=None,
+    )
+    response = SimpleNamespace(success=lambda: True, data=SimpleNamespace(items=[msg]))
+    adapter._client = SimpleNamespace(
+        im=SimpleNamespace(v1=SimpleNamespace(message=SimpleNamespace(get=Mock(return_value=response))))
+    )
+    adapter._build_get_message_request = Mock(return_value=object())
+    adapter._resolve_sender_profile = AsyncMock(
+        return_value={"user_id": "ou_user", "user_name": "User", "user_id_alt": None}
+    )
+    adapter.get_chat_info = AsyncMock(return_value={"name": "Feishu Chat", "type": "group", "reliable": True})
+    adapter._handle_message_with_guards = AsyncMock()
+    return adapter
+
+
 @pytest.mark.asyncio
 async def test_normalized_inbound_event_applies_before_handle_message(monkeypatch, tmp_path):
     adapter = _adapter(tmp_path)
     calls = []
 
-    def fake_apply(event, state_dir):
+    async def fake_apply(event, state_dir):
         calls.append(("apply", event, state_dir))
         return _ok("feishu_inbound")
 
@@ -74,7 +99,7 @@ async def test_normalized_inbound_event_applies_before_handle_message(monkeypatc
         calls.append(("handle", event.message_id))
 
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event",
+        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
         fake_apply,
     )
     adapter.handle_message = AsyncMock(side_effect=fake_handle)
@@ -94,9 +119,12 @@ async def test_normalized_inbound_event_applies_before_handle_message(monkeypatc
 async def test_inbound_apply_failure_blocks_handle_message(monkeypatch, tmp_path, caplog):
     adapter = _adapter(tmp_path)
 
+    async def fake_apply(_event, _state_dir):
+        return _failure("feishu_inbound", "implicit_session_switch")
+
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event",
-        lambda _event, _state_dir: _failure("feishu_inbound", "implicit_session_switch"),
+        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        fake_apply,
     )
 
     await adapter._handle_message_with_guards(_message_event(adapter))
@@ -109,9 +137,14 @@ async def test_inbound_apply_failure_blocks_handle_message(monkeypatch, tmp_path
 async def test_text_batch_flush_applies_only_flushed_normalized_event(monkeypatch, tmp_path):
     adapter = _adapter(tmp_path)
     calls = []
+
+    async def fake_apply(event, _state_dir):
+        calls.append(event)
+        return _ok("feishu_inbound")
+
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event",
-        lambda event, _state_dir: calls.append(event) or _ok("feishu_inbound"),
+        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        fake_apply,
     )
 
     event = _message_event(adapter, message_id="om_text", message_type=MessageType.TEXT)
@@ -128,9 +161,14 @@ async def test_text_batch_flush_applies_only_flushed_normalized_event(monkeypatc
 async def test_media_batch_flush_applies_only_flushed_normalized_event(monkeypatch, tmp_path):
     adapter = _adapter(tmp_path)
     calls = []
+
+    async def fake_apply(event, _state_dir):
+        calls.append(event)
+        return _ok("feishu_inbound")
+
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event",
-        lambda event, _state_dir: calls.append(event) or _ok("feishu_inbound"),
+        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        fake_apply,
     )
 
     event = _message_event(adapter, message_id="om_media", message_type=MessageType.PHOTO)
@@ -149,9 +187,14 @@ async def test_media_batch_flush_applies_only_flushed_normalized_event(monkeypat
 async def test_synthetic_reaction_and_card_command_events_are_applied(monkeypatch, tmp_path):
     adapter = _adapter(tmp_path)
     calls = []
+
+    async def fake_apply(event, _state_dir):
+        calls.append(event)
+        return _ok("feishu_inbound")
+
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event",
-        lambda event, _state_dir: calls.append(event) or _ok("feishu_inbound"),
+        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        fake_apply,
     )
 
     reaction_event = _message_event(adapter, message_id="om_reacted")
@@ -167,56 +210,187 @@ async def test_synthetic_reaction_and_card_command_events_are_applied(monkeypatc
     assert [call["message_type"] for call in calls] == ["command", "command"]
 
 
-def test_read_event_applies_feishu_ack_with_stable_feishu_event_id(
+@pytest.mark.asyncio
+async def test_reaction_synthetic_inbound_id_uses_feishu_event_id_not_target_message(tmp_path):
+    adapter = _reaction_adapter(tmp_path)
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="ev_reaction_1"),
+        event=SimpleNamespace(
+            message_id="om_bot_target",
+            user_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+        ),
+    )
+
+    await adapter._handle_reaction_event("im.message.reaction.created_v1", data)
+
+    synthetic_event = adapter._handle_message_with_guards.await_args.args[0]
+    assert synthetic_event.message_id == "ev_reaction_1"
+    assert synthetic_event.message_id != "om_bot_target"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "data",
+    [
+        SimpleNamespace(
+            event=SimpleNamespace(
+                message_id="om_bot_target",
+                user_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+                reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+            )
+        ),
+        SimpleNamespace(
+            header=SimpleNamespace(event_id="ev_reaction_missing_target"),
+            event=SimpleNamespace(
+                message_id="",
+                user_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+                reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+            ),
+        ),
+    ],
+)
+async def test_reaction_without_event_or_target_id_is_dropped(tmp_path, data):
+    adapter = _reaction_adapter(tmp_path)
+
+    await adapter._handle_reaction_event("im.message.reaction.created_v1", data)
+
+    adapter._handle_message_with_guards.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_card_action_missing_token_is_fail_closed_before_message_guards(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._resolve_sender_profile = AsyncMock(
+        return_value={"user_id": "ou_user", "user_name": "User", "user_id_alt": None}
+    )
+    adapter.get_chat_info = AsyncMock(return_value={"name": "Feishu Chat", "type": "group", "reliable": True})
+    adapter._handle_message_with_guards = AsyncMock()
+    data = SimpleNamespace(
+        event=SimpleNamespace(
+            token="",
+            context=SimpleNamespace(open_chat_id="oc_chat", thread_id=None, root_id=None),
+            operator=SimpleNamespace(open_id="ou_user"),
+            action=SimpleNamespace(tag="button", value={"custom_action": "x"}),
+        )
+    )
+
+    await adapter._handle_card_action_event(data)
+
+    adapter._handle_message_with_guards.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_read_event_applies_feishu_ack_with_stable_feishu_event_id(
     monkeypatch, tmp_path
 ):
     adapter = _adapter(tmp_path)
     calls = []
 
+    async def fake_apply(event, state_dir):
+        calls.append((event, state_dir))
+        return _ok("feishu_ack")
+
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event",
-        lambda event, state_dir: calls.append((event, state_dir)) or _ok("feishu_ack"),
+        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        fake_apply,
     )
 
-    adapter._on_message_read_event(_read_event(message_id="om_sent", event_id="ev_read_1"))
+    await adapter._handle_message_read_event(_read_event(message_id="om_sent", event_id="ev_read_1"))
 
     assert len(calls) == 1
     event, state_dir = calls[0]
     assert event["type"] == "feishu_ack"
     assert event["message_id"] == "om_sent"
-    assert event["ack_event_id"] == "ev_read_1"
+    assert event["ack_event_id"] == "ev_read_1:om_sent"
     assert event["timestamp"] == pytest.approx(int(datetime.now().timestamp()), abs=2)
     assert state_dir == tmp_path
 
 
+@pytest.mark.asyncio
+async def test_read_event_applies_one_ack_per_sdk_message_id(monkeypatch, tmp_path):
+    adapter = _adapter(tmp_path)
+    calls = []
+
+    async def fake_apply(event, state_dir):
+        calls.append((event, state_dir))
+        return _ok("feishu_ack")
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        fake_apply,
+    )
+
+    await adapter._handle_message_read_event(
+        SimpleNamespace(
+            header=SimpleNamespace(event_id="ev_read_batch"),
+            event=SimpleNamespace(message_id_list=["om_1", "om_2"]),
+        )
+    )
+
+    assert [call[0]["message_id"] for call in calls] == ["om_1", "om_2"]
+    assert [call[0]["ack_event_id"] for call in calls] == [
+        "ev_read_batch:om_1",
+        "ev_read_batch:om_2",
+    ]
+
+
+def test_read_event_callback_schedules_async_apply_without_inline_subprocess(monkeypatch, tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._loop = object()
+    scheduled = []
+    sync_apply = Mock()
+    monkeypatch.setattr("gateway.hermes_tools_gateway_event.apply_gateway_event", sync_apply)
+
+    def fake_submit(_loop, coro):
+        scheduled.append(coro)
+        coro.close()
+        return True
+
+    adapter._submit_on_loop = fake_submit
+
+    adapter._on_message_read_event(_read_event(message_id="om_sent", event_id="ev_read_1"))
+
+    assert len(scheduled) == 1
+    sync_apply.assert_not_called()
+
+
 @pytest.mark.parametrize("failure_class", ["unknown_message_id", "conflicting_ack_event"])
-def test_read_event_adapter_failures_are_classified_not_swallowed(
+@pytest.mark.asyncio
+async def test_read_event_adapter_failures_are_classified_not_swallowed(
     monkeypatch, tmp_path, caplog, failure_class
 ):
     adapter = _adapter(tmp_path)
 
+    async def fake_apply(_event, _state_dir):
+        return _failure("feishu_ack", failure_class)
+
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event",
-        lambda _event, _state_dir: _failure("feishu_ack", failure_class),
+        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        fake_apply,
     )
 
-    adapter._on_message_read_event(_read_event(message_id="om_unknown", event_id="ev_read_2"))
+    await adapter._handle_message_read_event(_read_event(message_id="om_unknown", event_id="ev_read_2"))
 
     assert failure_class in caplog.text
     assert "om_unknown" not in caplog.text
 
 
-def test_duplicate_read_event_success_is_recorded_without_failure(
+@pytest.mark.asyncio
+async def test_duplicate_read_event_success_is_recorded_without_failure(
     monkeypatch, tmp_path, caplog
 ):
     adapter = _adapter(tmp_path)
 
+    async def fake_apply(_event, _state_dir):
+        return _ok("feishu_ack")
+
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event",
-        lambda _event, _state_dir: _ok("feishu_ack"),
+        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        fake_apply,
     )
 
-    adapter._on_message_read_event(_read_event(message_id="om_sent", event_id="ev_same"))
+    await adapter._handle_message_read_event(_read_event(message_id="om_sent", event_id="ev_same"))
 
     assert "failed" not in caplog.text.lower()
 
@@ -225,18 +399,21 @@ def test_duplicate_read_event_success_is_recorded_without_failure(
     "data",
     [
         SimpleNamespace(header=SimpleNamespace(event_id="ev_read_missing"), event=SimpleNamespace(message=SimpleNamespace())),
-        SimpleNamespace(event=SimpleNamespace(message=SimpleNamespace(message_id="om_sent"))),
-        SimpleNamespace(header=SimpleNamespace(), event=SimpleNamespace(message=SimpleNamespace(message_id="om_sent"))),
+        SimpleNamespace(header=SimpleNamespace(event_id="ev_read_empty"), event=SimpleNamespace(message_id_list=[])),
+        SimpleNamespace(header=SimpleNamespace(event_id="ev_read_bad"), event=SimpleNamespace(message_id_list=[""])),
+        SimpleNamespace(event=SimpleNamespace(message_id_list=["om_sent"])),
+        SimpleNamespace(header=SimpleNamespace(), event=SimpleNamespace(message_id_list=["om_sent"])),
     ],
 )
-def test_malformed_read_event_without_reliable_ids_is_dropped(monkeypatch, tmp_path, data):
+@pytest.mark.asyncio
+async def test_malformed_read_event_without_reliable_ids_is_dropped(monkeypatch, tmp_path, data):
     adapter = _adapter(tmp_path)
-    apply_mock = Mock()
+    apply_mock = AsyncMock()
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event",
+        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
         apply_mock,
     )
 
-    adapter._on_message_read_event(data)
+    await adapter._handle_message_read_event(data)
 
-    apply_mock.assert_not_called()
+    apply_mock.assert_not_awaited()

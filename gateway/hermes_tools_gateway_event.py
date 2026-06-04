@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import subprocess
@@ -21,6 +22,7 @@ _SUPPORTED_ACTION_TYPES = frozenset(
         "stale_pending_alert",
         "session_state",
         "status_card",
+        "inbound_admission",
     }
 )
 _ABSOLUTE_PATH_RE = re.compile(
@@ -130,6 +132,23 @@ def apply_gateway_event(
         )
 
     return _success_from_apply_envelope(envelope, state_dir_path)
+
+
+async def apply_gateway_event_async(
+    event: Mapping[str, Any],
+    state_dir: str | Path,
+    *,
+    timeout_seconds: int | float = DEFAULT_TIMEOUT_SECONDS,
+    binary: str = DEFAULT_HERMES_TOOLS_BINARY,
+) -> HermesToolsGatewayEventResult:
+    """Apply one gateway event without blocking the current event loop."""
+    return await asyncio.to_thread(
+        apply_gateway_event,
+        event,
+        state_dir,
+        timeout_seconds=timeout_seconds,
+        binary=binary,
+    )
 
 
 def preflight_gateway_event(
@@ -447,6 +466,13 @@ def _validated_action(action: dict[str, Any]) -> dict[str, Any] | None:
         if not _has_only_keys(action, {"type"}):
             return None
         return {"type": action_type}
+
+    if action_type == "inbound_admission":
+        if not _has_only_keys(action, {"type", "decision"}):
+            return None
+        if action.get("decision") != "continue":
+            return None
+        return {"type": action_type, "decision": "continue"}
 
     return None
 

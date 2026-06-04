@@ -1,8 +1,11 @@
 import json
 import subprocess
 
+import pytest
+
 from gateway.hermes_tools_gateway_event import (
     apply_gateway_event,
+    apply_gateway_event_async,
     preflight_gateway_event,
 )
 
@@ -68,6 +71,123 @@ def test_apply_gateway_event_success_invokes_hermes_tools_with_json_stdin(
     assert kwargs["text"] is True
     assert kwargs["timeout"] > 0
     assert kwargs["check"] is False
+
+
+def test_apply_gateway_event_accepts_inbound_admission_action(monkeypatch, tmp_path):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "feishu_inbound",
+                    "action": {"type": "inbound_admission", "decision": "continue"},
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event(
+        {
+            "type": "feishu_inbound",
+            "inbound_id": "ev_1",
+            "message_id": "om_1",
+            "message_type": "text",
+            "timestamp": 100,
+        },
+        tmp_path,
+    )
+
+    assert result.ok is True
+    assert result.event_type == "feishu_inbound"
+    assert result.action == {"type": "inbound_admission", "decision": "continue"}
+
+
+def test_apply_gateway_event_rejects_inbound_admission_extra_fields(monkeypatch, tmp_path):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "feishu_inbound",
+                    "action": {
+                        "type": "inbound_admission",
+                        "decision": "continue",
+                        "raw_message_id": "om_sensitive",
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "feishu_inbound"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+    assert "om_sensitive" not in result.diagnostics
+
+
+def test_apply_gateway_event_rejects_inbound_admission_non_continue(monkeypatch, tmp_path):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "feishu_inbound",
+                    "action": {"type": "inbound_admission", "decision": "raw user text"},
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "feishu_inbound"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+    assert "raw user text" not in result.diagnostics
+
+
+@pytest.mark.asyncio
+async def test_apply_gateway_event_async_runs_sync_apply_in_worker(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_apply(event, state_dir, **kwargs):
+        calls.append((event, state_dir, kwargs))
+        return "result"
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.apply_gateway_event",
+        fake_apply,
+    )
+
+    result = await apply_gateway_event_async(
+        {"type": "feishu_inbound"},
+        tmp_path,
+        timeout_seconds=3,
+        binary="hermes-tools-test",
+    )
+
+    assert result == "result"
+    assert calls == [
+        (
+            {"type": "feishu_inbound"},
+            tmp_path,
+            {"timeout_seconds": 3, "binary": "hermes-tools-test"},
+        )
+    ]
 
 
 def test_preflight_gateway_event_success_invokes_preflight(monkeypatch, tmp_path):

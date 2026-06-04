@@ -2463,14 +2463,26 @@ class FeishuAdapter(BasePlatformAdapter):
         )
 
     def _on_message_read_event(self, data: P2ImMessageMessageReadV1) -> None:
+        """Schedule Feishu read acknowledgements through the Hermes event ledger."""
+        if self._hermes_tools_state_dir is None:
+            return
+        loop = self._loop
+        if not self._loop_accepts_callbacks(loop):
+            logger.warning(
+                "[Feishu] Dropping read event before adapter loop is ready: "
+                "reason=feishu_read_ack_loop_unavailable"
+            )
+            return
+        self._submit_on_loop(loop, self._handle_message_read_event(data))
+
+    async def _handle_message_read_event(self, data: P2ImMessageMessageReadV1) -> None:
         """Record Feishu read acknowledgements through the Hermes event ledger."""
         event = getattr(data, "event", None)
-        message = getattr(event, "message", None)
-        message_id = self._string_field(message, "message_id")
+        message_id_list = self._message_id_list_field(event, "message_id_list")
         ack_event_id = self._feishu_event_id(data)
-        if not message_id:
+        if not message_id_list:
             logger.warning(
-                "[Feishu] Dropping malformed read event: reason=feishu_read_ack_missing_message_id "
+                "[Feishu] Dropping malformed read event: reason=feishu_read_ack_missing_message_id_list "
                 "ack_event_id_present=%s",
                 bool(ack_event_id),
             )
@@ -2482,14 +2494,16 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             return
 
-        self._apply_gateway_event(
-            {
-                "type": "feishu_ack",
-                "message_id": message_id,
-                "ack_event_id": ack_event_id,
-                "timestamp": int(time.time()),
-            }
-        )
+        timestamp = int(time.time())
+        for message_id in message_id_list:
+            await self._apply_gateway_event(
+                {
+                    "type": "feishu_ack",
+                    "message_id": message_id,
+                    "ack_event_id": f"{ack_event_id}:{message_id}",
+                    "timestamp": timestamp,
+                }
+            )
 
     def _on_bot_added_to_chat(self, data: Any) -> None:
         """Handle bot being added to a group chat."""
@@ -2870,8 +2884,15 @@ class FeishuAdapter(BasePlatformAdapter):
         if not self._client:
             return
         event = getattr(data, "event", None)
+        reaction_event_id = self._feishu_event_id(data)
         message_id = str(getattr(event, "message_id", "") or "")
-        if not message_id:
+        if not reaction_event_id or not message_id:
+            logger.warning(
+                "[Feishu] Dropping malformed reaction event: "
+                "reason=feishu_reaction_missing_stable_id event_id_present=%s target_message_id_present=%s",
+                bool(reaction_event_id),
+                bool(message_id),
+            )
             return
 
         # Fetch the target message to verify it was sent by us and to obtain chat context.
@@ -2930,7 +2951,7 @@ class FeishuAdapter(BasePlatformAdapter):
             message_type=MessageType.TEXT,
             source=source,
             raw_message=data,
-            message_id=message_id,
+            message_id=reaction_event_id,
             reply_to_message_id=reply_to_message_id,
             timestamp=datetime.now(),
         )
@@ -2953,6 +2974,12 @@ class FeishuAdapter(BasePlatformAdapter):
         """Route Feishu interactive card button clicks as synthetic COMMAND events."""
         event = getattr(data, "event", None)
         token = str(getattr(event, "token", "") or "")
+        if not token:
+            logger.warning(
+                "[Feishu] Dropping card action without stable token: "
+                "reason=feishu_card_action_missing_token"
+            )
+            return
         if token and self._is_card_action_duplicate(token):
             logger.debug("[Feishu] Dropping duplicate card action token: %s", token)
             return
@@ -3014,7 +3041,7 @@ class FeishuAdapter(BasePlatformAdapter):
             message_type=MessageType.COMMAND,
             source=source,
             raw_message=data,
-            message_id=token or str(uuid.uuid4()),
+            message_id=token,
             reply_to_message_id=reply_to_message_id,
             timestamp=datetime.now(),
         )
@@ -3044,7 +3071,7 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_lock = self._get_chat_lock(chat_id)
         async with chat_lock:
             try:
-                if not self._apply_inbound_gateway_event(event):
+                if not await self._apply_inbound_gateway_event(event):
                     return
                 await self.handle_message(event)
             except InvalidLiveSessionSource as exc:
@@ -3057,6 +3084,22 @@ class FeishuAdapter(BasePlatformAdapter):
         else:
             value = getattr(obj, field, None)
         return str(value).strip() if value is not None else ""
+
+    @classmethod
+    def _message_id_list_field(cls, obj: Any, field: str) -> List[str]:
+        if isinstance(obj, dict):
+            value = obj.get(field)
+        else:
+            value = getattr(obj, field, None)
+        if not isinstance(value, list) or not value:
+            return []
+        message_ids: List[str] = []
+        for item in value:
+            message_id = str(item).strip() if item is not None else ""
+            if not message_id:
+                return []
+            message_ids.append(message_id)
+        return message_ids
 
     @classmethod
     def _feishu_event_id(cls, data: Any) -> str:
@@ -3073,7 +3116,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 return value
         return ""
 
-    def _apply_inbound_gateway_event(self, event: MessageEvent) -> bool:
+    async def _apply_inbound_gateway_event(self, event: MessageEvent) -> bool:
         if self._hermes_tools_state_dir is None:
             return True
         inbound_id = str(getattr(event, "message_id", "") or "").strip()
@@ -3091,7 +3134,7 @@ class FeishuAdapter(BasePlatformAdapter):
             "message_type": getattr(getattr(event, "message_type", None), "value", "unknown"),
             "timestamp": timestamp,
         }
-        return self._apply_gateway_event(event_payload)
+        return await self._apply_gateway_event(event_payload)
 
     @staticmethod
     def _event_timestamp_seconds(timestamp: Any) -> int:
@@ -3101,11 +3144,11 @@ class FeishuAdapter(BasePlatformAdapter):
             return int(timestamp)
         return int(time.time())
 
-    def _apply_gateway_event(self, event_payload: Dict[str, Any]) -> bool:
+    async def _apply_gateway_event(self, event_payload: Dict[str, Any]) -> bool:
         if self._hermes_tools_state_dir is None:
             return True
         try:
-            result = hermes_tools_gateway_event.apply_gateway_event(
+            result = await hermes_tools_gateway_event.apply_gateway_event_async(
                 event_payload,
                 self._hermes_tools_state_dir,
             )

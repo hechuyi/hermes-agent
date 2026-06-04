@@ -754,7 +754,7 @@ class TestAdapterBehavior(unittest.TestCase):
             user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
             reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
         )
-        data = SimpleNamespace(event=event)
+        data = SimpleNamespace(header=SimpleNamespace(event_id="ev_reaction_peer"), event=event)
         asyncio.run(
             adapter._handle_reaction_event("im.message.reaction.created_v1", data)
         )
@@ -769,11 +769,13 @@ class TestAdapterBehavior(unittest.TestCase):
             user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
             reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
         )
-        data = SimpleNamespace(event=event)
+        data = SimpleNamespace(header=SimpleNamespace(event_id="ev_reaction_self"), event=event)
         asyncio.run(
             adapter._handle_reaction_event("im.message.reaction.created_v1", data)
         )
         adapter._handle_message_with_guards.assert_awaited_once()
+        synthetic_event = adapter._handle_message_with_guards.await_args.args[0]
+        self.assertEqual(synthetic_event.message_id, "ev_reaction_self")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_reaction_on_topic_message_preserves_thread_id(self):
@@ -788,7 +790,7 @@ class TestAdapterBehavior(unittest.TestCase):
             user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
             reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
         )
-        data = SimpleNamespace(event=event)
+        data = SimpleNamespace(header=SimpleNamespace(event_id="ev_reaction_topic"), event=event)
         asyncio.run(
             adapter._handle_reaction_event("im.message.reaction.created_v1", data)
         )
@@ -814,7 +816,7 @@ class TestAdapterBehavior(unittest.TestCase):
             user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
             reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
         )
-        data = SimpleNamespace(event=event)
+        data = SimpleNamespace(header=SimpleNamespace(event_id="ev_reaction_scope"), event=event)
         asyncio.run(
             adapter._handle_reaction_event("im.message.reaction.created_v1", data)
         )
@@ -836,7 +838,7 @@ class TestAdapterBehavior(unittest.TestCase):
             user_id=SimpleNamespace(open_id="ou_human", user_id=None, union_id=None),
             reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
         )
-        data = SimpleNamespace(event=event)
+        data = SimpleNamespace(header=SimpleNamespace(event_id="ev_reaction_reply"), event=event)
         asyncio.run(
             adapter._handle_reaction_event("im.message.reaction.created_v1", data)
         )
