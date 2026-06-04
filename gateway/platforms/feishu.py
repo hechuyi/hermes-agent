@@ -5278,7 +5278,11 @@ class FeishuAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _idempotency_key_for_delivery(delivery_id: str) -> str:
-        return delivery_id
+        delivery_text = str(delivery_id or "")
+        if re.fullmatch(r"^[A-Za-z0-9_.:-]{1,50}$", delivery_text):
+            return delivery_text
+        digest = hashlib.sha256(delivery_text.encode("utf-8")).hexdigest()[:40]
+        return f"hgw-{digest}"
 
     @staticmethod
     def _delivery_metadata(

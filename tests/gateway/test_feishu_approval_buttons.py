@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -162,12 +163,15 @@ class TestFeishuExecApproval:
         assert events[0]["correlation_id"] == "corr-a"
         assert events[1]["delivery_id"] == events[0]["delivery_id"]
         assert events[1]["message_id"] == "om_approval"
+        assert events[0]["delivery_id"].startswith("approval_prompt_card_create-")
+        assert len(events[0]["delivery_id"]) > 50
 
         kwargs = mock_send_raw.call_args.kwargs
         assert kwargs["chat_id"] == "oc_12345"
         assert kwargs["msg_type"] == "interactive"
         assert kwargs["reply_to"] is None
-        assert kwargs["uuid_value"] == events[0]["delivery_id"]
+        assert len(kwargs["uuid_value"]) <= 50
+        assert kwargs["uuid_value"] != events[0]["delivery_id"]
         card = json.loads(kwargs["payload"])
         actions = card["elements"][1]["actions"]
         assert actions[0]["value"]["hermes_card_scope"]["chat_type"] == "group"
@@ -405,7 +409,7 @@ class TestFeishuUpdatePrompt:
         assert kwargs["chat_id"] == "oc_12345"
         assert kwargs["msg_type"] == "interactive"
         assert kwargs["metadata"]["thread_id"] == "th_1"
-        assert kwargs["uuid_value"] == events[0]["delivery_id"]
+        assert len(kwargs["uuid_value"]) <= 50
         card = json.loads(kwargs["payload"])
         actions = card["elements"][1]["actions"]
         assert actions[0]["value"]["hermes_card_scope"]["thread_id"] == "th_1"
@@ -525,6 +529,27 @@ class TestFeishuUpdatePrompt:
 
         assert result.success is False
         assert "timed out" in (result.error or "")
+
+
+class TestFeishuIdempotencyKeys:
+    def test_long_delivery_id_maps_to_stable_bounded_uuid(self):
+        delivery_id = "approval_prompt_card_create-" + ("a" * 24)
+
+        first = FeishuAdapter._idempotency_key_for_delivery(delivery_id)
+        second = FeishuAdapter._idempotency_key_for_delivery(delivery_id)
+
+        assert first == second
+        assert first != delivery_id
+        assert len(first) <= 50
+        assert re.fullmatch(r"[A-Za-z0-9_.:-]+", first)
+
+    def test_short_safe_delivery_id_remains_unchanged(self):
+        delivery_id = "update_prompt_card_create-" + ("b" * 24)
+
+        key = FeishuAdapter._idempotency_key_for_delivery(delivery_id)
+
+        assert key == delivery_id
+        assert len(key) == 50
 
 
 # ===========================================================================
