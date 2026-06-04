@@ -423,6 +423,7 @@ class _HermesTaskStatusContext:
     idempotency_key: str
     message_id: Optional[str] = None
     create_attempted: bool = False
+    patch_sequence: int = 0
 
 
 def _stable_gateway_material(prefix: str, *parts: Any) -> str:
@@ -549,8 +550,16 @@ async def _emit_hermes_task_status(
         )
         return True
 
-    delivery_kind = "patch" if context.message_id else "create"
-    delivery_id = _stable_gateway_material("status-card", context.task_id, delivery_kind)
+    if context.message_id:
+        context.patch_sequence += 1
+        delivery_id = _stable_gateway_material(
+            "status-card",
+            context.task_id,
+            "patch",
+            context.patch_sequence,
+        )
+    else:
+        delivery_id = _stable_gateway_material("status-card", context.task_id, "create")
     try:
         send_result = await adapter.execute_status_card_action(
             action,

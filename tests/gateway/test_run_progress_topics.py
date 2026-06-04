@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import re
 import sys
 import threading
 import time
@@ -649,6 +650,36 @@ async def test_run_agent_feishu_progress_emits_task_status_create_then_patch(mon
         "create",
         "update",
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_feishu_status_card_delivery_ids_distinguish_patch_sequence(
+    monkeypatch, tmp_path
+):
+    adapter, events, result = await _run_feishu_status_card_agent(monkeypatch, tmp_path)
+
+    assert result["final_response"] == "done"
+    task_status_events = [event for event in events if event.get("type") == "task_status"]
+    assert len(task_status_events) >= 3
+    assert [event["state"] for event in task_status_events[:3]] == [
+        "running",
+        "running",
+        "completed",
+    ]
+
+    action_calls = adapter.status_card_actions[:3]
+    assert [call["action"]["card_action"]["type"] for call in action_calls] == [
+        "create",
+        "update",
+        "update",
+    ]
+
+    delivery_ids = [call["delivery_id"] for call in action_calls]
+    assert len(delivery_ids) == len(set(delivery_ids))
+    assert all(re.match(r"^[A-Za-z0-9_-]+$", delivery_id) for delivery_id in delivery_ids)
+    assert "create" in delivery_ids[0]
+    assert "patch" in delivery_ids[1]
+    assert "patch" in delivery_ids[2]
 
 
 @pytest.mark.asyncio
