@@ -1,5 +1,7 @@
+import asyncio
 import json
 import subprocess
+import threading
 
 import pytest
 
@@ -19,6 +21,44 @@ def _completed(stdout="", stderr="", returncode=0):
     )
 
 
+def _rust_delivery_record(status="pending", **overrides):
+    record = {
+        "delivery_id": "delivery-1",
+        "inbound_id": "om_inbound_1",
+        "target": "feishu:chat:oc_1",
+        "session_id": "session-a",
+        "correlation_id": "corr-1",
+        "status": status,
+        "created_at": 100,
+        "updated_at": 100,
+        "feishu_message_id": None,
+        "failure_class": None,
+        "ack_event_id": None,
+    }
+    record.update(overrides)
+    return record
+
+
+def _rust_inbound_admission_action(*, duplicate=False):
+    return {
+        "type": "inbound_admission",
+        "decision": "continue",
+        "duplicate": duplicate,
+        "record": {
+            "inbound_id_hash": (
+                "0123456789abcdef0123456789abcdef"
+                "0123456789abcdef0123456789abcdef"
+            ),
+            "message_id_hash": (
+                "fedcba9876543210fedcba9876543210"
+                "fedcba9876543210fedcba9876543210"
+            ),
+            "message_type": "text",
+            "first_seen_at": 100,
+        },
+    }
+
+
 def test_apply_gateway_event_success_invokes_hermes_tools_with_json_stdin(
     monkeypatch, tmp_path
 ):
@@ -33,7 +73,7 @@ def test_apply_gateway_event_success_invokes_hermes_tools_with_json_stdin(
                     "event_type": "delivery_pending",
                     "action": {
                         "type": "delivery_record",
-                        "record": {"delivery_id": "delivery-1"},
+                        "record": _rust_delivery_record(),
                     },
                 }
             )
@@ -51,7 +91,7 @@ def test_apply_gateway_event_success_invokes_hermes_tools_with_json_stdin(
     assert result.event_type == "delivery_pending"
     assert result.action == {
         "type": "delivery_record",
-        "record": {"delivery_id": "delivery-1"},
+        "record": _rust_delivery_record(),
     }
     assert result.failure_class is None
     assert result.reason is None
@@ -74,13 +114,15 @@ def test_apply_gateway_event_success_invokes_hermes_tools_with_json_stdin(
 
 
 def test_apply_gateway_event_accepts_inbound_admission_action(monkeypatch, tmp_path):
+    action = _rust_inbound_admission_action(duplicate=False)
+
     def fake_run(*args, **kwargs):
         return _completed(
             stdout=json.dumps(
                 {
                     "ok": True,
                     "event_type": "feishu_inbound",
-                    "action": {"type": "inbound_admission", "decision": "continue"},
+                    "action": action,
                 }
             )
         )
@@ -103,7 +145,64 @@ def test_apply_gateway_event_accepts_inbound_admission_action(monkeypatch, tmp_p
 
     assert result.ok is True
     assert result.event_type == "feishu_inbound"
-    assert result.action == {"type": "inbound_admission", "decision": "continue"}
+    assert result.action == action
+
+
+@pytest.mark.parametrize(
+    ("event_type", "record"),
+    [
+        ("delivery_pending", _rust_delivery_record()),
+        (
+            "delivery_sent",
+            _rust_delivery_record(
+                "sent",
+                updated_at=105,
+                feishu_message_id="om_123",
+            ),
+        ),
+        (
+            "delivery_failed",
+            _rust_delivery_record(
+                "failed",
+                updated_at=106,
+                failure_class="send_failed",
+            ),
+        ),
+        (
+            "feishu_ack",
+            _rust_delivery_record(
+                "acked",
+                updated_at=110,
+                feishu_message_id="om_123",
+                ack_event_id="read-event-1",
+            ),
+        ),
+    ],
+)
+def test_apply_gateway_event_accepts_rust_delivery_record_shapes(
+    monkeypatch, tmp_path, event_type, record
+):
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": event_type,
+                    "action": {"type": "delivery_record", "record": record},
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": event_type}, tmp_path)
+
+    assert result.ok is True
+    assert result.event_type == event_type
+    assert result.action == {"type": "delivery_record", "record": record}
 
 
 def test_apply_gateway_event_rejects_inbound_admission_extra_fields(monkeypatch, tmp_path):
@@ -190,6 +289,46 @@ async def test_apply_gateway_event_async_runs_sync_apply_in_worker(monkeypatch, 
     ]
 
 
+@pytest.mark.asyncio
+async def test_apply_gateway_event_async_fails_closed_when_worker_slots_are_saturated(
+    monkeypatch, tmp_path
+):
+    started = 0
+    started_lock = threading.Lock()
+    release = threading.Event()
+
+    def fake_apply(event, state_dir, **kwargs):
+        nonlocal started
+        with started_lock:
+            started += 1
+        release.wait(timeout=5)
+        return "result"
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.apply_gateway_event",
+        fake_apply,
+    )
+
+    tasks = [
+        asyncio.create_task(apply_gateway_event_async({"type": f"event_{index}"}, tmp_path))
+        for index in range(4)
+    ]
+    for _ in range(100):
+        with started_lock:
+            if started == 4:
+                break
+        await asyncio.sleep(0.01)
+
+    saturated = await apply_gateway_event_async({"type": "event_5"}, tmp_path)
+    release.set()
+    completed = await asyncio.gather(*tasks)
+
+    assert completed == ["result", "result", "result", "result"]
+    assert saturated.ok is False
+    assert saturated.failure_class == "hermes_tools_async_saturated"
+    assert saturated.event_type == "event_5"
+
+
 def test_preflight_gateway_event_success_invokes_preflight(monkeypatch, tmp_path):
     def fake_run(*args, **kwargs):
         assert args[0] == [
@@ -205,7 +344,13 @@ def test_preflight_gateway_event_success_invokes_preflight(monkeypatch, tmp_path
                 {
                     "ok": True,
                     "state_dir_writable": True,
-                    "checks": [{"name": "delivery_lifecycle", "ok": True}],
+                    "checks": [
+                        {
+                            "name": "delivery_lifecycle",
+                            "ok": True,
+                            "detail": "delivery_pending and delivery_sent persisted",
+                        }
+                    ],
                     "feishu_request": {
                         "operation": "feishu.card.create",
                         "body": {"msg_type": "interactive"},
@@ -628,7 +773,9 @@ def test_apply_gateway_event_rejects_fields_under_supported_action_type(
     assert "raw platform text" not in result.diagnostics
 
 
-def test_preflight_gateway_event_rejects_malformed_checks(monkeypatch, tmp_path):
+def test_preflight_gateway_event_accepts_check_detail_without_leaking_it(
+    monkeypatch, tmp_path
+):
     def fake_run(*args, **kwargs):
         return _completed(
             stdout=json.dumps(
@@ -654,11 +801,11 @@ def test_preflight_gateway_event_rejects_malformed_checks(monkeypatch, tmp_path)
 
     result = preflight_gateway_event(tmp_path)
 
-    assert result.ok is False
-    assert result.failure_class == "hermes_tools_invalid_envelope"
-    assert result.action is None
-    assert "raw platform text" not in result.diagnostics
-    assert "om_sensitive" not in result.diagnostics
+    assert result.ok is True
+    assert result.action["checks"] == [{"name": "delivery_lifecycle", "ok": True}]
+    assert "raw platform text" not in json.dumps(result.action)
+    assert "om_sensitive" not in json.dumps(result.action)
+    assert result.diagnostics == ""
 
 
 def test_preflight_gateway_event_rejects_malformed_feishu_request(

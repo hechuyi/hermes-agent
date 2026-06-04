@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -15,6 +16,8 @@ from agent.redact import redact_sensitive_text
 
 DEFAULT_HERMES_TOOLS_BINARY = "hermes-tools"
 DEFAULT_TIMEOUT_SECONDS = 10
+_ASYNC_APPLY_MAX_CONCURRENCY = 4
+_ASYNC_APPLY_SEMAPHORE = threading.BoundedSemaphore(_ASYNC_APPLY_MAX_CONCURRENCY)
 
 _SUPPORTED_ACTION_TYPES = frozenset(
     {
@@ -33,6 +36,7 @@ _MAX_DIAGNOSTIC_CHARS = 1200
 _SAFE_CLASS_RE = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 _SAFE_EVENT_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_SHA256_HEX_RE = re.compile(r"^[a-f0-9]{64}$")
 _APPLY_SUCCESS_KEYS = frozenset({"ok", "event_type", "action"})
 _APPLY_ERROR_KEYS = frozenset({"ok", "event_type", "error"})
 _APPLY_ERROR_OBJECT_KEYS = frozenset({"reason", "message"})
@@ -49,6 +53,30 @@ _PREFLIGHT_FAILURE_KEYS = frozenset(
         "feishu_request",
     }
 )
+_INBOUND_ADMISSION_ACTION_KEYS = frozenset(
+    {"type", "decision", "duplicate", "record"}
+)
+_INBOUND_ADMISSION_RECORD_KEYS = frozenset(
+    {"inbound_id_hash", "message_id_hash", "message_type", "first_seen_at"}
+)
+_DELIVERY_RECORD_ACTION_KEYS = frozenset({"type", "record"})
+_DELIVERY_RECORD_KEYS = frozenset(
+    {
+        "delivery_id",
+        "inbound_id",
+        "target",
+        "session_id",
+        "correlation_id",
+        "status",
+        "created_at",
+        "updated_at",
+        "feishu_message_id",
+        "failure_class",
+        "ack_event_id",
+    }
+)
+_DELIVERY_STATUSES = frozenset({"pending", "sent", "failed", "acked"})
+_PREFLIGHT_CHECK_KEYS = frozenset({"name", "ok", "detail"})
 
 
 @dataclass(frozen=True)
@@ -142,13 +170,34 @@ async def apply_gateway_event_async(
     binary: str = DEFAULT_HERMES_TOOLS_BINARY,
 ) -> HermesToolsGatewayEventResult:
     """Apply one gateway event without blocking the current event loop."""
-    return await asyncio.to_thread(
-        apply_gateway_event,
-        event,
-        state_dir,
-        timeout_seconds=timeout_seconds,
-        binary=binary,
+    state_dir_path = Path(state_dir)
+    if not _ASYNC_APPLY_SEMAPHORE.acquire(blocking=False):
+        event_type = _string_or_none(event.get("type"))
+        if event_type is not None and not _is_safe_event_type(event_type):
+            event_type = None
+        return _failure(
+            "hermes_tools_async_saturated",
+            "async apply worker capacity exhausted",
+            event_type=event_type,
+            diagnostics=f"max_concurrency={_ASYNC_APPLY_MAX_CONCURRENCY}",
+            state_dir=state_dir_path,
+        )
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            apply_gateway_event,
+            event,
+            state_dir_path,
+            timeout_seconds=timeout_seconds,
+            binary=binary,
+        )
     )
+    try:
+        return await asyncio.shield(worker)
+    finally:
+        if worker.done():
+            _ASYNC_APPLY_SEMAPHORE.release()
+        else:
+            worker.add_done_callback(lambda _worker: _ASYNC_APPLY_SEMAPHORE.release())
 
 
 def preflight_gateway_event(
@@ -452,15 +501,12 @@ _INVALID = _InvalidSentinel()
 def _validated_action(action: dict[str, Any]) -> dict[str, Any] | None:
     action_type = _string_or_none(action.get("type"))
     if action_type == "delivery_record":
-        if not _has_only_keys(action, {"type", "record"}):
+        if not _has_exact_keys(action, _DELIVERY_RECORD_ACTION_KEYS):
             return None
-        record = action.get("record")
-        if not isinstance(record, dict) or not _has_only_keys(record, {"delivery_id"}):
+        record = _validated_delivery_record(action.get("record"))
+        if record is None:
             return None
-        delivery_id = record.get("delivery_id")
-        if not isinstance(delivery_id, str) or not _is_safe_identifier(delivery_id):
-            return None
-        return {"type": action_type, "record": {"delivery_id": delivery_id}}
+        return {"type": action_type, "record": record}
 
     if action_type in {"stale_pending_alert", "session_state", "status_card"}:
         if not _has_only_keys(action, {"type"}):
@@ -468,13 +514,98 @@ def _validated_action(action: dict[str, Any]) -> dict[str, Any] | None:
         return {"type": action_type}
 
     if action_type == "inbound_admission":
-        if not _has_only_keys(action, {"type", "decision"}):
+        if not _has_exact_keys(action, _INBOUND_ADMISSION_ACTION_KEYS):
             return None
         if action.get("decision") != "continue":
             return None
-        return {"type": action_type, "decision": "continue"}
+        duplicate = action.get("duplicate")
+        record = _validated_inbound_admission_record(action.get("record"))
+        if not isinstance(duplicate, bool) or record is None:
+            return None
+        return {
+            "type": action_type,
+            "decision": "continue",
+            "duplicate": duplicate,
+            "record": record,
+        }
 
     return None
+
+
+def _validated_delivery_record(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or not _has_exact_keys(value, _DELIVERY_RECORD_KEYS):
+        return None
+
+    delivery_id = _validated_identifier_field(value.get("delivery_id"))
+    inbound_id = _validated_identifier_field(value.get("inbound_id"))
+    target = _validated_identifier_field(value.get("target"))
+    session_id = _validated_identifier_field(value.get("session_id"))
+    correlation_id = _validated_identifier_field(value.get("correlation_id"))
+    status = _string_or_none(value.get("status"))
+    created_at = value.get("created_at")
+    updated_at = value.get("updated_at")
+    feishu_message_id = _validated_optional_identifier_field(
+        value.get("feishu_message_id")
+    )
+    failure_class = _validated_optional_failure_class_field(value.get("failure_class"))
+    ack_event_id = _validated_optional_identifier_field(value.get("ack_event_id"))
+
+    if (
+        delivery_id is None
+        or inbound_id is None
+        or target is None
+        or session_id is None
+        or correlation_id is None
+        or status not in _DELIVERY_STATUSES
+        or not _is_json_int(created_at)
+        or not _is_json_int(updated_at)
+        or feishu_message_id is _INVALID
+        or failure_class is _INVALID
+        or ack_event_id is _INVALID
+    ):
+        return None
+
+    return {
+        "delivery_id": delivery_id,
+        "inbound_id": inbound_id,
+        "target": target,
+        "session_id": session_id,
+        "correlation_id": correlation_id,
+        "status": status,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "feishu_message_id": feishu_message_id,
+        "failure_class": failure_class,
+        "ack_event_id": ack_event_id,
+    }
+
+
+def _validated_inbound_admission_record(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or not _has_exact_keys(
+        value, _INBOUND_ADMISSION_RECORD_KEYS
+    ):
+        return None
+
+    inbound_id_hash = _string_or_none(value.get("inbound_id_hash"))
+    message_id_hash = _string_or_none(value.get("message_id_hash"))
+    message_type = _validated_identifier_field(value.get("message_type"))
+    first_seen_at = value.get("first_seen_at")
+    if (
+        inbound_id_hash is None
+        or message_id_hash is None
+        or not _SHA256_HEX_RE.fullmatch(inbound_id_hash)
+        or not _SHA256_HEX_RE.fullmatch(message_id_hash)
+        or message_type is None
+        or not _is_json_int(first_seen_at)
+    ):
+        return None
+
+    return {
+        "inbound_id_hash": inbound_id_hash,
+        "message_id_hash": message_id_hash,
+        "message_type": message_type,
+        "first_seen_at": first_seen_at,
+    }
 
 
 def _validated_preflight_checks(value: Any) -> list[dict[str, Any]] | None:
@@ -482,13 +613,16 @@ def _validated_preflight_checks(value: Any) -> list[dict[str, Any]] | None:
         return None
     checks: list[dict[str, Any]] = []
     for item in value:
-        if not isinstance(item, dict) or not _has_only_keys(item, {"name", "ok"}):
+        if not isinstance(item, dict) or not _has_only_keys(item, _PREFLIGHT_CHECK_KEYS):
             return None
         name = item.get("name")
         ok = item.get("ok")
+        detail = item.get("detail")
         if not isinstance(name, str) or not _is_safe_identifier(name):
             return None
         if not isinstance(ok, bool):
+            return None
+        if detail is not None and not isinstance(detail, str):
             return None
         checks.append({"name": name, "ok": ok})
     return checks
@@ -515,8 +649,33 @@ def _validated_failure_class(value: Any, *, fallback: str) -> str:
     return fallback
 
 
+def _validated_identifier_field(value: Any) -> str | None:
+    if isinstance(value, str) and _is_safe_identifier(value):
+        return value
+    return None
+
+
+def _validated_optional_identifier_field(value: Any) -> str | None | _InvalidSentinel:
+    if value is None:
+        return None
+    identifier = _validated_identifier_field(value)
+    return identifier if identifier is not None else _INVALID
+
+
+def _validated_optional_failure_class_field(value: Any) -> str | None | _InvalidSentinel:
+    if value is None:
+        return None
+    if isinstance(value, str) and _SAFE_CLASS_RE.fullmatch(value):
+        return value
+    return _INVALID
+
+
 def _has_only_keys(value: Mapping[str, Any], allowed: frozenset[str] | set[str]) -> bool:
     return set(value.keys()).issubset(allowed)
+
+
+def _has_exact_keys(value: Mapping[str, Any], expected: frozenset[str] | set[str]) -> bool:
+    return set(value.keys()) == set(expected)
 
 
 def _is_safe_event_type(value: str) -> bool:
@@ -525,6 +684,10 @@ def _is_safe_event_type(value: str) -> bool:
 
 def _is_safe_identifier(value: str) -> bool:
     return bool(_SAFE_IDENTIFIER_RE.fullmatch(value))
+
+
+def _is_json_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _byte_count(value: str) -> int:
