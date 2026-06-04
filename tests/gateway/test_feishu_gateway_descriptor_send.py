@@ -185,6 +185,45 @@ async def test_audited_send_uses_allowlisted_queued_followup_first_reply_hint(tm
 
 
 @pytest.mark.asyncio
+async def test_audited_queued_followup_long_reply_uses_unique_chunk_deliveries(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+    metadata = {
+        **_metadata("queued_followup_first_reply:om_followup"),
+        "inbound_id": "om_followup",
+        "delivery_operation_hint": "queued_followup_first_reply",
+    }
+
+    result = await adapter.send("oc_chat", "x" * 9000, metadata=metadata)
+
+    assert result.success is True
+    assert len(message_api.create_calls) == 2
+    assert _event_types(events) == [
+        "delivery_pending",
+        "delivery_sent",
+        "delivery_pending",
+        "delivery_sent",
+    ]
+    assert [event["operation"] for event in events] == [
+        "queued_followup_first_reply",
+        "queued_followup_first_reply",
+        "queued_followup_first_reply",
+        "queued_followup_first_reply",
+    ]
+    first_delivery_id = events[0]["delivery_id"]
+    second_delivery_id = events[2]["delivery_id"]
+    assert first_delivery_id != second_delivery_id
+    assert events[1]["delivery_id"] == first_delivery_id
+    assert events[3]["delivery_id"] == second_delivery_id
+    uuids = [call.request_body.uuid for call in message_api.create_calls]
+    assert uuids[0] != uuids[1]
+    assert uuids == [
+        adapter._idempotency_key_for_delivery(first_delivery_id),
+        adapter._idempotency_key_for_delivery(second_delivery_id),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_audited_send_rejects_unsupported_operation_hint_before_sdk(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)

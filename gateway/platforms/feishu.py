@@ -1798,10 +1798,11 @@ class FeishuAdapter(BasePlatformAdapter):
 
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+        chunk_total = len(chunks)
         last_response = None
 
         try:
-            for chunk in chunks:
+            for chunk_index, chunk in enumerate(chunks):
                 msg_type, payload = self._build_outbound_payload(chunk)
                 if self._hermes_tools_state_dir is not None:
                     operation, operation_error = self._send_delivery_operation(
@@ -1810,9 +1811,15 @@ class FeishuAdapter(BasePlatformAdapter):
                     )
                     if operation_error is not None:
                         return SendResult(success=False, error=operation_error)
+                    chunk_metadata = self._metadata_for_send_chunk(
+                        operation=operation,
+                        metadata=metadata,
+                        chunk_index=chunk_index,
+                        chunk_total=chunk_total,
+                    )
                     delivery_id = self._delivery_id_for(
                         operation,
-                        metadata=metadata,
+                        metadata=chunk_metadata,
                         parts=[chat_id, reply_to or "", msg_type, payload],
                     )
                     response_or_result = await self._audited_delivery(
@@ -1820,18 +1827,20 @@ class FeishuAdapter(BasePlatformAdapter):
                         operation=operation,
                         target=f"feishu:chat:{chat_id}",
                         inbound_id=self._delivery_metadata(
-                            metadata, "inbound_id", reply_to or chat_id
+                            chunk_metadata, "inbound_id", reply_to or chat_id
                         ),
-                        session_id=self._delivery_metadata(metadata, "session_id", "session"),
+                        session_id=self._delivery_metadata(
+                            chunk_metadata, "session_id", "session"
+                        ),
                         correlation_id=self._delivery_metadata(
-                            metadata, "correlation_id", delivery_id
+                            chunk_metadata, "correlation_id", delivery_id
                         ),
                         network_call=lambda uuid_value: self._send_raw_message(
                             chat_id=chat_id,
                             msg_type=msg_type,
                             payload=payload,
                             reply_to=reply_to,
-                            metadata=metadata,
+                            metadata=chunk_metadata,
                             uuid_value=uuid_value,
                         ),
                         require_returned_message_id=True,
@@ -1860,20 +1869,20 @@ class FeishuAdapter(BasePlatformAdapter):
                                 operation=f"{operation}_text_fallback",
                                 target=f"feishu:chat:{chat_id}",
                                 inbound_id=self._delivery_metadata(
-                                    metadata, "inbound_id", reply_to or chat_id
+                                    chunk_metadata, "inbound_id", reply_to or chat_id
                                 ),
                                 session_id=self._delivery_metadata(
-                                    metadata, "session_id", "session"
+                                    chunk_metadata, "session_id", "session"
                                 ),
                                 correlation_id=self._delivery_metadata(
-                                    metadata, "correlation_id", delivery_id
+                                    chunk_metadata, "correlation_id", delivery_id
                                 ),
                                 network_call=lambda uuid_value: self._send_raw_message(
                                     chat_id=chat_id,
                                     msg_type="text",
                                     payload=fallback_payload,
                                     reply_to=reply_to,
-                                    metadata=metadata,
+                                    metadata=chunk_metadata,
                                     uuid_value=uuid_value,
                                 ),
                                 require_returned_message_id=True,
@@ -5333,6 +5342,33 @@ class FeishuAdapter(BasePlatformAdapter):
         seed = "\x1f".join([operation, *(str(part) for part in parts)])
         digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
         return f"{operation}-{digest}"
+
+    def _metadata_for_send_chunk(
+        self,
+        *,
+        operation: str,
+        metadata: Optional[Dict[str, Any]],
+        chunk_index: int,
+        chunk_total: int,
+    ) -> Optional[Dict[str, Any]]:
+        if (
+            operation != "queued_followup_first_reply"
+            or chunk_total <= 1
+            or metadata is None
+        ):
+            return metadata
+        explicit = metadata.get("delivery_id")
+        if explicit is None:
+            return metadata
+        explicit_text = str(explicit).strip()
+        if not re.fullmatch(r"^[A-Za-z0-9_.:-]{1,127}$", explicit_text):
+            return metadata
+        chunk_metadata = dict(metadata)
+        chunk_metadata["delivery_id"] = self._derived_delivery_id(
+            explicit_text,
+            f"queued_followup_first_reply_chunk_{chunk_index + 1}_of_{chunk_total}",
+        )
+        return chunk_metadata
 
     @staticmethod
     def _valid_feishu_message_id(message_id: str) -> bool:
