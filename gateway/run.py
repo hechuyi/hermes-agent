@@ -422,6 +422,7 @@ class _HermesTaskStatusContext:
     receive_id: str
     idempotency_key: str
     message_id: Optional[str] = None
+    create_attempted: bool = False
 
 
 def _stable_gateway_material(prefix: str, *parts: Any) -> str:
@@ -484,6 +485,7 @@ async def _emit_hermes_task_status(
     platform: Any = None,
     timestamp: Optional[int] = None,
     min_update_interval_seconds: int = _HERMES_STATUS_CARD_MIN_UPDATE_INTERVAL_SECONDS,
+    allow_create: bool = False,
 ) -> bool:
     """Emit a Hermes task_status event and execute a validated status-card action.
 
@@ -507,10 +509,17 @@ async def _emit_hermes_task_status(
     }
     if context.message_id:
         event["message_id"] = context.message_id
-    elif context.receive_id and context.receive_id_type:
+    elif allow_create and not context.create_attempted and context.receive_id and context.receive_id_type:
+        context.create_attempted = True
         event["receive_id_type"] = context.receive_id_type
         event["receive_id"] = context.receive_id
         event["idempotency_key"] = context.idempotency_key
+    else:
+        logger.warning(
+            "Hermes task_status blocker: failure_class=missing_status_card_binding state=%s",
+            state,
+        )
+        return True
 
     try:
         result = await apply_gateway_event_async(event, state_dir)
@@ -16770,7 +16779,7 @@ class GatewayRunner:
                 run_generation=run_generation,
             )
 
-        async def _emit_turn_task_status(state: str, text: str) -> bool:
+        async def _emit_turn_task_status(state: str, text: str, *, allow_create: bool = False) -> bool:
             if _hermes_status_context is None:
                 return False
             adapter = self.adapters.get(source.platform)
@@ -16784,6 +16793,7 @@ class GatewayRunner:
                     text=text,
                     config=getattr(self, "config", None),
                     platform=source.platform,
+                    allow_create=allow_create,
                 )
 
         async def send_progress_messages():
@@ -16978,12 +16988,23 @@ class GatewayRunner:
                         progress_lines.append(msg)
 
                     try:
-                        await _emit_turn_task_status("running", _progress_text(progress_lines))
+                        _status_handled = await _emit_turn_task_status(
+                            "running",
+                            _progress_text(progress_lines),
+                            allow_create=(
+                                _hermes_status_context is not None
+                                and not _hermes_status_context.create_attempted
+                                and not _hermes_status_context.message_id
+                            ),
+                        )
                     except Exception as _hts_err:
                         logger.warning(
                             "Hermes task_status progress blocker: failure_class=%s",
                             type(_hts_err).__name__,
                         )
+                        _status_handled = True
+                    if _status_handled:
+                        continue
 
                     if await _roll_progress_overflow_if_needed():
                         _last_edit_ts = time.monotonic()
@@ -17107,10 +17128,19 @@ class GatewayRunner:
                             else:
                                 progress_lines.append(raw)
                                 try:
-                                    await _emit_turn_task_status("running", _progress_text(progress_lines))
+                                    _status_handled = await _emit_turn_task_status(
+                                        "running",
+                                        _progress_text(progress_lines),
+                                        allow_create=(
+                                            _hermes_status_context is not None
+                                            and not _hermes_status_context.create_attempted
+                                            and not _hermes_status_context.message_id
+                                        ),
+                                    )
                                 except Exception:
-                                    pass
-                                await _roll_progress_overflow_if_needed()
+                                    _status_handled = True
+                                if not _status_handled:
+                                    await _roll_progress_overflow_if_needed()
                         except Exception:
                             break
                     # Final edit with all remaining tools (only if editing works)

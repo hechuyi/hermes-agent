@@ -60,11 +60,12 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
 
 
 class StatusCardProgressAdapter(ProgressCaptureAdapter):
-    def __init__(self, platform=Platform.FEISHU, state_dir=None):
+    def __init__(self, platform=Platform.FEISHU, state_dir=None, fail_status_card_execute=False):
         super().__init__(platform=platform)
         self._hermes_tools_state_dir = state_dir
         self.status_card_actions = []
         self._status_card_counter = 0
+        self.fail_status_card_execute = fail_status_card_execute
 
     async def execute_status_card_action(
         self,
@@ -84,6 +85,8 @@ class StatusCardProgressAdapter(ProgressCaptureAdapter):
                 "correlation_id": correlation_id,
             }
         )
+        if self.fail_status_card_execute:
+            return SendResult(success=False, error="status_card_execute_failed")
         card_action = action.get("card_action", {}) if isinstance(action, dict) else {}
         if card_action.get("type") == "create":
             self._status_card_counter += 1
@@ -171,6 +174,19 @@ class FakeAgent:
             time.sleep(0.35)
             cb("tool.started", "browser_navigate", "https://example.com", {})
             time.sleep(0.35)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class NoProgressAgent:
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
         return {
             "final_response": "done",
             "messages": [],
@@ -337,7 +353,14 @@ def _install_fake_agent(monkeypatch, agent_cls):
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
 
-async def _run_feishu_status_card_agent(monkeypatch, tmp_path, agent_cls=FakeAgent):
+async def _run_feishu_status_card_agent(
+    monkeypatch,
+    tmp_path,
+    agent_cls=FakeAgent,
+    *,
+    adapter=None,
+    apply_result_factory=None,
+):
     monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
     _install_fake_agent(monkeypatch, agent_cls)
 
@@ -345,6 +368,8 @@ async def _run_feishu_status_card_agent(monkeypatch, tmp_path, agent_cls=FakeAge
 
     async def fake_apply_gateway_event_async(event, state_dir, **kwargs):
         events.append(dict(event))
+        if apply_result_factory is not None:
+            return apply_result_factory(event)
         action_type = "update" if event.get("message_id") else "create"
         return _status_card_apply_result(action_type, event["state"])
 
@@ -353,7 +378,8 @@ async def _run_feishu_status_card_agent(monkeypatch, tmp_path, agent_cls=FakeAge
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
 
-    adapter = StatusCardProgressAdapter(state_dir=tmp_path / "hermes-tools-state")
+    if adapter is None:
+        adapter = StatusCardProgressAdapter(state_dir=tmp_path / "hermes-tools-state")
     runner = _make_runner(adapter)
     source = SessionSource(
         platform=Platform.FEISHU,
@@ -638,6 +664,109 @@ async def test_run_agent_terminal_task_status_requires_final_reply_without_suppr
     assert terminal_actions[-1]["requires_final_reply"] is True
     assert result["final_response"] == "done"
     assert result.get("already_sent") is not True
+
+
+@pytest.mark.asyncio
+async def test_run_agent_feishu_no_progress_does_not_create_completed_status_card(
+    monkeypatch, tmp_path
+):
+    adapter, events, result = await _run_feishu_status_card_agent(
+        monkeypatch,
+        tmp_path,
+        agent_cls=NoProgressAgent,
+    )
+
+    assert result["final_response"] == "done"
+    assert events == []
+    assert adapter.status_card_actions == []
+    assert adapter.sent == []
+    assert adapter.edits == []
+
+
+@pytest.mark.asyncio
+async def test_run_agent_terminal_task_status_without_binding_is_noop(monkeypatch, tmp_path):
+    adapter, events, result = await _run_feishu_status_card_agent(
+        monkeypatch,
+        tmp_path,
+        agent_cls=NoProgressAgent,
+    )
+
+    assert result["final_response"] == "done"
+    assert not [event for event in events if event.get("state") == "completed"]
+    assert not [
+        call
+        for call in adapter.status_card_actions
+        if call["action"]["card_action"]["type"] == "create"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_terminal_task_status_with_binding_patches_completed(
+    monkeypatch, tmp_path
+):
+    adapter, events, result = await _run_feishu_status_card_agent(monkeypatch, tmp_path)
+
+    assert result["final_response"] == "done"
+    terminal_events = [
+        event for event in events if event.get("type") == "task_status" and event.get("state") == "completed"
+    ]
+    assert terminal_events
+    assert terminal_events[-1]["message_id"] == "status-card-1"
+    terminal_actions = [
+        call["action"]["card_action"]
+        for call in adapter.status_card_actions
+        if call["action"]["card_action"]["state"] == "completed"
+    ]
+    assert terminal_actions[-1]["type"] == "update"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_feishu_status_card_apply_failure_suppresses_progress_fallback(
+    monkeypatch, tmp_path
+):
+    def apply_failure(event):
+        return SimpleNamespace(
+            ok=False,
+            event_type="task_status",
+            action=None,
+            failure_class="status_card_apply_failed",
+            reason="status_card_apply_failed",
+            diagnostics="",
+        )
+
+    adapter, events, result = await _run_feishu_status_card_agent(
+        monkeypatch,
+        tmp_path,
+        apply_result_factory=apply_failure,
+    )
+
+    assert result["final_response"] == "done"
+    assert [event for event in events if event.get("type") == "task_status"]
+    assert adapter.status_card_actions == []
+    assert adapter.sent == []
+    assert adapter.edits == []
+
+
+@pytest.mark.asyncio
+async def test_run_agent_feishu_status_card_execute_failure_suppresses_progress_fallback(
+    monkeypatch, tmp_path
+):
+    adapter = StatusCardProgressAdapter(
+        state_dir=tmp_path / "hermes-tools-state",
+        fail_status_card_execute=True,
+    )
+
+    adapter, events, result = await _run_feishu_status_card_agent(
+        monkeypatch,
+        tmp_path,
+        adapter=adapter,
+    )
+
+    assert result["final_response"] == "done"
+    assert [event for event in events if event.get("type") == "task_status"]
+    assert adapter.status_card_actions
+    assert adapter.sent == []
+    assert adapter.edits == []
 
 
 @pytest.mark.asyncio
