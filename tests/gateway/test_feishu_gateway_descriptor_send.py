@@ -168,6 +168,7 @@ async def test_audited_image_file_records_pending_and_sent_after_upload(tmp_path
     assert request.request_body.msg_type == "image"
     assert request.request_body.uuid == "delivery-image"
     assert sent["type"] == "delivery_sent"
+    assert sent["operation"] == "normal_final_reply"
     assert sent["delivery_id"] == "delivery-image"
     assert sent["message_id"] == "om_image_msg"
 
@@ -220,7 +221,64 @@ async def test_audited_uploaded_file_records_pending_and_sent_after_upload(tmp_p
     assert request.request_body.msg_type == "file"
     assert request.request_body.uuid == "delivery-file"
     assert sent["type"] == "delivery_sent"
+    assert sent["operation"] == "normal_final_reply"
     assert sent["message_id"] == "om_file_msg"
+
+
+@pytest.mark.asyncio
+async def test_audited_image_file_reply_records_reply_operation_after_upload(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    image_api = _FakeImageApi()
+    events = _install_event_recorder(adapter)
+    adapter._client.im.v1.image = image_api
+    image_path = tmp_path / "reply.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    result = await adapter.send_image_file(
+        chat_id="oc_chat",
+        image_path=str(image_path),
+        reply_to="om_parent",
+        metadata=_metadata("delivery-image-reply"),
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_reply"
+    assert len(image_api.create_calls) == 1
+    assert message_api.create_calls == []
+    assert len(message_api.reply_calls) == 1
+    assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert events[0]["operation"] == "reply"
+    assert events[1]["operation"] == "reply"
+    assert events[1]["delivery_id"] == "delivery-image-reply"
+    assert events[1]["message_id"] == "om_reply"
+
+
+@pytest.mark.asyncio
+async def test_audited_uploaded_file_reply_records_reply_operation_after_upload(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    file_api = _FakeFileApi()
+    events = _install_event_recorder(adapter)
+    adapter._client.im.v1.file = file_api
+    file_path = tmp_path / "reply.pdf"
+    file_path.write_bytes(b"%PDF-1.4 test")
+
+    result = await adapter.send_document(
+        chat_id="oc_chat",
+        file_path=str(file_path),
+        reply_to="om_parent",
+        metadata=_metadata("delivery-file-reply"),
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_reply"
+    assert len(file_api.create_calls) == 1
+    assert message_api.create_calls == []
+    assert len(message_api.reply_calls) == 1
+    assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert events[0]["operation"] == "reply"
+    assert events[1]["operation"] == "reply"
+    assert events[1]["delivery_id"] == "delivery-file-reply"
+    assert events[1]["message_id"] == "om_reply"
 
 
 @pytest.mark.asyncio
@@ -297,12 +355,37 @@ async def test_create_persists_pending_before_sdk_and_sent_after_message_id(tmp_
     assert result.message_id == "om_created"
     assert events[0][0] == "event"
     assert events[0][1]["type"] == "delivery_pending"
+    assert events[0][1]["operation"] == "normal_final_reply"
     assert events[0][1]["delivery_id"] == "delivery-create"
     assert events[1][0] == "sdk_create"
     assert events[2][0] == "event"
     assert events[2][1]["type"] == "delivery_sent"
+    assert events[2][1]["operation"] == "normal_final_reply"
     assert events[2][1]["delivery_id"] == "delivery-create"
     assert events[2][1]["message_id"] == "om_created"
+
+
+@pytest.mark.asyncio
+async def test_reply_send_records_reply_operation(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    result = await adapter.send(
+        "oc_chat",
+        "hello",
+        reply_to="om_parent",
+        metadata=_metadata("delivery-reply"),
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_reply"
+    assert message_api.create_calls == []
+    assert len(message_api.reply_calls) == 1
+    assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert events[0]["operation"] == "reply"
+    assert events[1]["operation"] == "reply"
+    assert events[1]["delivery_id"] == "delivery-reply"
+    assert events[1]["message_id"] == "om_reply"
 
 
 @pytest.mark.asyncio
@@ -713,6 +796,8 @@ async def test_edit_validates_existing_message_id_and_records_sent_with_same_id(
     assert result.message_id == "om_existing"
     assert message_api.update_calls[0].message_id == "om_existing"
     assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert events[0]["operation"] == "message_edit"
+    assert events[1]["operation"] == "message_edit"
     assert events[-1]["message_id"] == "om_existing"
 
 
@@ -987,6 +1072,8 @@ async def test_status_card_create_action_executes_descriptor_and_writes_delivery
     assert len(message_api.create_calls) == 1
     assert message_api.update_calls == []
     assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert events[0]["operation"] == "status_card_create"
+    assert events[1]["operation"] == "status_card_create"
     assert events[-1]["message_id"] == "om_created"
 
 
@@ -1008,6 +1095,8 @@ async def test_status_card_update_action_executes_patch_descriptor(tmp_path):
     assert message_api.create_calls == []
     assert len(message_api.update_calls) == 1
     assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert events[0]["operation"] == "status_card_patch"
+    assert events[1]["operation"] == "status_card_patch"
     assert events[-1]["message_id"] == "om_card"
 
 

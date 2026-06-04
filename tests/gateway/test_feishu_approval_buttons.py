@@ -182,6 +182,7 @@ class TestFeishuExecApproval:
         assert events[0]["session_id"] == "session-a"
         assert events[0]["correlation_id"] == "corr-a"
         assert events[1]["delivery_id"] == events[0]["delivery_id"]
+        assert events[1]["operation"] == "approval_prompt_card_create"
         assert events[1]["message_id"] == "om_approval"
         assert events[0]["delivery_id"].startswith("approval_prompt_card_create-")
         assert len(events[0]["delivery_id"]) > 50
@@ -423,6 +424,7 @@ class TestFeishuUpdatePrompt:
         assert events[0]["inbound_id"] == "inbound-2"
         assert events[0]["session_id"] == "session-b"
         assert events[0]["correlation_id"] == "corr-b"
+        assert events[1]["operation"] == "update_prompt_card_create"
         assert events[1]["message_id"] == "om_update_prompt"
 
         kwargs = mock_send_raw.call_args.kwargs
