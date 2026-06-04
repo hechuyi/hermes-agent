@@ -735,6 +735,7 @@ def _validated_delivery_record(
         or not _is_json_int(updated_at)
         or feishu_message_id is _INVALID
         or failure_class is _INVALID
+        or (status == "unknown" and failure_class is None)
         or ack_event_id is _INVALID
     ):
         return None

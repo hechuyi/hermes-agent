@@ -247,6 +247,78 @@ def test_apply_gateway_event_accepts_rust_stale_pending_alert_shape(
     assert result.action == action
 
 
+def test_apply_gateway_event_rejects_unknown_delivery_without_failure_class(
+    monkeypatch, tmp_path
+):
+    record = _rust_delivery_record(
+        "unknown",
+        updated_at=111,
+        failure_class=None,
+    )
+
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "unknown_delivery_state",
+                    "action": {"type": "delivery_record", "record": record},
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "unknown_delivery_state"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+
+
+def test_apply_gateway_event_rejects_stale_unknown_record_without_failure_class(
+    monkeypatch, tmp_path
+):
+    action = {
+        "type": "stale_pending_alert",
+        "alert_required": True,
+        "resend_permitted": False,
+        "count": 1,
+        "records": [
+            _rust_delivery_record(
+                "unknown",
+                updated_at=111,
+                failure_class=None,
+            )
+        ],
+    }
+
+    def fake_run(*args, **kwargs):
+        return _completed(
+            stdout=json.dumps(
+                {
+                    "ok": True,
+                    "event_type": "stale_pending_scan",
+                    "action": action,
+                }
+            )
+        )
+
+    monkeypatch.setattr(
+        "gateway.hermes_tools_gateway_event.subprocess.run",
+        fake_run,
+    )
+
+    result = apply_gateway_event({"type": "stale_pending_scan"}, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "hermes_tools_invalid_envelope"
+    assert result.action is None
+
+
 def test_apply_gateway_event_rejects_stale_pending_alert_without_blocker_contract(
     monkeypatch, tmp_path
 ):
