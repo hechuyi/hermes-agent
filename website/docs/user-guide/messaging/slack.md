@@ -190,8 +190,8 @@ Add the following to your `~/.hermes/.env` file:
 
 ```bash
 # Required
-SLACK_BOT_TOKEN=xoxb-your-bot-token-here
-SLACK_APP_TOKEN=xapp-your-app-token-here
+SLACK_BOT_TOKEN=placeholder-bot-token
+SLACK_APP_TOKEN=placeholder-app-level-token
 SLACK_ALLOWED_USERS=U01ABC2DEF3              # Comma-separated Member IDs
 
 # Optional
@@ -495,10 +495,10 @@ Provide multiple bot tokens as a **comma-separated list** in `SLACK_BOT_TOKEN`:
 
 ```bash
 # Multiple bot tokens — one per workspace
-SLACK_BOT_TOKEN=xoxb-workspace1-token,xoxb-workspace2-token,xoxb-workspace3-token
+SLACK_BOT_TOKEN=placeholder-workspace-one-bot-token,placeholder-workspace-two-bot-token,placeholder-workspace-three-bot-token
 
 # A single app-level token is still used for Socket Mode
-SLACK_APP_TOKEN=xapp-your-app-token
+SLACK_APP_TOKEN=placeholder-app-level-token
 ```
 
 Or in `~/.hermes/config.yaml`:
@@ -506,7 +506,7 @@ Or in `~/.hermes/config.yaml`:
 ```yaml
 platforms:
   slack:
-    token: "fake_redacted_credential,xoxb-workspace2-token"
+    token: "placeholder-workspace-one-bot-token,placeholder-workspace-two-bot-token"
 ```
 
 ### OAuth Token File

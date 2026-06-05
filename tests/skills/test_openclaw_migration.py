@@ -510,7 +510,7 @@ def test_discord_settings_migrated(tmp_path: Path):
     )
     report = migrator.migrate()
     env_text = (target / ".env").read_text(encoding="utf-8")
-    assert "DISCORD_BOT_TOKEN=discord-bot-token-123" in env_text
+    assert "DISCORD_BOT_TOKEN=fake_redacted_credential" in env_text
     assert "DISCORD_ALLOWED_USERS=111222333,444555666" in env_text
 
 

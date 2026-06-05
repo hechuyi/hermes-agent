@@ -69,12 +69,17 @@ uv run "$SCRIPT" servers
 
 如果未找到服务器，启动一个：
 ```
-jupyter-lab --no-browser --port=8888 --notebook-dir=$HOME/notebooks \
-  --IdentityProvider.token=fake_redacted_credential
+mkdir -p "$HOME/notebooks"
+JUPYTER_TOKEN_VALUE=""
+JUPYTER_PASSWORD_VALUE=""
+nohup jupyter-lab --no-browser --port=8888 --notebook-dir="$HOME/notebooks" \
+  --IdentityProvider.token="$JUPYTER_TOKEN_VALUE" \
+  --ServerApp.password="$JUPYTER_PASSWORD_VALUE" \
+  > "$HOME/notebooks/jupyterlab.log" 2>&1 &
 sleep 3
 ```
 
-注意：已禁用 token/password 以供本地 agent 访问。服务器以无头模式运行。
+注意：已禁用 token/password 认证以供本地 agent 访问。服务器以无头模式在后台运行，并将日志写入 `~/notebooks/jupyterlab.log`。
 
 ### 为 REPL 使用创建 Notebook
 

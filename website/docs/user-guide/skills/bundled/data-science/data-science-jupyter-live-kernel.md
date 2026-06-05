@@ -71,12 +71,17 @@ uv run "$SCRIPT" servers
 
 If no servers found, start one:
 ```
-jupyter-lab --no-browser --port=8888 --notebook-dir=$HOME/notebooks \
-  --IdentityProvider.token=fake_redacted_credential
+mkdir -p "$HOME/notebooks"
+JUPYTER_TOKEN_VALUE=""
+JUPYTER_PASSWORD_VALUE=""
+nohup jupyter-lab --no-browser --port=8888 --notebook-dir="$HOME/notebooks" \
+  --IdentityProvider.token="$JUPYTER_TOKEN_VALUE" \
+  --ServerApp.password="$JUPYTER_PASSWORD_VALUE" \
+  > "$HOME/notebooks/jupyterlab.log" 2>&1 &
 sleep 3
 ```
 
-Note: Token/password disabled for local agent access. The server runs headless.
+Note: Token/password auth is disabled for local agent access. The server runs headless in the background and writes logs to `~/notebooks/jupyterlab.log`.
 
 ### Creating a Notebook for REPL Use
 

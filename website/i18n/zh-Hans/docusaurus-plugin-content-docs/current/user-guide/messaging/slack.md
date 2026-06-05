@@ -172,8 +172,8 @@ Member ID 格式类似 `U01ABC2DEF3`。你至少需要自己的 Member ID。
 
 ```bash
 # 必需
-SLACK_BOT_TOKEN=xoxb-your-bot-token-here
-SLACK_APP_TOKEN=xapp-your-app-token-here
+SLACK_BOT_TOKEN=placeholder-bot-token
+SLACK_APP_TOKEN=placeholder-app-level-token
 SLACK_ALLOWED_USERS=U01ABC2DEF3              # 逗号分隔的 Member ID
 
 # 可选
@@ -452,10 +452,10 @@ Hermes 可以使用单个 gateway 实例**同时连接多个 Slack 工作区**�
 
 ```bash
 # 多个 bot token——每个工作区一个
-SLACK_BOT_TOKEN=xoxb-workspace1-token,xoxb-workspace2-token,xoxb-workspace3-token
+SLACK_BOT_TOKEN=placeholder-workspace-one-bot-token,placeholder-workspace-two-bot-token,placeholder-workspace-three-bot-token
 
 # Socket Mode 仍使用单个 app-level token
-SLACK_APP_TOKEN=xapp-your-app-token
+SLACK_APP_TOKEN=placeholder-app-level-token
 ```
 
 或在 `~/.hermes/config.yaml` 中：
@@ -463,7 +463,7 @@ SLACK_APP_TOKEN=xapp-your-app-token
 ```yaml
 platforms:
   slack:
-    token: "fake_redacted_credential,xoxb-workspace2-token"
+    token: "placeholder-workspace-one-bot-token,placeholder-workspace-two-bot-token"
 ```
 
 ### OAuth Token 文件
