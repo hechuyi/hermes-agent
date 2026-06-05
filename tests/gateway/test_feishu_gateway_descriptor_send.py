@@ -121,6 +121,35 @@ def _event_types(calls):
     return [call.get("type") for call in calls if "type" in call]
 
 
+def _delivery_events(calls):
+    return [call for call in calls if call.get("type") in {"delivery_pending", "delivery_sent"}]
+
+
+def _assert_sent_matrix_events(
+    events,
+    *,
+    operation,
+    delivery_id,
+    target,
+    inbound_id,
+    session_id,
+    correlation_id,
+    message_id,
+):
+    pending, sent = _delivery_events(events)
+    assert pending["type"] == "delivery_pending"
+    assert pending["operation"] == operation
+    assert pending["delivery_id"] == delivery_id
+    assert pending["target"] == target
+    assert pending["inbound_id"] == inbound_id
+    assert pending["session_id"] == session_id
+    assert pending["correlation_id"] == correlation_id
+    assert sent["type"] == "delivery_sent"
+    assert sent["operation"] == operation
+    assert sent["delivery_id"] == delivery_id
+    assert sent["message_id"] == message_id
+
+
 def _delivery_record_action(
     *,
     delivery_id="delivery-reply",
@@ -415,6 +444,143 @@ async def test_reply_send_records_reply_operation(tmp_path):
     assert events[1]["operation"] == "reply"
     assert events[1]["delivery_id"] == "delivery-reply"
     assert events[1]["message_id"] == "om_reply"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "case",
+        "chat_id",
+        "reply_to",
+        "metadata",
+        "expected_operation",
+        "expected_message_id",
+        "expected_sdk_method",
+        "expected_target",
+    ),
+    [
+        (
+            "normal final",
+            "oc_chat",
+            None,
+            _metadata("turn-42-final-1"),
+            "normal_final_reply",
+            "om_created",
+            "create",
+            "feishu:chat:oc_chat",
+        ),
+        (
+            "direct reply",
+            "oc_chat",
+            "om_parent",
+            _metadata("om_parent-reply-1"),
+            "reply",
+            "om_reply",
+            "reply",
+            "feishu:chat:oc_chat",
+        ),
+        (
+            "queued follow-up first reply",
+            "oc_chat",
+            None,
+            {
+                **_metadata("queue-item-7:first-reply"),
+                "inbound_id": "queue-item-7",
+                "delivery_operation_hint": "queued_followup_first_reply",
+            },
+            "queued_followup_first_reply",
+            "om_created",
+            "create",
+            "feishu:chat:oc_chat",
+        ),
+        (
+            "stream fresh-final",
+            "oc_chat",
+            None,
+            {
+                **_metadata("stream-session-9:fresh-final"),
+                "inbound_id": "stream-session-9",
+                "delivery_operation_hint": "stream_fresh_final",
+            },
+            "stream_fresh_final",
+            "om_created",
+            "create",
+            "feishu:chat:oc_chat",
+        ),
+    ],
+)
+async def test_send_operation_matrix_covers_delivery_and_sdk_contract(
+    tmp_path,
+    case,
+    chat_id,
+    reply_to,
+    metadata,
+    expected_operation,
+    expected_message_id,
+    expected_sdk_method,
+    expected_target,
+):
+    adapter, message_api = _adapter(tmp_path)
+    timeline = []
+
+    async def apply(event):
+        timeline.append(("event", event))
+        return True
+
+    def create(request):
+        message_api.create_calls.append(request)
+        timeline.append(("sdk_create", request))
+        return _FakeResponse(message_id="om_created")
+
+    def reply(request):
+        message_api.reply_calls.append(request)
+        timeline.append(("sdk_reply", request))
+        return _FakeResponse(message_id="om_reply")
+
+    adapter._apply_gateway_event = apply
+    message_api.create = create
+    message_api.reply = reply
+
+    result = await adapter.send(chat_id, f"matrix payload: {case}", reply_to=reply_to, metadata=metadata)
+
+    assert result.success is True
+    assert result.message_id == expected_message_id
+    assert [entry[0] for entry in timeline] == [
+        "event",
+        f"sdk_{expected_sdk_method}",
+        "event",
+    ]
+    events = [entry[1] for entry in timeline if entry[0] == "event"]
+    delivery_id = events[0]["delivery_id"]
+    if expected_operation in {"queued_followup_first_reply", "stream_fresh_final"}:
+        assert delivery_id.startswith(f"{expected_operation}-")
+        assert delivery_id != metadata["delivery_id"]
+    else:
+        assert delivery_id == metadata["delivery_id"]
+    _assert_sent_matrix_events(
+        events,
+        operation=expected_operation,
+        delivery_id=delivery_id,
+        target=expected_target,
+        inbound_id=metadata["inbound_id"],
+        session_id=metadata["session_id"],
+        correlation_id=metadata["correlation_id"],
+        message_id=expected_message_id,
+    )
+
+    assert len(message_api.create_calls) + len(message_api.reply_calls) == 1
+    if expected_sdk_method == "create":
+        assert len(message_api.create_calls) == 1
+        request = message_api.create_calls[0]
+        assert request.receive_id_type == "chat_id"
+        assert request.request_body.receive_id == chat_id
+    else:
+        assert len(message_api.reply_calls) == 1
+        request = message_api.reply_calls[0]
+        assert request.message_id == reply_to
+        assert request.request_body.reply_in_thread is False
+    assert request.request_body.uuid == adapter._idempotency_key_for_delivery(delivery_id)
+    assert request.request_body.msg_type in {"text", "post"}
 
 
 @pytest.mark.asyncio
@@ -1145,6 +1311,50 @@ async def test_edit_validates_existing_message_id_and_records_sent_with_same_id(
 
 
 @pytest.mark.asyncio
+async def test_message_edit_operation_matrix_uses_existing_target_as_message_evidence(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    timeline = []
+
+    async def apply(event):
+        timeline.append(("event", event))
+        return True
+
+    def update(request):
+        message_api.update_calls.append(request)
+        timeline.append(("sdk_update", request))
+        return _FakeResponse(message_id=None)
+
+    adapter._apply_gateway_event = apply
+    message_api.update = update
+
+    result = await adapter.edit_message(
+        "oc_chat",
+        "om_existing",
+        "edited final",
+        metadata=_metadata("outbound-delivery-9-edit-1"),
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_existing"
+    assert [entry[0] for entry in timeline] == ["event", "sdk_update", "event"]
+    events = [entry[1] for entry in timeline if entry[0] == "event"]
+    _assert_sent_matrix_events(
+        events,
+        operation="message_edit",
+        delivery_id="outbound-delivery-9-edit-1",
+        target="feishu:message:om_existing",
+        inbound_id="inbound-1",
+        session_id="session-a",
+        correlation_id="corr-a",
+        message_id="om_existing",
+    )
+    assert len(message_api.update_calls) == 1
+    request = message_api.update_calls[0]
+    assert request.message_id == "om_existing"
+    assert request.request_body.msg_type in {"text", "post"}
+
+
+@pytest.mark.asyncio
 async def test_audited_edit_falls_back_to_text_on_post_rejection_response(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
@@ -1421,6 +1631,59 @@ async def test_status_card_create_action_executes_descriptor_and_writes_delivery
 
 
 @pytest.mark.asyncio
+async def test_status_card_create_operation_matrix_uses_descriptor_create_builder(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    timeline = []
+    descriptor = _create_descriptor('{"config":{"wide_screen_mode":true}}')
+
+    async def apply(event):
+        timeline.append(("event", event))
+        return True
+
+    def create(request):
+        message_api.create_calls.append(request)
+        timeline.append(("sdk_create", request))
+        return _FakeResponse(message_id="om_created")
+
+    adapter._apply_gateway_event = apply
+    message_api.create = create
+
+    result = await adapter.execute_status_card_action(
+        _status_card_create_action(feishu_request=descriptor),
+        delivery_id="delivery-card-create",
+        inbound_id="task-1:create",
+        session_id="session-a",
+        correlation_id="corr-a",
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_created"
+    assert descriptor["method"] == "POST"
+    assert descriptor["path"] == "/open-apis/im/v1/messages"
+    assert [entry[0] for entry in timeline] == ["event", "sdk_create", "event"]
+    events = [entry[1] for entry in timeline if entry[0] == "event"]
+    _assert_sent_matrix_events(
+        events,
+        operation="status_card_create",
+        delivery_id="delivery-card-create",
+        target="feishu:chat:oc_chat",
+        inbound_id="task-1:create",
+        session_id="session-a",
+        correlation_id="corr-a",
+        message_id="om_created",
+    )
+    assert len(message_api.create_calls) == 1
+    request = message_api.create_calls[0]
+    assert request.receive_id_type == descriptor["params"]["receive_id_type"]
+    assert request.request_body.receive_id == descriptor["body"]["receive_id"]
+    assert request.request_body.msg_type == "interactive"
+    assert request.request_body.content == descriptor["body"]["content"]
+    assert request.request_body.uuid == adapter._idempotency_key_for_delivery(
+        "delivery-card-create"
+    )
+
+
+@pytest.mark.asyncio
 async def test_status_card_update_action_executes_patch_descriptor(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
@@ -1441,6 +1704,56 @@ async def test_status_card_update_action_executes_patch_descriptor(tmp_path):
     assert events[0]["operation"] == "status_card_patch"
     assert events[1]["operation"] == "status_card_patch"
     assert events[-1]["message_id"] == "om_card"
+
+
+@pytest.mark.asyncio
+async def test_status_card_patch_operation_matrix_uses_descriptor_patch_builder(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    timeline = []
+    descriptor = _patch_descriptor('{"config":{"wide_screen_mode":true}}')
+
+    async def apply(event):
+        timeline.append(("event", event))
+        return True
+
+    def update(request):
+        message_api.update_calls.append(request)
+        timeline.append(("sdk_update", request))
+        return _FakeResponse(message_id=None)
+
+    adapter._apply_gateway_event = apply
+    message_api.update = update
+
+    result = await adapter.execute_status_card_action(
+        _status_card_update_action(feishu_request=descriptor),
+        delivery_id="delivery-card-patch",
+        inbound_id="task-1:patch-1",
+        session_id="session-a",
+        correlation_id="corr-a",
+    )
+
+    assert result.success is True
+    assert result.message_id == "om_card"
+    assert descriptor["method"] == "PATCH"
+    assert descriptor["path"] == "/open-apis/im/v1/messages/om_card"
+    assert [entry[0] for entry in timeline] == ["event", "sdk_update", "event"]
+    events = [entry[1] for entry in timeline if entry[0] == "event"]
+    _assert_sent_matrix_events(
+        events,
+        operation="status_card_patch",
+        delivery_id="delivery-card-patch",
+        target="feishu:message:om_card",
+        inbound_id="task-1:patch-1",
+        session_id="session-a",
+        correlation_id="corr-a",
+        message_id="om_card",
+    )
+    assert message_api.create_calls == []
+    assert len(message_api.update_calls) == 1
+    request = message_api.update_calls[0]
+    assert request.message_id == "om_card"
+    assert request.request_body.msg_type == "interactive"
+    assert request.request_body.content == descriptor["body"]["content"]
 
 
 @pytest.mark.asyncio

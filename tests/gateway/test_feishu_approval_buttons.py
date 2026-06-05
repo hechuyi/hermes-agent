@@ -81,6 +81,35 @@ def _event_types(calls):
     return [call.get("type") for call in calls if "type" in call]
 
 
+def _delivery_events(calls):
+    return [call for call in calls if call.get("type") in {"delivery_pending", "delivery_sent"}]
+
+
+def _assert_sent_matrix_events(
+    events,
+    *,
+    operation,
+    delivery_id,
+    target,
+    inbound_id,
+    session_id,
+    correlation_id,
+    message_id,
+):
+    pending, sent = _delivery_events(events)
+    assert pending["type"] == "delivery_pending"
+    assert pending["operation"] == operation
+    assert pending["delivery_id"] == delivery_id
+    assert pending["target"] == target
+    assert pending["inbound_id"] == inbound_id
+    assert pending["session_id"] == session_id
+    assert pending["correlation_id"] == correlation_id
+    assert sent["type"] == "delivery_sent"
+    assert sent["operation"] == operation
+    assert sent["delivery_id"] == delivery_id
+    assert sent["message_id"] == message_id
+
+
 def _delivery_record_action(
     *,
     delivery_id,
@@ -122,9 +151,15 @@ class _FakeResponse:
 
 class _FakeMessageApi:
     def __init__(self, *, update_delay=0):
+        self.create_calls = []
+        self.create_response = _FakeResponse(message_id="om_created")
         self.update_calls = []
         self.update_response = _FakeResponse(message_id="om_updated")
         self.update_delay = update_delay
+
+    def create(self, request):
+        self.create_calls.append(request)
+        return self.create_response
 
     def update(self, request):
         if self.update_delay:
@@ -259,6 +294,71 @@ class TestFeishuExecApproval:
         assert state["chat_id"] == "oc_12345"
         assert state["chat_type"] == "group"
         assert state["prompt_card"] == card
+
+    @pytest.mark.asyncio
+    async def test_approval_prompt_create_operation_matrix_uses_interactive_create_builder(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        message_api.create_response = _FakeResponse(message_id="om_approval_matrix")
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        timeline = []
+
+        async def apply(event):
+            timeline.append(("event", event))
+            return True
+
+        def create(request):
+            message_api.create_calls.append(request)
+            timeline.append(("sdk_create", request))
+            return message_api.create_response
+
+        adapter._apply_gateway_event = apply
+        message_api.create = create
+
+        result = await adapter.send_exec_approval(
+            chat_id="oc_12345",
+            command="echo matrix",
+            session_key="agent:main:feishu:group:oc_12345",
+            description="operation matrix",
+            metadata={
+                "inbound_id": "approval-prompt-1",
+                "session_id": "session-approval",
+                "correlation_id": "corr-approval",
+            },
+        )
+
+        assert result.success is True
+        assert result.message_id == "om_approval_matrix"
+        assert [entry[0] for entry in timeline] == ["event", "sdk_create", "event"]
+        events = [entry[1] for entry in timeline if entry[0] == "event"]
+        delivery_id = events[0]["delivery_id"]
+        assert delivery_id.startswith("approval_prompt_card_create-")
+        _assert_sent_matrix_events(
+            events,
+            operation="approval_prompt_card_create",
+            delivery_id=delivery_id,
+            target="feishu:chat:oc_12345",
+            inbound_id="approval-prompt-1",
+            session_id="session-approval",
+            correlation_id="corr-approval",
+            message_id="om_approval_matrix",
+        )
+        assert len(message_api.create_calls) == 1
+        request = message_api.create_calls[0]
+        assert request.receive_id_type == "chat_id"
+        assert request.request_body.receive_id == "oc_12345"
+        assert request.request_body.msg_type == "interactive"
+        assert request.request_body.uuid == adapter._idempotency_key_for_delivery(delivery_id)
+        card = json.loads(request.request_body.content)
+        action_values = _interactive_card_action_values(card)
+        assert {value.get("hermes_action") for value in action_values} == {
+            "approve_once",
+            "approve_session",
+            "approve_always",
+            "deny",
+        }
+        state = next(iter(adapter._approval_state.values()))
+        assert state["message_id"] == "om_approval_matrix"
 
     @pytest.mark.asyncio
     async def test_audited_pending_apply_failure_aborts_before_sdk_and_does_not_store_state(self, tmp_path):
@@ -499,6 +599,69 @@ class TestFeishuUpdatePrompt:
         assert state["chat_id"] == "oc_12345"
         assert state["thread_id"] == "th_1"
         assert state["prompt_card"] == card
+
+    @pytest.mark.asyncio
+    async def test_update_prompt_create_operation_matrix_is_distinct_from_approval_create(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        message_api.create_response = _FakeResponse(message_id="om_update_matrix")
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        timeline = []
+
+        async def apply(event):
+            timeline.append(("event", event))
+            return True
+
+        def create(request):
+            message_api.create_calls.append(request)
+            timeline.append(("sdk_create", request))
+            return message_api.create_response
+
+        adapter._apply_gateway_event = apply
+        message_api.create = create
+
+        result = await adapter.send_update_prompt(
+            chat_id="oc_12345",
+            prompt="Continue update?",
+            default="y",
+            session_key="agent:main:feishu:group:oc_12345",
+            metadata={
+                "thread_id": "th_update",
+                "inbound_id": "update-prompt-1",
+                "session_id": "session-update",
+                "correlation_id": "corr-update",
+            },
+        )
+
+        assert result.success is True
+        assert result.message_id == "om_update_matrix"
+        assert [entry[0] for entry in timeline] == ["event", "sdk_create", "event"]
+        events = [entry[1] for entry in timeline if entry[0] == "event"]
+        delivery_id = events[0]["delivery_id"]
+        assert delivery_id.startswith("update_prompt_card_create-")
+        _assert_sent_matrix_events(
+            events,
+            operation="update_prompt_card_create",
+            delivery_id=delivery_id,
+            target="feishu:chat:oc_12345",
+            inbound_id="update-prompt-1",
+            session_id="session-update",
+            correlation_id="corr-update",
+            message_id="om_update_matrix",
+        )
+        assert len(message_api.create_calls) == 1
+        request = message_api.create_calls[0]
+        assert request.receive_id_type == "chat_id"
+        assert request.request_body.receive_id == "oc_12345"
+        assert request.request_body.msg_type == "interactive"
+        assert request.request_body.uuid == adapter._idempotency_key_for_delivery(delivery_id)
+        card = json.loads(request.request_body.content)
+        action_values = _interactive_card_action_values(card)
+        assert {value.get("hermes_update_prompt_action") for value in action_values} == {"y", "n"}
+        assert {value.get("hermes_action") for value in action_values} == {None}
+        state = next(iter(adapter._update_prompt_state.values()))
+        assert state["message_id"] == "om_update_matrix"
+        assert state["thread_id"] == "th_update"
 
     @pytest.mark.asyncio
     async def test_audited_pending_apply_failure_aborts_before_sdk_and_does_not_store_prompt_state(self, tmp_path):
@@ -819,6 +982,69 @@ class TestResolveApproval:
         assert request.request_body.msg_type == "interactive"
         mock_resolve.assert_called_once_with("agent:main:feishu:group:oc_12345", "once")
         assert 10 not in adapter._approval_state
+
+    @pytest.mark.asyncio
+    async def test_approval_prompt_update_operation_matrix_uses_existing_message_evidence(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        timeline = []
+
+        async def apply(event):
+            timeline.append(("event", event))
+            return True
+
+        def update(request):
+            message_api.update_calls.append(request)
+            timeline.append(("sdk_update", request))
+            return _FakeResponse(message_id=None)
+
+        adapter._apply_gateway_event = apply
+        message_api.update = update
+        state = {
+            "session_key": "agent:main:feishu:group:oc_12345",
+            "message_id": "om_approval_matrix",
+            "inbound_id": "approval-prompt-1",
+            "session_id": "session-approval",
+            "correlation_id": "corr-approval",
+        }
+
+        updated = await adapter._audited_prompt_card_update(
+            operation="approval_prompt_card_update",
+            state=state,
+            prompt_id=10,
+            choice="once:attempt:1",
+            card={"elements": [], "header": {"title": {"content": "Approved"}}},
+        )
+
+        expected_delivery_id = adapter._delivery_id_for(
+            "approval_prompt_card_update",
+            metadata=None,
+            parts=[
+                "om_approval_matrix",
+                "agent:main:feishu:group:oc_12345",
+                "10",
+                "once:attempt:1",
+            ],
+        )
+        assert updated is True
+        assert [entry[0] for entry in timeline] == ["event", "sdk_update", "event"]
+        events = [entry[1] for entry in timeline if entry[0] == "event"]
+        _assert_sent_matrix_events(
+            events,
+            operation="approval_prompt_card_update",
+            delivery_id=expected_delivery_id,
+            target="feishu:message:om_approval_matrix",
+            inbound_id="approval-prompt-1",
+            session_id="session-approval",
+            correlation_id="corr-approval",
+            message_id="om_approval_matrix",
+        )
+        assert len(message_api.update_calls) == 1
+        request = message_api.update_calls[0]
+        assert request.message_id == "om_approval_matrix"
+        assert request.request_body.msg_type == "interactive"
+        assert json.loads(request.request_body.content)["header"]["title"]["content"] == "Approved"
 
     @pytest.mark.asyncio
     async def test_approval_audited_resolution_keeps_state_and_releases_claim_when_side_effect_fails(
@@ -1808,6 +2034,74 @@ class TestResolveUpdatePrompt:
         assert request.request_body.msg_type == "interactive"
         assert (hermes_home / ".update_response").read_text() == "y"
         assert 9 not in adapter._update_prompt_state
+
+    @pytest.mark.asyncio
+    async def test_update_prompt_update_operation_matrix_is_distinct_from_approval_update(
+        self,
+        tmp_path,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        timeline = []
+
+        async def apply(event):
+            timeline.append(("event", event))
+            return True
+
+        def update(request):
+            message_api.update_calls.append(request)
+            timeline.append(("sdk_update", request))
+            return _FakeResponse(message_id=None)
+
+        adapter._apply_gateway_event = apply
+        message_api.update = update
+        state = {
+            "session_key": "agent:main:feishu:group:oc_12345",
+            "message_id": "om_update_matrix",
+            "inbound_id": "update-prompt-1",
+            "session_id": "session-update",
+            "correlation_id": "corr-update",
+        }
+
+        updated = await adapter._audited_prompt_card_update(
+            operation="update_prompt_card_update",
+            state=state,
+            prompt_id=9,
+            choice="y:attempt:1",
+            card=adapter._build_resolved_update_prompt_card(answer="y", user_name="Alice"),
+        )
+
+        expected_delivery_id = adapter._delivery_id_for(
+            "update_prompt_card_update",
+            metadata=None,
+            parts=[
+                "om_update_matrix",
+                "agent:main:feishu:group:oc_12345",
+                "9",
+                "y:attempt:1",
+            ],
+        )
+        assert updated is True
+        assert [entry[0] for entry in timeline] == ["event", "sdk_update", "event"]
+        events = [entry[1] for entry in timeline if entry[0] == "event"]
+        _assert_sent_matrix_events(
+            events,
+            operation="update_prompt_card_update",
+            delivery_id=expected_delivery_id,
+            target="feishu:message:om_update_matrix",
+            inbound_id="update-prompt-1",
+            session_id="session-update",
+            correlation_id="corr-update",
+            message_id="om_update_matrix",
+        )
+        assert len(message_api.update_calls) == 1
+        request = message_api.update_calls[0]
+        assert request.message_id == "om_update_matrix"
+        assert request.request_body.msg_type == "interactive"
+        card = json.loads(request.request_body.content)
+        assert "answered: Yes" in card["header"]["title"]["content"]
+        assert _interactive_card_action_values(card) == []
 
     @pytest.mark.asyncio
     async def test_update_prompt_audited_resolution_keeps_state_and_releases_claim_when_side_effect_fails(
