@@ -3230,10 +3230,6 @@ class FeishuAdapter(BasePlatformAdapter):
             if not card_updated:
                 self._release_audited_prompt_resolution_claim(state, claim)
                 return
-        state = self._approval_state.pop(approval_id, None)
-        if not state:
-            logger.debug("[Feishu] Approval %s already resolved while validating callback", approval_id)
-            return
         try:
             from tools.approval import resolve_gateway_approval
             count = resolve_gateway_approval(state["session_key"], choice)
@@ -3243,6 +3239,10 @@ class FeishuAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
+            if self._hermes_tools_state_dir is not None:
+                self._release_audited_prompt_resolution_claim(state, claim)
+            return
+        self._approval_state.pop(approval_id, None)
 
     async def _resolve_update_prompt(self, prompt_id: Any, answer: str, user_name: str) -> None:
         """Persist an update prompt answer for the detached update process."""
@@ -3269,10 +3269,6 @@ class FeishuAdapter(BasePlatformAdapter):
             if not card_updated:
                 self._release_audited_prompt_resolution_claim(state, claim)
                 return
-        state = self._update_prompt_state.pop(prompt_id, None)
-        if not state:
-            logger.debug("[Feishu] Update prompt %s already resolved while validating callback", prompt_id)
-            return
         try:
             self._write_update_prompt_response(answer)
             logger.info(
@@ -3281,6 +3277,10 @@ class FeishuAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             logger.error("Failed to resolve Feishu update prompt: %s", exc)
+            if self._hermes_tools_state_dir is not None:
+                self._release_audited_prompt_resolution_claim(state, claim)
+            return
+        self._update_prompt_state.pop(prompt_id, None)
 
     async def _handle_reaction_event(self, event_type: str, data: Any) -> None:
         """Fetch the reacted-to message; if it was sent by this bot, emit a synthetic text event."""

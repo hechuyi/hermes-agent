@@ -632,6 +632,58 @@ class TestResolveApproval:
         assert 10 not in adapter._approval_state
 
     @pytest.mark.asyncio
+    async def test_approval_audited_resolution_keeps_state_and_releases_claim_when_side_effect_fails(
+        self,
+        tmp_path,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        _install_event_recorder(adapter)
+        adapter._approval_state[12] = {
+            "session_key": "agent:main:feishu:group:oc_12345",
+            "message_id": "om_approval_12",
+            "chat_id": "oc_12345",
+            "inbound_id": "inbound-approval",
+            "session_id": "session-approval",
+            "correlation_id": "corr-approval",
+        }
+        resolved = []
+
+        def resolve(session_key, choice):
+            resolved.append((session_key, choice))
+            if len(resolved) == 1:
+                raise RuntimeError("approval store unavailable")
+            return 1
+
+        with patch("tools.approval.resolve_gateway_approval", side_effect=resolve):
+            await adapter._resolve_approval(
+                12,
+                "once",
+                "Alice",
+                open_id="ou_user1",
+                chat_id="oc_12345",
+            )
+
+            assert 12 in adapter._approval_state
+            assert "resolution_claim" not in adapter._approval_state[12]
+
+            await adapter._resolve_approval(
+                12,
+                "once",
+                "Alice",
+                open_id="ou_user1",
+                chat_id="oc_12345",
+            )
+
+        assert resolved == [
+            ("agent:main:feishu:group:oc_12345", "once"),
+            ("agent:main:feishu:group:oc_12345", "once"),
+        ]
+        assert len(message_api.update_calls) == 2
+        assert 12 not in adapter._approval_state
+
+    @pytest.mark.asyncio
     async def test_approval_audited_conflicting_concurrent_resolutions_single_card_update_matches_side_effect(
         self,
         tmp_path,
@@ -1411,6 +1463,51 @@ class TestResolveUpdatePrompt:
         assert request.request_body.msg_type == "interactive"
         assert (hermes_home / ".update_response").read_text() == "y"
         assert 9 not in adapter._update_prompt_state
+
+    @pytest.mark.asyncio
+    async def test_update_prompt_audited_resolution_keeps_state_and_releases_claim_when_side_effect_fails(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        _install_event_recorder(adapter)
+        original_write_response = adapter._write_update_prompt_response
+        writes = []
+
+        def write_response(answer):
+            writes.append(answer)
+            if len(writes) == 1:
+                raise RuntimeError("response store unavailable")
+            original_write_response(answer)
+
+        monkeypatch.setattr(adapter, "_write_update_prompt_response", write_response)
+        adapter._update_prompt_state[12] = {
+            "session_key": "agent:main:feishu:group:oc_12345",
+            "message_id": "om_update_12",
+            "chat_id": "oc_12345",
+            "inbound_id": "inbound-update",
+            "session_id": "session-update",
+            "correlation_id": "corr-update",
+        }
+
+        await adapter._resolve_update_prompt(12, "y", "Alice")
+
+        assert 12 in adapter._update_prompt_state
+        assert "resolution_claim" not in adapter._update_prompt_state[12]
+        assert not (hermes_home / ".update_response").exists()
+
+        await adapter._resolve_update_prompt(12, "y", "Alice")
+
+        assert writes == ["y", "y"]
+        assert len(message_api.update_calls) == 2
+        assert (hermes_home / ".update_response").read_text() == "y"
+        assert 12 not in adapter._update_prompt_state
 
     @pytest.mark.asyncio
     async def test_update_prompt_audited_patch_pending_failure_does_not_write_response(
