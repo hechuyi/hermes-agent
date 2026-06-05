@@ -48,6 +48,7 @@ user is seen through different apps in the future.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import hmac
 import itertools
@@ -2152,6 +2153,8 @@ class FeishuAdapter(BasePlatformAdapter):
                 if self._hermes_tools_state_dir is not None:
                     approval_state.update(
                         {
+                            "prompt_card": copy.deepcopy(card),
+                            "resolution_attempt": 0,
                             "inbound_id": self._delivery_metadata(metadata, "inbound_id", chat_id),
                             "session_id": self._delivery_metadata(
                                 metadata, "session_id", session_key or "session"
@@ -2218,10 +2221,12 @@ class FeishuAdapter(BasePlatformAdapter):
                 session_key=session_key,
                 metadata=metadata,
             )
-            payload = json.dumps(
-                self._build_update_prompt_card(prompt=prompt, default=default, prompt_id=prompt_id),
-                ensure_ascii=False,
+            card_payload = self._build_update_prompt_card(
+                prompt=prompt,
+                default=default,
+                prompt_id=prompt_id,
             )
+            payload = json.dumps(card_payload, ensure_ascii=False)
             try:
                 card_payload = json.loads(payload)
                 for element in card_payload.get("elements", []):
@@ -2283,6 +2288,8 @@ class FeishuAdapter(BasePlatformAdapter):
                 if self._hermes_tools_state_dir is not None:
                     prompt_state.update(
                         {
+                            "prompt_card": copy.deepcopy(card_payload),
+                            "resolution_attempt": 0,
                             "inbound_id": self._delivery_metadata(metadata, "inbound_id", chat_id),
                             "session_id": self._delivery_metadata(
                                 metadata, "session_id", session_key or "session"
@@ -3132,7 +3139,22 @@ class FeishuAdapter(BasePlatformAdapter):
         if state.get("resolution_claim") == claim:
             state.pop("resolution_claim", None)
 
-    async def _audited_resolved_prompt_card_update(
+    @staticmethod
+    def _next_prompt_resolution_attempt(state: Dict[str, Any]) -> int:
+        try:
+            current = int(state.get("resolution_attempt", 0))
+        except (TypeError, ValueError):
+            current = 0
+        attempt = current + 1
+        state["resolution_attempt"] = attempt
+        return attempt
+
+    @staticmethod
+    def _prompt_card_from_state(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        card = state.get("prompt_card")
+        return copy.deepcopy(card) if isinstance(card, dict) else None
+
+    async def _audited_prompt_card_update(
         self,
         *,
         operation: str,
@@ -3141,7 +3163,7 @@ class FeishuAdapter(BasePlatformAdapter):
         choice: str,
         card: Dict[str, Any],
     ) -> bool:
-        """Patch a resolved prompt card through the delivery ledger before side effects."""
+        """Patch a prompt card through the delivery ledger."""
         if not self._client:
             logger.warning("[Feishu] Cannot audit %s: client not connected", operation)
             return False
@@ -3180,12 +3202,41 @@ class FeishuAdapter(BasePlatformAdapter):
         )
         if isinstance(response_or_result, SendResult):
             logger.warning(
-                "[Feishu] Audited %s failed before prompt side effect: %s",
+                "[Feishu] Audited %s failed for prompt card update: %s",
                 operation,
                 response_or_result.error or "unknown",
             )
             return False
         return True
+
+    async def _restore_audited_prompt_card_after_side_effect_failure(
+        self,
+        *,
+        operation: str,
+        state: Dict[str, Any],
+        prompt_id: Any,
+        choice: str,
+        attempt: int,
+    ) -> None:
+        card = self._prompt_card_from_state(state)
+        if card is None:
+            logger.warning(
+                "[Feishu] Cannot restore prompt %s after side-effect failure: missing prompt_card",
+                prompt_id,
+            )
+            return
+        restored = await self._audited_prompt_card_update(
+            operation=operation,
+            state=state,
+            prompt_id=prompt_id,
+            choice=f"{choice}:attempt:{attempt}:retry",
+            card=card,
+        )
+        if not restored:
+            logger.warning(
+                "[Feishu] Failed to restore actionable prompt card for prompt %s",
+                prompt_id,
+            )
 
     async def _resolve_approval(
         self,
@@ -3220,11 +3271,12 @@ class FeishuAdapter(BasePlatformAdapter):
             if claim is None:
                 logger.debug("[Feishu] Approval %s resolution already in progress", approval_id)
                 return
-            card_updated = await self._audited_resolved_prompt_card_update(
+            attempt = self._next_prompt_resolution_attempt(state)
+            card_updated = await self._audited_prompt_card_update(
                 operation="approval_prompt_card_update",
                 state=state,
                 prompt_id=approval_id,
-                choice=choice,
+                choice=f"{choice}:attempt:{attempt}",
                 card=self._build_resolved_approval_card(choice=choice, user_name=user_name),
             )
             if not card_updated:
@@ -3240,6 +3292,13 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
             if self._hermes_tools_state_dir is not None:
+                await self._restore_audited_prompt_card_after_side_effect_failure(
+                    operation="approval_prompt_card_update",
+                    state=state,
+                    prompt_id=approval_id,
+                    choice=choice,
+                    attempt=attempt,
+                )
                 self._release_audited_prompt_resolution_claim(state, claim)
             return
         self._approval_state.pop(approval_id, None)
@@ -3259,11 +3318,12 @@ class FeishuAdapter(BasePlatformAdapter):
             if claim is None:
                 logger.debug("[Feishu] Update prompt %s resolution already in progress", prompt_id)
                 return
-            card_updated = await self._audited_resolved_prompt_card_update(
+            attempt = self._next_prompt_resolution_attempt(state)
+            card_updated = await self._audited_prompt_card_update(
                 operation="update_prompt_card_update",
                 state=state,
                 prompt_id=prompt_id,
-                choice=answer,
+                choice=f"{answer}:attempt:{attempt}",
                 card=self._build_resolved_update_prompt_card(answer=answer, user_name=user_name),
             )
             if not card_updated:
@@ -3278,6 +3338,13 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.error("Failed to resolve Feishu update prompt: %s", exc)
             if self._hermes_tools_state_dir is not None:
+                await self._restore_audited_prompt_card_after_side_effect_failure(
+                    operation="update_prompt_card_update",
+                    state=state,
+                    prompt_id=prompt_id,
+                    choice=answer,
+                    attempt=attempt,
+                )
                 self._release_audited_prompt_resolution_claim(state, claim)
             return
         self._update_prompt_state.pop(prompt_id, None)

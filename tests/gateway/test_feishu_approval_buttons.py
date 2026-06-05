@@ -106,8 +106,24 @@ class _FakeMessageApi:
 
 
 def _interactive_card_title_from_update_request(request) -> str:
-    card = json.loads(request.request_body.content)
+    card = _interactive_card_from_update_request(request)
     return card["header"]["title"]["content"]
+
+
+def _interactive_card_from_update_request(request) -> dict:
+    return json.loads(request.request_body.content)
+
+
+def _interactive_card_action_values(card: dict) -> list[dict]:
+    values = []
+    for element in card.get("elements", []):
+        if not isinstance(element, dict) or element.get("tag") != "action":
+            continue
+        for action in element.get("actions", []):
+            value = action.get("value") if isinstance(action, dict) else None
+            if isinstance(value, dict):
+                values.append(value)
+    return values
 
 
 def _make_card_action_data(
@@ -203,6 +219,7 @@ class TestFeishuExecApproval:
         assert state["message_id"] == "om_approval"
         assert state["chat_id"] == "oc_12345"
         assert state["chat_type"] == "group"
+        assert state["prompt_card"] == card
 
     @pytest.mark.asyncio
     async def test_audited_pending_apply_failure_aborts_before_sdk_and_does_not_store_state(self, tmp_path):
@@ -442,6 +459,7 @@ class TestFeishuUpdatePrompt:
         assert state["message_id"] == "om_update_prompt"
         assert state["chat_id"] == "oc_12345"
         assert state["thread_id"] == "th_1"
+        assert state["prompt_card"] == card
 
     @pytest.mark.asyncio
     async def test_audited_pending_apply_failure_aborts_before_sdk_and_does_not_store_prompt_state(self, tmp_path):
@@ -639,15 +657,27 @@ class TestResolveApproval:
         adapter = _make_audited_adapter(tmp_path)
         message_api = _FakeMessageApi()
         adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
-        _install_event_recorder(adapter)
-        adapter._approval_state[12] = {
-            "session_key": "agent:main:feishu:group:oc_12345",
-            "message_id": "om_approval_12",
-            "chat_id": "oc_12345",
-            "inbound_id": "inbound-approval",
-            "session_id": "session-approval",
-            "correlation_id": "corr-approval",
-        }
+        events = _install_event_recorder(adapter)
+        with patch.object(
+            adapter,
+            "_send_raw_message",
+            new_callable=AsyncMock,
+            return_value=_FakeResponse(message_id="om_approval_12"),
+        ):
+            result = await adapter.send_exec_approval(
+                chat_id="oc_12345",
+                command="rm -rf /important",
+                session_key="agent:main:feishu:group:oc_12345",
+                description="dangerous deletion",
+                metadata={
+                    "inbound_id": "inbound-approval",
+                    "session_id": "session-approval",
+                    "correlation_id": "corr-approval",
+                },
+            )
+        assert result.success is True
+        approval_id = next(iter(adapter._approval_state))
+        events.clear()
         resolved = []
 
         def resolve(session_key, choice):
@@ -658,18 +688,28 @@ class TestResolveApproval:
 
         with patch("tools.approval.resolve_gateway_approval", side_effect=resolve):
             await adapter._resolve_approval(
-                12,
+                approval_id,
                 "once",
                 "Alice",
                 open_id="ou_user1",
                 chat_id="oc_12345",
             )
 
-            assert 12 in adapter._approval_state
-            assert "resolution_claim" not in adapter._approval_state[12]
+            assert approval_id in adapter._approval_state
+            assert "resolution_claim" not in adapter._approval_state[approval_id]
+            assert len(message_api.update_calls) == 2
+            retry_card = _interactive_card_from_update_request(message_api.update_calls[1])
+            retry_values = _interactive_card_action_values(retry_card)
+            assert {value.get("hermes_action") for value in retry_values} == {
+                "approve_once",
+                "approve_session",
+                "approve_always",
+                "deny",
+            }
+            assert {value.get("approval_id") for value in retry_values} == {approval_id}
 
             await adapter._resolve_approval(
-                12,
+                approval_id,
                 "once",
                 "Alice",
                 open_id="ou_user1",
@@ -680,8 +720,11 @@ class TestResolveApproval:
             ("agent:main:feishu:group:oc_12345", "once"),
             ("agent:main:feishu:group:oc_12345", "once"),
         ]
-        assert len(message_api.update_calls) == 2
-        assert 12 not in adapter._approval_state
+        assert len(message_api.update_calls) == 3
+        sent_ids = [event["delivery_id"] for event in events if event["type"] == "delivery_sent"]
+        assert len(sent_ids) == 3
+        assert len(set(sent_ids)) == 3
+        assert approval_id not in adapter._approval_state
 
     @pytest.mark.asyncio
     async def test_approval_audited_conflicting_concurrent_resolutions_single_card_update_matches_side_effect(
@@ -1476,7 +1519,27 @@ class TestResolveUpdatePrompt:
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-        _install_event_recorder(adapter)
+        events = _install_event_recorder(adapter)
+        with patch.object(
+            adapter,
+            "_send_raw_message",
+            new_callable=AsyncMock,
+            return_value=_FakeResponse(message_id="om_update_12"),
+        ):
+            result = await adapter.send_update_prompt(
+                chat_id="oc_12345",
+                prompt="Restore stashed changes after update?",
+                default="y",
+                session_key="agent:main:feishu:group:oc_12345",
+                metadata={
+                    "inbound_id": "inbound-update",
+                    "session_id": "session-update",
+                    "correlation_id": "corr-update",
+                },
+            )
+        assert result.success is True
+        prompt_id = next(iter(adapter._update_prompt_state))
+        events.clear()
         original_write_response = adapter._write_update_prompt_response
         writes = []
 
@@ -1487,27 +1550,27 @@ class TestResolveUpdatePrompt:
             original_write_response(answer)
 
         monkeypatch.setattr(adapter, "_write_update_prompt_response", write_response)
-        adapter._update_prompt_state[12] = {
-            "session_key": "agent:main:feishu:group:oc_12345",
-            "message_id": "om_update_12",
-            "chat_id": "oc_12345",
-            "inbound_id": "inbound-update",
-            "session_id": "session-update",
-            "correlation_id": "corr-update",
-        }
 
-        await adapter._resolve_update_prompt(12, "y", "Alice")
+        await adapter._resolve_update_prompt(prompt_id, "y", "Alice")
 
-        assert 12 in adapter._update_prompt_state
-        assert "resolution_claim" not in adapter._update_prompt_state[12]
+        assert prompt_id in adapter._update_prompt_state
+        assert "resolution_claim" not in adapter._update_prompt_state[prompt_id]
         assert not (hermes_home / ".update_response").exists()
+        assert len(message_api.update_calls) == 2
+        retry_card = _interactive_card_from_update_request(message_api.update_calls[1])
+        retry_values = _interactive_card_action_values(retry_card)
+        assert {value.get("hermes_update_prompt_action") for value in retry_values} == {"y", "n"}
+        assert {value.get("update_prompt_id") for value in retry_values} == {prompt_id}
 
-        await adapter._resolve_update_prompt(12, "y", "Alice")
+        await adapter._resolve_update_prompt(prompt_id, "y", "Alice")
 
         assert writes == ["y", "y"]
-        assert len(message_api.update_calls) == 2
+        assert len(message_api.update_calls) == 3
+        sent_ids = [event["delivery_id"] for event in events if event["type"] == "delivery_sent"]
+        assert len(sent_ids) == 3
+        assert len(set(sent_ids)) == 3
         assert (hermes_home / ".update_response").read_text() == "y"
-        assert 12 not in adapter._update_prompt_state
+        assert prompt_id not in adapter._update_prompt_state
 
     @pytest.mark.asyncio
     async def test_update_prompt_audited_patch_pending_failure_does_not_write_response(
