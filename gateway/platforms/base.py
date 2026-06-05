@@ -153,6 +153,26 @@ def _merge_event_delivery_metadata(metadata: dict | None, event) -> dict | None:
     return merged or None
 
 
+def _delivery_leg_metadata(metadata: dict | None, leg_key: str) -> dict | None:
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("delivery_operation_hint")
+        != _QUEUED_FOLLOWUP_FIRST_REPLY_OPERATION
+    ):
+        return metadata
+    delivery_id = metadata.get("delivery_id")
+    if not isinstance(delivery_id, str) or not delivery_id.strip():
+        return metadata
+    seed = f"{delivery_id}\x1f{leg_key}"
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+    derived_id = f"{delivery_id}:leg:{digest}"
+    if len(derived_id) > 127 or not _DELIVERY_IDENTIFIER_RE.fullmatch(derived_id):
+        derived_id = f"{_QUEUED_FOLLOWUP_FIRST_REPLY_OPERATION}:{digest}"
+    leg_metadata = dict(metadata)
+    leg_metadata["delivery_id"] = derived_id
+    return leg_metadata
+
+
 def _reply_anchor_for_event(event) -> str | None:
     """Return reply_to id for platforms that need reply semantics.
 
@@ -2257,10 +2277,14 @@ class BasePlatformAdapter(ABC):
         """
         from urllib.parse import unquote as _unquote
 
-        for image_url, alt_text in images:
+        for image_index, (image_url, alt_text) in enumerate(images):
             if human_delay > 0:
                 await asyncio.sleep(human_delay)
             try:
+                image_metadata = _delivery_leg_metadata(
+                    metadata,
+                    f"image:{image_index}:{image_url}",
+                )
                 logger.info(
                     "[%s] Sending image: %s (alt=%s)",
                     self.name,
@@ -2272,21 +2296,21 @@ class BasePlatformAdapter(ABC):
                         chat_id=chat_id,
                         image_path=_unquote(image_url[7:]),
                         caption=alt_text if alt_text else None,
-                        metadata=metadata,
+                        metadata=image_metadata,
                     )
                 elif self._is_animation_url(image_url):
                     img_result = await self.send_animation(
                         chat_id=chat_id,
                         animation_url=image_url,
                         caption=alt_text if alt_text else None,
-                        metadata=metadata,
+                        metadata=image_metadata,
                     )
                 else:
                     img_result = await self.send_image(
                         chat_id=chat_id,
                         image_url=image_url,
                         caption=alt_text if alt_text else None,
-                        metadata=metadata,
+                        metadata=image_metadata,
                     )
                 if not img_result.success:
                     logger.error("[%s] Failed to send image: %s", self.name, img_result.error)
@@ -3783,7 +3807,10 @@ class BasePlatformAdapter(ABC):
                             chat_id=event.source.chat_id,
                             audio_path=_tts_path,
                             caption=telegram_tts_caption,
-                            metadata=_thread_metadata,
+                            metadata=_delivery_leg_metadata(
+                                _merge_event_delivery_metadata(_thread_metadata, event),
+                                f"tts:{_tts_path}",
+                            ),
                         )
                         _tts_caption_delivered = bool(
                             telegram_tts_caption and getattr(tts_result, "success", False)
@@ -3839,6 +3866,10 @@ class BasePlatformAdapter(ABC):
 
                 # Human-like pacing delay between text and media
                 human_delay = self._get_human_delay()
+                _media_metadata = _merge_event_delivery_metadata(
+                    _thread_metadata,
+                    event,
+                )
 
                 # Send extracted images as native attachments
                 if images:
@@ -3847,7 +3878,10 @@ class BasePlatformAdapter(ABC):
                         await self.send_multiple_images(
                             chat_id=event.source.chat_id,
                             images=images,
-                            metadata=_thread_metadata,
+                            metadata=_delivery_leg_metadata(
+                                _media_metadata,
+                                "images",
+                            ),
                             human_delay=human_delay,
                         )
                     except Exception as batch_err:
@@ -3889,34 +3923,41 @@ class BasePlatformAdapter(ABC):
                         await self.send_multiple_images(
                             chat_id=event.source.chat_id,
                             images=_batch,
-                            metadata=_thread_metadata,
+                            metadata=_delivery_leg_metadata(
+                                _media_metadata,
+                                "image_files",
+                            ),
                             human_delay=human_delay,
                         )
                     except Exception as batch_err:
                         logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
 
-                for media_path, is_voice in _non_image_media:
+                for media_index, (media_path, is_voice) in enumerate(_non_image_media):
                     if human_delay > 0:
                         await asyncio.sleep(human_delay)
                     try:
                         ext = Path(media_path).suffix.lower()
+                        media_metadata = _delivery_leg_metadata(
+                            _media_metadata,
+                            f"media:{media_index}:{media_path}",
+                        )
                         if should_send_media_as_audio(self.platform, ext, is_voice=is_voice):
                             media_result = await self.send_voice(
                                 chat_id=event.source.chat_id,
                                 audio_path=media_path,
-                                metadata=_thread_metadata,
+                                metadata=media_metadata,
                             )
                         elif ext in _VIDEO_EXTS:
                             media_result = await self.send_video(
                                 chat_id=event.source.chat_id,
                                 video_path=media_path,
-                                metadata=_thread_metadata,
+                                metadata=media_metadata,
                             )
                         else:
                             media_result = await self.send_document(
                                 chat_id=event.source.chat_id,
                                 file_path=media_path,
-                                metadata=_thread_metadata,
+                                metadata=media_metadata,
                             )
 
                         if not media_result.success:
@@ -3925,22 +3966,26 @@ class BasePlatformAdapter(ABC):
                         logger.warning("[%s] Error sending media: %s", self.name, media_err)
 
                 # Send auto-detected local non-image files as native attachments
-                for file_path in _non_image_local:
+                for file_index, file_path in enumerate(_non_image_local):
                     if human_delay > 0:
                         await asyncio.sleep(human_delay)
                     try:
                         ext = Path(file_path).suffix.lower()
+                        file_metadata = _delivery_leg_metadata(
+                            _media_metadata,
+                            f"local:{file_index}:{file_path}",
+                        )
                         if ext in _VIDEO_EXTS:
                             await self.send_video(
                                 chat_id=event.source.chat_id,
                                 video_path=file_path,
-                                metadata=_thread_metadata,
+                                metadata=file_metadata,
                             )
                         else:
                             await self.send_document(
                                 chat_id=event.source.chat_id,
                                 file_path=file_path,
-                                metadata=_thread_metadata,
+                                metadata=file_metadata,
                             )
                     except Exception as file_err:
                         logger.error("[%s] Error sending local file %s: %s", self.name, file_path, file_err)

@@ -273,6 +273,107 @@ async def test_pending_drain_first_reply_carries_queued_followup_delivery_metada
 
 
 @pytest.mark.asyncio
+async def test_pending_drain_media_only_first_reply_carries_queued_followup_delivery_metadata():
+    adapter = _make_adapter()
+    sk = build_session_key(_make_feishu_event().source)
+    sent = []
+
+    async def send_with_retry(**kwargs):
+        sent.append(("text", kwargs))
+        return SimpleNamespace(success=True, message_id=f"sent-{len(sent)}")
+
+    async def send_image(**kwargs):
+        sent.append(("image", kwargs))
+        return SimpleNamespace(success=True, message_id=f"sent-{len(sent)}")
+
+    adapter._send_with_retry = send_with_retry
+    adapter.send_image = send_image
+    processed = []
+
+    async def handler(event):
+        processed.append(event.text)
+        if event.text == "M1":
+            adapter._pending_messages[sk] = _make_feishu_event(
+                text="M2",
+                message_id="om_media_only",
+            )
+            return "reply-M1"
+        return "![chart](https://example.test/chart.png)"
+
+    adapter._message_handler = handler
+
+    await adapter._process_message_background(_make_feishu_event(text="M1"), sk)
+
+    for _ in range(50):
+        if processed == ["M1", "M2"] and len(sent) == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    await adapter.cancel_background_tasks()
+
+    assert processed == ["M1", "M2"]
+    assert [kind for kind, _ in sent] == ["text", "image"]
+    first_metadata = sent[0][1]["metadata"]
+    image_metadata = sent[1][1]["metadata"]
+    assert first_metadata.get("delivery_operation_hint") != "queued_followup_first_reply"
+    assert image_metadata["delivery_operation_hint"] == "queued_followup_first_reply"
+    assert image_metadata["delivery_id"]
+    assert image_metadata["inbound_id"] == "om_media_only"
+
+
+@pytest.mark.asyncio
+async def test_pending_drain_text_and_media_first_reply_uses_distinct_queued_delivery_ids():
+    adapter = _make_adapter()
+    sk = build_session_key(_make_feishu_event().source)
+    sent = []
+
+    async def send_with_retry(**kwargs):
+        sent.append(("text", kwargs))
+        return SimpleNamespace(success=True, message_id=f"sent-{len(sent)}")
+
+    async def send_image(**kwargs):
+        sent.append(("image", kwargs))
+        return SimpleNamespace(success=True, message_id=f"sent-{len(sent)}")
+
+    adapter._send_with_retry = send_with_retry
+    adapter.send_image = send_image
+    processed = []
+
+    async def handler(event):
+        processed.append(event.text)
+        if event.text == "M1":
+            adapter._pending_messages[sk] = _make_feishu_event(
+                text="M2",
+                message_id="om_text_media",
+            )
+            return "reply-M1"
+        return "queued text\n![chart](https://example.test/chart.png)"
+
+    adapter._message_handler = handler
+
+    await adapter._process_message_background(_make_feishu_event(text="M1"), sk)
+
+    for _ in range(50):
+        if processed == ["M1", "M2"] and len(sent) == 3:
+            break
+        await asyncio.sleep(0.01)
+
+    await adapter.cancel_background_tasks()
+
+    assert processed == ["M1", "M2"]
+    assert [kind for kind, _ in sent] == ["text", "text", "image"]
+    first_metadata = sent[0][1]["metadata"]
+    text_metadata = sent[1][1]["metadata"]
+    image_metadata = sent[2][1]["metadata"]
+    assert first_metadata.get("delivery_operation_hint") != "queued_followup_first_reply"
+    assert text_metadata["delivery_operation_hint"] == "queued_followup_first_reply"
+    assert image_metadata["delivery_operation_hint"] == "queued_followup_first_reply"
+    assert text_metadata["inbound_id"] == "om_text_media"
+    assert image_metadata["inbound_id"] == "om_text_media"
+    assert text_metadata["delivery_id"] != image_metadata["delivery_id"]
+
+
+@pytest.mark.asyncio
 async def test_late_pending_drain_first_reply_carries_queued_followup_delivery_metadata():
     adapter = _make_adapter()
     first_event = _make_feishu_event(text="M1", message_id="om_first")
