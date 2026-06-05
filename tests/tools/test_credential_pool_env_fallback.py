@@ -67,7 +67,7 @@ class TestCredentialPoolSeedsFromDotEnv:
 
     def test_deepseek_key_from_dotenv_only(self, isolated_hermes_home):
         """Key in .env but not os.environ → _seed_from_env adds a pool entry."""
-        _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY="sk-dotenv-only-12345")
+        _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY="sk-REDACTED")
         assert "DEEPSEEK_API_KEY" not in os.environ
 
         from agent.credential_pool import _seed_from_env
@@ -77,14 +77,14 @@ class TestCredentialPoolSeedsFromDotEnv:
         assert changed is True
         assert "env:DEEPSEEK_API_KEY" in active_sources
         assert any(
-            e.access_token == "sk-dotenv-only-12345"
+            e.access_token == "sk-REDACTED"
             and e.source == "env:DEEPSEEK_API_KEY"
             for e in entries
         ), f"Expected seeded entry with dotenv key, got: {[(e.source, e.access_token) for e in entries]}"
 
     def test_openrouter_key_from_dotenv_only(self, isolated_hermes_home):
         """OpenRouter path has its own branch — verify it also reads .env."""
-        _write_env_file(isolated_hermes_home, OPENROUTER_API_KEY="sk-or-dotenv-abc")
+        _write_env_file(isolated_hermes_home, OPENROUTER_API_KEY="sk-REDACTED")
         assert "OPENROUTER_API_KEY" not in os.environ
 
         from agent.credential_pool import _seed_from_env
@@ -94,7 +94,7 @@ class TestCredentialPoolSeedsFromDotEnv:
         assert changed is True
         assert "env:OPENROUTER_API_KEY" in active_sources
         assert any(
-            e.access_token == "sk-or-dotenv-abc" for e in entries
+            e.access_token == "sk-REDACTED" for e in entries
         )
 
     def test_empty_dotenv_no_entries(self, isolated_hermes_home):
@@ -113,7 +113,7 @@ class TestAuthResolvesFromDotEnv:
 
     def test_key_from_dotenv_only(self, isolated_hermes_home):
         """Key in .env but not os.environ → _resolve returns it with the env var source."""
-        _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY="sk-dotenv-resolve-789")
+        _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY="sk-REDACTED")
         assert "DEEPSEEK_API_KEY" not in os.environ
 
         from hermes_cli.auth import _resolve_api_key_provider_secret
@@ -121,7 +121,7 @@ class TestAuthResolvesFromDotEnv:
             provider_id="deepseek",
             pconfig=_make_pconfig(),
         )
-        assert key == "sk-dotenv-resolve-789"
+        assert key == "sk-REDACTED"
         assert source == "DEEPSEEK_API_KEY"
 
 
@@ -162,7 +162,7 @@ class TestAuthCredentialPoolFallback:
 
     def test_env_var_takes_priority_over_pool(self, isolated_hermes_home, monkeypatch):
         """os.environ key wins — credential pool is NEVER consulted."""
-        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-key-first-abc123")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-REDACTED")
 
         mock_pool = MagicMock()
         mock_pool.has_credentials.return_value = True
@@ -173,14 +173,14 @@ class TestAuthCredentialPoolFallback:
                 provider_id="deepseek",
                 pconfig=_make_pconfig(),
             )
-        assert key == "sk-env-key-first-abc123"
+        assert key == "sk-REDACTED"
         assert source == "DEEPSEEK_API_KEY"
         # Pool should not even have been loaded — env var satisfied the request first
         mp.assert_not_called()
 
     def test_dotenv_takes_priority_over_pool(self, isolated_hermes_home):
         """Key in .env beats credential pool — pool only fires when both env sources are empty."""
-        _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY="sk-dotenv-priority-xyz")
+        _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY="sk-REDACTED")
         assert "DEEPSEEK_API_KEY" not in os.environ
 
         mock_pool = MagicMock()
@@ -192,6 +192,6 @@ class TestAuthCredentialPoolFallback:
                 provider_id="deepseek",
                 pconfig=_make_pconfig(),
             )
-        assert key == "sk-dotenv-priority-xyz"
+        assert key == "sk-REDACTED"
         assert source == "DEEPSEEK_API_KEY"
         mp.assert_not_called()

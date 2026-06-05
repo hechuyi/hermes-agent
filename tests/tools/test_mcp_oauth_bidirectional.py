@@ -181,7 +181,7 @@ async def test_hermes_provider_forwards_401_triggers_refresh(tmp_path, monkeypat
     fake_401 = httpx.Response(
         401,
         request=outbound,
-        headers={"www-authenticate": 'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource"'},
+        headers={"www-authenticate": 'Bearer REDACTED"https://example.com/.well-known/oauth-protected-resource"'},
     )
 
     # The correct bridge forwards the 401 into the SDK; the SDK then yields

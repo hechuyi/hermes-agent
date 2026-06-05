@@ -44,7 +44,7 @@ class TestMicrosoftGraphClient:
         )
         payload = await client.get_json("/me")
         assert payload == {"ok": True}
-        assert captured_auth == ["Bearer cached-token"]
+        assert captured_auth == ["Bearer REDACTED"]
 
     async def test_retries_on_rate_limit_and_uses_retry_after(self):
         calls: list[int] = []

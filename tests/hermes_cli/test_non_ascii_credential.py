@@ -80,9 +80,9 @@ class TestEnvLoaderSanitization:
     def test_ascii_credentials_untouched(self, monkeypatch):
         from hermes_cli.env_loader import _sanitize_loaded_credentials
 
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-allascii123")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-REDACTED")
         _sanitize_loaded_credentials()
-        assert os.environ["OPENAI_API_KEY"] == "sk-proj-allascii123"
+        assert os.environ["OPENAI_API_KEY"] == "sk-REDACTED"
 
     def test_warns_to_stderr_when_stripping(self, monkeypatch, capsys):
         """Silent stripping masks bad keys as opaque provider 400s (see #6843 fallout).

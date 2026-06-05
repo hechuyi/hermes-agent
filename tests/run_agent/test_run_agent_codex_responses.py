@@ -784,13 +784,13 @@ def test_try_refresh_codex_client_credentials_skips_xai_oauth_when_singleton_dif
         if force_refresh:
             refresh_calls["count"] += 1
             return {
-                "api_key": "singleton-account-token",
+                "api_key": "fake_redacted_credential",
                 "base_url": "https://api.x.ai/v1",
             }
         # The pre-refresh guard read — return the singleton's view of the
         # singleton's token, which is NOT what the agent is currently using.
         return {
-            "api_key": "singleton-account-token",
+            "api_key": "fake_redacted_credential",
             "base_url": "https://api.x.ai/v1",
         }
 

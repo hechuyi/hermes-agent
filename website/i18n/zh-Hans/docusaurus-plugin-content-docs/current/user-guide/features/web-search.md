@@ -282,7 +282,7 @@ PARALLEL_API_KEY=your-parallel-key-here
 
 ```bash
 # ~/.hermes/.env（环境变量路径）
-XAI_API_KEY=sk-xai-your-key-here
+XAI_API_KEY=sk-REDACTED
 ```
 
 或对于 SuperGrok 订阅用户：

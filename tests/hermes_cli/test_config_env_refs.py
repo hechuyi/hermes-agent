@@ -103,14 +103,14 @@ def test_save_config_preserves_template_when_env_rotates_after_load(monkeypatch,
     )
 
     config = load_config()
-    monkeypatch.setenv("TU_ZI_API_KEY", "sk-rotated-secret")
+    monkeypatch.setenv("TU_ZI_API_KEY", "sk-REDACTED")
     config["model"]["default"] = "doubao-pro"
     save_config(config)
 
     saved = _read_config(tmp_path)
     assert "api_key: ${TU_ZI_API_KEY}" in saved
     assert "sk-old-secret" not in saved
-    assert "sk-rotated-secret" not in saved
+    assert "sk-REDACTED" not in saved
 
 
 def test_save_config_keeps_edited_partial_template_strings_literal(monkeypatch, tmp_path):

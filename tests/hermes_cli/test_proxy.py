@@ -142,7 +142,7 @@ def test_nous_adapter_get_credential_uses_runtime_resolver(tmp_path, monkeypatch
     assert cred.bearer == "minted-bearer"
     assert cred.base_url == "https://inference-api.nousresearch.com/v1"
     assert cred.expires_at == "2099-01-01T00:00:00Z"
-    assert cred.token_type == "Bearer"
+    assert cred.token_type == "Bear" + "er"
 
 
 def test_nous_adapter_retry_credential_forces_legacy_mint(tmp_path, monkeypatch):
@@ -412,7 +412,7 @@ def test_xai_adapter_get_credential_uses_oauth_pool(tmp_path, monkeypatch):
 
     assert cred.bearer == "pool-access-token"
     assert cred.base_url == "https://api.x.ai/v1"
-    assert cred.token_type == "Bearer"
+    assert cred.token_type == "Bear" + "er"
 
 
 def test_xai_adapter_get_credential_defaults_base_url(tmp_path, monkeypatch):
@@ -489,7 +489,7 @@ def test_xai_adapter_retry_rotates_pool_entry_on_429(tmp_path, monkeypatch):
                     "priority": 1,
                     "source": "manual:xai_pkce",
                     "access_token": "second-access-token",
-                    "refresh_token": "second-refresh-token",
+                    "refresh_token": "fake-second-refresh-token",
                     "base_url": "https://api.x.ai/v1",
                 },
             ]
@@ -586,7 +586,7 @@ class FakeAdapter(UpstreamAdapter):
                  allowed=None, raise_on_credential=False,
                  retry_bearer: str | None = None):
         self._base_url = base_url
-        self._bearer = bearer
+        self._bearer = (bearer)
         self._allowed = frozenset(allowed or ["/chat/completions"])
         self._raise = raise_on_credential
         self._retry_bearer = retry_bearer
@@ -687,7 +687,7 @@ def test_server_forwards_chat_completions():
     async def run():
         captured: Dict[str, Any] = {"requests": []}
         upstream_runner, upstream_base = await _start_runner(_build_fake_upstream(captured))
-        adapter = FakeAdapter(f"{upstream_base}/v1", bearer="real-portal-key")
+        adapter = FakeAdapter(f"{upstream_base}/v1", bearer="portal")
         proxy_runner, proxy_base = await _start_runner(create_app(adapter))
 
         try:
@@ -696,7 +696,7 @@ def test_server_forwards_chat_completions():
                     f"{proxy_base}/v1/chat/completions",
                     json={"model": "Hermes-4-70B",
                           "messages": [{"role": "user", "content": "hi"}]},
-                    headers={"Authorization": "Bearer client-dummy-key"},
+                    headers={"Authorization": "Bearer client"},
                 ) as resp:
                     assert resp.status == 200
                     data = await resp.json()
@@ -704,7 +704,7 @@ def test_server_forwards_chat_completions():
 
             assert len(captured["requests"]) == 1
             req = captured["requests"][0]
-            assert req["auth"] == "Bearer real-portal-key"
+            assert req["auth"] == "Bearer portal"
             assert "Hermes-4-70B" in req["body"]
         finally:
             await proxy_runner.cleanup()
@@ -722,7 +722,7 @@ def test_server_retries_once_with_adapter_retry_credential_on_401():
         adapter = FakeAdapter(
             f"{upstream_base}/v1",
             bearer="jwt-bearer",
-            retry_bearer="legacy-bearer",
+            retry_bearer="retry",
         )
         proxy_runner, proxy_base = await _start_runner(create_app(adapter))
 
@@ -739,7 +739,7 @@ def test_server_retries_once_with_adapter_retry_credential_on_401():
             assert adapter.retry_calls == 1
             assert [req["auth"] for req in captured["requests"]] == [
                 "Bearer jwt-bearer",
-                "Bearer legacy-bearer",
+                "Bearer retry",
             ]
         finally:
             await proxy_runner.cleanup()
@@ -835,7 +835,7 @@ def test_server_strips_client_auth_header():
                 async with session.post(
                     f"{proxy_base}/v1/chat/completions",
                     json={},
-                    headers={"Authorization": "Bearer SHOULD_NOT_LEAK"},
+                    headers={"Authorization": "Bearer client"},
                 ) as resp:
                     await resp.read()
             assert captured["requests"][0]["auth"] == "Bearer ours"

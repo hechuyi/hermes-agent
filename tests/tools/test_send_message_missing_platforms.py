@@ -332,7 +332,7 @@ class TestSendDingtalk:
         assert "DingTalk send failed" in result["error"]
 
     def test_http_error_redacts_access_token_in_exception_text(self):
-        token = "supersecret-access-token-123456789"
+        token = "fake_redacted_credential"
         resp = self._make_httpx_resp(status_code=401)
         resp.raise_for_status = MagicMock(
             side_effect=Exception(

@@ -25,7 +25,7 @@ class TestStaleOAuthTokenDetection:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         # Pre-load .env with an expired OAuth token (sk-ant- prefix = OAuth)
-        save_env_value("ANTHROPIC_TOKEN", "sk-ant-oat-ExpiredToken00000")
+        save_env_value("ANTHROPIC_TOKEN", "sk-REDACTED")
         save_env_value("ANTHROPIC_API_KEY", "")
 
         # No valid Claude Code credentials available (expired, no refresh token)
@@ -76,7 +76,7 @@ class TestStaleOAuthTokenDetection:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         # Regular API key — NOT an OAuth token
-        save_env_value("ANTHROPIC_API_KEY", "sk-ant-api03-RegularPayPerTokenKey")
+        save_env_value("ANTHROPIC_API_KEY", "sk-REDACTED")
         save_env_value("ANTHROPIC_TOKEN", "")
 
         monkeypatch.setattr(
@@ -111,7 +111,7 @@ class TestStaleOAuthTokenDetection:
         """
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-        save_env_value("ANTHROPIC_TOKEN", "sk-ant-oat-GoodOAuthToken")
+        save_env_value("ANTHROPIC_TOKEN", "sk-REDACTED")
         save_env_value("ANTHROPIC_API_KEY", "")
 
         # Valid Claude Code credentials with refresh token
@@ -157,7 +157,7 @@ class TestStaleOAuthGuardLogic:
         When existing_key is OAuth and cc_available is False,
         existing_is_stale_oauth should be True → has_creds = False.
         """
-        existing_key = "sk-ant-oat-expiredtoken123"
+        existing_key = "sk-REDACTED"
         _is_oauth_token = lambda k: k.startswith("sk-ant-")
         cc_available = False
 
@@ -176,7 +176,7 @@ class TestStaleOAuthGuardLogic:
         When existing_key is OAuth but cc_available is True (valid creds exist),
         has_creds should be True — the cc_creds will be used instead.
         """
-        existing_key = "sk-ant-oat-sometoken"
+        existing_key = "sk-REDACTED"
         _is_oauth_token = lambda k: k.startswith("sk-ant-")
         cc_available = True
 
@@ -195,7 +195,7 @@ class TestStaleOAuthGuardLogic:
         Regular ANTHROPIC_API_KEY (non-OAuth) must not be flagged as stale
         even when cc_available is False.
         """
-        existing_key = "sk-ant-api03-regular-key"
+        existing_key = "sk-REDACTED"
         _is_oauth_token = lambda k: k.startswith("sk-ant-") and "oat" in k
         cc_available = False
 

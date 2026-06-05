@@ -42,7 +42,7 @@ class TestDetectProviderEntra:
         def _fake_runtime(**_kwargs):
             return {
                 "provider": "openrouter",
-                "api_key": "sk-or-static-key",
+                "api_key": "sk-REDACTED",
             }
 
         with patch(

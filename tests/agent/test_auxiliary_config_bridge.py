@@ -41,13 +41,13 @@ def _run_auxiliary_bridge(config_dict, monkeypatch):
                 "provider": "AUXILIARY_VISION_PROVIDER",
                 "model": "AUXILIARY_VISION_MODEL",
                 "base_url": "AUXILIARY_VISION_BASE_URL",
-                "api_key": "AUXILIARY_VISION_API_KEY",
+                "api_key": "fake_redacted_credential",
             },
             "web_extract": {
                 "provider": "AUXILIARY_WEB_EXTRACT_PROVIDER",
                 "model": "AUXILIARY_WEB_EXTRACT_MODEL",
                 "base_url": "AUXILIARY_WEB_EXTRACT_BASE_URL",
-                "api_key": "AUXILIARY_WEB_EXTRACT_API_KEY",
+                "api_key": "fake_redacted_credential",
             },
         }
         for task_key, env_map in aux_task_env.items():

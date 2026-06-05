@@ -206,7 +206,7 @@ def test_model_command_uses_existing_codex_session_without_relogin(monkeypatch):
     )
     monkeypatch.setattr(
         "hermes_cli.auth.resolve_codex_runtime_credentials",
-        lambda *args, **kwargs: {"api_key": "existing-codex-token"},
+        lambda *args, **kwargs: {"api_key": "fake_redacted_credential"},
     )
 
     def _fake_get_codex_model_ids(access_token=None):

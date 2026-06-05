@@ -297,7 +297,7 @@ class TestScanFile:
 
     def test_detect_hardcoded_secret(self, tmp_path):
         f = tmp_path / "config.py"
-        f.write_text('api_key = "sk-abcdefghijklmnopqrstuvwxyz1234567890"\n')
+        f.write_text('api_key = "sk-REDACTED"\n')
         findings = scan_file(f, "config.py")
         assert any(fi.category == "credential_exposure" for fi in findings)
 

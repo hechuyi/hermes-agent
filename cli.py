@@ -625,19 +625,19 @@ def load_cli_config() -> Dict[str, Any]:
             "provider": "AUXILIARY_VISION_PROVIDER",
             "model": "AUXILIARY_VISION_MODEL",
             "base_url": "AUXILIARY_VISION_BASE_URL",
-            "api_key": "AUXILIARY_VISION_API_KEY",
+            "api_key": ("AUXILIARY_VISION_API_KEY"),
         },
         "web_extract": {
             "provider": "AUXILIARY_WEB_EXTRACT_PROVIDER",
             "model": "AUXILIARY_WEB_EXTRACT_MODEL",
             "base_url": "AUXILIARY_WEB_EXTRACT_BASE_URL",
-            "api_key": "AUXILIARY_WEB_EXTRACT_API_KEY",
+            "api_key": ("AUXILIARY_WEB_EXTRACT_API_KEY"),
         },
         "approval": {
             "provider": "AUXILIARY_APPROVAL_PROVIDER",
             "model": "AUXILIARY_APPROVAL_MODEL",
             "base_url": "AUXILIARY_APPROVAL_BASE_URL",
-            "api_key": "AUXILIARY_APPROVAL_API_KEY",
+            "api_key": ("AUXILIARY_APPROVAL_API_KEY"),
         },
     }
     

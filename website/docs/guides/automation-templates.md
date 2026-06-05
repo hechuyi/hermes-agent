@@ -90,7 +90,7 @@ platforms:
       routes:
         github-pr-review:
           events: ["pull_request"]
-          secret: "github-webhook-secret"
+          secret: "fake_redacted_credential"
           prompt: |
             Review PR #{pull_request.number}: {pull_request.title}
             Repository: {repository.full_name}
@@ -104,7 +104,7 @@ platforms:
             pr_number: "{pull_request.number}"
 ```
 
-Then in GitHub: **Settings → Webhooks → Add webhook** → Payload URL: `http://your-server:8644/webhooks/github-pr-review`, Content type: `application/json`, Secret: `github-webhook-secret`, Events: **Pull requests**.
+Then in GitHub: **Settings → Webhooks → Add webhook** → Payload URL: `http://your-server:8644/webhooks/github-pr-review`, Content type: `application/json`, Secret: `fake_redacted_credential`, Events: **Pull requests**.
 
 ### Docs Drift Detection
 

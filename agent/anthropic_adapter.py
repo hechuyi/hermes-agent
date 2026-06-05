@@ -621,7 +621,7 @@ def _build_anthropic_client_with_bearer_hook(
         # event hook overrides Authorization per request so this value
         # is never sent. The sentinel string makes accidental leaks
         # diagnosable in logs.
-        "auth_token": "entra-id-bearer-via-http-hook",
+        "auth_token": "redacted-entra-id-bearer-via-http-hook",
     }
 
     if normalized_base_url:

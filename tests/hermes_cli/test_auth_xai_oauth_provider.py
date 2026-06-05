@@ -1662,7 +1662,7 @@ def test_pool_refresh_adopts_singleton_tokens_when_consumed_elsewhere(tmp_path, 
     raw = json.loads((hermes_home / "auth.json").read_text())
     raw["providers"]["xai-oauth"]["tokens"] = {
         "access_token": other_process_at,
-        "refresh_token": "rt-rotated-by-other-process",
+        "refresh_token": "fake_redacted_credential",
         "id_token": "",
         "expires_in": 3600,
         "token_type": "Bearer",

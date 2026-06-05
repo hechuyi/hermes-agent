@@ -200,12 +200,12 @@ class TestCustomProviderModelSwitch:
             "  api_key: ${EXAMPLE_PROVIDER_API_KEY}\n"
             "  model: qwen3.6-35b-fast\n"
         )
-        monkeypatch.setenv("EXAMPLE_PROVIDER_API_KEY", "sk-live-example-provider")
+        monkeypatch.setenv("EXAMPLE_PROVIDER_API_KEY", "sk-REDACTED")
 
         provider_info = {
             "name": "Example Provider",
             "base_url": "https://api.example-provider.test/v1",
-            "api_key": "sk-live-example-provider",
+            "api_key": "sk-REDACTED",
             "api_key_ref": "${EXAMPLE_PROVIDER_API_KEY}",
             "model": "qwen3.6-35b-fast",
         }
@@ -217,14 +217,14 @@ class TestCustomProviderModelSwitch:
             _model_flow_named_custom({}, provider_info)
 
         mock_fetch.assert_called_once_with(
-            "sk-live-example-provider",
+            "sk-REDACTED",
             "https://api.example-provider.test/v1",
             timeout=8.0,
         )
         config = yaml.safe_load(config_path.read_text()) or {}
         assert config["model"]["api_key"] == "${EXAMPLE_PROVIDER_API_KEY}"
         assert config["custom_providers"][0]["api_key"] == "${EXAMPLE_PROVIDER_API_KEY}"
-        assert "sk-live-example-provider" not in config_path.read_text()
+        assert "sk-REDACTED" not in config_path.read_text()
 
     def test_key_env_custom_provider_persists_reference_not_secret(self, config_home, monkeypatch):
         """key_env custom providers should also avoid writing plaintext keys."""
@@ -241,7 +241,7 @@ class TestCustomProviderModelSwitch:
             "  key_env: EXAMPLE_PROVIDER_API_KEY\n"
             "  model: qwen3.6-35b-fast\n"
         )
-        monkeypatch.setenv("EXAMPLE_PROVIDER_API_KEY", "sk-live-example-provider")
+        monkeypatch.setenv("EXAMPLE_PROVIDER_API_KEY", "sk-REDACTED")
 
         provider_info = {
             "name": "Example Provider",
@@ -260,7 +260,7 @@ class TestCustomProviderModelSwitch:
         config = yaml.safe_load(config_path.read_text()) or {}
         assert config["model"]["api_key"] == "${EXAMPLE_PROVIDER_API_KEY}"
         assert config["custom_providers"][0]["key_env"] == "EXAMPLE_PROVIDER_API_KEY"
-        assert "sk-live-example-provider" not in config_path.read_text()
+        assert "sk-REDACTED" not in config_path.read_text()
 
     def test_env_ref_base_url_preserves_api_key_ref_through_picker(
         self, config_home, monkeypatch
@@ -291,7 +291,7 @@ class TestCustomProviderModelSwitch:
             "  models: []\n"
         )
         monkeypatch.setenv("NEURALWATT_API_BASE", "https://api.neuralwatt.com/v1")
-        monkeypatch.setenv("NEURALWATT_API_KEY", "sk-live-neuralwatt-secret")
+        monkeypatch.setenv("NEURALWATT_API_KEY", "sk-REDACTED")
 
         # Exercise the real picker: select "custom:neuralwatt" from the
         # provider menu. ``select_provider_and_model`` prompts for a provider
@@ -318,14 +318,14 @@ class TestCustomProviderModelSwitch:
         # The live probe must still use the resolved secret.
         mock_fetch.assert_called_once()
         probe_args, probe_kwargs = mock_fetch.call_args
-        assert probe_args[0] == "sk-live-neuralwatt-secret"
+        assert probe_args[0] == "sk-REDACTED"
 
         # But config.yaml must keep the env reference, not the plaintext secret.
         saved = config_path.read_text()
         config = yaml.safe_load(saved) or {}
         assert config["model"]["api_key"] == "${NEURALWATT_API_KEY}"
         assert config["custom_providers"][0]["api_key"] == "${NEURALWATT_API_KEY}"
-        assert "sk-live-neuralwatt-secret" not in saved
+        assert "sk-REDACTED" not in saved
 
     def test_bare_custom_current_provider_matches_env_base_url_before_first_fallback(
         self, config_home, monkeypatch
@@ -362,9 +362,9 @@ class TestCustomProviderModelSwitch:
             "  models: []\n"
         )
         monkeypatch.setenv("CEREBRAS_API_BASE", "https://api.cerebras.ai/v1")
-        monkeypatch.setenv("CEREBRAS_API_KEY", "sk-live-cerebras-secret")
+        monkeypatch.setenv("CEREBRAS_API_KEY", "sk-REDACTED")
         monkeypatch.setenv("NEURALWATT_API_BASE", "https://api.neuralwatt.com/v1")
-        monkeypatch.setenv("NEURALWATT_API_KEY", "sk-live-neuralwatt-secret")
+        monkeypatch.setenv("NEURALWATT_API_KEY", "sk-REDACTED")
 
         captured: dict = {}
 
@@ -409,7 +409,7 @@ class TestCustomProviderModelSwitch:
             "  models: []\n"
         )
         monkeypatch.setenv("NEURALWATT_API_BASE", "https://api.neuralwatt.com/v1")
-        monkeypatch.setenv("NEURALWATT_API_KEY", "sk-live-neuralwatt-secret")
+        monkeypatch.setenv("NEURALWATT_API_KEY", "sk-REDACTED")
 
         def _pick_neuralwatt(labels, default=0):
             for i, label in enumerate(labels):
@@ -437,7 +437,7 @@ class TestCustomProviderModelSwitch:
         assert config["model"]["base_url"] == "${NEURALWATT_API_BASE}"
         assert config["model"]["api_key"] == "${NEURALWATT_API_KEY}"
         assert "https://api.neuralwatt.com/v1" not in saved
-        assert "sk-live-neuralwatt-secret" not in saved
+        assert "sk-REDACTED" not in saved
 
     def test_key_env_providers_dict_entry_does_not_add_api_key(
         self, config_home, monkeypatch

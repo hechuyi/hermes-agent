@@ -463,7 +463,7 @@ SLACK_APP_TOKEN=xapp-your-app-token
 ```yaml
 platforms:
   slack:
-    token: "xoxb-workspace1-token,xoxb-workspace2-token"
+    token: "fake_redacted_credential,xoxb-workspace2-token"
 ```
 
 ### OAuth Token 文件
@@ -479,7 +479,7 @@ platforms:
 ```json
 {
   "T01ABC2DEF3": {
-    "token": "xoxb-workspace-token-here",
+    "token": "fake_redacted_credential",
     "team_name": "My Workspace"
   }
 }

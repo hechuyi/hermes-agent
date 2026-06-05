@@ -51,7 +51,7 @@ def _run_opencode_switch(
         patch(
             "hermes_cli.runtime_provider.resolve_runtime_provider",
             return_value={
-                "api_key": "sk-opencode-fake",
+                "api_key": "sk-REDACTED",
                 "base_url": effective_runtime_base,
                 "api_mode": "chat_completions",
             },
@@ -69,7 +69,7 @@ def _run_opencode_switch(
             current_provider=current_provider,
             current_model=current_model,
             current_base_url=current_base_url,
-            current_api_key="sk-opencode-fake",
+            current_api_key="sk-REDACTED",
             explicit_provider=explicit_provider,
         )
 
@@ -205,7 +205,7 @@ class TestAgentSwitchModelDefenseInDepth:
         agent.model = "glm-5"
         agent.provider = "opencode-go"
         agent.base_url = "https://opencode.ai/zen/go/v1"
-        agent.api_key = "sk-opencode-fake"
+        agent.api_key = "sk-REDACTED"
         agent.api_mode = "chat_completions"
         agent._client_kwargs = {}
 
@@ -241,7 +241,7 @@ class TestAgentSwitchModelDefenseInDepth:
                 agent.switch_model(
                     new_model="minimax-m2.7",
                     new_provider="opencode-go",
-                    api_key="sk-opencode-fake",
+                    api_key="sk-REDACTED",
                     base_url="https://opencode.ai/zen/go/v1",
                     api_mode="anthropic_messages",
                 )

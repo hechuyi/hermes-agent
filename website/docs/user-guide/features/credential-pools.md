@@ -39,10 +39,10 @@ If you already have an API key set in `.env`, Hermes auto-discovers it as a 1-ke
 
 ```bash
 # Add a second OpenRouter key
-hermes auth add openrouter --api-key sk-or-v1-your-second-key
+hermes auth add openrouter --api-key sk-REDACTED
 
 # Add a second Anthropic key
-hermes auth add anthropic --type api-key --api-key sk-ant-api03-your-second-key
+hermes auth add anthropic --type api-key --api-key sk-REDACTED
 
 # Add an Anthropic OAuth credential (requires Claude Max plan + extra usage credits)
 hermes auth add anthropic --type oauth
@@ -154,7 +154,7 @@ hermes auth list
 #     #1  config key    api_key config:Together.ai ←
 
 # Add a second key for the same endpoint:
-hermes auth add Together.ai --api-key sk-together-second-key
+hermes auth add Together.ai --api-key sk-REDACTED
 ```
 
 Custom endpoint pools are stored in `auth.json` under `credential_pool` with a `custom:` prefix:

@@ -619,33 +619,33 @@ class TestSaveSessionLogRedactsSecrets:
             {"role": "user", "content": "Hello"},
             {
                 "role": "tool",
-                "content": "Response: Authorization: Bearer sk-proj-abc123def456ghi789jkl012mno",
+                "content": "Response: Authorization: Bearer REDACTED",
             },
         ]
         agent._save_session_log(messages)
 
         snapshot = (tmp_path / f"session_{agent.session_id}.json").read_text(encoding="utf-8")
-        assert "sk-proj-abc123def456ghi789jkl012mno" not in snapshot
+        assert "sk-REDACTED" not in snapshot
 
     def test_redacts_api_key_in_user_message(self, agent, tmp_path):
         agent._session_json_enabled = True
         agent.logs_dir = tmp_path
         messages = [
-            {"role": "user", "content": "My key is sk-ant-api03-abc123def456ghi789jkl012mno please use it"},
+            {"role": "user", "content": "My key is sk-REDACTED please use it"},
         ]
         agent._save_session_log(messages)
 
         snapshot = (tmp_path / f"session_{agent.session_id}.json").read_text(encoding="utf-8")
-        assert "sk-ant-api03-abc123def456ghi789jkl012mno" not in snapshot
+        assert "sk-REDACTED" not in snapshot
 
     def test_redacts_system_prompt_credentials(self, agent, tmp_path):
         agent._session_json_enabled = True
         agent.logs_dir = tmp_path
-        agent._cached_system_prompt = "Use key sk-proj-realkey1234567890123456 for API calls"
+        agent._cached_system_prompt = "Use key sk-REDACTED for API calls"
         agent._save_session_log([{"role": "user", "content": "test"}])
 
         snapshot = (tmp_path / f"session_{agent.session_id}.json").read_text(encoding="utf-8")
-        assert "sk-proj-realkey1234567890123456" not in snapshot
+        assert "sk-REDACTED" not in snapshot
 
     def test_redacts_list_type_multimodal_content(self, agent, tmp_path):
         """OpenAI/Anthropic multimodal shape: content = list of {type, text|image_url} parts."""
@@ -720,7 +720,7 @@ class TestMaskApiKey:
         assert agent._mask_api_key_for_logs("short") == "***"
 
     def test_long_key_masked(self, agent):
-        key = "sk-or-v1-abcdefghijklmnop"
+        key = "sk-REDACTED"
         result = agent._mask_api_key_for_logs(key)
         assert result.startswith("sk-or-v1")
         assert result.endswith("mnop")
@@ -4589,7 +4589,7 @@ class TestFallbackAnthropicProvider:
 
         mock_client = MagicMock()
         mock_client.base_url = "https://api.anthropic.com/v1"
-        mock_client.api_key = "sk-ant-api03-test"
+        mock_client.api_key = "sk-REDACTED"
 
         with (
             patch("agent.auxiliary_client.resolve_provider_client", return_value=(mock_client, None)),
@@ -4612,7 +4612,7 @@ class TestFallbackAnthropicProvider:
 
         mock_client = MagicMock()
         mock_client.base_url = "https://api.anthropic.com/v1"
-        mock_client.api_key = "sk-ant-api03-test"
+        mock_client.api_key = "sk-REDACTED"
 
         with (
             patch("agent.auxiliary_client.resolve_provider_client", return_value=(mock_client, None)),
@@ -4745,7 +4745,7 @@ class TestAnthropicBaseUrlPassthrough:
         ):
             mock_build.return_value = MagicMock()
             a = AIAgent(
-                api_key="sk-ant-api03-test1234567890",
+                api_key="sk-REDACTED",
                 base_url="https://llm-proxy.company.com/v1",
                 api_mode="anthropic_messages",
                 quiet_mode=True,
@@ -4787,7 +4787,7 @@ class TestAnthropicCredentialRefresh:
             new_client = MagicMock()
             mock_build.side_effect = [old_client, new_client]
             agent = AIAgent(
-                api_key="sk-ant-oat01-stale-token",
+                api_key="sk-REDACTED",
                 base_url="https://openrouter.ai/api/v1",
                 api_mode="anthropic_messages",
                 quiet_mode=True,
@@ -4796,22 +4796,22 @@ class TestAnthropicCredentialRefresh:
             )
 
         agent._anthropic_client = old_client
-        agent._anthropic_api_key = "sk-ant-oat01-stale-token"
+        agent._anthropic_api_key = "sk-REDACTED"
         agent._anthropic_base_url = "https://api.anthropic.com"
         agent.provider = "anthropic"
 
         with (
-            patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-oat01-fresh-token"),
+            patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-REDACTED"),
             patch("agent.anthropic_adapter.build_anthropic_client", return_value=new_client) as rebuild,
         ):
             assert agent._try_refresh_anthropic_client_credentials() is True
 
         old_client.close.assert_called_once()
         rebuild.assert_called_once_with(
-            "sk-ant-oat01-fresh-token", "https://api.anthropic.com", timeout=None,
+            "sk-REDACTED", "https://api.anthropic.com", timeout=None,
         )
         assert agent._anthropic_client is new_client
-        assert agent._anthropic_api_key == "sk-ant-oat01-fresh-token"
+        assert agent._anthropic_api_key == "sk-REDACTED"
 
     def test_try_refresh_anthropic_client_credentials_returns_false_when_token_unchanged(self):
         with (
@@ -4820,7 +4820,7 @@ class TestAnthropicCredentialRefresh:
             patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()),
         ):
             agent = AIAgent(
-                api_key="sk-ant-oat01-same-token",
+                api_key="sk-REDACTED",
                 base_url="https://openrouter.ai/api/v1",
                 api_mode="anthropic_messages",
                 quiet_mode=True,
@@ -4830,10 +4830,10 @@ class TestAnthropicCredentialRefresh:
 
         old_client = MagicMock()
         agent._anthropic_client = old_client
-        agent._anthropic_api_key = "sk-ant-oat01-same-token"
+        agent._anthropic_api_key = "sk-REDACTED"
 
         with (
-            patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-oat01-same-token"),
+            patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-REDACTED"),
             patch("agent.anthropic_adapter.build_anthropic_client") as rebuild,
         ):
             assert agent._try_refresh_anthropic_client_credentials() is False
@@ -4848,7 +4848,7 @@ class TestAnthropicCredentialRefresh:
             patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()),
         ):
             agent = AIAgent(
-                api_key="sk-ant-oat01-current-token",
+                api_key="sk-REDACTED",
                 base_url="https://openrouter.ai/api/v1",
                 api_mode="anthropic_messages",
                 quiet_mode=True,
@@ -5453,7 +5453,7 @@ class TestOAuthFlagAfterCredentialRefresh:
 
         with (
             patch("agent.anthropic_adapter.resolve_anthropic_token",
-                  return_value="sk-ant-setup-oauth-token"),
+                  return_value="sk-REDACTED"),
             patch("agent.anthropic_adapter.build_anthropic_client",
                   return_value=MagicMock()),
         ):
@@ -5466,13 +5466,13 @@ class TestOAuthFlagAfterCredentialRefresh:
         """Refreshing from OAuth to API key must set flag to False."""
         agent.api_mode = "anthropic_messages"
         agent.provider = "anthropic"
-        agent._anthropic_api_key = "sk-ant-setup-old"
+        agent._anthropic_api_key = "sk-REDACTED"
         agent._anthropic_client = MagicMock()
         agent._is_anthropic_oauth = True
 
         with (
             patch("agent.anthropic_adapter.resolve_anthropic_token",
-                  return_value="sk-ant-api03-new-key"),
+                  return_value="sk-REDACTED"),
             patch("agent.anthropic_adapter.build_anthropic_client",
                   return_value=MagicMock()),
         ):
@@ -5493,7 +5493,7 @@ class TestFallbackSetsOAuthFlag:
 
         mock_client = MagicMock()
         mock_client.base_url = "https://api.anthropic.com/v1"
-        mock_client.api_key = "sk-ant-setup-oauth-token"
+        mock_client.api_key = "sk-REDACTED"
 
         with (
             patch("agent.auxiliary_client.resolve_provider_client",
@@ -5516,7 +5516,7 @@ class TestFallbackSetsOAuthFlag:
 
         mock_client = MagicMock()
         mock_client.base_url = "https://api.anthropic.com/v1"
-        mock_client.api_key = "sk-ant-api03-regular-key"
+        mock_client.api_key = "sk-REDACTED"
 
         with (
             patch("agent.auxiliary_client.resolve_provider_client",

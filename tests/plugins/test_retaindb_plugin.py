@@ -89,7 +89,7 @@ class TestClient:
     def test_headers_include_auth(self):
         c = self._make_client()
         h = c._headers("/v1/files")
-        assert h["Authorization"] == "Bearer rdb-test-key"
+        assert h["Authorization"] == "Bearer REDACTED"
         assert "X-API-Key" not in h
 
     def test_headers_include_api_key_for_memory_path(self):
@@ -103,9 +103,9 @@ class TestClient:
         assert h["X-API-Key"] == "rdb-test-key"
 
     def test_headers_strip_bearer_prefix(self):
-        c = self._make_client(api_key="Bearer rdb-test-key")
+        c = self._make_client(api_key="Bearer REDACTED")
         h = c._headers("/v1/memory/search")
-        assert h["Authorization"] == "Bearer rdb-test-key"
+        assert h["Authorization"] == "Bearer REDACTED"
         assert h["X-API-Key"] == "rdb-test-key"
 
     def test_add_memory_tries_fallback(self):

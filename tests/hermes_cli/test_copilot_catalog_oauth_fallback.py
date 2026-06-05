@@ -80,8 +80,8 @@ class TestCopilotCatalogApiKeyResolution:
                 "not-a-dict",
                 {"label": "no-token-here"},
                 {"access_token": ""},
-                {"access_token": "gho_first_real_token"},
-                {"access_token": "gho_should_not_reach"},
+                {"access_token": "fake_redacted_credential"},
+                {"access_token": "fake_redacted_credential"},
             ],
         ), patch(
             "hermes_cli.copilot_auth.exchange_copilot_token",
@@ -107,7 +107,7 @@ class TestCopilotCatalogApiKeyResolution:
         ), patch(
             "hermes_cli.auth.read_credential_pool",
             return_value=[
-                {"access_token": "gho_unsupported_account"},
+                {"access_token": "fake_redacted_credential"},
                 {"access_token": "gho_valid_token"},
             ],
         ), patch(

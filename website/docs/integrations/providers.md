@@ -640,7 +640,7 @@ model:
   default: your-model-name
   provider: custom
   base_url: http://localhost:8000/v1
-  api_key: your-key-or-leave-empty-for-local
+  api_key: fake_redacted_credential
 ```
 
 :::warning Legacy env vars

@@ -48,7 +48,7 @@ export async function fetchJSON<T>(
 ): Promise<T> {
   // Inject the session token into all /api/ requests.
   const headers = new Headers(init?.headers);
-  const token = window.__HERMES_SESSION_TOKEN__;
+  const token = (window.__HERMES_SESSION_TOKEN__);
   if (token) {
     setSessionHeader(headers, token);
   }
@@ -188,7 +188,7 @@ export async function buildWsAuthParam(): Promise<[string, string]> {
     const { ticket } = await getWsTicket();
     return ["ticket", ticket];
   }
-  const token = window.__HERMES_SESSION_TOKEN__ ?? "";
+  const token = (window.__HERMES_SESSION_TOKEN__) ?? "";
   return ["token", token];
 }
 

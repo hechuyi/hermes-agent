@@ -63,7 +63,7 @@ cp cli-config.yaml.example ~/.hermes/config.yaml
 touch ~/.hermes/.env
 
 # 至少添加一个 LLM 提供商密钥：
-echo 'OPENROUTER_API_KEY=sk-or-v1-your-key' >> ~/.hermes/.env
+echo 'OPENROUTER_API_KEY=sk-REDACTED' >> ~/.hermes/.env
 ```
 
 ### 运行

@@ -1635,7 +1635,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         config.platforms[Platform.DINGTALK].enabled = True
         config.platforms[Platform.DINGTALK].extra.update({
             "client_id": dingtalk_client_id,
-            "client_secret": dingtalk_client_secret,
+            "client_secret": (dingtalk_client_secret),
         })
         dingtalk_home = os.getenv("DINGTALK_HOME_CHANNEL")
         if dingtalk_home:
@@ -1765,7 +1765,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         config.platforms[Platform.BLUEBUBBLES].enabled = True
         config.platforms[Platform.BLUEBUBBLES].extra.update({
             "server_url": bluebubbles_server_url.rstrip("/"),
-            "password": bluebubbles_password,
+            "password": (bluebubbles_password),
             "webhook_host": os.getenv("BLUEBUBBLES_WEBHOOK_HOST", "127.0.0.1"),
             "webhook_port": int(os.getenv("BLUEBUBBLES_WEBHOOK_PORT", "8645")),
             "webhook_path": os.getenv("BLUEBUBBLES_WEBHOOK_PATH", "/bluebubbles-webhook"),

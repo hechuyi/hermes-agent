@@ -70,7 +70,7 @@ uv run "$SCRIPT" servers
 如果未找到服务器，启动一个：
 ```
 jupyter-lab --no-browser --port=8888 --notebook-dir=$HOME/notebooks \
-  --IdentityProvider.token='' --ServerApp.password='' > /tmp/jupyter.log 2>&1 &
+  --IdentityProvider.token=fake_redacted_credential
 sleep 3
 ```
 

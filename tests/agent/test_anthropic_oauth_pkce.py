@@ -42,8 +42,8 @@ def _patch_oauth_flow(
 
     if token_response is None:
         token_response = {
-            "access_token": "sk-ant-test-access",
-            "refresh_token": "sk-ant-test-refresh",
+            "access_token": "sk-REDACTED",
+            "refresh_token": "sk-REDACTED",
             "expires_in": 3600,
         }
 

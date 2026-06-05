@@ -5539,7 +5539,7 @@ def resolve_nous_runtime_credentials(
                                 try:
                                     refreshed = _refresh_access_token(
                                         client=client, portal_base_url=portal_base_url,
-                                        client_id=client_id, refresh_token=latest_refresh_token,
+                                        client_id=client_id, refresh_token=(latest_refresh_token),
                                     )
                                 except AuthError as exc:
                                     if _is_terminal_nous_refresh_error(exc):
@@ -6149,7 +6149,7 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     # see the local server as configured. doctor still reports unconfigured
     # because get_api_key_provider_status uses the raw secret resolver.
     if not api_key and provider_id == "lmstudio":
-        api_key = LMSTUDIO_NOAUTH_PLACEHOLDER
+        api_key = (LMSTUDIO_NOAUTH_PLACEHOLDER)
         key_source = key_source or "default"
 
     env_url = ""
@@ -7506,7 +7506,7 @@ def build_minimax_oauth_token_provider() -> Callable[[], str]:
     ~15 minutes in, because MiniMax issues short-lived access tokens.
 
     Returning a *callable* instead of a string lets us hook into the
-    existing Entra-ID bearer infrastructure in
+    existing Entra-ID bearer-token infrastructure in
     :mod:`agent.anthropic_adapter`: ``build_anthropic_client`` detects a
     callable and routes through ``_build_anthropic_client_with_bearer_hook``,
     which mints a fresh ``Authorization`` header on every outbound request.

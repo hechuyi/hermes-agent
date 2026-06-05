@@ -46,7 +46,7 @@ hermes gateway
 ```bash
 # 使用 curl 测试
 curl http://localhost:8642/v1/chat/completions \
-  -H "Authorization: Bearer change-me-local-dev" \
+  -H "Authorization: Bearer REDACTED" \
   -H "Content-Type: application/json" \
   -d '{"model": "hermes-agent", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```

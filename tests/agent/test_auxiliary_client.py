@@ -60,7 +60,7 @@ def codex_auth_dir(tmp_path, monkeypatch):
     auth_file = codex_dir / "auth.json"
     auth_file.write_text(json.dumps({
         "tokens": {
-            "access_token": "codex-test-token-abc123",
+            "access_token": "fake_redacted_credential",
             "refresh_token": "codex-refresh-xyz",
         }
     }))
@@ -308,7 +308,7 @@ class TestAnthropicOAuthFlag:
 
     def test_oauth_token_sets_flag(self, monkeypatch):
         """OAuth tokens (sk-ant-oat01-*) should create client with is_oauth=True."""
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-test-token")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-REDACTED")
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _try_anthropic, AnthropicAuxiliaryClient
@@ -321,7 +321,7 @@ class TestAnthropicOAuthFlag:
 
     def test_api_key_no_oauth_flag(self, monkeypatch):
         """Regular API keys (sk-ant-api-*) should create client with is_oauth=False."""
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-api03-testkey1234"), \
+        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-REDACTED"), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
@@ -334,7 +334,7 @@ class TestAnthropicOAuthFlag:
 
     def test_pool_entry_takes_priority_over_legacy_resolution(self):
         class _Entry:
-            access_token = "sk-ant-oat01-pooled"
+            access_token = "sk-REDACTED"
             base_url = "https://api.anthropic.com"
 
         class _Pool:
@@ -355,7 +355,7 @@ class TestAnthropicOAuthFlag:
 
         assert client is not None
         assert model == "claude-haiku-4-5-20251001"
-        assert mock_build.call_args.args[0] == "sk-ant-oat01-pooled"
+        assert mock_build.call_args.args[0] == "sk-REDACTED"
 
 
 class TestBuildCodexClient:
@@ -606,7 +606,7 @@ class TestExpiredCodexFallback:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
         # Set up Anthropic as fallback
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-test-fallback")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-REDACTED")
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _resolve_auto, AnthropicAuxiliaryClient
@@ -692,7 +692,7 @@ class TestExpiredCodexFallback:
     def test_hermes_oauth_file_sets_oauth_flag(self, monkeypatch):
         """OAuth-style tokens should get is_oauth=*** (token is not sk-ant-api-*)."""
         # Mock resolve_anthropic_token to return an OAuth-style token
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-oat-hermes-token"), \
+        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-REDACTED"), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
@@ -747,7 +747,7 @@ class TestExpiredCodexFallback:
 
     def test_claude_code_oauth_env_sets_flag(self, monkeypatch):
         """CLAUDE_CODE_OAUTH_TOKEN env var should get is_oauth=True."""
-        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-cc-test-token")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-REDACTED")
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
@@ -763,7 +763,7 @@ class TestExplicitProviderRouting:
 
     def test_explicit_anthropic_api_key(self, monkeypatch):
         """provider='anthropic' + regular API key should work with is_oauth=False."""
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-api-regular-key"), \
+        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-REDACTED"), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()

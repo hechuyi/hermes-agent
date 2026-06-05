@@ -271,7 +271,7 @@ hermes config show
 hermes model
 
 # 或直接设置
-hermes config set OPENROUTER_API_KEY sk-or-v1-xxxxxxxxxxxx
+hermes config set OPENROUTER_API_KEY sk-REDACTED
 ```
 
 :::warning

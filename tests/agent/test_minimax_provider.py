@@ -139,7 +139,7 @@ class TestMinimaxBetaHeaders:
     # -- Non-MiniMax keeps full betas ------------------------------------
 
     def test_native_anthropic_keeps_tool_streaming(self):
-        betas = self._build_and_get_betas("sk-ant-api03-real-key-here")
+        betas = self._build_and_get_betas("sk-REDACTED")
         assert self._TOOL_BETA in betas
         assert self._THINKING_BETA in betas
 

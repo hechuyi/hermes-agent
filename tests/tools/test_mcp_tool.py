@@ -1394,12 +1394,12 @@ class TestSanitizeError:
 
     def test_strips_openai_key(self):
         from tools.mcp_tool import _sanitize_error
-        result = _sanitize_error("key sk-projABC123xyz")
+        result = _sanitize_error("key sk-REDACTED")
         assert result == "key [REDACTED]"
 
     def test_strips_bearer_token(self):
         from tools.mcp_tool import _sanitize_error
-        result = _sanitize_error("Authorization: Bearer eyJabc123def")
+        result = _sanitize_error("Authorization: Bearer REDACTED")
         assert result == "Authorization: [REDACTED]"
 
     def test_strips_token_param(self):

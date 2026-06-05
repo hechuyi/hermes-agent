@@ -281,7 +281,7 @@ class TestRunTurn:
         client = FakeClient()
         client.set_stderr_tail([
             "ERROR: provider auth failed",
-            "Authorization: Bearer sk-live-deadbeefdeadbeef",
+            "Authorization: Bearer REDACTED",
             "url=https://api.example.com/v1?token=querysecret12345",
         ])
         from agent.transports.codex_app_server import CodexAppServerError
@@ -301,7 +301,7 @@ class TestRunTurn:
         assert "codex stderr" in r.error
         assert "provider auth failed" in r.error
         # Credential-shaped values still redacted (sk- prefix + Bearer header)
-        assert "sk-live-deadbeefdeadbeef" not in r.error
+        assert "sk-REDACTED" not in r.error
         # Non-OAuth → should NOT retire (subprocess JSON-RPC is still healthy).
         assert r.should_retire is False
 
@@ -311,7 +311,7 @@ class TestRunTurn:
         client = FakeClient()
         client.set_stderr_tail([
             "WARN: provider request stalled",
-            "Authorization: Bearer sk-stalled-secret-abc123",
+            "Authorization: Bearer REDACTED",
         ])
 
         def stall(method, params):
@@ -325,7 +325,7 @@ class TestRunTurn:
         assert r.error is not None
         assert "turn/start timed out" in r.error
         assert "provider request stalled" in r.error
-        assert "sk-stalled-secret-abc123" not in r.error
+        assert "sk-REDACTED" not in r.error
         assert r.should_retire is True
 
     def test_startup_failure_returns_error_with_stderr(self):

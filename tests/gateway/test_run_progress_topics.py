@@ -873,7 +873,7 @@ async def test_run_agent_feishu_status_card_execute_failure_suppresses_progress_
 async def test_run_agent_feishu_status_card_execute_failure_logs_stable_failure_class(
     monkeypatch, tmp_path, caplog
 ):
-    raw_error = "POST /private/raw/path token=sk-sensitive-user-text"
+    raw_error = "POST /private/raw/path token=sk-REDACTED"
     adapter = StatusCardProgressAdapter(
         state_dir=tmp_path / "hermes-tools-state",
         fail_status_card_execute=True,
@@ -892,7 +892,7 @@ async def test_run_agent_feishu_status_card_execute_failure_logs_stable_failure_
     assert "failure_class=status_card_execute_failed" in log_text
     assert raw_error not in log_text
     assert "/private/raw/path" not in log_text
-    assert "sk-sensitive-user-text" not in log_text
+    assert "sk-REDACTED" not in log_text
 
 
 @pytest.mark.asyncio

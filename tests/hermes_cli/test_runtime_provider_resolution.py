@@ -473,12 +473,12 @@ def test_openrouter_key_takes_priority_over_openai_key(monkeypatch):
     monkeypatch.setattr(rp, "_get_model_config", lambda: {})
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-should-lose")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-should-win")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-REDACTED")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-REDACTED")
 
     resolved = rp.resolve_runtime_provider(requested="openrouter")
 
-    assert resolved["api_key"] == "sk-or-should-win"
+    assert resolved["api_key"] == "sk-REDACTED"
 
 
 def test_openai_key_used_when_no_openrouter_key(monkeypatch):
@@ -487,12 +487,12 @@ def test_openai_key_used_when_no_openrouter_key(monkeypatch):
     monkeypatch.setattr(rp, "_get_model_config", lambda: {})
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-fallback")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-REDACTED")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
     resolved = rp.resolve_runtime_provider(requested="openrouter")
 
-    assert resolved["api_key"] == "sk-openai-fallback"
+    assert resolved["api_key"] == "sk-REDACTED"
 
 
 def test_custom_endpoint_prefers_openai_key(monkeypatch):
@@ -2449,7 +2449,7 @@ def test_openai_key_only_sent_to_openai_host(monkeypatch):
     )
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-REDACTED")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-secret")
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
@@ -2473,11 +2473,11 @@ def test_openai_key_reaches_openai_host(monkeypatch):
     )
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-REDACTED")
 
     resolved = rp.resolve_runtime_provider(requested="custom")
 
-    assert resolved["api_key"] == "sk-openai-secret"
+    assert resolved["api_key"] == "sk-REDACTED"
 
 
 def test_openrouter_key_reaches_openrouter_host(monkeypatch):
@@ -2520,11 +2520,11 @@ def test_host_derived_key_picked_up_for_deepseek(monkeypatch):
     )
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-secret")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-REDACTED")
 
     resolved = rp.resolve_runtime_provider(requested="custom")
 
-    assert resolved["api_key"] == "sk-deepseek-secret"
+    assert resolved["api_key"] == "sk-REDACTED"
 
 
 def test_host_derived_key_picked_up_for_groq(monkeypatch):
@@ -2561,11 +2561,11 @@ def test_host_derived_key_does_not_leak_to_lookalike_host(monkeypatch):
         },
     )
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-secret")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-REDACTED")
 
     resolved = rp.resolve_runtime_provider(requested="custom")
 
-    assert "sk-deepseek-secret" not in (resolved["api_key"] or "")
+    assert "sk-REDACTED" not in (resolved["api_key"] or "")
     # No ATTACKER_API_KEY is set, so the chain falls through to no-key-required.
     assert resolved["api_key"] == "no-key-required"
 
@@ -2610,7 +2610,7 @@ def test_host_derived_key_skips_already_handled_vendors(monkeypatch):
             "base_url": "https://api.example.com/v1",
         },
     )
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-REDACTED")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-secret")
 
     resolved = rp.resolve_runtime_provider(requested="custom")

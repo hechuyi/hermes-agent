@@ -51,7 +51,7 @@ def test_loopback_protected_route_accepts_session_token(client_loopback):
     """The injected SPA token unlocks protected /api/ routes."""
     r = client_loopback.get(
         "/api/sessions",
-        headers={"X-Hermes-Session-Token": web_server._SESSION_TOKEN},
+        headers={"X-Hermes-Session-Token": fake_redacted_credential},
     )
     # 200 or 404 (no sessions yet) both prove the auth layer let it through.
     # 500 is also acceptable if there's a downstream issue unrelated to auth.

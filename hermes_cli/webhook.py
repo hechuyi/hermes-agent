@@ -117,7 +117,7 @@ def _setup_hint() -> str:
          extra:
            host: "0.0.0.0"
            port: 8644
-           secret: "your-global-hmac-secret"
+           secret: "fake_redacted_credential"
 
   3. Or set environment variables in {_dhh}/.env:
      WEBHOOK_ENABLED=true

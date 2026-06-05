@@ -174,7 +174,7 @@ class TestScanMemoryContent:
     # ── Hardcoded secrets ──
 
     def test_hardcoded_secret_blocked(self):
-        result = _scan_memory_content('api_key="sk-abcdef1234567890abcdef12"')
+        result = _scan_memory_content('api_key="sk-REDACTED"')
         assert "Blocked" in result
         assert "hardcoded_secret" in result
 

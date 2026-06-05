@@ -78,7 +78,7 @@ class TestReadClaudeCodeCredentialsFromKeychain:
                 stdout=json.dumps({
                     "claudeAiOauth": {
                         "accessToken": "kc-access-token-abc",
-                        "refreshToken": "kc-refresh-token-xyz",
+                        "refreshToken": "fake_redacted_credential",
                         "expiresAt": 9999999999999,
                     }
                 }),

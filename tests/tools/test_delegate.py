@@ -1114,7 +1114,7 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             "model": "google/gemini-3-flash-preview",
             "provider": "openrouter",
             "base_url": "https://openrouter.ai/api/v1",
-            "api_key": "sk-or-delegation-key",
+            "api_key": "sk-REDACTED",
             "api_mode": "chat_completions",
         }
         parent = _make_mock_parent(depth=0)
@@ -1132,7 +1132,7 @@ class TestDelegationProviderIntegration(unittest.TestCase):
             self.assertEqual(kwargs["model"], "google/gemini-3-flash-preview")
             self.assertEqual(kwargs["provider"], "openrouter")
             self.assertEqual(kwargs["base_url"], "https://openrouter.ai/api/v1")
-            self.assertEqual(kwargs["api_key"], "sk-or-delegation-key")
+            self.assertEqual(kwargs["api_key"], "sk-REDACTED")
             self.assertEqual(kwargs["api_mode"], "chat_completions")
 
     @patch("tools.delegate_tool._load_config")

@@ -268,7 +268,7 @@ def test_x_search_uses_xai_oauth_when_only_oauth_available(monkeypatch):
 
     assert result["success"] is True
     assert result["credential_source"] == "xai-oauth"
-    assert captured["headers"]["Authorization"] == "Bearer oauth-bearer-token"
+    assert captured["headers"]["Authorization"] == "Bearer REDACTED"
 
 
 def test_x_search_uses_api_key_when_only_xai_api_key_set(monkeypatch):
@@ -347,7 +347,7 @@ def test_x_search_prefers_oauth_when_both_available(monkeypatch):
     result = json.loads(x_search_tool(query="anything"))
 
     assert result["credential_source"] == "xai-oauth"
-    assert captured["headers"]["Authorization"] == "Bearer oauth-bearer-token"
+    assert captured["headers"]["Authorization"] == "Bearer REDACTED"
 
 
 def test_x_search_returns_tool_error_when_no_credentials(monkeypatch):

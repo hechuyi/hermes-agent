@@ -80,10 +80,10 @@ def test_keep_on_unrecognised_input(profile_env):
 
 def test_replace_saves_new_key(profile_env):
     from hermes_cli.config import get_env_value, save_env_value
-    save_env_value("DEEPSEEK_API_KEY", "sk-malformed-junk")
+    save_env_value("DEEPSEEK_API_KEY", "sk-REDACTED")
 
     key, abort = _run_prompt(
-        existing_key="sk-malformed-junk", choice="r", new_key="sk-fresh"
+        existing_key="sk-REDACTED", choice="r", new_key="sk-fresh"
     )
     assert key == "sk-fresh"
     assert abort is False

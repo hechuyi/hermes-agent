@@ -107,7 +107,7 @@ class TestProviderPersistsAfterModelSave:
             pytest.skip("kimi-coding not in PROVIDER_REGISTRY")
 
         # Simulate: user has a Kimi API key, model was a string
-        monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-test-key")
+        monkeypatch.setenv("KIMI_API_KEY", "sk-REDACTED")
 
         from hermes_cli.main import _model_flow_api_key_provider
         from hermes_cli.config import load_config

@@ -387,7 +387,7 @@ class TestAPISmoke:
     def test_invalid_auth_returns_401(self):
         resp = requests.get(
             f"{BASE_URL}/users",
-            headers={"Authorization": "Bearer invalid-token"},
+            headers={"Authorization": "Bearer REDACTED"},
             timeout=10,
         )
         assert resp.status_code == 401

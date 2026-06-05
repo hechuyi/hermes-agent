@@ -55,7 +55,7 @@ class CopilotACPClientSafetyTests(unittest.TestCase):
             home = Path(tmpdir) / "home"
             blocked = home / ".hermes" / "skills" / ".hub" / "index-cache" / "entry.json"
             blocked.parent.mkdir(parents=True, exist_ok=True)
-            blocked.write_text('{"token":"sk-test-secret-1234567890"}')
+            blocked.write_text('{"token":"sk-REDACTED"}')
 
             with patch.dict(
                 os.environ,
@@ -78,7 +78,7 @@ class CopilotACPClientSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             secret_file = root / "config.env"
-            secret_file.write_text("OPENAI_API_KEY=sk-proj-abc123def456ghi789jkl012")
+            secret_file.write_text("OPENAI_API_KEY=sk-REDACTED")
 
             # agent.redact snapshots HERMES_REDACT_SECRETS at import time into
             # _REDACT_ENABLED, so patching os.environ is a no-op. Flip the

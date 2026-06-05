@@ -40,21 +40,21 @@ def _load():
 # ───────────────────────────────────────────────────────────────────────
 def test_redact_replaces_secret_by_key_name():
     mod = _load()
-    out = mod.redact_migration_value({"OPENROUTER_API_KEY": "sk-or-v1-abcdef12345678"})
+    out = mod.redact_migration_value({"OPENROUTER_API_KEY": "sk-REDACTED"})
     assert out["OPENROUTER_API_KEY"] == mod.REDACTED_MIGRATION_VALUE
 
 
 def test_redact_replaces_secret_by_value_pattern():
     mod = _load()
     # Even under a non-secret-looking key, the sk-... pattern should be replaced inline.
-    out = mod.redact_migration_value({"note": "use sk-or-v1-9Xs7fF2JkLmNpQrT to authenticate"})
+    out = mod.redact_migration_value({"note": "use sk-REDACTED to authenticate"})
     assert "sk-or-" not in out["note"]
     assert mod.REDACTED_MIGRATION_VALUE in out["note"]
 
 
 def test_redact_handles_github_token_pattern():
     mod = _load()
-    out = mod.redact_migration_value({"detail": "token: ghp_1234567890abcdef1234"})
+    out = mod.redact_migration_value({"detail": "token: fake_redacted_credential"})
     assert "ghp_" not in out["detail"]
     assert mod.REDACTED_MIGRATION_VALUE in out["detail"]
 
@@ -74,7 +74,7 @@ def test_redact_handles_google_api_key_pattern():
 
 def test_redact_handles_bearer_header():
     mod = _load()
-    out = mod.redact_migration_value({"hint": "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.abc"})
+    out = mod.redact_migration_value({"hint": "Authorization: Bearer REDACTED"})
     # Key "hint" is not a secret marker — only the Bearer <token> substring
     # gets scrubbed inline by the value pattern.
     assert "Bearer eyJ" not in out["hint"]
@@ -137,14 +137,14 @@ def test_write_report_redacts_api_keys_on_disk(tmp_path):
                 "destination": "/tgt/.env",
                 "status": "migrated",
                 "reason": "",
-                "details": {"OPENROUTER_API_KEY": "sk-or-v1-1234567890abcdef"},
+                "details": {"OPENROUTER_API_KEY": "sk-REDACTED"},
             },
         ],
     }
     mod.write_report(tmp_path, report)
     persisted = json.loads((tmp_path / "report.json").read_text())
     # The raw secret must not appear anywhere in the persisted JSON.
-    assert "sk-or-v1-1234567890abcdef" not in (tmp_path / "report.json").read_text()
+    assert "sk-REDACTED" not in (tmp_path / "report.json").read_text()
     assert persisted["items"][0]["details"]["OPENROUTER_API_KEY"] == mod.REDACTED_MIGRATION_VALUE
 
 
@@ -342,7 +342,7 @@ def test_json_mode_redacts_secrets_in_output(tmp_path):
     (source / "openclaw.json").write_text("{}", encoding="utf-8")
     # Plant a fake OpenClaw .env with a recognizably-shaped key.
     (source / ".env").write_text(
-        "OPENROUTER_API_KEY=sk-or-v1-abcdef1234567890abcdef\n", encoding="utf-8"
+        "OPENROUTER_API_KEY=sk-REDACTED\n", encoding="utf-8"
     )
     target = tmp_path / "hermes"
     target.mkdir()
@@ -362,7 +362,7 @@ def test_json_mode_redacts_secrets_in_output(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     # The raw key value must never appear in the JSON output.
-    assert "sk-or-v1-abcdef1234567890abcdef" not in result.stdout
+    assert "sk-REDACTED" not in result.stdout
 
 
 # ───────────────────────────────────────────────────────────────────────

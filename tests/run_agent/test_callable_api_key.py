@@ -265,7 +265,7 @@ class TestCliEnsureRuntimeCredentialsCallable:
     """Regression: ``cli.py:_ensure_runtime_credentials`` previously
     treated a callable ``api_key`` as "not a string" and overwrote it
     with the ``"no-key-required"`` placeholder, which then got sent as
-    ``Authorization: Bearer no-key-required`` and rejected by Azure
+    ``Authorization: Bearer REDACTED`` and rejected by Azure
     with a 401. This is the most subtle of the callable-api_key audit
     sites — gated by ``not isinstance(api_key, str)`` rather than the
     cleaner ``callable(...)`` check used elsewhere.

@@ -905,19 +905,19 @@ class TestKimiCodeStatusAutoDetect:
     """Test that get_api_key_provider_status auto-detects sk-kimi- keys."""
 
     def test_sk_kimi_key_gets_kimi_code_url(self, monkeypatch):
-        monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-test-key-123")
+        monkeypatch.setenv("KIMI_API_KEY", "sk-REDACTED")
         status = get_api_key_provider_status("kimi-coding")
         assert status["configured"] is True
         assert status["base_url"] == KIMI_CODE_BASE_URL
 
     def test_legacy_key_gets_moonshot_url(self, monkeypatch):
-        monkeypatch.setenv("KIMI_API_KEY", "sk-legacy-test-key")
+        monkeypatch.setenv("KIMI_API_KEY", "sk-REDACTED")
         status = get_api_key_provider_status("kimi-coding")
         assert status["configured"] is True
         assert status["base_url"] == MOONSHOT_DEFAULT_URL
 
     def test_env_override_wins(self, monkeypatch):
-        monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-test-key")
+        monkeypatch.setenv("KIMI_API_KEY", "sk-REDACTED")
         monkeypatch.setenv("KIMI_BASE_URL", "https://override.example/v1")
         status = get_api_key_provider_status("kimi-coding")
         assert status["base_url"] == "https://override.example/v1"
@@ -927,19 +927,19 @@ class TestKimiCodeCredentialAutoDetect:
     """Test that resolve_api_key_provider_credentials auto-detects sk-kimi- keys."""
 
     def test_sk_kimi_key_gets_kimi_code_url(self, monkeypatch):
-        monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-secret-key")
+        monkeypatch.setenv("KIMI_API_KEY", "sk-REDACTED")
         creds = resolve_api_key_provider_credentials("kimi-coding")
-        assert creds["api_key"] == "sk-kimi-secret-key"
+        assert creds["api_key"] == "sk-REDACTED"
         assert creds["base_url"] == KIMI_CODE_BASE_URL
 
     def test_legacy_key_gets_moonshot_url(self, monkeypatch):
-        monkeypatch.setenv("KIMI_API_KEY", "sk-legacy-secret-key")
+        monkeypatch.setenv("KIMI_API_KEY", "sk-REDACTED")
         creds = resolve_api_key_provider_credentials("kimi-coding")
-        assert creds["api_key"] == "sk-legacy-secret-key"
+        assert creds["api_key"] == "sk-REDACTED"
         assert creds["base_url"] == MOONSHOT_DEFAULT_URL
 
     def test_env_override_wins(self, monkeypatch):
-        monkeypatch.setenv("KIMI_API_KEY", "sk-kimi-secret-key")
+        monkeypatch.setenv("KIMI_API_KEY", "sk-REDACTED")
         monkeypatch.setenv("KIMI_BASE_URL", "https://override.example/v1")
         creds = resolve_api_key_provider_credentials("kimi-coding")
         assert creds["base_url"] == "https://override.example/v1"

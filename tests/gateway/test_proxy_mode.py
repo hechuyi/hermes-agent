@@ -301,7 +301,7 @@ class TestRunAgentViaProxy:
         assert session.captured_url == "http://host:8642/v1/chat/completions"
 
         # Verify auth header
-        assert session.captured_headers["Authorization"] == "Bearer test-key-123"
+        assert session.captured_headers["Authorization"] == "Bearer REDACTED"
 
         # Verify session ID header
         assert session.captured_headers["X-Hermes-Session-Id"] == "session-abc"

@@ -282,7 +282,7 @@ Works with either credential path — no new env vars, no new setup wizard:
 
 ```bash
 # ~/.hermes/.env (env-var path)
-XAI_API_KEY=sk-xai-your-key-here
+XAI_API_KEY=sk-REDACTED
 ```
 
 or for SuperGrok subscribers:

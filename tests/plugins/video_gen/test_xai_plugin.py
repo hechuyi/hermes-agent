@@ -95,7 +95,7 @@ def test_xai_resolved_credentials_threaded_through_request(monkeypatch):
     assert api_key == "oauth-bearer-token"
     assert base_url == "https://api.x.ai/v1"
     headers = xai_plugin._xai_headers(api_key)
-    assert headers["Authorization"] == "Bearer oauth-bearer-token"
+    assert headers["Authorization"] == "Bearer REDACTED"
 
 
 def test_xai_no_operation_kwarg():

@@ -103,7 +103,7 @@ hermes memory setup        # 选择 "honcho" — 运行 Honcho 专属的安装�
 
 ```json
 {
-  "apiKey": "your-key-from-app.honcho.dev",
+  "apiKey": "fake_redacted_credential",
   "hosts": {
     "hermes": {
       "enabled": true,

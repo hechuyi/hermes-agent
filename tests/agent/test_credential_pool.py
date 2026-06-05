@@ -348,7 +348,7 @@ def test_mark_exhausted_and_rotate_persists_status(tmp_path, monkeypatch):
                         "auth_type": "api_key",
                         "priority": 0,
                         "source": "manual",
-                        "access_token": "sk-ant-api-primary",
+                        "access_token": "sk-REDACTED",
                     },
                     {
                         "id": "cred-2",
@@ -356,7 +356,7 @@ def test_mark_exhausted_and_rotate_persists_status(tmp_path, monkeypatch):
                         "auth_type": "api_key",
                         "priority": 1,
                         "source": "manual",
-                        "access_token": "sk-ant-api-secondary",
+                        "access_token": "sk-REDACTED",
                     },
                 ]
             },
@@ -725,11 +725,11 @@ def test_load_pool_prefers_dotenv_over_stale_os_environ(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
     # Simulate the bug: parent shell exported a stale test key
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-STALE-from-shell")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-REDACTED")
 
     # User edited ~/.hermes/.env with the fresh key
     (hermes_home / ".env").write_text(
-        "OPENROUTER_API_KEY=sk-or-FRESH-from-dotenv\n"
+        "OPENROUTER_API_KEY=sk-REDACTED\n"
     )
 
     _write_auth_store(tmp_path, {"version": 1, "providers": {}})
@@ -741,7 +741,7 @@ def test_load_pool_prefers_dotenv_over_stale_os_environ(tmp_path, monkeypatch):
     assert entry is not None
     assert entry.source == "env:OPENROUTER_API_KEY"
     # The fresh key from .env must win over the stale shell export
-    assert entry.access_token == "sk-or-FRESH-from-dotenv", (
+    assert entry.access_token == "sk-REDACTED", (
         f"Expected .env to win, got {entry.access_token!r}"
     )
 
@@ -755,7 +755,7 @@ def test_load_pool_falls_back_to_os_environ_when_dotenv_empty(tmp_path, monkeypa
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-from-runtime-env")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-REDACTED")
 
     # .env exists but does not define OPENROUTER_API_KEY
     (hermes_home / ".env").write_text("SOME_OTHER_VAR=unrelated\n")
@@ -767,7 +767,7 @@ def test_load_pool_falls_back_to_os_environ_when_dotenv_empty(tmp_path, monkeypa
     entry = pool.select()
 
     assert entry is not None
-    assert entry.access_token == "sk-or-from-runtime-env"
+    assert entry.access_token == "sk-REDACTED"
 
 
 def test_load_pool_removes_stale_seeded_env_entry(tmp_path, monkeypatch):
@@ -1196,7 +1196,7 @@ def test_load_pool_api_key_path_skips_oauth_autodiscovery(tmp_path, monkeypatch)
     the session onto OAuth credentials mid-conversation.
     """
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-explicit-user-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-REDACTED")
     monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     _write_auth_store(tmp_path, {"version": 1, "providers": {}})
@@ -1208,7 +1208,7 @@ def test_load_pool_api_key_path_skips_oauth_autodiscovery(tmp_path, monkeypatch)
     def _fake_pkce():
         pkce_called["n"] += 1
         return {
-            "accessToken": "sk-ant-oat01-pkce-token",
+            "accessToken": "sk-REDACTED",
             "refreshToken": "pkce-refresh",
             "expiresAt": int(time.time() * 1000) + 3_600_000,
         }
@@ -1216,7 +1216,7 @@ def test_load_pool_api_key_path_skips_oauth_autodiscovery(tmp_path, monkeypatch)
     def _fake_cc():
         cc_called["n"] += 1
         return {
-            "accessToken": "sk-ant-oat01-claude-code-token",
+            "accessToken": "sk-REDACTED",
             "refreshToken": "cc-refresh",
             "expiresAt": int(time.time() * 1000) + 3_600_000,
         }
@@ -1246,7 +1246,7 @@ def test_load_pool_api_key_path_prunes_stale_oauth_entries(tmp_path, monkeypatch
     session onto the OAuth masquerade.
     """
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-explicit-user-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-REDACTED")
     monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
 
@@ -1263,7 +1263,7 @@ def test_load_pool_api_key_path_prunes_stale_oauth_entries(tmp_path, monkeypatch
                         "id": "stale1",
                         "source": "claude_code",
                         "auth_type": "oauth",
-                        "access_token": "sk-ant-oat01-stale-claude-code",
+                        "access_token": "sk-REDACTED",
                         "refresh_token": "stale-refresh",
                         "expires_at_ms": int(time.time() * 1000) + 3_600_000,
                         "priority": 0,
@@ -1298,7 +1298,7 @@ def test_load_pool_oauth_path_still_autodiscovers(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-explicit-oauth-token")
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-REDACTED")
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     _write_auth_store(tmp_path, {"version": 1, "providers": {}})
     monkeypatch.setattr("hermes_cli.auth.is_provider_explicitly_configured", lambda pid: True)
@@ -1310,7 +1310,7 @@ def test_load_pool_oauth_path_still_autodiscovers(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "agent.anthropic_adapter.read_claude_code_credentials",
         lambda: {
-            "accessToken": "sk-ant-oat01-autodiscovered-cc",
+            "accessToken": "sk-REDACTED",
             "refreshToken": "cc-refresh",
             "expiresAt": int(time.time() * 1000) + 3_600_000,
         },
@@ -1515,7 +1515,7 @@ def test_custom_endpoint_pool_seeds_from_config(tmp_path, monkeypatch):
             {
                 "name": "Together.ai",
                 "base_url": "https://api.together.ai/v1",
-                "api_key": "sk-config-seeded",
+                "api_key": "sk-REDACTED",
             }
         ]
     }))
@@ -1526,7 +1526,7 @@ def test_custom_endpoint_pool_seeds_from_config(tmp_path, monkeypatch):
     assert pool.has_credentials()
     entries = pool.entries()
     assert len(entries) == 1
-    assert entries[0].access_token == "sk-config-seeded"
+    assert entries[0].access_token == "sk-REDACTED"
     assert entries[0].source == "config:Together.ai"
 
 

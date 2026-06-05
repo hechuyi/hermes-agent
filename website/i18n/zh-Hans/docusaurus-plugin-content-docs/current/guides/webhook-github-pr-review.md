@@ -48,7 +48,7 @@ platforms:
 
       routes:
         github-pr-review:
-          secret: "your-webhook-secret-here"   # 必须与 GitHub webhook secret 完全一致
+          secret: "fake_redacted_credential"   # 必须与 GitHub webhook secret 完全一致
           events:
             - pull_request
 
@@ -157,7 +157,7 @@ ngrok http 8644
 :::
 
 ```bash
-SECRET="your-webhook-secret-here"
+SECRET="fake_redacted_credential"
 BODY='{"action":"opened","number":99,"pull_request":{"title":"Test PR","body":"Adds a feature.","user":{"login":"testuser"},"head":{"ref":"feat/x"},"base":{"ref":"main"},"html_url":"https://github.com/org/repo/pull/99"},"repository":{"full_name":"org/repo"}}'
 SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | awk '{print "sha256="$2}')
 
@@ -205,7 +205,7 @@ platforms:
     extra:
       routes:
         github-pr-review:
-          secret: "your-webhook-secret-here"
+          secret: "fake_redacted_credential"
           events: [pull_request]
           prompt: |
             A pull request event was received (action: {action}).

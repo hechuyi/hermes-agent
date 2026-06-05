@@ -232,7 +232,7 @@ class TestTranscribeCallSitesReadDotenv:
             result = tt._transcribe_xai("/tmp/fake.mp3", "grok-stt")
 
         assert result["success"] is True
-        assert captured["headers"]["Authorization"] == "Bearer xai-dotenv-key"
+        assert captured["headers"]["Authorization"] == "Bearer REDACTED"
 
 
 class TestEndToEndRegressionGuard:
@@ -268,4 +268,4 @@ class TestEndToEndRegressionGuard:
                 result = tt._transcribe_xai("/tmp/fake.mp3", "grok-stt")
 
         assert result["success"] is True
-        assert captured["headers"]["Authorization"] == "Bearer dotenv-secret"
+        assert captured["headers"]["Authorization"] == "Bearer REDACTED"

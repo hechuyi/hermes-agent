@@ -333,8 +333,8 @@ async def auth_callback(
     resp = RedirectResponse(url=landing, status_code=302)
     set_session_cookies(
         resp,
-        access_token=session.access_token,
-        refresh_token=session.refresh_token,
+        access_token=(session.access_token),
+        refresh_token=(session.refresh_token),
         access_token_expires_in=expires_in,
         use_https=detect_https(request),
         prefix=_prefix(request),

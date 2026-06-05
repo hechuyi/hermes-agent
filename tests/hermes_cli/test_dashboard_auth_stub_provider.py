@@ -110,7 +110,7 @@ def test_stub_verify_expired_session_returns_none():
 
 def test_stub_verify_tampered_token_returns_none():
     p = StubAuthProvider()
-    assert p.verify_session(access_token="garbage-not-a-real-token") is None
+    assert p.verify_session(access_token="fake_redacted_credential") is None
 
 
 def test_stub_refresh_round_trips():

@@ -168,7 +168,7 @@ class MicrosoftGraphTokenProvider:
         data = {
             "grant_type": "client_credentials",
             "client_id": self.credentials.client_id,
-            "client_secret": self.credentials.client_secret,
+            "client_secret": (self.credentials.client_secret),
             "scope": self.credentials.scope,
         }
         headers = {"Content-Type": "application/x-www-form-urlencoded"}

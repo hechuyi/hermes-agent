@@ -883,7 +883,7 @@ class TestMatrixAccessTokenAuth:
 
         config = PlatformConfig(
             enabled=True,
-            token="syt_test_access_token",
+            token="fake_redacted_credential",
             extra={
                 "homeserver": "https://matrix.example.org",
                 "user_id": "@bot:example.org",
@@ -916,7 +916,7 @@ class TestMatrixAccessTokenAuth:
             }}},
         })
         mock_client.api = MagicMock()
-        mock_client.api.token = "syt_test_access_token"
+        mock_client.api.token = "fake_redacted_credential"
         mock_client.api.session = MagicMock()
         mock_client.api.session.close = AsyncMock()
 
@@ -990,7 +990,7 @@ class TestMatrixE2EEHardFail:
 
         config = PlatformConfig(
             enabled=True,
-            token="syt_test_access_token",
+            token="fake_redacted_credential",
             extra={
                 "homeserver": "https://matrix.example.org",
                 "user_id": "@bot:example.org",
@@ -1004,7 +1004,7 @@ class TestMatrixE2EEHardFail:
         mock_client = MagicMock()
         mock_client.whoami = AsyncMock(return_value=MagicMock(user_id="@bot:example.org", device_id="DEV123"))
         mock_client.api = MagicMock()
-        mock_client.api.token = "syt_test_access_token"
+        mock_client.api.token = "fake_redacted_credential"
         mock_client.api.session = MagicMock()
         mock_client.api.session.close = AsyncMock()
         mock_client.mxid = "@bot:example.org"
@@ -1028,7 +1028,7 @@ class TestMatrixE2EEHardFail:
 
         config = PlatformConfig(
             enabled=True,
-            token="syt_test_access_token",
+            token="fake_redacted_credential",
             extra={
                 "homeserver": "https://matrix.example.org",
                 "user_id": "@bot:example.org",
@@ -1042,7 +1042,7 @@ class TestMatrixE2EEHardFail:
         mock_client = MagicMock()
         mock_client.whoami = AsyncMock(return_value=MagicMock(user_id="@bot:example.org", device_id="DEV123"))
         mock_client.api = MagicMock()
-        mock_client.api.token = "syt_test_access_token"
+        mock_client.api.token = "fake_redacted_credential"
         mock_client.api.session = MagicMock()
         mock_client.api.session.close = AsyncMock()
         mock_client.mxid = "@bot:example.org"
@@ -1115,7 +1115,7 @@ class TestMatrixDeviceId:
 
         config = PlatformConfig(
             enabled=True,
-            token="syt_test_access_token",
+            token="fake_redacted_credential",
             extra={
                 "homeserver": "https://matrix.example.org",
                 "user_id": "@bot:example.org",
@@ -1143,7 +1143,7 @@ class TestMatrixDeviceId:
             }}},
         })
         mock_client.api = MagicMock()
-        mock_client.api.token = "syt_test_access_token"
+        mock_client.api.token = "fake_redacted_credential"
         mock_client.api.session = MagicMock()
         mock_client.api.session.close = AsyncMock()
 

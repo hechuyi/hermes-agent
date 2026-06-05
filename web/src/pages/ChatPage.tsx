@@ -272,7 +272,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     const host = hostRef.current;
     if (!host) return;
 
-    const token = window.__HERMES_SESSION_TOKEN__;
+    const token = (window.__HERMES_SESSION_TOKEN__);
     // Banner already initialised above; just bail before wiring xterm/WS.
     if (!token) {
       return;

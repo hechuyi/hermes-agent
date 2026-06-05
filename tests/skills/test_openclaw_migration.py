@@ -495,7 +495,7 @@ def test_discord_settings_migrated(tmp_path: Path):
         json.dumps({
             "channels": {
                 "discord": {
-                    "token": "discord-bot-token-123",
+                    "token": "fake_redacted_credential",
                     "allowFrom": ["111222333", "444555666"],
                 }
             }

@@ -94,7 +94,7 @@ class TestPrimaryRuntimeSnapshot:
             patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()),
         ):
             agent = AIAgent(
-                api_key="sk-ant-test-12345678",
+                api_key="sk-REDACTED",
                 base_url="https://api.anthropic.com",
                 provider="anthropic",
                 api_mode="anthropic_messages",

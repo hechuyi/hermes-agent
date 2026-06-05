@@ -115,7 +115,7 @@ def _run_switch(raw_input: str, **extra):
         current_provider="opencode-go",
         current_model="kimi-k2.6",
         current_base_url="https://opencode.ai/zen/go/v1",
-        current_api_key="sk-test-opencode-go",
+        current_api_key="sk-REDACTED",
         is_global=False,
     )
     defaults.update(extra)

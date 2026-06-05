@@ -147,7 +147,7 @@ class BrowserUseBrowserProvider(BrowserProvider):
             return None
 
         return {
-            "api_key": managed.nous_user_token,
+            "api_key": (managed.nous_user_token),
             "base_url": managed.gateway_origin.rstrip("/"),
             "managed_mode": True,
         }

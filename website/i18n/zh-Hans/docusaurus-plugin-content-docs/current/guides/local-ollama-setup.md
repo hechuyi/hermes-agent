@@ -216,7 +216,7 @@ model:
 platforms:
   telegram:
     enabled: true
-    token: "YOUR_TELEGRAM_BOT_TOKEN"
+    token: "fake_redacted_credential"
 ```
 
 3. 启动 gateway：
@@ -236,7 +236,7 @@ hermes gateway
 platforms:
   discord:
     enabled: true
-    token: "YOUR_DISCORD_BOT_TOKEN"
+    token: "fake_redacted_credential"
 ```
 
 3. 启动：`hermes gateway`

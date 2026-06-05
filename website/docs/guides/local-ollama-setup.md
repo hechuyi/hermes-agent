@@ -216,7 +216,7 @@ model:
 platforms:
   telegram:
     enabled: true
-    token: "YOUR_TELEGRAM_BOT_TOKEN"
+    token: "fake_redacted_credential"
 ```
 
 3. Start the gateway:
@@ -236,7 +236,7 @@ Now message your bot on Telegram — it responds using your local model.
 platforms:
   discord:
     enabled: true
-    token: "YOUR_DISCORD_BOT_TOKEN"
+    token: "fake_redacted_credential"
 ```
 
 3. Start: `hermes gateway`

@@ -67,7 +67,7 @@ class TestTencentTokenhubAliases:
     def test_alias_resolves(self, alias, monkeypatch):
         for key in _OTHER_PROVIDER_KEYS:
             monkeypatch.delenv(key, raising=False)
-        monkeypatch.setenv("TOKENHUB_API_KEY", "sk-test-key-12345678")
+        monkeypatch.setenv("TOKENHUB_API_KEY", "sk-REDACTED")
         assert resolve_provider(alias) == "tencent-tokenhub"
 
     def test_normalize_provider_models_py(self):
@@ -96,7 +96,7 @@ class TestTencentTokenhubAutoDetection:
     def test_auto_detect(self, monkeypatch):
         for var in _OTHER_PROVIDER_KEYS:
             monkeypatch.delenv(var, raising=False)
-        monkeypatch.setenv("TOKENHUB_API_KEY", "sk-tokenhub-test-12345678")
+        monkeypatch.setenv("TOKENHUB_API_KEY", "sk-REDACTED")
         provider = resolve_provider("auto")
         assert provider == "tencent-tokenhub"
 
@@ -110,7 +110,7 @@ class TestTencentTokenhubCredentials:
     """Test credential resolution for the tencent-tokenhub provider."""
 
     def test_status_configured(self, monkeypatch):
-        monkeypatch.setenv("TOKENHUB_API_KEY", "sk-test-12345678")
+        monkeypatch.setenv("TOKENHUB_API_KEY", "sk-REDACTED")
         status = get_api_key_provider_status("tencent-tokenhub")
         assert status["configured"]
 
@@ -120,10 +120,10 @@ class TestTencentTokenhubCredentials:
         assert not status["configured"]
 
     def test_resolve_credentials(self, monkeypatch):
-        monkeypatch.setenv("TOKENHUB_API_KEY", "sk-test-12345678")
+        monkeypatch.setenv("TOKENHUB_API_KEY", "sk-REDACTED")
         monkeypatch.delenv("TOKENHUB_BASE_URL", raising=False)
         creds = resolve_api_key_provider_credentials("tencent-tokenhub")
-        assert creds["api_key"] == "sk-test-12345678"
+        assert creds["api_key"] == "sk-REDACTED"
         assert creds["base_url"] == "https://tokenhub.tencentmaas.com/v1"
 
     def test_openrouter_key_does_not_make_tokenhub_configured(self, monkeypatch):
@@ -134,7 +134,7 @@ class TestTencentTokenhubCredentials:
         assert not status["configured"]
 
     def test_custom_base_url_override(self, monkeypatch):
-        monkeypatch.setenv("TOKENHUB_API_KEY", "sk-test-12345678")
+        monkeypatch.setenv("TOKENHUB_API_KEY", "sk-REDACTED")
         monkeypatch.setenv("TOKENHUB_BASE_URL", "https://custom.tokenhub.example/v1")
         creds = resolve_api_key_provider_credentials("tencent-tokenhub")
         assert creds["base_url"] == "https://custom.tokenhub.example/v1"

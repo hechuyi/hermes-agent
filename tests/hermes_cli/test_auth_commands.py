@@ -332,7 +332,7 @@ def test_auth_remove_reindexes_priorities(tmp_path, monkeypatch):
                         "auth_type": "api_key",
                         "priority": 0,
                         "source": "manual",
-                        "access_token": "sk-ant-api-primary",
+                        "access_token": "sk-REDACTED",
                     },
                     {
                         "id": "cred-2",
@@ -340,7 +340,7 @@ def test_auth_remove_reindexes_priorities(tmp_path, monkeypatch):
                         "auth_type": "api_key",
                         "priority": 1,
                         "source": "manual",
-                        "access_token": "sk-ant-api-secondary",
+                        "access_token": "sk-REDACTED",
                     },
                 ]
             },
@@ -477,7 +477,7 @@ def test_auth_reset_clears_provider_statuses(tmp_path, monkeypatch, capsys):
                         "auth_type": "api_key",
                         "priority": 0,
                         "source": "manual",
-                        "access_token": "sk-ant-api-primary",
+                        "access_token": "sk-REDACTED",
                         "last_status": "exhausted",
                         "last_status_at": 1711230000.0,
                         "last_error_code": 402,
@@ -819,8 +819,8 @@ def test_auth_remove_env_seeded_clears_env_var(tmp_path, monkeypatch):
 
     # Write a .env with an OpenRouter key
     env_path = hermes_home / ".env"
-    env_path.write_text("OPENROUTER_API_KEY=sk-or-test-key-12345\nOTHER_KEY=keep-me\n")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key-12345")
+    env_path.write_text("OPENROUTER_API_KEY=sk-REDACTED\nOTHER_KEY=keep-me\n")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-REDACTED")
 
     # Seed the pool with the env entry
     _write_auth_store(
@@ -835,7 +835,7 @@ def test_auth_remove_env_seeded_clears_env_var(tmp_path, monkeypatch):
                         "auth_type": "api_key",
                         "priority": 0,
                         "source": "env:OPENROUTER_API_KEY",
-                        "access_token": "sk-or-test-key-12345",
+                        "access_token": "sk-REDACTED",
                     }
                 ]
             },
@@ -869,8 +869,8 @@ def test_auth_remove_env_seeded_does_not_resurrect(tmp_path, monkeypatch):
 
     # Write .env with an OpenRouter key
     env_path = hermes_home / ".env"
-    env_path.write_text("OPENROUTER_API_KEY=sk-or-test-key-12345\n")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key-12345")
+    env_path.write_text("OPENROUTER_API_KEY=sk-REDACTED\n")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-REDACTED")
 
     _write_auth_store(
         tmp_path,
@@ -884,7 +884,7 @@ def test_auth_remove_env_seeded_does_not_resurrect(tmp_path, monkeypatch):
                         "auth_type": "api_key",
                         "priority": 0,
                         "source": "env:OPENROUTER_API_KEY",
-                        "access_token": "sk-or-test-key-12345",
+                        "access_token": "sk-REDACTED",
                     }
                 ]
             },
@@ -927,7 +927,7 @@ def test_auth_remove_manual_entry_does_not_touch_env(tmp_path, monkeypatch):
                         "auth_type": "api_key",
                         "priority": 0,
                         "source": "manual",
-                        "access_token": "sk-or-manual-key",
+                        "access_token": "sk-REDACTED",
                     }
                 ]
             },
@@ -968,7 +968,7 @@ def test_auth_remove_claude_code_suppresses_reseed(tmp_path, monkeypatch):
                 "auth_type": "oauth",
                 "priority": 0,
                 "source": "claude_code",
-                "access_token": "sk-ant-oat01-token",
+                "access_token": "sk-REDACTED",
             }]
         },
     }
@@ -1223,7 +1223,7 @@ def test_auth_remove_env_seeded_suppresses_shell_exported_var(tmp_path, monkeypa
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
     # Simulate shell export (NOT written to .env)
-    monkeypatch.setenv("XAI_API_KEY", "sk-xai-shell-export")
+    monkeypatch.setenv("XAI_API_KEY", "sk-REDACTED")
     (hermes_home / ".env").write_text("")
 
     _write_auth_store(
@@ -1237,7 +1237,7 @@ def test_auth_remove_env_seeded_suppresses_shell_exported_var(tmp_path, monkeypa
                     "auth_type": "api_key",
                     "priority": 0,
                     "source": "env:XAI_API_KEY",
-                    "access_token": "sk-xai-shell-export",
+                    "access_token": "sk-REDACTED",
                     "base_url": "https://api.x.ai/v1",
                 }]
             },
@@ -1258,7 +1258,7 @@ def test_auth_remove_env_seeded_suppresses_shell_exported_var(tmp_path, monkeypa
     assert "Cleared XAI_API_KEY from .env" not in out  # wasn't in .env
 
     # Fresh simulation: shell re-exports, reload pool
-    monkeypatch.setenv("XAI_API_KEY", "sk-xai-shell-export")
+    monkeypatch.setenv("XAI_API_KEY", "sk-REDACTED")
     from agent.credential_pool import load_pool
     pool = load_pool("xai")
     assert not pool.has_credentials(), "pool must stay empty — env:XAI_API_KEY suppressed"
@@ -1345,7 +1345,7 @@ def test_seed_from_env_respects_env_suppression(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-    monkeypatch.setenv("XAI_API_KEY", "sk-xai-shell-export")
+    monkeypatch.setenv("XAI_API_KEY", "sk-REDACTED")
 
     (hermes_home / "auth.json").write_text(json.dumps({
         "version": 1,
@@ -1369,7 +1369,7 @@ def test_seed_from_env_respects_openrouter_suppression(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-shell-export")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-REDACTED")
 
     (hermes_home / "auth.json").write_text(json.dumps({
         "version": 1,

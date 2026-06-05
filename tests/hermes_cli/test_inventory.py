@@ -345,7 +345,7 @@ def test_end_to_end_with_real_context_no_credentials_leak(monkeypatch):
     """Full pipeline: real load_picker_context + real
     list_authenticated_providers. Verify no credential string ever
     appears in the returned payload, even with picker_hints=True."""
-    canary = "sk-canary-XYZ-must-not-appear"
+    canary = "sk-REDACTED"
     monkeypatch.setenv("OPENROUTER_API_KEY", canary)
     monkeypatch.setenv("ANTHROPIC_API_KEY", canary)
     cfg = _cfg(model={"provider": "openrouter"})

@@ -53,13 +53,13 @@ class TestAgentConfigSignature:
         from gateway.run import GatewayRunner
 
         rt1 = {
-            "api_key": "eyJhbGci.token-for-account-a",
+            "api_key": "fake_redacted_credential",
             "base_url": "https://chatgpt.com/backend-api/codex",
             "provider": "openai-codex",
             "api_mode": "codex_responses",
         }
         rt2 = {
-            "api_key": "eyJhbGci.token-for-account-b",
+            "api_key": "fake_redacted_credential",
             "base_url": "https://chatgpt.com/backend-api/codex",
             "provider": "openai-codex",
             "api_mode": "codex_responses",

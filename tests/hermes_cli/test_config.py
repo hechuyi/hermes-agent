@@ -335,7 +335,7 @@ class TestSanitizeEnvLines:
 
     def test_splits_concatenated_keys(self):
         """Two KEY=VALUE pairs jammed on one line get split."""
-        lines = ["ANTHROPIC_API_KEY=sk-ant-xxxOPENAI_BASE_URL=https://api.openai.com/v1\n"]
+        lines = ["ANTHROPIC_API_KEY=sk-REDACTED=https://api.openai.com/v1\n"]
         result = _sanitize_env_lines(lines)
         assert result == [
             "ANTHROPIC_API_KEY=sk-ant-xxx\n",
@@ -389,7 +389,7 @@ class TestSanitizeEnvLines:
 
     def test_value_ending_with_digits_still_splits(self):
         """Concatenation is detected even when value ends with digits."""
-        lines = ["OPENROUTER_API_KEY=sk-or-v1-abc123OPENAI_BASE_URL=https://api.openai.com/v1\n"]
+        lines = ["OPENROUTER_API_KEY=sk-REDACTED=https://api.openai.com/v1\n"]
         result = _sanitize_env_lines(lines)
         assert len(result) == 2
         assert result[0].startswith("OPENROUTER_API_KEY=")
@@ -416,7 +416,7 @@ class TestSanitizeEnvLines:
         """save_env_value sanitizes corrupted lines when writing a new key."""
         env_file = tmp_path / ".env"
         env_file.write_text(
-            "ANTHROPIC_API_KEY=sk-antOPENAI_BASE_URL=https://api.openai.com/v1\n"
+            "ANTHROPIC_API_KEY=sk-REDACTED=https://api.openai.com/v1\n"
             "FAL_KEY=existing\n"
         )
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):

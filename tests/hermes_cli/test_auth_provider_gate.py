@@ -68,7 +68,7 @@ def test_returns_false_when_config_provider_is_different(tmp_path, monkeypatch):
 
 def test_returns_true_when_anthropic_env_var_set(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-realkey")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-REDACTED")
     (tmp_path / "hermes").mkdir(parents=True, exist_ok=True)
 
     from hermes_cli.auth import is_provider_explicitly_configured
@@ -78,7 +78,7 @@ def test_returns_true_when_anthropic_env_var_set(tmp_path, monkeypatch):
 def test_claude_code_oauth_token_does_not_count_as_explicit(tmp_path, monkeypatch):
     """CLAUDE_CODE_OAUTH_TOKEN is set by Claude Code, not the user — must not gate."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-auto-token")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-REDACTED")
     (tmp_path / "hermes").mkdir(parents=True, exist_ok=True)
 
     from hermes_cli.auth import is_provider_explicitly_configured

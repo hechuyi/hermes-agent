@@ -90,7 +90,7 @@ platforms:
       routes:
         github-pr-review:
           events: ["pull_request"]
-          secret: "github-webhook-secret"
+          secret: "fake_redacted_credential"
           prompt: |
             Review PR #{pull_request.number}: {pull_request.title}
             Repository: {repository.full_name}

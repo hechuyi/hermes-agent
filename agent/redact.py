@@ -131,7 +131,7 @@ _TELEGRAM_RE = re.compile(
     r"(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})",
 )
 
-# Private key blocks: -----BEGIN RSA PRIVATE KEY----- ... -----END RSA PRIVATE KEY-----
+# Private key blocks: -----BEGIN REDACTED KEY----- ... -----END REDACTED KEY-----
 _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
 )
@@ -226,8 +226,8 @@ def mask_secret(
                      Colors.DIM)`` for user-facing display.
 
     Examples:
-        >>> mask_secret("sk-proj-abcdef1234567890")
-        'sk-p...7890'
+        >>> mask_secret("sk-proj-demo12")
+        'sk-p...mo12'
         >>> mask_secret("short")                         # fully masked
         '***'
         >>> mask_secret("")                              # empty default

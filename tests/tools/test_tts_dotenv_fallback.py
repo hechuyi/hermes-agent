@@ -78,7 +78,7 @@ class TestDotenvFallbackPerProvider:
              patch("requests.post", side_effect=fake_post):
             tts_tool._generate_xai_tts("hi", str(tmp_path / "out.mp3"), {})
 
-        assert captured["headers"]["Authorization"] == "Bearer xai-dotenv-key"
+        assert captured["headers"]["Authorization"] == "Bearer REDACTED"
 
     def test_minimax_reads_dotenv_key(self, tmp_path):
         from tools import tts_tool
@@ -99,7 +99,7 @@ class TestDotenvFallbackPerProvider:
              patch("requests.post", side_effect=fake_post):
             tts_tool._generate_minimax_tts("hi", str(tmp_path / "out.mp3"), {})
 
-        assert captured["headers"]["Authorization"] == "Bearer mm-dotenv-key"
+        assert captured["headers"]["Authorization"] == "Bearer REDACTED"
 
     def test_mistral_reads_dotenv_key(self, tmp_path):
         import base64
@@ -214,7 +214,7 @@ class TestRegressionGuard:
                     "hi", str(tmp_path / "out.mp3"), {}
                 )
 
-            assert captured["headers"]["Authorization"] == "Bearer dotenv-secret"
+            assert captured["headers"]["Authorization"] == "Bearer REDACTED"
         finally:
             importlib.reload(tts_tool)
 
@@ -254,7 +254,7 @@ class TestRegressionGuard:
                     "hi", str(tmp_path / "out.mp3"), {}
                 )
 
-            assert captured["headers"]["Authorization"] == "Bearer dotenv-secret"
+            assert captured["headers"]["Authorization"] == "Bearer REDACTED"
 
     def test_check_tts_requirements_sees_dotenv_minimax(self, monkeypatch):
         """``check_tts_requirements`` is the gate that decides whether

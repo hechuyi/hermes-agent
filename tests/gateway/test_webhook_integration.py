@@ -88,7 +88,7 @@ class TestGitHubPRWebhook:
         3. The event text contains the rendered prompt
         4. The event source has chat_type 'webhook'
         """
-        secret = "gh-webhook-test-secret"
+        secret = "fake_redacted_credential"
         routes = {
             "github-pr": {
                 "secret": secret,

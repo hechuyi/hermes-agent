@@ -55,7 +55,7 @@ class TestXiaomiAliases:
         # Clear env to avoid auto-detection interfering
         for key in ("XIAOMI_API_KEY",):
             monkeypatch.delenv(key, raising=False)
-        monkeypatch.setenv("XIAOMI_API_KEY", "sk-test-key-12345678")
+        monkeypatch.setenv("XIAOMI_API_KEY", "sk-REDACTED")
         assert resolve_provider(alias) == "xiaomi"
 
     def test_normalize_provider_models_py(self):
@@ -87,7 +87,7 @@ class TestXiaomiAutoDetection:
                      "GH_TOKEN", "GITHUB_TOKEN", "MINIMAX_CN_API_KEY",
                      "TOKENHUB_API_KEY", "ARCEEAI_API_KEY"):
             monkeypatch.delenv(var, raising=False)
-        monkeypatch.setenv("XIAOMI_API_KEY", "sk-xiaomi-test-12345678")
+        monkeypatch.setenv("XIAOMI_API_KEY", "sk-REDACTED")
         provider = resolve_provider("auto")
         assert provider == "xiaomi"
 
@@ -101,7 +101,7 @@ class TestXiaomiCredentials:
     """Test credential resolution for the xiaomi provider."""
 
     def test_status_configured(self, monkeypatch):
-        monkeypatch.setenv("XIAOMI_API_KEY", "sk-test-12345678")
+        monkeypatch.setenv("XIAOMI_API_KEY", "sk-REDACTED")
         status = get_api_key_provider_status("xiaomi")
         assert status["configured"]
 
@@ -111,14 +111,14 @@ class TestXiaomiCredentials:
         assert not status["configured"]
 
     def test_resolve_credentials(self, monkeypatch):
-        monkeypatch.setenv("XIAOMI_API_KEY", "sk-test-12345678")
+        monkeypatch.setenv("XIAOMI_API_KEY", "sk-REDACTED")
         monkeypatch.delenv("XIAOMI_BASE_URL", raising=False)
         creds = resolve_api_key_provider_credentials("xiaomi")
-        assert creds["api_key"] == "sk-test-12345678"
+        assert creds["api_key"] == "sk-REDACTED"
         assert creds["base_url"] == "https://api.xiaomimimo.com/v1"
 
     def test_custom_base_url_override(self, monkeypatch):
-        monkeypatch.setenv("XIAOMI_API_KEY", "sk-test-12345678")
+        monkeypatch.setenv("XIAOMI_API_KEY", "sk-REDACTED")
         monkeypatch.setenv("XIAOMI_BASE_URL", "https://custom.xiaomi.example/v1")
         creds = resolve_api_key_provider_credentials("xiaomi")
         assert creds["base_url"] == "https://custom.xiaomi.example/v1"

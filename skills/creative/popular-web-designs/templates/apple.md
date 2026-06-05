@@ -40,7 +40,7 @@ The color story is starkly binary. Product sections alternate between pure black
 
 ### Interactive
 - **Apple Blue** (`#0071e3`): `--sk-focus-color`, primary CTA backgrounds, focus rings. The ONLY chromatic color in the interface.
-- **Link Blue** (`#0066cc`): `--sk-body-link-color`, inline text links. Slightly darker than Apple Blue for text-level readability.
+- **Link Blue** (`#0066cc`): `--sk-REDACTED`, inline text links. Slightly darker than Apple Blue for text-level readability.
 - **Bright Blue** (`#2997ff`): Links on dark backgrounds. Higher luminance for contrast on black sections.
 
 ### Text

@@ -100,7 +100,7 @@ platforms:
     enabled: true
     extra:
       client_id: "your-teams-client-id"
-      client_secret: "your-teams-client-secret"
+      client_secret: "fake_redacted_credential"
       tenant_id: "your-teams-tenant-id"
 
       # outbound summary delivery

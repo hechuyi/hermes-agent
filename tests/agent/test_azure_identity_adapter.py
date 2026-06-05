@@ -191,7 +191,7 @@ class TestBuildBearerHttpClient:
             req = httpx.Request(
                 "POST", "https://example.com/v1/messages",
                 headers={
-                    "Authorization": "Bearer entra-id-bearer-via-http-hook",
+                    "Authorization": "Bearer REDACTED",
                     "api-key": "leaked-placeholder",
                 },
             )

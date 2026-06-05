@@ -397,7 +397,7 @@ def test_legacy_auth_mode_bypasses_usable_invoke_jwt(tmp_path, monkeypatch):
     def _fake_mint_agent_key(*, client, portal_base_url, access_token, min_ttl_seconds):
         del client, portal_base_url, min_ttl_seconds
         mint_calls.append(access_token)
-        return _mint_payload(api_key="legacy-after-jwt-401")
+        return _mint_payload(api_key="fake_redacted_credential")
 
     monkeypatch.setattr(auth_mod, "_mint_agent_key", _fake_mint_agent_key)
 
@@ -601,7 +601,7 @@ def test_nous_inference_auth_logs_do_not_include_secret_values(
         "scope": "inference:mint_agent_key",
         "exp": int(time.time() + 3600),
     })
-    refresh_token = "refresh-secret-token"
+    refresh_token = "fake_redacted_credential"
     opaque_key = "opaque-secret-agent-key"
     _setup_nous_auth(
         hermes_home,
@@ -1457,7 +1457,7 @@ def test_refresh_token_reuse_detection_surfaces_actionable_message():
             client=_FakeClient(),
             portal_base_url="https://portal.nousresearch.com",
             client_id="hermes-cli",
-            refresh_token="rt_consumed_elsewhere",
+            refresh_token="fake_redacted_credential",
         )
 
     message = str(exc_info.value)
@@ -1492,7 +1492,7 @@ def test_refresh_token_reuse_error_code_is_terminal():
             client=_FakeClient(),
             portal_base_url="https://portal.nousresearch.com",
             client_id="hermes-cli",
-            refresh_token="rt_consumed_elsewhere",
+            refresh_token="fake_redacted_credential",
         )
 
     assert exc_info.value.code == "refresh_token_reused"
@@ -1918,7 +1918,7 @@ def test_runtime_refresh_uses_newer_shared_token_before_local_stale_token(
     profile_b = tmp_path / "profile_b"
     _setup_nous_auth(
         profile_b,
-        access_token="local-expired-access",
+        access_token="fake_redacted_credential",
         refresh_token="local-stale-refresh",
     )
     monkeypatch.setenv("HERMES_HOME", str(profile_b))
@@ -1936,7 +1936,7 @@ def test_runtime_refresh_uses_newer_shared_token_before_local_stale_token(
 
     def _fake_mint_agent_key(*, client, portal_base_url, access_token, min_ttl_seconds):
         minted_with.append(access_token)
-        return _mint_payload(api_key="agent-key-from-shared-token")
+        return _mint_payload(api_key="fake_redacted_credential")
 
     monkeypatch.setattr(auth_mod, "_refresh_access_token", _refresh_should_not_happen)
     monkeypatch.setattr(auth_mod, "_mint_agent_key", _fake_mint_agent_key)
@@ -1964,7 +1964,7 @@ def test_managed_gateway_access_token_uses_newer_shared_token(
     profile_b = tmp_path / "profile_b"
     _setup_nous_auth(
         profile_b,
-        access_token="local-expired-access",
+        access_token="fake_redacted_credential",
         refresh_token="local-stale-refresh",
     )
     monkeypatch.setenv("HERMES_HOME", str(profile_b))

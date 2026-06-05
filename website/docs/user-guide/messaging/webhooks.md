@@ -94,11 +94,11 @@ platforms:
     enabled: true
     extra:
       port: 8644
-      secret: "global-fallback-secret"
+      secret: "fake_redacted_credential"
       routes:
         github-pr:
           events: ["pull_request"]
-          secret: "github-webhook-secret"
+          secret: "fake_redacted_credential"
           prompt: |
             Review this pull request:
             Repository: {repository.full_name}
@@ -212,7 +212,7 @@ platforms:
       routes:
         gitlab-mr:
           events: ["merge_request"]
-          secret: "your-gitlab-secret-token"
+          secret: "fake_redacted_credential"
           prompt: |
             Review this merge request:
             Project: {project.path_with_namespace}
@@ -284,7 +284,7 @@ platforms:
       secret: "global-secret"
       routes:
         antenna-matches:
-          secret: "antenna-webhook-secret"
+          secret: "fake_redacted_credential"
           deliver: "telegram"
           deliver_only: true
           prompt: "🎉 New match: {match.user_name} matched with you!"

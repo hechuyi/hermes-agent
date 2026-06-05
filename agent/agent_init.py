@@ -754,7 +754,7 @@ def init_agent(
                 agent.provider or "auto", model=agent.model, raw_codex=True)
             if _routed_client is not None:
                 client_kwargs = {
-                    "api_key": _routed_client.api_key,
+                    "api_key": (_routed_client.api_key),
                     "base_url": str(_routed_client.base_url),
                 }
                 if _provider_timeout is not None:

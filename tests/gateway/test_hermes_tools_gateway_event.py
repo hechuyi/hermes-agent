@@ -794,7 +794,7 @@ def test_apply_gateway_event_unsupported_action_fails_closed(
 def test_apply_gateway_event_unsupported_token_like_action_type_is_not_diagnostic(
     monkeypatch, tmp_path
 ):
-    token_like_type = "sk-test-abcdefghijklmnopqrstuvwxyz"
+    token_like_type = "sk-REDACTED"
 
     def fake_run(*args, **kwargs):
         return _completed(
@@ -850,10 +850,10 @@ def test_apply_gateway_event_unsupported_identifier_action_type_is_not_diagnosti
 
 
 def test_diagnostics_do_not_include_sensitive_output_or_state_dir(monkeypatch, tmp_path):
-    raw_secret = "sk-test-abcdefghijklmnopqrstuvwxyz"
+    raw_secret = "sk-REDACTED"
     raw_output = (
         f"state_dir={tmp_path} OPENAI_API_KEY={raw_secret} "
-        '{"access_token": "super-secret-token-value"}'
+        '{"access_token": "fake_redacted_credential"}'
     )
 
     def fake_run(*args, **kwargs):

@@ -298,7 +298,7 @@ class TestValidateSignature:
         """Raw shared secrets are accepted for Svix-style senders without whsec_ secrets."""
         adapter = _make_adapter()
         body = b'{"event_type":"message.received"}'
-        secret = "raw-agentmail-secret"
+        secret = "fake_redacted_credential"
         msg_id = "msg_123"
         timestamp = str(int(time.time()))
         sig = _svix_signature(body, secret, msg_id, timestamp)

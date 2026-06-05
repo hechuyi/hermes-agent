@@ -166,7 +166,7 @@ class TestWsAuthOkLoopback:
     """Gate OFF — legacy token path."""
 
     def test_correct_token_accepted(self, loopback_app):
-        ws = _fake_ws(query={"token": web_server._SESSION_TOKEN})
+        ws = _fake_ws(query={"token": fake_redacted_credential})
         assert web_server._ws_auth_ok(ws) is True
 
     def test_wrong_token_rejected(self, loopback_app):
@@ -213,7 +213,7 @@ class TestWsAuthOkGated:
         """Critical: gated mode must NOT honour the legacy token path
         even when someone has access to the in-process value of
         _SESSION_TOKEN (e.g. a leaked log line)."""
-        ws = _fake_ws(query={"token": web_server._SESSION_TOKEN})
+        ws = _fake_ws(query={"token": fake_redacted_credential})
         assert web_server._ws_auth_ok(ws) is False
 
     def test_rejection_audit_logs(self, gated_app, tmp_path, monkeypatch):

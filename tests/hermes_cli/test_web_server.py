@@ -79,7 +79,7 @@ class TestReloadEnv:
 
 class TestRedactKey:
     def test_long_key_shows_prefix_suffix(self):
-        result = redact_key("sk-1234567890abcdef")
+        result = redact_key("sk-REDACTED")
         assert result.startswith("sk-1")
         assert result.endswith("cdef")
         assert "..." in result

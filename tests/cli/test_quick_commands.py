@@ -172,10 +172,10 @@ class TestGatewayQuickCommands:
         runner._is_user_authorized = MagicMock(return_value=True)
 
         event = self._make_event("leak")
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-secret-12345"}):
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-REDACTED"}):
             result = await runner._handle_message(event)
 
-        assert "sk-or-secret-12345" not in result, \
+        assert "sk-REDACTED" not in result, \
             "Quick command leaked OPENROUTER_API_KEY — exec runs without env sanitization"
 
     @pytest.mark.asyncio
@@ -189,7 +189,7 @@ class TestGatewayQuickCommands:
         monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
 
         runner = GatewayRunner.__new__(GatewayRunner)
-        runner.config = {"quick_commands": {"token": {"type": "exec", "command": "echo sk-ant-api03-supersecretkey1234567890"}}}
+        runner.config = {"quick_commands": {"token": {"type": "exec", "command": "echo sk-REDACTED"}}}
         runner._running_agents = {}
         runner._pending_messages = {}
         runner._is_user_authorized = MagicMock(return_value=True)

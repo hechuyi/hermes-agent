@@ -400,14 +400,14 @@ class TestSecurityInvariantsAcrossModes(unittest.TestCase):
             "print('TOK=' + os.environ.get('ANTHROPIC_API_KEY', 'MISSING'))\n"
         )
         with patch.dict(os.environ, {
-            "OPENAI_API_KEY": "sk-should-not-leak",
+            "OPENAI_API_KEY": "sk-REDACTED",
             "ANTHROPIC_API_KEY": "ant-should-not-leak",
         }):
             result = self._run(code, mode="strict")
         self.assertEqual(result["status"], "success")
         self.assertIn("KEY=MISSING", result["output"])
         self.assertIn("TOK=MISSING", result["output"])
-        self.assertNotIn("sk-should-not-leak", result["output"])
+        self.assertNotIn("sk-REDACTED", result["output"])
         self.assertNotIn("ant-should-not-leak", result["output"])
 
     def test_api_keys_scrubbed_in_project_mode(self):
@@ -419,7 +419,7 @@ class TestSecurityInvariantsAcrossModes(unittest.TestCase):
             "print('SEC=' + os.environ.get('GITHUB_TOKEN', 'MISSING'))\n"
         )
         with patch.dict(os.environ, {
-            "OPENAI_API_KEY": "sk-should-not-leak",
+            "OPENAI_API_KEY": "sk-REDACTED",
             "ANTHROPIC_API_KEY": "ant-should-not-leak",
             "GITHUB_TOKEN": "ghp-should-not-leak",
         }):
@@ -427,7 +427,7 @@ class TestSecurityInvariantsAcrossModes(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         for needle in ("KEY=MISSING", "TOK=MISSING", "SEC=MISSING"):
             self.assertIn(needle, result["output"])
-        for leaked in ("sk-should-not-leak", "ant-should-not-leak", "ghp-should-not-leak"):
+        for leaked in ("sk-REDACTED", "ant-should-not-leak", "ghp-should-not-leak"):
             self.assertNotIn(leaked, result["output"])
 
     def test_secret_substrings_scrubbed_in_project_mode(self):
@@ -443,7 +443,7 @@ class TestSecurityInvariantsAcrossModes(unittest.TestCase):
             "DB_PASSWORD": "password-should-not-leak",
             "VAULT_CREDENTIAL": "cred-should-not-leak",
             "LDAP_PASSWD": "passwd-should-not-leak",
-            "AUTH_TOKEN": "auth-should-not-leak",
+            "AUTH_TOKEN": "fake_redacted_credential",
         }):
             result = self._run(code, mode="project")
         self.assertEqual(result["status"], "success")

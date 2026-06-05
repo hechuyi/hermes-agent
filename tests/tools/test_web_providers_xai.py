@@ -93,7 +93,7 @@ class TestXAIProviderIsAvailable:
         auth_path.write_text(json.dumps({
             "version": 1,
             "providers": {
-                "xai-oauth": {"tokens": {"access_token": "ya29.fake-access-token"}},
+                "xai-oauth": {"tokens": {"access_token": "fake_redacted_credential"}},
             },
         }))
 
@@ -536,7 +536,7 @@ class TestXAIProviderSearchErrors:
 
         assert result["success"] is True
         assert calls["refresh_count"] == 1
-        assert calls["posts"] == ["Bearer stale-token", "Bearer fresh-after-refresh"]
+        assert calls["posts"] == ["Bearer stale-token", "Bearer REDACTED"]
 
     def test_401_on_env_var_path_does_not_retry(self):
         """Env-var (XAI_API_KEY) creds can't be refreshed — must not retry."""
@@ -743,7 +743,7 @@ class TestXAIProviderOAuthPath:
             "provider": "xai-oauth",
             "api_mode": "codex_responses",
             "base_url": "https://api.x.ai/v1",
-            "api_key": "ya29.fake-oauth-access-token",
+            "api_key": "fake_redacted_credential",
             "source": "hermes-auth-store",
         }
 
@@ -763,4 +763,4 @@ class TestXAIProviderOAuthPath:
 
         assert result["success"] is True
         assert captured["url"] == "https://api.x.ai/v1/responses"
-        assert captured["headers"].get("Authorization") == "Bearer ya29.fake-oauth-access-token"
+        assert captured["headers"].get("Authorization") == "Bearer REDACTED"

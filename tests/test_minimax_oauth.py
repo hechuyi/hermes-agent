@@ -547,8 +547,8 @@ def test_resolve_credentials_does_not_quarantine_on_transient_refresh_failure():
     next attempt.
     """
     stale_state = {
-        "access_token": "still-good-access-token",
-        "refresh_token": "still-good-refresh-token",
+        "access_token": "fake_redacted_credential",
+        "refresh_token": "fake_redacted_credential",
         "expires_at": "2026-01-01T00:00:00Z",
         "inference_base_url": "https://api.minimax.io/v1",
     }
@@ -728,7 +728,7 @@ def test_token_provider_rereads_state_each_call():
             "expires_at": _future_iso(3600),
         },
         {
-            "access_token": "second-token-after-another-process-refreshed",
+            "access_token": "fake_redacted_credential",
             "refresh_token": "rt",
             "portal_base_url": MINIMAX_OAUTH_GLOBAL_BASE,
             "client_id": MINIMAX_OAUTH_CLIENT_ID,

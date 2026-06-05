@@ -99,7 +99,7 @@ You should see:
 curl -s http://127.0.0.1:8642/health
 # {"status": "ok", ...}
 
-curl -s -H "Authorization: Bearer your-secret-key" http://127.0.0.1:8642/v1/models
+curl -s -H "Authorization: Bearer REDACTED" http://127.0.0.1:8642/v1/models
 # {"object":"list","data":[{"id":"hermes-agent", ...}]}
 ```
 
@@ -249,7 +249,7 @@ With streaming enabled (the default), you'll see brief inline indicators as tool
 
 - **Check the URL has `/v1` suffix**: `http://host.docker.internal:8642/v1` (not just `:8642`)
 - **Verify the gateway is running**: `curl http://localhost:8642/health` should return `{"status": "ok"}`
-- **Check model listing**: `curl -H "Authorization: Bearer your-secret-key" http://localhost:8642/v1/models` should return a list with `hermes-agent`
+- **Check model listing**: `curl -H "Authorization: Bearer REDACTED" http://localhost:8642/v1/models` should return a list with `hermes-agent`
 - **Docker networking**: From inside Docker, `localhost` means the container, not your host. Use `host.docker.internal` or `--network=host`.
 - **Empty Ollama backend shadowing the picker**: If you omitted `ENABLE_OLLAMA_API=false`, Open WebUI shows an empty Ollama section above your Hermes models. Restart the container with `-e ENABLE_OLLAMA_API=false` or disable Ollama in **Admin Settings → Connections**.
 

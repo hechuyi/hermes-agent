@@ -279,7 +279,7 @@ class TestCaptureLogSnapshot:
 
 # A vendor-prefixed token used across redaction tests. Long enough to clear
 # the redactor's `floor` parameter so it actually masks rather than fully blanks.
-_REDACT_FIXTURE_TOKEN = "sk-proj-A1B2C3D4E5F6G7H8I9J0aA"
+_REDACT_FIXTURE_TOKEN = "sk-REDACTED"
 
 
 class TestCaptureLogSnapshotRedaction:

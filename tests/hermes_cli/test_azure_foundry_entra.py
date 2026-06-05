@@ -256,7 +256,7 @@ class TestResolveAzureFoundryRuntimeEntra:
 class TestResolveAzureFoundryRuntimeApiKey:
     def test_default_auth_mode_uses_static_key(self, monkeypatch):
         from hermes_cli.runtime_provider import _resolve_azure_foundry_runtime
-        monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "sk-azure-static-key")
+        monkeypatch.setenv("AZURE_FOUNDRY_API_KEY", "sk-REDACTED")
         runtime = _resolve_azure_foundry_runtime(
             requested_provider="azure-foundry",
             model_cfg={
@@ -265,7 +265,7 @@ class TestResolveAzureFoundryRuntimeApiKey:
                 "api_mode": "chat_completions",
             },
         )
-        assert runtime["api_key"] == "sk-azure-static-key"
+        assert runtime["api_key"] == "sk-REDACTED"
         assert runtime["auth_mode"] == "api_key"
         assert "entra" not in runtime  # only present in entra mode
 

@@ -1472,7 +1472,7 @@ class TestNonApprovalCardAction:
                 "custom_action": "something_else",
                 "update_prompt_id": 7,
             },
-            token="tok_saved_state_card",
+            token="fake_redacted_credential",
             thread_id="omt_topic",
             root_id="om_root",
         )

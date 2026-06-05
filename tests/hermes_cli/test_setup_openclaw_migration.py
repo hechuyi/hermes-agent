@@ -524,7 +524,7 @@ class TestGetSectionConfigSummary:
         trigger skip — mirrors the _IMPLICIT_ENV_VARS guard in
         is_provider_explicitly_configured()."""
         def env_side(key):
-            return "sk-ant-oat01-xxx" if key == "CLAUDE_CODE_OAUTH_TOKEN" else ""
+            return "sk-REDACTED" if key == "CLAUDE_CODE_OAUTH_TOKEN" else ""
 
         with patch.object(setup_mod, "get_env_value", side_effect=env_side):
             result = setup_mod._get_section_config_summary({}, "model")

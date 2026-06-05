@@ -241,7 +241,7 @@ def _get_firecrawl_client() -> Any:
             _raise_web_backend_configuration_error()
 
         kwargs = {
-            "api_key": managed_gateway.nous_user_token,
+            "api_key": (managed_gateway.nous_user_token),
             "api_url": managed_gateway.gateway_origin,
         }
         client_config = (

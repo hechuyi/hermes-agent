@@ -265,7 +265,7 @@ class TestGenerate:
             KreaImageGenProvider().generate(prompt="test")
 
         headers = mock_post.call_args.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer test-key-12345"
+        assert headers["Authorization"] == "Bearer REDACTED"
         assert headers["Content-Type"] == "application/json"
 
     def test_passthrough_seed_styles_moodboards(self):

@@ -474,7 +474,7 @@ class TestGetHeaders:
     def test_bearer_token_format(self, monkeypatch):
         monkeypatch.setattr("tools.homeassistant_tool._HASS_TOKEN", "my-secret-token")
         headers = _get_headers()
-        assert headers["Authorization"] == "Bearer my-secret-token"
+        assert headers["Authorization"] == "Bearer REDACTED"
         assert headers["Content-Type"] == "application/json"
 
 

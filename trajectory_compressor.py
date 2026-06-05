@@ -427,7 +427,7 @@ class TrajectoryCompressor:
         from agent.auxiliary_client import _to_openai_base_url
         # Always create a fresh client so it binds to the running loop.
         self.async_client = AsyncOpenAI(
-            api_key=self._async_client_api_key,
+            api_key=(self._async_client_api_key),
             base_url=_to_openai_base_url(self.config.base_url),
         )
         return self.async_client

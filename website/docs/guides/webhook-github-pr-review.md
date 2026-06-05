@@ -48,7 +48,7 @@ platforms:
 
       routes:
         github-pr-review:
-          secret: "your-webhook-secret-here"   # must match the GitHub webhook secret exactly
+          secret: "fake_redacted_credential"   # must match the GitHub webhook secret exactly
           events:
             - pull_request
 
@@ -157,7 +157,7 @@ Change `deliver: github_comment` to `deliver: log` in your config while testing.
 :::
 
 ```bash
-SECRET="your-webhook-secret-here"
+SECRET="fake_redacted_credential"
 BODY='{"action":"opened","number":99,"pull_request":{"title":"Test PR","body":"Adds a feature.","user":{"login":"testuser"},"head":{"ref":"feat/x"},"base":{"ref":"main"},"html_url":"https://github.com/org/repo/pull/99"},"repository":{"full_name":"org/repo"}}'
 SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | awk '{print "sha256="$2}')
 
@@ -205,7 +205,7 @@ platforms:
     extra:
       routes:
         github-pr-review:
-          secret: "your-webhook-secret-here"
+          secret: "fake_redacted_credential"
           events: [pull_request]
           prompt: |
             A pull request event was received (action: {action}).
