@@ -222,8 +222,10 @@ def test_provider_keys_skipped_warning_when_secrets_disabled(tmp_path):
 
 def test_deep_channel_secret_env_names_keep_runtime_semantics(tmp_path):
     mod = _load()
+    matrix_env = "_".join(("MATRIX", "ACCESS", "TOKEN"))
     mattermost_env = "_".join(("MATTERMOST", "TOKEN"))
     bluebubbles_env = "_".join(("BLUEBUBBLES", "PASSWORD"))
+    matrix_value = "matrix-runtime-value"
     mattermost_value = "mm-runtime-value"
     bluebubbles_value = "bluebubbles-runtime-value"
     migrator = _make_minimal_migrator(
@@ -235,6 +237,7 @@ def test_deep_channel_secret_env_names_keep_runtime_semantics(tmp_path):
     )
     migrator.migrate_deep_channels({
         "channels": {
+            "matrix": {"accessToken": matrix_value},
             "mattermost": {"botToken": mattermost_value},
             "bluebubbles": {"password": bluebubbles_value},
         },
@@ -244,6 +247,7 @@ def test_deep_channel_secret_env_names_keep_runtime_semantics(tmp_path):
         line.split("=", 1)
         for line in (migrator.target_root / ".env").read_text(encoding="utf-8").splitlines()
     )
+    assert env_values[matrix_env] == matrix_value
     assert env_values[mattermost_env] == mattermost_value
     assert env_values[bluebubbles_env] == bluebubbles_value
     assert "fake_redacted_credential" not in env_values

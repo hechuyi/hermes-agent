@@ -2565,7 +2565,7 @@ class Migrator:
 
         # Extended channel token/allowlist mapping
         CHANNEL_ENV_MAP = {
-            "matrix": {"token": "MATRIX...OKEN", "tokenField": "accessToken", "allowFrom": "MATRIX_ALLOWED_USERS",
+            "matrix": {"token": env_name("MATRIX", "ACCESS", "TOKEN"), "tokenField": "accessToken", "allowFrom": "MATRIX_ALLOWED_USERS",
                         "extras": {"homeserverUrl": "MATRIX_HOMESERVER_URL", "userId": "MATRIX_USER_ID"}},
             "mattermost": {"token": env_name("MATTERMOST", "TOKEN"), "allowFrom": "MATTERMOST_ALLOWED_USERS",
                            "extras": {"url": "MATTERMOST_URL", "teamId": "MATTERMOST_TEAM_ID"}},
