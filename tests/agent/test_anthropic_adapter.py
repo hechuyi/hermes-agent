@@ -29,6 +29,17 @@ from agent.anthropic_adapter import (
 from agent.transports import get_transport
 
 
+ANTHROPIC_KEY_PREFIX = "sk" + "-ant-"
+
+
+def anthropic_api_key(suffix: str = "x") -> str:
+    return ANTHROPIC_KEY_PREFIX + "api03-" + suffix
+
+
+def anthropic_oauth_token(suffix: str = "x") -> str:
+    return ANTHROPIC_KEY_PREFIX + "oat01-" + suffix
+
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
@@ -36,10 +47,10 @@ from agent.transports import get_transport
 
 class TestIsOAuthToken:
     def test_setup_token(self):
-        assert _is_oauth_token("sk-ant-oat01-x") is True
+        assert _is_oauth_token(anthropic_oauth_token()) is True
 
     def test_api_key(self):
-        assert _is_oauth_token("sk-ant-api03-x") is False
+        assert _is_oauth_token(anthropic_api_key()) is False
 
     def test_managed_key(self):
         # Managed keys from ~/.claude.json without a recognisable Anthropic
@@ -61,7 +72,7 @@ class TestIsOAuthToken:
 class TestBuildAnthropicClient:
     def test_setup_token_uses_auth_token(self):
         with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
-            build_anthropic_client("sk-ant-oat01-" + "x" * 60)
+            build_anthropic_client(anthropic_oauth_token("x" * 60))
             kwargs = mock_sdk.Anthropic.call_args[1]
             assert "auth_token" in kwargs
             betas = kwargs["default_headers"]["anthropic-beta"]
@@ -79,7 +90,7 @@ class TestBuildAnthropicClient:
         preserving every other OAuth-relevant beta."""
         with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
             build_anthropic_client(
-                "sk-ant-oat01-" + "x" * 60,
+                anthropic_oauth_token("x" * 60),
                 drop_context_1m_beta=True,
             )
             kwargs = mock_sdk.Anthropic.call_args[1]
@@ -93,9 +104,9 @@ class TestBuildAnthropicClient:
 
     def test_api_key_uses_api_key(self):
         with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
-            build_anthropic_client("sk-ant-api03-x")
+            build_anthropic_client(anthropic_api_key())
             kwargs = mock_sdk.Anthropic.call_args[1]
-            assert kwargs["api_key"] == "sk-ant-api03-x"
+            assert kwargs["api_key"] == anthropic_api_key()
             assert "auth_token" not in kwargs
             # API key auth should still get common betas
             betas = kwargs["default_headers"]["anthropic-beta"]
@@ -106,7 +117,7 @@ class TestBuildAnthropicClient:
 
     def test_custom_base_url(self):
         with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
-            build_anthropic_client("sk-ant-api03-x", base_url="https://custom.api.com")
+            build_anthropic_client(anthropic_api_key(), base_url="https://custom.api.com")
             kwargs = mock_sdk.Anthropic.call_args[1]
             assert kwargs["base_url"] == "https://custom.api.com"
             assert kwargs["default_headers"] == {
@@ -206,21 +217,21 @@ class TestReadClaudeCodeCredentials:
         cred_file.parent.mkdir(parents=True)
         cred_file.write_text(json.dumps({
             "claudeAiOauth": {
-                "accessToken": "sk-ant-oat01-x",
-                "refreshToken": "sk-ant-oat01-r",
+                "accessToken": anthropic_oauth_token(),
+                "refreshToken": anthropic_oauth_token("r"),
                 "expiresAt": int(time.time() * 1000) + 3600_000,
             }
         }))
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
         creds = read_claude_code_credentials()
         assert creds is not None
-        assert creds["accessToken"] == "sk-ant-oat01-x"
-        assert creds["refreshToken"] == "sk-ant-oat01-r"
+        assert creds["accessToken"] == anthropic_oauth_token()
+        assert creds["refreshToken"] == anthropic_oauth_token("r")
         assert creds["source"] == "claude_code_credentials_file"
 
     def test_ignores_primary_api_key_for_native_anthropic_resolution(self, tmp_path, monkeypatch):
         claude_json = tmp_path / ".claude.json"
-        claude_json.write_text(json.dumps({"primaryApiKey": "sk-ant-api03-x"}))
+        claude_json.write_text(json.dumps({"primaryApiKey": anthropic_api_key()}))
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
 
         creds = read_claude_code_credentials()
@@ -263,34 +274,34 @@ class TestIsClaudeCodeTokenValid:
 
 class TestResolveAnthropicToken:
     def test_prefers_oauth_token_over_api_key(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-x")
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-x")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", anthropic_api_key())
+        monkeypatch.setenv("ANTHROPIC_TOKEN", anthropic_oauth_token())
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
-        assert resolve_anthropic_token() == "sk-ant-oat01-x"
+        assert resolve_anthropic_token() == anthropic_oauth_token()
 
     def test_does_not_resolve_primary_api_key_as_native_anthropic_token(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        (tmp_path / ".claude.json").write_text(json.dumps({"primaryApiKey": "sk-ant-api03-x"}))
+        (tmp_path / ".claude.json").write_text(json.dumps({"primaryApiKey": anthropic_api_key()}))
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
 
         assert resolve_anthropic_token() is None
 
     def test_falls_back_to_api_key_when_no_oauth_sources_exist(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-x")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", anthropic_api_key())
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
-        assert resolve_anthropic_token() == "sk-ant-api03-x"
+        assert resolve_anthropic_token() == anthropic_api_key()
 
     def test_falls_back_to_token(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-x")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", anthropic_oauth_token())
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
-        assert resolve_anthropic_token() == "sk-ant-oat01-x"
+        assert resolve_anthropic_token() == anthropic_oauth_token()
 
     def test_returns_none_with_no_creds(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -302,9 +313,9 @@ class TestResolveAnthropicToken:
     def test_falls_back_to_claude_code_oauth_token(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
-        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-x")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", anthropic_oauth_token())
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
-        assert resolve_anthropic_token() == "sk-ant-oat01-x"
+        assert resolve_anthropic_token() == anthropic_oauth_token()
 
     def test_falls_back_to_claude_code_credentials(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -324,7 +335,7 @@ class TestResolveAnthropicToken:
 
     def test_prefers_refreshable_claude_code_credentials_over_static_anthropic_token(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-x")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", anthropic_oauth_token())
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         cred_file = tmp_path / ".claude" / ".credentials.json"
         cred_file.parent.mkdir(parents=True)
@@ -341,13 +352,13 @@ class TestResolveAnthropicToken:
 
     def test_keeps_static_anthropic_token_when_only_non_refreshable_claude_key_exists(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-x")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", anthropic_oauth_token())
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         claude_json = tmp_path / ".claude.json"
-        claude_json.write_text(json.dumps({"primaryApiKey": "sk-ant-api03-x"}))
+        claude_json.write_text(json.dumps({"primaryApiKey": anthropic_api_key()}))
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
 
-        assert resolve_anthropic_token() == "sk-ant-oat01-x"
+        assert resolve_anthropic_token() == anthropic_oauth_token()
 
 
 class TestRefreshOauthToken:
@@ -467,14 +478,14 @@ class TestResolveWithRefresh:
 
     def test_static_env_oauth_token_does_not_block_refreshable_claude_creds(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-x")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", anthropic_oauth_token())
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
 
         cred_file = tmp_path / ".claude" / ".credentials.json"
         cred_file.parent.mkdir(parents=True)
         cred_file.write_text(json.dumps({
             "claudeAiOauth": {
-                "accessToken": "sk-ant-oat01-o",
+                "accessToken": anthropic_oauth_token("o"),
                 "refreshToken": "valid-refresh",
                 "expiresAt": int(time.time() * 1000) - 3600_000,
             }

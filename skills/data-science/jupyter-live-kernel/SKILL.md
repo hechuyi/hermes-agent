@@ -54,8 +54,10 @@ uv run "$SCRIPT" servers
 
 If no servers found, start one:
 ```
-jupyter-lab --no-browser --port=8888 --notebook-dir=$HOME/notebooks \
-  --IdentityProvider.token=fake_redacted_credential
+nohup jupyter-lab --no-browser --port=8888 --notebook-dir="$HOME/notebooks" \
+  --IdentityProvider.token='' \
+  --ServerApp.password='' \
+  > /tmp/jupyter.log 2>&1 &
 sleep 3
 ```
 

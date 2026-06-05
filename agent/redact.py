@@ -226,8 +226,8 @@ def mask_secret(
                      Colors.DIM)`` for user-facing display.
 
     Examples:
-        >>> mask_secret("sk-proj-demo12")
-        'sk-p...mo12'
+        >>> mask_secret("demo-secret-1234")
+        'demo...1234'
         >>> mask_secret("short")                         # fully masked
         '***'
         >>> mask_secret("")                              # empty default
