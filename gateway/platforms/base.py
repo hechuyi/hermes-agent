@@ -3682,28 +3682,33 @@ class BasePlatformAdapter(ABC):
         # Track delivery outcomes for the processing-complete hook
         delivery_attempted = False
         delivery_succeeded = False
+        delivery_failed = False
 
         def _record_delivery(result):
-            nonlocal delivery_attempted, delivery_succeeded
+            nonlocal delivery_attempted, delivery_succeeded, delivery_failed
             if result is None:
                 return
             delivery_attempted = True
             if getattr(result, "success", False):
                 delivery_succeeded = True
+            else:
+                delivery_failed = True
 
-        def _record_media_delivery(result, *, assume_success_when_none: bool = False):
-            nonlocal delivery_attempted, delivery_succeeded
+        def _record_media_delivery(result):
+            nonlocal delivery_attempted, delivery_succeeded, delivery_failed
             delivery_attempted = True
             if result is None:
-                if assume_success_when_none:
-                    delivery_succeeded = True
+                delivery_failed = True
                 return
             if getattr(result, "success", False):
                 delivery_succeeded = True
+            else:
+                delivery_failed = True
 
         def _record_delivery_failure():
-            nonlocal delivery_attempted
+            nonlocal delivery_attempted, delivery_failed
             delivery_attempted = True
+            delivery_failed = True
 
         # Reuse the interrupt event set by handle_message() (which marks
         # the session active before spawning this task to prevent races).
@@ -3917,7 +3922,7 @@ class BasePlatformAdapter(ABC):
                             ),
                             human_delay=human_delay,
                         )
-                        _record_media_delivery(image_result, assume_success_when_none=True)
+                        _record_media_delivery(image_result)
                     except Exception as batch_err:
                         _record_delivery_failure()
                         logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
@@ -3964,7 +3969,7 @@ class BasePlatformAdapter(ABC):
                             ),
                             human_delay=human_delay,
                         )
-                        _record_media_delivery(image_result, assume_success_when_none=True)
+                        _record_media_delivery(image_result)
                     except Exception as batch_err:
                         _record_delivery_failure()
                         logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
@@ -3996,7 +4001,7 @@ class BasePlatformAdapter(ABC):
                                 file_path=media_path,
                                 metadata=media_metadata,
                             )
-                        _record_delivery(media_result)
+                        _record_media_delivery(media_result)
 
                         if not media_result.success:
                             logger.warning("[%s] Failed to send media (%s): %s", self.name, ext, media_result.error)
@@ -4026,13 +4031,18 @@ class BasePlatformAdapter(ABC):
                                 file_path=file_path,
                                 metadata=file_metadata,
                             )
-                        _record_delivery(file_result)
+                        _record_media_delivery(file_result)
                     except Exception as file_err:
                         _record_delivery_failure()
                         logger.error("[%s] Error sending local file %s: %s", self.name, file_path, file_err)
 
             # Determine overall success for the processing hook
-            processing_ok = delivery_succeeded if delivery_attempted else not bool(response)
+            if delivery_failed:
+                processing_ok = False
+            elif delivery_attempted:
+                processing_ok = delivery_succeeded
+            else:
+                processing_ok = not bool(response)
             await self._run_processing_hook(
                 "on_processing_complete",
                 event,
