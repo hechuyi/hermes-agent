@@ -515,6 +515,51 @@ async def test_audited_queued_followup_long_reply_uses_unique_chunk_deliveries(t
 
 
 @pytest.mark.asyncio
+async def test_audited_chunked_send_continues_after_first_chunk_replay(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = []
+    metadata = {
+        **_metadata("queued_followup_first_reply:om_followup"),
+        "inbound_id": "om_followup",
+        "delivery_operation_hint": "queued_followup_first_reply",
+    }
+
+    async def apply(event):
+        events.append(event)
+        if event.get("type") == "delivery_pending" and len(_event_types(events)) == 1:
+            return SimpleNamespace(
+                ok=True,
+                action=_delivery_record_action(
+                    delivery_id=event["delivery_id"],
+                    inbound_id=event["inbound_id"],
+                    target=event["target"],
+                    session_id=event["session_id"],
+                    correlation_id=event["correlation_id"],
+                    status="sent",
+                    feishu_message_id="om_replayed_chunk_1",
+                ),
+            )
+        return True
+
+    adapter._apply_gateway_event = apply
+
+    result = await adapter.send("oc_chat", "x" * 9000, metadata=metadata)
+
+    assert result.success is True
+    assert result.message_id == "om_created"
+    assert result.continuation_message_ids == ("om_replayed_chunk_1", "om_created")
+    assert _event_types(events) == [
+        "delivery_pending",
+        "delivery_pending",
+        "delivery_sent",
+    ]
+    assert len(message_api.create_calls) == 1
+    assert message_api.create_calls[0].request_body.uuid == adapter._idempotency_key_for_delivery(
+        events[1]["delivery_id"]
+    )
+
+
+@pytest.mark.asyncio
 async def test_audited_send_rejects_unsupported_operation_hint_before_sdk(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)

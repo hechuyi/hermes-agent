@@ -81,6 +81,34 @@ def _event_types(calls):
     return [call.get("type") for call in calls if "type" in call]
 
 
+def _delivery_record_action(
+    *,
+    delivery_id,
+    inbound_id,
+    target,
+    session_id,
+    correlation_id,
+    status="sent",
+    feishu_message_id="om_existing_msg",
+):
+    return {
+        "type": "delivery_record",
+        "record": {
+            "delivery_id": delivery_id,
+            "inbound_id": inbound_id,
+            "target": target,
+            "session_id": session_id,
+            "correlation_id": correlation_id,
+            "status": status,
+            "created_at": 1,
+            "updated_at": 2,
+            "feishu_message_id": feishu_message_id,
+            "failure_class": "unknown_delivery_state" if status == "unknown" else None,
+            "ack_event_id": None,
+        },
+    }
+
+
 class _FakeResponse:
     def __init__(self, *, ok=True, message_id="om_sent", code=0, msg="ok"):
         self.code = code
@@ -609,6 +637,92 @@ class TestFeishuIdempotencyKeys:
 
 class TestResolveApproval:
     """Test _resolve_approval pops state and calls resolve_gateway_approval."""
+
+    @pytest.mark.asyncio
+    async def test_audited_prompt_card_update_replay_success_skips_sdk(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        events = []
+
+        async def apply(event):
+            events.append(event)
+            if event.get("type") == "delivery_pending":
+                return SimpleNamespace(
+                    ok=True,
+                    action=_delivery_record_action(
+                        delivery_id=event["delivery_id"],
+                        inbound_id=event["inbound_id"],
+                        target=event["target"],
+                        session_id=event["session_id"],
+                        correlation_id=event["correlation_id"],
+                        status="sent",
+                        feishu_message_id="om_approval_20",
+                    ),
+                )
+            return True
+
+        adapter._apply_gateway_event = apply
+        updated = await adapter._audited_prompt_card_update(
+            operation="approval_prompt_card_update",
+            state={
+                "session_key": "agent:main:feishu:group:oc_12345",
+                "message_id": "om_approval_20",
+                "inbound_id": "inbound-approval",
+                "session_id": "session-approval",
+                "correlation_id": "corr-approval",
+            },
+            prompt_id=20,
+            choice="once",
+            card={"elements": []},
+        )
+
+        assert updated is True
+        assert _event_types(events) == ["delivery_pending"]
+        assert message_api.update_calls == []
+
+    @pytest.mark.asyncio
+    async def test_audited_prompt_card_update_replay_failure_returns_false(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        events = []
+
+        async def apply(event):
+            events.append(event)
+            if event.get("type") == "delivery_pending":
+                return SimpleNamespace(
+                    ok=True,
+                    action=_delivery_record_action(
+                        delivery_id=event["delivery_id"],
+                        inbound_id=event["inbound_id"],
+                        target=event["target"],
+                        session_id=event["session_id"],
+                        correlation_id=event["correlation_id"],
+                        status="unknown",
+                        feishu_message_id="om_unknown_update",
+                    ),
+                )
+            return True
+
+        adapter._apply_gateway_event = apply
+        updated = await adapter._audited_prompt_card_update(
+            operation="approval_prompt_card_update",
+            state={
+                "session_key": "agent:main:feishu:group:oc_12345",
+                "message_id": "om_approval_21",
+                "inbound_id": "inbound-approval",
+                "session_id": "session-approval",
+                "correlation_id": "corr-approval",
+            },
+            prompt_id=21,
+            choice="once",
+            card={"elements": []},
+        )
+
+        assert updated is False
+        assert _event_types(events) == ["delivery_pending"]
+        assert message_api.update_calls == []
 
     @pytest.mark.asyncio
     async def test_approval_audited_resolution_patches_card_before_resolving_gateway_approval(self, tmp_path):

@@ -1801,6 +1801,17 @@ class FeishuAdapter(BasePlatformAdapter):
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
         chunk_total = len(chunks)
         last_response = None
+        chunk_message_ids: list[str] = []
+
+        def remember_chunk_message_id(response_or_result: Any) -> None:
+            if isinstance(response_or_result, SendResult):
+                if response_or_result.success and response_or_result.message_id:
+                    chunk_message_ids.append(str(response_or_result.message_id))
+                return
+            if self._response_succeeded(response_or_result):
+                message_id = self._extract_response_field(response_or_result, "message_id")
+                if message_id:
+                    chunk_message_ids.append(str(message_id))
 
         try:
             for chunk_index, chunk in enumerate(chunks):
@@ -1852,6 +1863,10 @@ class FeishuAdapter(BasePlatformAdapter):
                         ),
                     )
                     if isinstance(response_or_result, SendResult):
+                        if response_or_result.success:
+                            remember_chunk_message_id(response_or_result)
+                            last_response = response_or_result
+                            continue
                         if msg_type == "post" and self._is_post_content_invalid_result(
                             response_or_result
                         ):
@@ -1889,10 +1904,16 @@ class FeishuAdapter(BasePlatformAdapter):
                                 require_returned_message_id=True,
                             )
                             if isinstance(response_or_result, SendResult):
-                                return response_or_result
+                                if not response_or_result.success:
+                                    return response_or_result
+                                remember_chunk_message_id(response_or_result)
+                                last_response = response_or_result
+                                continue
+                            remember_chunk_message_id(response_or_result)
                             last_response = response_or_result
                             continue
                         return response_or_result
+                    remember_chunk_message_id(response_or_result)
                     last_response = response_or_result
                     continue
                 try:
@@ -1927,9 +1948,17 @@ class FeishuAdapter(BasePlatformAdapter):
                         reply_to=reply_to,
                         metadata=metadata,
                     )
+                remember_chunk_message_id(response)
                 last_response = response
 
-            return self._finalize_send_result(last_response, "send failed")
+            if isinstance(last_response, SendResult):
+                result = last_response
+            else:
+                result = self._finalize_send_result(last_response, "send failed")
+            if result.success and len(chunk_message_ids) > 1:
+                result.message_id = chunk_message_ids[-1]
+                result.continuation_message_ids = tuple(chunk_message_ids)
+            return result
         except Exception as exc:
             logger.error("[Feishu] Send error: %s", exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
@@ -3201,6 +3230,8 @@ class FeishuAdapter(BasePlatformAdapter):
             existing_message_id=message_id,
         )
         if isinstance(response_or_result, SendResult):
+            if response_or_result.success:
+                return True
             logger.warning(
                 "[Feishu] Audited %s failed for prompt card update: %s",
                 operation,
