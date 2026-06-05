@@ -125,6 +125,36 @@ def _delivery_events(calls):
     return [call for call in calls if call.get("type") in {"delivery_pending", "delivery_sent"}]
 
 
+def _assert_pending_event_payload(event, *, operation, delivery_id, target, inbound_id, session_id, correlation_id):
+    assert set(event) == {
+        "type",
+        "delivery_id",
+        "operation",
+        "inbound_id",
+        "target",
+        "session_id",
+        "correlation_id",
+        "timestamp",
+    }
+    assert event["type"] == "delivery_pending"
+    assert event["operation"] == operation
+    assert event["delivery_id"] == delivery_id
+    assert event["target"] == target
+    assert event["inbound_id"] == inbound_id
+    assert event["session_id"] == session_id
+    assert event["correlation_id"] == correlation_id
+    assert isinstance(event["timestamp"], int)
+
+
+def _assert_sent_event_payload(event, *, operation, delivery_id, message_id):
+    assert set(event) == {"type", "delivery_id", "operation", "message_id", "timestamp"}
+    assert event["type"] == "delivery_sent"
+    assert event["operation"] == operation
+    assert event["delivery_id"] == delivery_id
+    assert event["message_id"] == message_id
+    assert isinstance(event["timestamp"], int)
+
+
 def _assert_sent_matrix_events(
     events,
     *,
@@ -137,17 +167,53 @@ def _assert_sent_matrix_events(
     message_id,
 ):
     pending, sent = _delivery_events(events)
-    assert pending["type"] == "delivery_pending"
-    assert pending["operation"] == operation
-    assert pending["delivery_id"] == delivery_id
-    assert pending["target"] == target
-    assert pending["inbound_id"] == inbound_id
-    assert pending["session_id"] == session_id
-    assert pending["correlation_id"] == correlation_id
-    assert sent["type"] == "delivery_sent"
-    assert sent["operation"] == operation
-    assert sent["delivery_id"] == delivery_id
-    assert sent["message_id"] == message_id
+    _assert_pending_event_payload(
+        pending,
+        operation=operation,
+        delivery_id=delivery_id,
+        target=target,
+        inbound_id=inbound_id,
+        session_id=session_id,
+        correlation_id=correlation_id,
+    )
+    _assert_sent_event_payload(
+        sent,
+        operation=operation,
+        delivery_id=delivery_id,
+        message_id=message_id,
+    )
+
+
+def _assert_create_request_contract(
+    adapter,
+    request,
+    *,
+    delivery_id,
+    receive_id,
+    receive_id_type="chat_id",
+    msg_type,
+    content=None,
+):
+    assert request.receive_id_type == receive_id_type
+    assert request.request_body.receive_id == receive_id
+    assert request.request_body.msg_type == msg_type
+    assert request.request_body.uuid == adapter._idempotency_key_for_delivery(delivery_id)
+    if content is not None:
+        assert request.request_body.content == content
+
+
+def _assert_reply_request_contract(adapter, request, *, delivery_id, parent_message_id, msg_type):
+    assert request.message_id == parent_message_id
+    assert request.request_body.msg_type == msg_type
+    assert request.request_body.reply_in_thread is False
+    assert request.request_body.uuid == adapter._idempotency_key_for_delivery(delivery_id)
+
+
+def _assert_update_request_contract(request, *, message_id, msg_type, content=None):
+    assert request.message_id == message_id
+    assert request.request_body.msg_type == msg_type
+    if content is not None:
+        assert request.request_body.content == content
 
 
 def _delivery_record_action(
@@ -551,12 +617,24 @@ async def test_send_operation_matrix_covers_delivery_and_sdk_contract(
         "event",
     ]
     events = [entry[1] for entry in timeline if entry[0] == "event"]
+    request = (
+        message_api.create_calls[0]
+        if expected_sdk_method == "create"
+        else message_api.reply_calls[0]
+    )
+    expected_delivery_id = adapter._delivery_id_for(
+        expected_operation,
+        metadata=metadata,
+        parts=[
+            chat_id,
+            reply_to or "",
+            request.request_body.msg_type,
+            request.request_body.content,
+        ],
+    )
     delivery_id = events[0]["delivery_id"]
-    if expected_operation in {"queued_followup_first_reply", "stream_fresh_final"}:
-        assert delivery_id.startswith(f"{expected_operation}-")
-        assert delivery_id != metadata["delivery_id"]
-    else:
-        assert delivery_id == metadata["delivery_id"]
+    assert delivery_id == expected_delivery_id
+    assert events[1]["delivery_id"] == delivery_id
     _assert_sent_matrix_events(
         events,
         operation=expected_operation,
@@ -571,16 +649,25 @@ async def test_send_operation_matrix_covers_delivery_and_sdk_contract(
     assert len(message_api.create_calls) + len(message_api.reply_calls) == 1
     if expected_sdk_method == "create":
         assert len(message_api.create_calls) == 1
-        request = message_api.create_calls[0]
-        assert request.receive_id_type == "chat_id"
-        assert request.request_body.receive_id == chat_id
+        _assert_create_request_contract(
+            adapter,
+            request,
+            delivery_id=delivery_id,
+            receive_id=chat_id,
+            msg_type=request.request_body.msg_type,
+        )
+        assert request.request_body.receive_id == expected_target.removeprefix("feishu:chat:")
     else:
         assert len(message_api.reply_calls) == 1
-        request = message_api.reply_calls[0]
-        assert request.message_id == reply_to
-        assert request.request_body.reply_in_thread is False
-    assert request.request_body.uuid == adapter._idempotency_key_for_delivery(delivery_id)
+        _assert_reply_request_contract(
+            adapter,
+            request,
+            delivery_id=delivery_id,
+            parent_message_id=reply_to,
+            msg_type=request.request_body.msg_type,
+        )
     assert request.request_body.msg_type in {"text", "post"}
+    assert request.request_body.content
 
 
 @pytest.mark.asyncio
@@ -1350,8 +1437,13 @@ async def test_message_edit_operation_matrix_uses_existing_target_as_message_evi
     )
     assert len(message_api.update_calls) == 1
     request = message_api.update_calls[0]
-    assert request.message_id == "om_existing"
+    _assert_update_request_contract(
+        request,
+        message_id="om_existing",
+        msg_type=request.request_body.msg_type,
+    )
     assert request.request_body.msg_type in {"text", "post"}
+    assert request.request_body.content
 
 
 @pytest.mark.asyncio
@@ -1674,12 +1766,14 @@ async def test_status_card_create_operation_matrix_uses_descriptor_create_builde
     )
     assert len(message_api.create_calls) == 1
     request = message_api.create_calls[0]
-    assert request.receive_id_type == descriptor["params"]["receive_id_type"]
-    assert request.request_body.receive_id == descriptor["body"]["receive_id"]
-    assert request.request_body.msg_type == "interactive"
-    assert request.request_body.content == descriptor["body"]["content"]
-    assert request.request_body.uuid == adapter._idempotency_key_for_delivery(
-        "delivery-card-create"
+    _assert_create_request_contract(
+        adapter,
+        request,
+        delivery_id="delivery-card-create",
+        receive_id=descriptor["body"]["receive_id"],
+        receive_id_type=descriptor["params"]["receive_id_type"],
+        msg_type="interactive",
+        content=descriptor["body"]["content"],
     )
 
 
@@ -1751,9 +1845,12 @@ async def test_status_card_patch_operation_matrix_uses_descriptor_patch_builder(
     assert message_api.create_calls == []
     assert len(message_api.update_calls) == 1
     request = message_api.update_calls[0]
-    assert request.message_id == "om_card"
-    assert request.request_body.msg_type == "interactive"
-    assert request.request_body.content == descriptor["body"]["content"]
+    _assert_update_request_contract(
+        request,
+        message_id="om_card",
+        msg_type="interactive",
+        content=descriptor["body"]["content"],
+    )
 
 
 @pytest.mark.asyncio

@@ -85,6 +85,36 @@ def _delivery_events(calls):
     return [call for call in calls if call.get("type") in {"delivery_pending", "delivery_sent"}]
 
 
+def _assert_pending_event_payload(event, *, operation, delivery_id, target, inbound_id, session_id, correlation_id):
+    assert set(event) == {
+        "type",
+        "delivery_id",
+        "operation",
+        "inbound_id",
+        "target",
+        "session_id",
+        "correlation_id",
+        "timestamp",
+    }
+    assert event["type"] == "delivery_pending"
+    assert event["operation"] == operation
+    assert event["delivery_id"] == delivery_id
+    assert event["target"] == target
+    assert event["inbound_id"] == inbound_id
+    assert event["session_id"] == session_id
+    assert event["correlation_id"] == correlation_id
+    assert isinstance(event["timestamp"], int)
+
+
+def _assert_sent_event_payload(event, *, operation, delivery_id, message_id):
+    assert set(event) == {"type", "delivery_id", "operation", "message_id", "timestamp"}
+    assert event["type"] == "delivery_sent"
+    assert event["operation"] == operation
+    assert event["delivery_id"] == delivery_id
+    assert event["message_id"] == message_id
+    assert isinstance(event["timestamp"], int)
+
+
 def _assert_sent_matrix_events(
     events,
     *,
@@ -97,17 +127,35 @@ def _assert_sent_matrix_events(
     message_id,
 ):
     pending, sent = _delivery_events(events)
-    assert pending["type"] == "delivery_pending"
-    assert pending["operation"] == operation
-    assert pending["delivery_id"] == delivery_id
-    assert pending["target"] == target
-    assert pending["inbound_id"] == inbound_id
-    assert pending["session_id"] == session_id
-    assert pending["correlation_id"] == correlation_id
-    assert sent["type"] == "delivery_sent"
-    assert sent["operation"] == operation
-    assert sent["delivery_id"] == delivery_id
-    assert sent["message_id"] == message_id
+    _assert_pending_event_payload(
+        pending,
+        operation=operation,
+        delivery_id=delivery_id,
+        target=target,
+        inbound_id=inbound_id,
+        session_id=session_id,
+        correlation_id=correlation_id,
+    )
+    _assert_sent_event_payload(
+        sent,
+        operation=operation,
+        delivery_id=delivery_id,
+        message_id=message_id,
+    )
+
+
+def _assert_interactive_create_contract(adapter, request, *, delivery_id, receive_id):
+    assert request.receive_id_type == "chat_id"
+    assert request.request_body.receive_id == receive_id
+    assert request.request_body.msg_type == "interactive"
+    assert request.request_body.uuid == adapter._idempotency_key_for_delivery(delivery_id)
+    assert json.loads(request.request_body.content)
+
+
+def _assert_interactive_update_contract(request, *, message_id):
+    assert request.message_id == message_id
+    assert request.request_body.msg_type == "interactive"
+    assert json.loads(request.request_body.content)
 
 
 def _delivery_record_action(
@@ -345,18 +393,35 @@ class TestFeishuExecApproval:
         )
         assert len(message_api.create_calls) == 1
         request = message_api.create_calls[0]
-        assert request.receive_id_type == "chat_id"
-        assert request.request_body.receive_id == "oc_12345"
-        assert request.request_body.msg_type == "interactive"
-        assert request.request_body.uuid == adapter._idempotency_key_for_delivery(delivery_id)
+        _assert_interactive_create_contract(
+            adapter,
+            request,
+            delivery_id=delivery_id,
+            receive_id="oc_12345",
+        )
         card = json.loads(request.request_body.content)
         action_values = _interactive_card_action_values(card)
+        assert delivery_id == adapter._delivery_id_for(
+            "approval_prompt_card_create",
+            metadata={
+                "inbound_id": "approval-prompt-1",
+                "session_id": "session-approval",
+                "correlation_id": "corr-approval",
+            },
+            parts=[
+                "oc_12345",
+                "agent:main:feishu:group:oc_12345",
+                str(action_values[0]["approval_id"]),
+                request.request_body.content,
+            ],
+        )
         assert {value.get("hermes_action") for value in action_values} == {
             "approve_once",
             "approve_session",
             "approve_always",
             "deny",
         }
+        assert {value.get("hermes_update_prompt_action") for value in action_values} == {None}
         state = next(iter(adapter._approval_state.values()))
         assert state["message_id"] == "om_approval_matrix"
 
@@ -651,12 +716,29 @@ class TestFeishuUpdatePrompt:
         )
         assert len(message_api.create_calls) == 1
         request = message_api.create_calls[0]
-        assert request.receive_id_type == "chat_id"
-        assert request.request_body.receive_id == "oc_12345"
-        assert request.request_body.msg_type == "interactive"
-        assert request.request_body.uuid == adapter._idempotency_key_for_delivery(delivery_id)
+        _assert_interactive_create_contract(
+            adapter,
+            request,
+            delivery_id=delivery_id,
+            receive_id="oc_12345",
+        )
         card = json.loads(request.request_body.content)
         action_values = _interactive_card_action_values(card)
+        assert delivery_id == adapter._delivery_id_for(
+            "update_prompt_card_create",
+            metadata={
+                "thread_id": "th_update",
+                "inbound_id": "update-prompt-1",
+                "session_id": "session-update",
+                "correlation_id": "corr-update",
+            },
+            parts=[
+                "oc_12345",
+                "agent:main:feishu:group:oc_12345",
+                str(action_values[0]["update_prompt_id"]),
+                request.request_body.content,
+            ],
+        )
         assert {value.get("hermes_update_prompt_action") for value in action_values} == {"y", "n"}
         assert {value.get("hermes_action") for value in action_values} == {None}
         state = next(iter(adapter._update_prompt_state.values()))
@@ -1042,9 +1124,10 @@ class TestResolveApproval:
         )
         assert len(message_api.update_calls) == 1
         request = message_api.update_calls[0]
-        assert request.message_id == "om_approval_matrix"
-        assert request.request_body.msg_type == "interactive"
-        assert json.loads(request.request_body.content)["header"]["title"]["content"] == "Approved"
+        _assert_interactive_update_contract(request, message_id="om_approval_matrix")
+        card = json.loads(request.request_body.content)
+        assert card["header"]["title"]["content"] == "Approved"
+        assert _interactive_card_action_values(card) == []
 
     @pytest.mark.asyncio
     async def test_approval_audited_resolution_keeps_state_and_releases_claim_when_side_effect_fails(
@@ -2097,8 +2180,7 @@ class TestResolveUpdatePrompt:
         )
         assert len(message_api.update_calls) == 1
         request = message_api.update_calls[0]
-        assert request.message_id == "om_update_matrix"
-        assert request.request_body.msg_type == "interactive"
+        _assert_interactive_update_contract(request, message_id="om_update_matrix")
         card = json.loads(request.request_body.content)
         assert "answered: Yes" in card["header"]["title"]["content"]
         assert _interactive_card_action_values(card) == []
