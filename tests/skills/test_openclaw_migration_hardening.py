@@ -253,6 +253,50 @@ def test_deep_channel_secret_env_names_keep_runtime_semantics(tmp_path):
     assert "fake_redacted_credential" not in env_values
 
 
+def test_deep_channel_archive_excludes_migrated_secret_sources(tmp_path):
+    mod = _load()
+    matrix_value = "-".join(("matrix", "runtime", "value"))
+    mattermost_value = "-".join(("mm", "runtime", "value"))
+    bluebubbles_value = "-".join(("bluebubbles", "runtime", "value"))
+    migrator = _make_minimal_migrator(
+        mod,
+        tmp_path,
+        execute=True,
+        migrate_secrets=True,
+        output_dir=tmp_path / "out",
+        selected_options={"deep-channels"},
+    )
+    migrator.migrate_deep_channels({
+        "channels": {
+            "matrix": {
+                "accessToken": matrix_value,
+                "scope": {"rooms": ["!alerts:example.invalid"]},
+            },
+            "mattermost": {
+                "botToken": mattermost_value,
+                "webhookBindings": {"alerts": "ops"},
+            },
+            "bluebubbles": {
+                "password": bluebubbles_value,
+                "routing": {"defaultChat": "ops"},
+            },
+        },
+    })
+
+    archive_path = migrator.archive_dir / "channels-deep-config.json"
+    archive_text = archive_path.read_text(encoding="utf-8")
+    archived = json.loads(archive_text)
+    assert archived["matrix"]["scope"] == {"rooms": ["!alerts:example.invalid"]}
+    assert archived["mattermost"]["webhookBindings"] == {"alerts": "ops"}
+    assert archived["bluebubbles"]["routing"] == {"defaultChat": "ops"}
+    assert "accessToken" not in archived["matrix"]
+    assert "botToken" not in archived["mattermost"]
+    assert "password" not in archived["bluebubbles"]
+    assert matrix_value not in archive_text
+    assert mattermost_value not in archive_text
+    assert bluebubbles_value not in archive_text
+
+
 # ───────────────────────────────────────────────────────────────────────
 # Blocked-by-earlier-conflict sequencing
 # ───────────────────────────────────────────────────────────────────────

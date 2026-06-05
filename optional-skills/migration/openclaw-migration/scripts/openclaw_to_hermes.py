@@ -2563,6 +2563,10 @@ class Migrator:
         def env_name(*parts: str) -> str:
             return "_".join(parts)
 
+        def is_secret_channel_field(field: str) -> bool:
+            lower = field.lower()
+            return "password" in lower or "token" in lower or "nsec" in lower
+
         # Extended channel token/allowlist mapping
         CHANNEL_ENV_MAP = {
             "matrix": {"token": env_name("MATRIX", "ACCESS", "TOKEN"), "tokenField": "accessToken", "allowFrom": "MATRIX_ALLOWED_USERS",
@@ -2577,6 +2581,28 @@ class Migrator:
             "nostr": {"extras": {"nsec": "NOSTR_NSEC", "relays": "NOSTR_RELAYS"}},
             "twitch": {"token": "TWITCH_BOT_TOKEN", "extras": {"channels": "TWITCH_CHANNELS"}},
         }
+
+        migrated_secret_fields = {}
+        for mapped_ch_name, mapped_ch in CHANNEL_ENV_MAP.items():
+            fields = set()
+            if mapped_ch.get("token"):
+                fields.add(mapped_ch.get("tokenField", "botToken"))
+            for oc_key in (mapped_ch.get("extras") or {}):
+                if is_secret_channel_field(oc_key):
+                    fields.add(oc_key)
+            if fields:
+                migrated_secret_fields[mapped_ch_name] = fields
+
+        def without_migrated_secret_fields(value: Any, secret_fields: set[str]) -> Any:
+            if isinstance(value, dict):
+                return {
+                    k: without_migrated_secret_fields(v, secret_fields)
+                    for k, v in value.items()
+                    if k not in secret_fields
+                }
+            if isinstance(value, list):
+                return [without_migrated_secret_fields(item, secret_fields) for item in value]
+            return value
 
         for ch_name, ch_mapping in CHANNEL_ENV_MAP.items():
             ch_cfg = channels.get(ch_name) or {}
@@ -2601,7 +2627,7 @@ class Migrator:
                 if val:
                     if isinstance(val, list):
                         val = ",".join(str(x) for x in val)
-                    is_secret = "password" in oc_key.lower() or "token" in oc_key.lower() or "nsec" in oc_key.lower()
+                    is_secret = is_secret_channel_field(oc_key)
                     if is_secret and not self.migrate_secrets:
                         continue
                     self._set_env_var(env_key, str(val), f"channels.{ch_name}.{oc_key}")
@@ -2628,9 +2654,19 @@ class Migrator:
         for ch_name, ch_cfg in channels.items():
             if not isinstance(ch_cfg, dict):
                 continue
+            excluded_keys = (
+                {"botToken", "appToken", "allowFrom", "enabled", "requireMention", "autoThread"}
+                | migrated_secret_fields.get(ch_name, set())
+            )
             complex_keys = {k: v for k, v in ch_cfg.items()
-                          if k not in {"botToken", "appToken", "allowFrom", "enabled"}
-                          and v and k not in {"requireMention", "autoThread"}}
+                            if k not in excluded_keys and v}
+            secret_fields = migrated_secret_fields.get(ch_name, set())
+            if secret_fields:
+                complex_keys = {
+                    k: without_migrated_secret_fields(v, secret_fields)
+                    for k, v in complex_keys.items()
+                }
+                complex_keys = {k: v for k, v in complex_keys.items() if v}
             if complex_keys:
                 complex_archive[ch_name] = complex_keys
 
