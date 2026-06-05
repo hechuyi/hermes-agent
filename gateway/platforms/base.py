@@ -3672,6 +3672,20 @@ class BasePlatformAdapter(ABC):
             if getattr(result, "success", False):
                 delivery_succeeded = True
 
+        def _record_media_delivery(result, *, assume_success_when_none: bool = False):
+            nonlocal delivery_attempted, delivery_succeeded
+            delivery_attempted = True
+            if result is None:
+                if assume_success_when_none:
+                    delivery_succeeded = True
+                return
+            if getattr(result, "success", False):
+                delivery_succeeded = True
+
+        def _record_delivery_failure():
+            nonlocal delivery_attempted
+            delivery_attempted = True
+
         # Reuse the interrupt event set by handle_message() (which marks
         # the session active before spawning this task to prevent races).
         # Fall back to a new Event only if the entry was removed externally.
@@ -3875,7 +3889,7 @@ class BasePlatformAdapter(ABC):
                 if images:
                     logger.info("[%s] Extracted %d image(s) to send as attachments", self.name, len(images))
                     try:
-                        await self.send_multiple_images(
+                        image_result = await self.send_multiple_images(
                             chat_id=event.source.chat_id,
                             images=images,
                             metadata=_delivery_leg_metadata(
@@ -3884,7 +3898,9 @@ class BasePlatformAdapter(ABC):
                             ),
                             human_delay=human_delay,
                         )
+                        _record_media_delivery(image_result, assume_success_when_none=True)
                     except Exception as batch_err:
+                        _record_delivery_failure()
                         logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
 
 
@@ -3920,7 +3936,7 @@ class BasePlatformAdapter(ABC):
                 if _image_paths:
                     try:
                         _batch = [(f"file://{_quote(p)}", "") for p in _image_paths]
-                        await self.send_multiple_images(
+                        image_result = await self.send_multiple_images(
                             chat_id=event.source.chat_id,
                             images=_batch,
                             metadata=_delivery_leg_metadata(
@@ -3929,7 +3945,9 @@ class BasePlatformAdapter(ABC):
                             ),
                             human_delay=human_delay,
                         )
+                        _record_media_delivery(image_result, assume_success_when_none=True)
                     except Exception as batch_err:
+                        _record_delivery_failure()
                         logger.warning("[%s] Error batching images: %s", self.name, batch_err, exc_info=True)
 
                 for media_index, (media_path, is_voice) in enumerate(_non_image_media):
@@ -3959,10 +3977,12 @@ class BasePlatformAdapter(ABC):
                                 file_path=media_path,
                                 metadata=media_metadata,
                             )
+                        _record_delivery(media_result)
 
                         if not media_result.success:
                             logger.warning("[%s] Failed to send media (%s): %s", self.name, ext, media_result.error)
                     except Exception as media_err:
+                        _record_delivery_failure()
                         logger.warning("[%s] Error sending media: %s", self.name, media_err)
 
                 # Send auto-detected local non-image files as native attachments
@@ -3976,18 +3996,20 @@ class BasePlatformAdapter(ABC):
                             f"local:{file_index}:{file_path}",
                         )
                         if ext in _VIDEO_EXTS:
-                            await self.send_video(
+                            file_result = await self.send_video(
                                 chat_id=event.source.chat_id,
                                 video_path=file_path,
                                 metadata=file_metadata,
                             )
                         else:
-                            await self.send_document(
+                            file_result = await self.send_document(
                                 chat_id=event.source.chat_id,
                                 file_path=file_path,
                                 metadata=file_metadata,
                             )
+                        _record_delivery(file_result)
                     except Exception as file_err:
+                        _record_delivery_failure()
                         logger.error("[%s] Error sending local file %s: %s", self.name, file_path, file_err)
 
             # Determine overall success for the processing hook

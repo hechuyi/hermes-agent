@@ -32,6 +32,8 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
     MessageType,
+    ProcessingOutcome,
+    SendResult,
 )
 from gateway.session import SessionSource, build_session_key
 
@@ -319,6 +321,56 @@ async def test_pending_drain_media_only_first_reply_carries_queued_followup_deli
     assert image_metadata["delivery_operation_hint"] == "queued_followup_first_reply"
     assert image_metadata["delivery_id"]
     assert image_metadata["inbound_id"] == "om_media_only"
+
+
+@pytest.mark.asyncio
+async def test_media_only_successful_delivery_counts_as_successful_processing():
+    adapter = _make_adapter()
+    sk = build_session_key(_make_feishu_event().source)
+    outcomes = []
+
+    async def handler(event):
+        return "![chart](https://example.test/chart.png)"
+
+    async def send_multiple_images(**kwargs):
+        return SendResult(success=True, message_id="image-1")
+
+    async def on_processing_complete(event, outcome):
+        outcomes.append(outcome)
+
+    adapter._message_handler = handler
+    adapter.send_multiple_images = send_multiple_images
+    adapter.on_processing_complete = on_processing_complete
+
+    await adapter._process_message_background(_make_feishu_event(text="M1"), sk)
+
+    assert outcomes == [ProcessingOutcome.SUCCESS]
+
+
+@pytest.mark.asyncio
+async def test_media_only_failed_delivery_counts_as_failed_processing(tmp_path):
+    adapter = _make_adapter()
+    sk = build_session_key(_make_feishu_event().source)
+    outcomes = []
+    media_path = tmp_path / "report.pdf"
+    media_path.write_bytes(b"%PDF-1.4\n")
+
+    async def handler(event):
+        return f"MEDIA:{media_path}"
+
+    async def send_document(**kwargs):
+        return SendResult(success=False, error="upload failed")
+
+    async def on_processing_complete(event, outcome):
+        outcomes.append(outcome)
+
+    adapter._message_handler = handler
+    adapter.send_document = send_document
+    adapter.on_processing_complete = on_processing_complete
+
+    await adapter._process_message_background(_make_feishu_event(text="M1"), sk)
+
+    assert outcomes == [ProcessingOutcome.FAILURE]
 
 
 @pytest.mark.asyncio
