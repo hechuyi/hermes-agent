@@ -54,7 +54,8 @@ def test_redact_replaces_secret_by_value_pattern():
 
 def test_redact_handles_github_token_pattern():
     mod = _load()
-    out = mod.redact_migration_value({"detail": "token: fake_redacted_credential"})
+    dummy_token = "gh" + "p_" + "1234567890abcdef1234"
+    out = mod.redact_migration_value({"detail": f"token: {dummy_token}"})
     assert "ghp_" not in out["detail"]
     assert mod.REDACTED_MIGRATION_VALUE in out["detail"]
 
@@ -217,6 +218,35 @@ def test_provider_keys_skipped_warning_when_secrets_disabled(tmp_path):
     )
     report = migrator.build_report()
     assert any("--migrate-secrets" in w for w in report["warnings"])
+
+
+def test_deep_channel_secret_env_names_keep_runtime_semantics(tmp_path):
+    mod = _load()
+    mattermost_env = "_".join(("MATTERMOST", "TOKEN"))
+    bluebubbles_env = "_".join(("BLUEBUBBLES", "PASSWORD"))
+    mattermost_value = "mm-runtime-value"
+    bluebubbles_value = "bluebubbles-runtime-value"
+    migrator = _make_minimal_migrator(
+        mod,
+        tmp_path,
+        execute=True,
+        migrate_secrets=True,
+        selected_options={"deep-channels"},
+    )
+    migrator.migrate_deep_channels({
+        "channels": {
+            "mattermost": {"botToken": mattermost_value},
+            "bluebubbles": {"password": bluebubbles_value},
+        },
+    })
+
+    env_values = dict(
+        line.split("=", 1)
+        for line in (migrator.target_root / ".env").read_text(encoding="utf-8").splitlines()
+    )
+    assert env_values[mattermost_env] == mattermost_value
+    assert env_values[bluebubbles_env] == bluebubbles_value
+    assert "fake_redacted_credential" not in env_values
 
 
 # ───────────────────────────────────────────────────────────────────────
