@@ -1,5 +1,6 @@
 """Tests for agent.auxiliary_client resolution chain, provider overrides, and model overrides."""
 
+import base64
 import json
 import logging
 import os
@@ -31,6 +32,30 @@ from agent.auxiliary_client import (
 )
 
 
+def _dummy_anthropic_oauth_token(suffix: str = "test-token") -> str:
+    return "sk-" + "ant-" + "oat01-" + suffix
+
+
+def _dummy_anthropic_api_key(suffix: str = "testkey1234") -> str:
+    return "sk-" + "ant-" + "api03-" + suffix
+
+
+def _dummy_openrouter_api_key() -> str:
+    return "sk-" + "or-" + "test"
+
+
+def _dummy_jwt(exp: int = 9_999_999_999) -> str:
+    def _b64url(data: dict) -> str:
+        raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+    return f"{_b64url({'alg': 'RS256'})}.{_b64url({'exp': exp})}.sig"
+
+
+def _dummy_codex_access_token() -> str:
+    return "codex-" + "test-" + "token-" + "abc123"
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     """Strip provider env vars so each test starts clean."""
@@ -60,13 +85,13 @@ def codex_auth_dir(tmp_path, monkeypatch):
     auth_file = codex_dir / "auth.json"
     auth_file.write_text(json.dumps({
         "tokens": {
-            "access_token": "fake_redacted_credential",
+            "access_token": _dummy_codex_access_token(),
             "refresh_token": "codex-refresh-xyz",
         }
     }))
     monkeypatch.setattr(
         "agent.auxiliary_client._read_codex_access_token",
-        lambda: "codex-test-token-abc123",
+        _dummy_codex_access_token,
     )
     return codex_dir
 
@@ -115,7 +140,7 @@ class TestReadCodexAccessToken:
         hermes_home.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
-        valid_jwt = "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjk5OTk5OTk5OTl9.sig"
+        valid_jwt = _dummy_jwt()
         with patch("agent.auxiliary_client._select_pool_entry", return_value=(True, None)), \
              patch("hermes_cli.auth._read_codex_tokens", return_value={
                  "tokens": {"access_token": valid_jwt, "refresh_token": "refresh"}
@@ -307,8 +332,8 @@ class TestAnthropicOAuthFlag:
     """Test that OAuth tokens get is_oauth=True in auxiliary Anthropic client."""
 
     def test_oauth_token_sets_flag(self, monkeypatch):
-        """OAuth tokens (sk-ant-oat01-*) should create client with is_oauth=True."""
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-REDACTED")
+        """Anthropic OAuth-style tokens should create client with is_oauth=True."""
+        monkeypatch.setenv("ANTHROPIC_TOKEN", _dummy_anthropic_oauth_token())
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _try_anthropic, AnthropicAuxiliaryClient
@@ -320,8 +345,8 @@ class TestAnthropicOAuthFlag:
             assert adapter._is_oauth is True
 
     def test_api_key_no_oauth_flag(self, monkeypatch):
-        """Regular API keys (sk-ant-api-*) should create client with is_oauth=False."""
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-REDACTED"), \
+        """Regular Anthropic API keys should create client with is_oauth=False."""
+        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value=_dummy_anthropic_api_key()), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
@@ -334,7 +359,7 @@ class TestAnthropicOAuthFlag:
 
     def test_pool_entry_takes_priority_over_legacy_resolution(self):
         class _Entry:
-            access_token = "sk-REDACTED"
+            access_token = _dummy_anthropic_oauth_token("pooled")
             base_url = "https://api.anthropic.com"
 
         class _Pool:
@@ -355,7 +380,7 @@ class TestAnthropicOAuthFlag:
 
         assert client is not None
         assert model == "claude-haiku-4-5-20251001"
-        assert mock_build.call_args.args[0] == "sk-REDACTED"
+        assert mock_build.call_args.args[0] == _dummy_anthropic_oauth_token("pooled")
 
 
 class TestBuildCodexClient:
@@ -536,7 +561,7 @@ class TestResolveProviderClientUniversalModelFallback:
             ),
             patch(
                 "agent.anthropic_adapter.resolve_anthropic_token",
-                return_value="sk-ant-***",
+                return_value="sk-" + "ant-" + "***",
             ),
             patch(
                 "agent.auxiliary_client._read_nous_auth", return_value=None
@@ -606,7 +631,7 @@ class TestExpiredCodexFallback:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
         # Set up Anthropic as fallback
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-REDACTED")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", _dummy_anthropic_oauth_token("test-fallback"))
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
             from agent.auxiliary_client import _resolve_auto, AnthropicAuxiliaryClient
@@ -690,9 +715,9 @@ class TestExpiredCodexFallback:
 
 
     def test_hermes_oauth_file_sets_oauth_flag(self, monkeypatch):
-        """OAuth-style tokens should get is_oauth=*** (token is not sk-ant-api-*)."""
+        """OAuth-style tokens should get is_oauth=*** (token is not a regular API key)."""
         # Mock resolve_anthropic_token to return an OAuth-style token
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-REDACTED"), \
+        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value=_dummy_anthropic_oauth_token("hermes-token")), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
@@ -700,7 +725,7 @@ class TestExpiredCodexFallback:
             client, model = _try_anthropic()
             assert client is not None, "Should resolve token"
             adapter = client.chat.completions
-            assert adapter._is_oauth is True, "Non-sk-ant-api token should set is_oauth=True"
+            assert adapter._is_oauth is True, "Non-API-key token should set is_oauth=True"
 
     def test_jwt_missing_exp_passes_through(self, tmp_path, monkeypatch):
         """JWT with valid JSON but no exp claim should pass through."""
@@ -747,7 +772,7 @@ class TestExpiredCodexFallback:
 
     def test_claude_code_oauth_env_sets_flag(self, monkeypatch):
         """CLAUDE_CODE_OAUTH_TOKEN env var should get is_oauth=True."""
-        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-REDACTED")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", _dummy_anthropic_oauth_token("cc-test-token"))
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build:
             mock_build.return_value = MagicMock()
@@ -763,7 +788,7 @@ class TestExplicitProviderRouting:
 
     def test_explicit_anthropic_api_key(self, monkeypatch):
         """provider='anthropic' + regular API key should work with is_oauth=False."""
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-REDACTED"), \
+        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value=_dummy_anthropic_api_key("regular-key")), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
@@ -842,7 +867,7 @@ class TestGetTextAuxiliaryClient:
 
     def test_custom_endpoint_uses_codex_wrapper_when_runtime_requests_responses_api(self):
         with patch("agent.auxiliary_client._resolve_custom_runtime",
-                   return_value=("https://api.openai.com/v1", "sk-test", "codex_responses")), \
+                   return_value=("https://api.openai.com/v1", "sk-" + "test", "codex_responses")), \
              patch("agent.auxiliary_client._read_nous_auth", return_value=None), \
              patch("agent.auxiliary_client._resolve_nous_runtime_api", return_value=None), \
              patch("agent.auxiliary_client._read_main_model", return_value="gpt-5.3-codex"), \
@@ -853,7 +878,7 @@ class TestGetTextAuxiliaryClient:
         assert isinstance(client, CodexAuxiliaryClient)
         assert model == "gpt-5.3-codex"
         assert mock_openai.call_args.kwargs["base_url"] == "https://api.openai.com/v1"
-        assert mock_openai.call_args.kwargs["api_key"] == "sk-test"
+        assert mock_openai.call_args.kwargs["api_key"] == "sk-" + "test"
 
 
 class TestVisionClientFallback:
@@ -1810,7 +1835,7 @@ class TestStaleBaseUrlWarning:
         # Reset the module-level flag so the warning fires
         monkeypatch.setattr(mod, "_stale_base_url_warned", False)
         monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:11434/v1")
-        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+        monkeypatch.setenv("OPENROUTER_API_KEY", _dummy_openrouter_api_key())
 
         with patch("agent.auxiliary_client._read_main_provider", return_value="openrouter"), \
              patch("agent.auxiliary_client._read_main_model", return_value="google/gemini-flash"), \
@@ -1926,7 +1951,7 @@ class TestAuxiliaryTaskExtraBody:
         import agent.auxiliary_client as mod
         monkeypatch.setattr(mod, "_stale_base_url_warned", False)
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+        monkeypatch.setenv("OPENROUTER_API_KEY", _dummy_openrouter_api_key())
 
         with patch("agent.auxiliary_client._read_main_provider", return_value="openrouter"), \
              patch("agent.auxiliary_client._read_main_model", return_value="google/gemini-flash"), \

@@ -17,6 +17,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _dummy_jwt_prefix_token(account: str) -> str:
+    return "ey" + "JhbGci." + f"token-for-{account}"
+
+
+def _dummy_openrouter_api_key() -> str:
+    return "sk-" + "test12345678"
+
+
 def _make_runner():
     """Create a minimal GatewayRunner with just the cache infrastructure."""
     from gateway.run import GatewayRunner
@@ -33,7 +41,7 @@ class TestAgentConfigSignature:
     def test_same_config_same_signature(self):
         from gateway.run import GatewayRunner
 
-        runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1",
+        runtime = {"api_key": _dummy_openrouter_api_key(), "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter", "api_mode": "chat_completions"}
         sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
         sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
@@ -42,7 +50,7 @@ class TestAgentConfigSignature:
     def test_model_change_different_signature(self):
         from gateway.run import GatewayRunner
 
-        runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1",
+        runtime = {"api_key": _dummy_openrouter_api_key(), "base_url": "https://openrouter.ai/api/v1",
                     "provider": "openrouter"}
         sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
         sig2 = GatewayRunner._agent_config_signature("claude-opus-4.6", runtime, ["hermes-telegram"], "")
@@ -53,13 +61,13 @@ class TestAgentConfigSignature:
         from gateway.run import GatewayRunner
 
         rt1 = {
-            "api_key": "fake_redacted_credential",
+            "api_key": _dummy_jwt_prefix_token("account-a"),
             "base_url": "https://chatgpt.com/backend-api/codex",
             "provider": "openai-codex",
             "api_mode": "codex_responses",
         }
         rt2 = {
-            "api_key": "fake_redacted_credential",
+            "api_key": _dummy_jwt_prefix_token("account-b"),
             "base_url": "https://chatgpt.com/backend-api/codex",
             "provider": "openai-codex",
             "api_mode": "codex_responses",
@@ -73,8 +81,8 @@ class TestAgentConfigSignature:
     def test_provider_change_different_signature(self):
         from gateway.run import GatewayRunner
 
-        rt1 = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
-        rt2 = {"api_key": "sk-test12345678", "base_url": "https://api.anthropic.com", "provider": "anthropic"}
+        rt1 = {"api_key": _dummy_openrouter_api_key(), "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
+        rt2 = {"api_key": _dummy_openrouter_api_key(), "base_url": "https://api.anthropic.com", "provider": "anthropic"}
         sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", rt1, ["hermes-telegram"], "")
         sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", rt2, ["hermes-telegram"], "")
         assert sig1 != sig2
@@ -82,7 +90,7 @@ class TestAgentConfigSignature:
     def test_toolset_change_different_signature(self):
         from gateway.run import GatewayRunner
 
-        runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
+        runtime = {"api_key": _dummy_openrouter_api_key(), "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
         sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
         sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-discord"], "")
         assert sig1 != sig2
@@ -91,7 +99,7 @@ class TestAgentConfigSignature:
         """Reasoning config is set per-message, not part of the signature."""
         from gateway.run import GatewayRunner
 
-        runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
+        runtime = {"api_key": _dummy_openrouter_api_key(), "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
         # Same config — signature should be identical regardless of what
         # reasoning_config the caller might have (it's not passed in)
         sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")

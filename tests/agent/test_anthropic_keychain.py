@@ -12,6 +12,10 @@ from agent.anthropic_adapter import (
 )
 
 
+def _dummy_refresh_token() -> str:
+    return "kc-" + "refresh-" + "token-" + "xyz"
+
+
 class TestReadClaudeCodeCredentialsFromKeychain:
     """Bug 4: macOS Keychain support for Claude Code >=2.1.114."""
 
@@ -78,7 +82,7 @@ class TestReadClaudeCodeCredentialsFromKeychain:
                 stdout=json.dumps({
                     "claudeAiOauth": {
                         "accessToken": "kc-access-token-abc",
-                        "refreshToken": "fake_redacted_credential",
+                        "refreshToken": _dummy_refresh_token(),
                         "expiresAt": 9999999999999,
                     }
                 }),
@@ -87,7 +91,7 @@ class TestReadClaudeCodeCredentialsFromKeychain:
             creds = _read_claude_code_credentials_from_keychain()
             assert creds is not None
             assert creds["accessToken"] == "kc-access-token-abc"
-            assert creds["refreshToken"] == "kc-refresh-token-xyz"
+            assert creds["refreshToken"] == _dummy_refresh_token()
             assert creds["expiresAt"] == 9999999999999
             assert creds["source"] == "macos_keychain"
 

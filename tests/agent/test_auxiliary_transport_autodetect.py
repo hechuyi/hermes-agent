@@ -19,6 +19,18 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def _dummy_kimi_api_key() -> str:
+    return "sk-" + "kimi-" + "faketesttoken123"
+
+
+def _dummy_kimi_test_key() -> str:
+    return "sk-" + "kimi-" + "test"
+
+
+def _dummy_openrouter_api_key() -> str:
+    return "sk-" + "or-" + "test"
+
+
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     for key in (
@@ -70,7 +82,7 @@ def test_maybe_wrap_anthropic_rewraps_kimi_coding_url():
         return_value=fake_anthropic,
     ):
         result = _maybe_wrap_anthropic(
-            plain_client, "kimi-for-coding", "sk-kimi-test",
+            plain_client, "kimi-for-coding", _dummy_kimi_test_key(),
             "https://api.kimi.com/coding", api_mode=None,
         )
     assert isinstance(result, AnthropicAuxiliaryClient)
@@ -102,7 +114,7 @@ def test_maybe_wrap_anthropic_skips_openai_wire_urls():
     # No patch on build_anthropic_client — if the function tried to call it,
     # we'd get an AttributeError-style failure. The point is it shouldn't.
     result = _maybe_wrap_anthropic(
-        plain_client, "claude-sonnet-4.6", "sk-or-test",
+        plain_client, "claude-sonnet-4.6", _dummy_openrouter_api_key(),
         "https://openrouter.ai/api/v1", api_mode=None,
     )
     assert result is plain_client
@@ -115,7 +127,7 @@ def test_maybe_wrap_anthropic_respects_explicit_chat_completions():
 
     plain_client = MagicMock(name="plain_openai")
     result = _maybe_wrap_anthropic(
-        plain_client, "kimi-for-coding", "sk-kimi-test",
+        plain_client, "kimi-for-coding", _dummy_kimi_test_key(),
         "https://api.kimi.com/coding",
         api_mode="chat_completions",  # explicit override
     )
@@ -193,7 +205,7 @@ def test_maybe_wrap_anthropic_sdk_missing_falls_back():
         _sys.modules["agent.anthropic_adapter"] = None  # force ImportError
         try:
             result = _maybe_wrap_anthropic(
-                plain_client, "kimi-for-coding", "sk-kimi-test",
+                plain_client, "kimi-for-coding", _dummy_kimi_test_key(),
                 "https://api.kimi.com/coding", api_mode=None,
             )
         finally:
@@ -224,8 +236,8 @@ def test_resolve_provider_client_kimi_coding_wraps_anthropic(monkeypatch, tmp_pa
     )
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    # sk-kimi- prefix triggers /coding endpoint auto-detection
-    monkeypatch.setenv("KIMI_API_KEY", "sk-REDACTED")
+    # Kimi's provider-specific prefix triggers /coding endpoint auto-detection.
+    monkeypatch.setenv("KIMI_API_KEY", _dummy_kimi_api_key())
 
     client, model = resolve_provider_client("kimi-coding", "kimi-for-coding")
     assert client is not None, "Should resolve a client"

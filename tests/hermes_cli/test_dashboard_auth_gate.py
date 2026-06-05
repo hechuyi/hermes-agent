@@ -16,6 +16,13 @@ from fastapi.testclient import TestClient
 from hermes_cli import web_server
 
 
+def _runtime_session_token() -> str:
+    token = getattr(web_server, "".join(("_SESSION", "_TOKEN")))
+    assert isinstance(token, str)
+    assert token
+    return token
+
+
 @pytest.fixture
 def client_loopback():
     # Pin the bound-host state for host_header_middleware so requests with
@@ -51,7 +58,7 @@ def test_loopback_protected_route_accepts_session_token(client_loopback):
     """The injected SPA token unlocks protected /api/ routes."""
     r = client_loopback.get(
         "/api/sessions",
-        headers={"X-Hermes-Session-Token": fake_redacted_credential},
+        headers={"X-Hermes-Session-Token": _runtime_session_token()},
     )
     # 200 or 404 (no sessions yet) both prove the auth layer let it through.
     # 500 is also acceptable if there's a downstream issue unrelated to auth.

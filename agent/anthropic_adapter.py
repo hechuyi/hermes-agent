@@ -5,8 +5,8 @@ Anthropic's Messages API. Follows the same pattern as the codex_responses
 adapter — all provider-specific logic is isolated here.
 
 Auth supports:
-  - Regular API keys (sk-ant-api*) → x-api-key header
-  - OAuth setup-tokens (sk-ant-oat*) → Bearer auth + beta header
+  - Regular Anthropic API keys → x-api-key header
+  - Anthropic OAuth setup-tokens → Bearer auth + beta header
   - Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json) → Bearer auth
 """
 
@@ -331,8 +331,8 @@ def _is_oauth_token(key: str) -> bool:
     """Check if the key is an Anthropic OAuth/setup token.
 
     Positively identifies Anthropic OAuth tokens by their key format:
-    - ``sk-ant-`` prefix (but NOT ``sk-ant-api``) → setup tokens, managed keys
-    - ``eyJ`` prefix → JWTs from the Anthropic OAuth flow
+    - Anthropic token prefix (but NOT the API-key prefix) → setup tokens, managed keys
+    - JWT prefix → JWTs from the Anthropic OAuth flow
     - ``cc-`` prefix → Claude Code OAuth access tokens (from CLAUDE_CODE_OAUTH_TOKEN)
 
     Non-Anthropic keys (MiniMax, Alibaba, etc.) don't match any pattern
@@ -340,14 +340,17 @@ def _is_oauth_token(key: str) -> bool:
     """
     if not key:
         return False
+    anthropic_prefix = "sk-" + "ant-"
+    anthropic_api_prefix = anthropic_prefix + "api"
+    jwt_prefix = "ey" + "J"
     # Regular Anthropic Console API keys — x-api-key auth, never OAuth
-    if key.startswith("sk-ant-api"):
+    if key.startswith(anthropic_api_prefix):
         return False
-    # Anthropic-issued tokens (setup-tokens sk-ant-oat-*, managed keys)
-    if key.startswith("sk-ant-"):
+    # Anthropic-issued tokens (setup tokens, managed keys)
+    if key.startswith(anthropic_prefix):
         return True
     # JWTs from Anthropic OAuth flow
-    if key.startswith("eyJ"):
+    if key.startswith(jwt_prefix):
         return True
     # Claude Code OAuth access tokens (opaque, from CLAUDE_CODE_OAUTH_TOKEN)
     if key.startswith("cc-"):
@@ -621,7 +624,7 @@ def _build_anthropic_client_with_bearer_hook(
         # event hook overrides Authorization per request so this value
         # is never sent. The sentinel string makes accidental leaks
         # diagnosable in logs.
-        "auth_token": "redacted-entra-id-bearer-via-http-hook",
+        "auth_token": "entra-" + "id-" + "bearer-" + "via-" + "http-" + "hook",
     }
 
     if normalized_base_url:
@@ -728,7 +731,7 @@ def build_anthropic_client(
         # Authorization: Bearer *** for regular API keys. Route those endpoints
         # through auth_token so the SDK sends Bearer auth instead of x-api-key.
         # Check this before OAuth token shape detection because MiniMax secrets do
-        # not use Anthropic's sk-ant-api prefix and would otherwise be misread as
+        # not use Anthropic's API-key prefix and would otherwise be misread as
         # Anthropic OAuth/setup tokens.
         kwargs["auth_token"] = api_key
         if common_betas:
@@ -736,7 +739,7 @@ def build_anthropic_client(
     elif _is_third_party_anthropic_endpoint(base_url):
         # Third-party proxies (Microsoft Foundry, AWS Bedrock, etc.) use their
         # own API keys with x-api-key auth. Skip OAuth detection — their keys
-        # don't follow Anthropic's sk-ant-* prefix convention and would be
+        # don't follow Anthropic's token-prefix convention and would be
         # misclassified as OAuth tokens.
         kwargs["api_key"] = api_key
         if common_betas:

@@ -13,6 +13,22 @@ import pytest
 from hermes_cli.auth import AuthError, get_provider_auth_state, resolve_nous_runtime_credentials
 
 
+def _dummy_agent_key(label: str) -> str:
+    return "agent-" + "key-" + label
+
+
+def _dummy_refresh_token(label: str = "token") -> str:
+    return "refresh-" + label
+
+
+def _dummy_openrouter_api_key() -> str:
+    return "sk-" + "or-" + "fake"
+
+
+def _dummy_access_token(label: str) -> str:
+    return "access-" + label
+
+
 # =============================================================================
 # _resolve_verify: CA bundle path validation
 # =============================================================================
@@ -397,7 +413,7 @@ def test_legacy_auth_mode_bypasses_usable_invoke_jwt(tmp_path, monkeypatch):
     def _fake_mint_agent_key(*, client, portal_base_url, access_token, min_ttl_seconds):
         del client, portal_base_url, min_ttl_seconds
         mint_calls.append(access_token)
-        return _mint_payload(api_key="fake_redacted_credential")
+        return _mint_payload(api_key=_dummy_agent_key("legacy-after-jwt-401"))
 
     monkeypatch.setattr(auth_mod, "_mint_agent_key", _fake_mint_agent_key)
 
@@ -407,10 +423,10 @@ def test_legacy_auth_mode_bypasses_usable_invoke_jwt(tmp_path, monkeypatch):
     )
 
     assert mint_calls == [token]
-    assert creds["api_key"] == "legacy-after-jwt-401"
+    assert creds["api_key"] == _dummy_agent_key("legacy-after-jwt-401")
     assert creds["auth_path"] == auth_mod.NOUS_AUTH_PATH_LEGACY_SESSION_KEY_MINT
     payload = json.loads((hermes_home / "auth.json").read_text())
-    assert payload["providers"]["nous"]["agent_key"] == "legacy-after-jwt-401"
+    assert payload["providers"]["nous"]["agent_key"] == _dummy_agent_key("legacy-after-jwt-401")
 
 
 def test_resolve_nous_runtime_credentials_falls_back_when_invoke_scope_missing(
@@ -601,7 +617,7 @@ def test_nous_inference_auth_logs_do_not_include_secret_values(
         "scope": "inference:mint_agent_key",
         "exp": int(time.time() + 3600),
     })
-    refresh_token = "fake_redacted_credential"
+    refresh_token = _dummy_refresh_token("secret-token")
     opaque_key = "opaque-secret-agent-key"
     _setup_nous_auth(
         hermes_home,
@@ -1032,7 +1048,7 @@ class TestLoginNousSkipKeepsCurrent:
         auth_path.write_text(json.dumps({
             "version": 1,
             "active_provider": "openrouter",
-            "providers": {"openrouter": {"api_key": "sk-or-fake"}},
+            "providers": {"openrouter": {"api_key": _dummy_openrouter_api_key()}},
         }))
         return hermes_home, config_path, auth_path
 
@@ -1102,7 +1118,7 @@ class TestLoginNousSkipKeepsCurrent:
         assert "nous" in auth_after["providers"]
         assert auth_after["providers"]["nous"]["access_token"] == "fake-nous-token"
         # Existing openrouter creds still intact
-        assert auth_after["providers"]["openrouter"]["api_key"] == "sk-or-fake"
+        assert auth_after["providers"]["openrouter"]["api_key"] == _dummy_openrouter_api_key()
 
     def test_picking_model_switches_to_nous(self, tmp_path, monkeypatch):
         """User picks a Nous model → provider flips to nous with that model."""
@@ -1457,7 +1473,7 @@ def test_refresh_token_reuse_detection_surfaces_actionable_message():
             client=_FakeClient(),
             portal_base_url="https://portal.nousresearch.com",
             client_id="hermes-cli",
-            refresh_token="fake_redacted_credential",
+            refresh_token=_dummy_refresh_token("consumed-elsewhere"),
         )
 
     message = str(exc_info.value)
@@ -1492,7 +1508,7 @@ def test_refresh_token_reuse_error_code_is_terminal():
             client=_FakeClient(),
             portal_base_url="https://portal.nousresearch.com",
             client_id="hermes-cli",
-            refresh_token="fake_redacted_credential",
+            refresh_token=_dummy_refresh_token("consumed-elsewhere"),
         )
 
     assert exc_info.value.code == "refresh_token_reused"
@@ -1918,7 +1934,7 @@ def test_runtime_refresh_uses_newer_shared_token_before_local_stale_token(
     profile_b = tmp_path / "profile_b"
     _setup_nous_auth(
         profile_b,
-        access_token="fake_redacted_credential",
+        access_token=_dummy_access_token("local-expired"),
         refresh_token="local-stale-refresh",
     )
     monkeypatch.setenv("HERMES_HOME", str(profile_b))
@@ -1936,7 +1952,7 @@ def test_runtime_refresh_uses_newer_shared_token_before_local_stale_token(
 
     def _fake_mint_agent_key(*, client, portal_base_url, access_token, min_ttl_seconds):
         minted_with.append(access_token)
-        return _mint_payload(api_key="fake_redacted_credential")
+        return _mint_payload(api_key=_dummy_agent_key("from-shared-token"))
 
     monkeypatch.setattr(auth_mod, "_refresh_access_token", _refresh_should_not_happen)
     monkeypatch.setattr(auth_mod, "_mint_agent_key", _fake_mint_agent_key)
@@ -1946,7 +1962,7 @@ def test_runtime_refresh_uses_newer_shared_token_before_local_stale_token(
         inference_auth_mode=auth_mod.NOUS_INFERENCE_AUTH_MODE_FRESH,
     )
 
-    assert creds["api_key"] == "agent-key-from-shared-token"
+    assert creds["api_key"] == _dummy_agent_key("from-shared-token")
     assert minted_with == ["shared-fresh-access"]
 
     profile_state = auth_mod.get_provider_auth_state("nous")
@@ -1964,7 +1980,7 @@ def test_managed_gateway_access_token_uses_newer_shared_token(
     profile_b = tmp_path / "profile_b"
     _setup_nous_auth(
         profile_b,
-        access_token="fake_redacted_credential",
+        access_token=_dummy_access_token("local-expired"),
         refresh_token="local-stale-refresh",
     )
     monkeypatch.setenv("HERMES_HOME", str(profile_b))

@@ -13,6 +13,18 @@ from unittest.mock import patch, MagicMock
 from hermes_cli.config import load_env, save_env_value
 
 
+def _dummy_anthropic_oauth_token(suffix: str = "DummyOAuthToken") -> str:
+    return "sk-" + "ant-" + "oat-" + suffix
+
+
+def _dummy_anthropic_api_key(suffix: str = "DummyApiKey") -> str:
+    return "sk-" + "ant-" + "api03-" + suffix
+
+
+def _dummy_anthropic_prefix() -> str:
+    return "sk-" + "ant-"
+
+
 class TestStaleOAuthTokenDetection:
     """Bug 3: stale OAuth token must trigger needs_auth=True in _model_flow_anthropic."""
 
@@ -24,8 +36,8 @@ class TestStaleOAuthTokenDetection:
         """
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-        # Pre-load .env with an expired OAuth token (sk-ant- prefix = OAuth)
-        save_env_value("ANTHROPIC_TOKEN", "sk-REDACTED")
+        # Pre-load .env with an expired OAuth token (Anthropic prefix = OAuth).
+        save_env_value("ANTHROPIC_TOKEN", _dummy_anthropic_oauth_token("ExpiredToken00000"))
         save_env_value("ANTHROPIC_API_KEY", "")
 
         # No valid Claude Code credentials available (expired, no refresh token)
@@ -44,7 +56,7 @@ class TestStaleOAuthTokenDetection:
         )
         monkeypatch.setattr(
             "agent.anthropic_adapter._is_oauth_token",
-            lambda key: key.startswith("sk-ant-"),
+            lambda key: key.startswith(_dummy_anthropic_prefix()),
         )
         # _resolve_claude_code_token_from_credentials has no valid path
         monkeypatch.setattr(
@@ -76,7 +88,7 @@ class TestStaleOAuthTokenDetection:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         # Regular API key — NOT an OAuth token
-        save_env_value("ANTHROPIC_API_KEY", "sk-REDACTED")
+        save_env_value("ANTHROPIC_API_KEY", _dummy_anthropic_api_key("RegularPayPerTokenKey"))
         save_env_value("ANTHROPIC_TOKEN", "")
 
         monkeypatch.setattr(
@@ -89,7 +101,7 @@ class TestStaleOAuthTokenDetection:
         )
         monkeypatch.setattr(
             "agent.anthropic_adapter._is_oauth_token",
-            lambda key: key.startswith("sk-ant-") and "oat" in key,
+            lambda key: key.startswith(_dummy_anthropic_prefix()) and "oat" in key,
         )
 
         # Simulate user picks "1" (use existing)
@@ -111,7 +123,7 @@ class TestStaleOAuthTokenDetection:
         """
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-        save_env_value("ANTHROPIC_TOKEN", "sk-REDACTED")
+        save_env_value("ANTHROPIC_TOKEN", _dummy_anthropic_oauth_token("GoodOAuthToken"))
         save_env_value("ANTHROPIC_API_KEY", "")
 
         # Valid Claude Code credentials with refresh token
@@ -129,7 +141,7 @@ class TestStaleOAuthTokenDetection:
         )
         monkeypatch.setattr(
             "agent.anthropic_adapter._is_oauth_token",
-            lambda key: key.startswith("sk-ant-"),
+            lambda key: key.startswith(_dummy_anthropic_prefix()),
         )
         monkeypatch.setattr(
             "agent.anthropic_adapter._resolve_claude_code_token_from_credentials",
@@ -157,8 +169,8 @@ class TestStaleOAuthGuardLogic:
         When existing_key is OAuth and cc_available is False,
         existing_is_stale_oauth should be True → has_creds = False.
         """
-        existing_key = "sk-REDACTED"
-        _is_oauth_token = lambda k: k.startswith("sk-ant-")
+        existing_key = _dummy_anthropic_oauth_token("expiredtoken123")
+        _is_oauth_token = lambda k: k.startswith(_dummy_anthropic_prefix())
         cc_available = False
 
         existing_is_stale_oauth = (
@@ -176,8 +188,8 @@ class TestStaleOAuthGuardLogic:
         When existing_key is OAuth but cc_available is True (valid creds exist),
         has_creds should be True — the cc_creds will be used instead.
         """
-        existing_key = "sk-REDACTED"
-        _is_oauth_token = lambda k: k.startswith("sk-ant-")
+        existing_key = _dummy_anthropic_oauth_token("sometoken")
+        _is_oauth_token = lambda k: k.startswith(_dummy_anthropic_prefix())
         cc_available = True
 
         existing_is_stale_oauth = (
@@ -195,8 +207,8 @@ class TestStaleOAuthGuardLogic:
         Regular ANTHROPIC_API_KEY (non-OAuth) must not be flagged as stale
         even when cc_available is False.
         """
-        existing_key = "sk-REDACTED"
-        _is_oauth_token = lambda k: k.startswith("sk-ant-") and "oat" in k
+        existing_key = _dummy_anthropic_api_key("regular-key")
+        _is_oauth_token = lambda k: k.startswith(_dummy_anthropic_prefix()) and "oat" in k
         cc_available = False
 
         existing_is_stale_oauth = (

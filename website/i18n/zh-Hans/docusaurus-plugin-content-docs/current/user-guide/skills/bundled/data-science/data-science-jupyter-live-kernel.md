@@ -70,11 +70,9 @@ uv run "$SCRIPT" servers
 如果未找到服务器，启动一个：
 ```
 mkdir -p "$HOME/notebooks"
-JUPYTER_TOKEN_VALUE=""
-JUPYTER_PASSWORD_VALUE=""
 nohup jupyter-lab --no-browser --port=8888 --notebook-dir="$HOME/notebooks" \
-  --IdentityProvider.token="$JUPYTER_TOKEN_VALUE" \
-  --ServerApp.password="$JUPYTER_PASSWORD_VALUE" \
+  --IdentityProvider.token='' \
+  --ServerApp.password='' \
   > "$HOME/notebooks/jupyterlab.log" 2>&1 &
 sleep 3
 ```
