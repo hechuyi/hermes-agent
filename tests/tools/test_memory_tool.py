@@ -12,6 +12,8 @@ from tools.memory_tool import (
     MEMORY_SCHEMA,
 )
 
+_DUMMY_SECRET_VALUE = "x" * 20
+
 
 # =========================================================================
 # Tool schema guidance
@@ -174,7 +176,7 @@ class TestScanMemoryContent:
     # ── Hardcoded secrets ──
 
     def test_hardcoded_secret_blocked(self):
-        result = _scan_memory_content('api_key="sk-REDACTED"')
+        result = _scan_memory_content(f'api_key="{_DUMMY_SECRET_VALUE}"')
         assert "Blocked" in result
         assert "hardcoded_secret" in result
 

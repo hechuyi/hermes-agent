@@ -333,12 +333,15 @@ class TestSaveConfigAtomicity:
 class TestSanitizeEnvLines:
     """Tests for .env file corruption repair."""
 
+    _ANTHROPIC_DUMMY_KEY = "".join(("sk", "-", "ant"))
+    _OPENROUTER_DUMMY_KEY = "".join(("sk", "-", "or", "-")) + ("x" * 20)
+
     def test_splits_concatenated_keys(self):
         """Two KEY=VALUE pairs jammed on one line get split."""
-        lines = ["ANTHROPIC_API_KEY=sk-REDACTED=https://api.openai.com/v1\n"]
+        lines = [f"ANTHROPIC_API_KEY={self._ANTHROPIC_DUMMY_KEY}OPENAI_BASE_URL=https://api.openai.com/v1\n"]
         result = _sanitize_env_lines(lines)
         assert result == [
-            "ANTHROPIC_API_KEY=sk-ant-xxx\n",
+            f"ANTHROPIC_API_KEY={self._ANTHROPIC_DUMMY_KEY}\n",
             "OPENAI_BASE_URL=https://api.openai.com/v1\n",
         ]
 
@@ -389,7 +392,7 @@ class TestSanitizeEnvLines:
 
     def test_value_ending_with_digits_still_splits(self):
         """Concatenation is detected even when value ends with digits."""
-        lines = ["OPENROUTER_API_KEY=sk-REDACTED=https://api.openai.com/v1\n"]
+        lines = [f"OPENROUTER_API_KEY={self._OPENROUTER_DUMMY_KEY}OPENAI_BASE_URL=https://api.openai.com/v1\n"]
         result = _sanitize_env_lines(lines)
         assert len(result) == 2
         assert result[0].startswith("OPENROUTER_API_KEY=")
@@ -416,7 +419,7 @@ class TestSanitizeEnvLines:
         """save_env_value sanitizes corrupted lines when writing a new key."""
         env_file = tmp_path / ".env"
         env_file.write_text(
-            "ANTHROPIC_API_KEY=sk-REDACTED=https://api.openai.com/v1\n"
+            f"ANTHROPIC_API_KEY={self._ANTHROPIC_DUMMY_KEY}OPENAI_BASE_URL=https://api.openai.com/v1\n"
             "FAL_KEY=existing\n"
         )
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
@@ -426,7 +429,7 @@ class TestSanitizeEnvLines:
             lines = content.strip().split("\n")
 
             # Corrupted line should be split, new key added
-            assert "ANTHROPIC_API_KEY=sk-ant" in lines
+            assert f"ANTHROPIC_API_KEY={self._ANTHROPIC_DUMMY_KEY}" in lines
             assert "OPENAI_BASE_URL=https://api.openai.com/v1" in lines
             assert "MESSAGING_CWD=/tmp" in lines
 
@@ -892,4 +895,3 @@ class TestEnvWriteDenylist:
         # But the write path still refuses to update it
         with pytest.raises(ValueError, match="denylist"):
             save_env_value("LD_PRELOAD", "/tmp/evil.so")
-

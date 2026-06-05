@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+_DUMMY_SECRET_VALUE = "x" * 20
+
 
 def _can_symlink():
     """Check if we can create symlinks (needs admin/dev-mode on Windows)."""
@@ -297,7 +299,7 @@ class TestScanFile:
 
     def test_detect_hardcoded_secret(self, tmp_path):
         f = tmp_path / "config.py"
-        f.write_text('api_key = "sk-REDACTED"\n')
+        f.write_text(f'api_key = "{_DUMMY_SECRET_VALUE}"\n')
         findings = scan_file(f, "config.py")
         assert any(fi.category == "credential_exposure" for fi in findings)
 

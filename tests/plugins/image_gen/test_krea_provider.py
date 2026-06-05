@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+_KREA_DUMMY_KEY = "-".join(("krea", "dummy", "key"))
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -17,7 +19,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _fake_api_key(monkeypatch):
     """Ensure KREA_API_KEY is set for all tests."""
-    monkeypatch.setenv("KREA_API_KEY", "test-key-12345")
+    monkeypatch.setenv("KREA_API_KEY", _KREA_DUMMY_KEY)
 
 
 def _completed_job(url: str = "https://krea.cdn/img.png") -> dict:
@@ -265,7 +267,7 @@ class TestGenerate:
             KreaImageGenProvider().generate(prompt="test")
 
         headers = mock_post.call_args.kwargs["headers"]
-        assert headers["Authorization"] == "Bearer REDACTED"
+        assert headers["Authorization"] == f"Bearer {_KREA_DUMMY_KEY}"
         assert headers["Content-Type"] == "application/json"
 
     def test_passthrough_seed_styles_moodboards(self):

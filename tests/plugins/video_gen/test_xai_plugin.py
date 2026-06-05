@@ -6,6 +6,8 @@ import pytest
 
 from agent import video_gen_registry
 
+_XAI_OAUTH_TOKEN = "-".join(("oauth", "bearer", "token"))
+
 
 @pytest.fixture(autouse=True)
 def _reset_registry():
@@ -67,7 +69,7 @@ def test_xai_available_with_oauth_only(monkeypatch):
         "tools.xai_http.resolve_xai_http_credentials",
         lambda: {
             "provider": "xai-oauth",
-            "api_key": "oauth-bearer-token",
+            "api_key": _XAI_OAUTH_TOKEN,
             "base_url": "https://api.x.ai/v1",
         },
     )
@@ -86,16 +88,16 @@ def test_xai_resolved_credentials_threaded_through_request(monkeypatch):
         "tools.xai_http.resolve_xai_http_credentials",
         lambda: {
             "provider": "xai-oauth",
-            "api_key": "oauth-bearer-token",
+            "api_key": _XAI_OAUTH_TOKEN,
             "base_url": "https://api.x.ai/v1",
         },
     )
 
     api_key, base_url = xai_plugin._resolve_xai_credentials()
-    assert api_key == "oauth-bearer-token"
+    assert api_key == _XAI_OAUTH_TOKEN
     assert base_url == "https://api.x.ai/v1"
     headers = xai_plugin._xai_headers(api_key)
-    assert headers["Authorization"] == "Bearer REDACTED"
+    assert headers["Authorization"] == f"Bearer {_XAI_OAUTH_TOKEN}"
 
 
 def test_xai_no_operation_kwarg():

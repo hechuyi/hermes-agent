@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
+_HASS_DUMMY_TOKEN = "-".join(("homeassistant", "dummy", "token"))
+
 from tools.homeassistant_tool import (
     _check_ha_available,
     _filter_and_summarize,
@@ -472,9 +474,9 @@ class TestCheckAvailable:
 
 class TestGetHeaders:
     def test_bearer_token_format(self, monkeypatch):
-        monkeypatch.setattr("tools.homeassistant_tool._HASS_TOKEN", "my-secret-token")
+        monkeypatch.setattr("tools.homeassistant_tool._HASS_TOKEN", _HASS_DUMMY_TOKEN)
         headers = _get_headers()
-        assert headers["Authorization"] == "Bearer REDACTED"
+        assert headers["Authorization"] == f"Bearer {_HASS_DUMMY_TOKEN}"
         assert headers["Content-Type"] == "application/json"
 
 

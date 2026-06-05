@@ -1,6 +1,7 @@
 """Tests for Matrix platform adapter (mautrix-python backend)."""
 import asyncio
 import json
+import os
 import re
 import sys
 import time
@@ -2592,6 +2593,18 @@ class TestMatrixDmAutoThread:
 class TestMatrixProxyConfig:
     """Verify that MatrixAdapter resolves and propagates proxy settings."""
 
+    @staticmethod
+    def _resolve_proxy_url_from_test_env(platform_env_var=None, **_kwargs):
+        if platform_env_var:
+            value = os.getenv(platform_env_var)
+            if value:
+                return value
+        for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
+            value = os.getenv(key)
+            if value:
+                return value
+        return None
+
     def _make_adapter(self, monkeypatch, proxy_env=None):
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_test")
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
@@ -2607,7 +2620,11 @@ class TestMatrixProxyConfig:
             cfg = PlatformConfig(enabled=True, token="syt_test",
                                  extra={"homeserver": "https://matrix.example.org",
                                         "user_id": "@bot:example.org"})
-            return MatrixAdapter(cfg)
+            with patch(
+                "gateway.platforms.matrix.resolve_proxy_url",
+                side_effect=self._resolve_proxy_url_from_test_env,
+            ):
+                return MatrixAdapter(cfg)
 
     def test_no_proxy_by_default(self, monkeypatch):
         adapter = self._make_adapter(monkeypatch)

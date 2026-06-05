@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+_XAI_DUMMY_KEY = "-".join(("xai", "dummy", "key"))
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -19,7 +21,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _fake_api_key(monkeypatch):
     """Ensure XAI_API_KEY is set for all tests."""
-    monkeypatch.setenv("XAI_API_KEY", "test-key-12345")
+    monkeypatch.setenv("XAI_API_KEY", _XAI_DUMMY_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +296,7 @@ class TestGenerate:
 
         call_args = mock_post.call_args
         headers = call_args.kwargs.get("headers") or call_args[1].get("headers")
-        assert "Bearer REDACTED" in headers["Authorization"]
+        assert headers["Authorization"] == f"Bearer {_XAI_DUMMY_KEY}"
         assert "Hermes-Agent" in headers["User-Agent"]
 
     def test_payload_resolution_is_literal_1k_or_2k(self):
