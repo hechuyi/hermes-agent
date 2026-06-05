@@ -348,6 +348,30 @@ async def test_media_only_successful_delivery_counts_as_successful_processing():
 
 
 @pytest.mark.asyncio
+async def test_media_only_image_send_failure_counts_as_failed_processing():
+    adapter = _make_adapter()
+    sk = build_session_key(_make_feishu_event().source)
+    outcomes = []
+
+    async def handler(event):
+        return "![chart](https://example.test/chart.png)"
+
+    async def send_image(**kwargs):
+        return SendResult(success=False, error="image upload failed")
+
+    async def on_processing_complete(event, outcome):
+        outcomes.append(outcome)
+
+    adapter._message_handler = handler
+    adapter.send_image = send_image
+    adapter.on_processing_complete = on_processing_complete
+
+    await adapter._process_message_background(_make_feishu_event(text="M1"), sk)
+
+    assert outcomes == [ProcessingOutcome.FAILURE]
+
+
+@pytest.mark.asyncio
 async def test_media_only_failed_delivery_counts_as_failed_processing(tmp_path):
     adapter = _make_adapter()
     sk = build_session_key(_make_feishu_event().source)

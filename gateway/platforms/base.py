@@ -2262,7 +2262,7 @@ class BasePlatformAdapter(ABC):
         images: List[Tuple[str, str]],
         metadata: Optional[Dict[str, Any]] = None,
         human_delay: float = 0.0,
-    ) -> None:
+    ) -> SendResult:
         """Send a batch of images.
 
         Accepts ``http(s)://``, ``file://`` URIs in the first tuple
@@ -2276,6 +2276,11 @@ class BasePlatformAdapter(ABC):
         (e.g. Signal's multi-attachment RPC)
         """
         from urllib.parse import unquote as _unquote
+
+        succeeded = 0
+        failed = 0
+        last_message_id = None
+        last_error = None
 
         for image_index, (image_url, alt_text) in enumerate(images):
             if human_delay > 0:
@@ -2312,10 +2317,24 @@ class BasePlatformAdapter(ABC):
                         caption=alt_text if alt_text else None,
                         metadata=image_metadata,
                     )
-                if not img_result.success:
-                    logger.error("[%s] Failed to send image: %s", self.name, img_result.error)
+                if getattr(img_result, "success", False):
+                    succeeded += 1
+                    last_message_id = getattr(img_result, "message_id", None) or last_message_id
+                else:
+                    failed += 1
+                    last_error = getattr(img_result, "error", None) or "image delivery failed"
+                    logger.error("[%s] Failed to send image: %s", self.name, last_error)
             except Exception as img_err:
+                failed += 1
+                last_error = str(img_err)
                 logger.error("[%s] Error sending image: %s", self.name, img_err, exc_info=True)
+        if failed:
+            return SendResult(
+                success=False,
+                message_id=last_message_id,
+                error=last_error or f"{failed} image delivery failure(s)",
+            )
+        return SendResult(success=True, message_id=last_message_id)
 
     async def send_image(
         self,
