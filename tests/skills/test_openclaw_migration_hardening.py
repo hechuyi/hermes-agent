@@ -223,11 +223,15 @@ def test_provider_keys_skipped_warning_when_secrets_disabled(tmp_path):
 def test_deep_channel_secret_env_names_keep_runtime_semantics(tmp_path):
     mod = _load()
     matrix_env = "_".join(("MATRIX", "ACCESS", "TOKEN"))
+    matrix_homeserver_env = "_".join(("MATRIX", "HOMESERVER"))
     mattermost_env = "_".join(("MATTERMOST", "TOKEN"))
     bluebubbles_env = "_".join(("BLUEBUBBLES", "PASSWORD"))
+    bluebubbles_server_env = "_".join(("BLUEBUBBLES", "SERVER", "URL"))
     matrix_value = "matrix-runtime-value"
+    matrix_homeserver_value = "https://matrix.example.invalid"
     mattermost_value = "mm-runtime-value"
     bluebubbles_value = "bluebubbles-runtime-value"
+    bluebubbles_server_value = "http://bluebubbles.example.invalid"
     migrator = _make_minimal_migrator(
         mod,
         tmp_path,
@@ -237,9 +241,9 @@ def test_deep_channel_secret_env_names_keep_runtime_semantics(tmp_path):
     )
     migrator.migrate_deep_channels({
         "channels": {
-            "matrix": {"accessToken": matrix_value},
+            "matrix": {"accessToken": matrix_value, "homeserverUrl": matrix_homeserver_value},
             "mattermost": {"botToken": mattermost_value},
-            "bluebubbles": {"password": bluebubbles_value},
+            "bluebubbles": {"password": bluebubbles_value, "server": bluebubbles_server_value},
         },
     })
 
@@ -248,8 +252,10 @@ def test_deep_channel_secret_env_names_keep_runtime_semantics(tmp_path):
         for line in (migrator.target_root / ".env").read_text(encoding="utf-8").splitlines()
     )
     assert env_values[matrix_env] == matrix_value
+    assert env_values[matrix_homeserver_env] == matrix_homeserver_value
     assert env_values[mattermost_env] == mattermost_value
     assert env_values[bluebubbles_env] == bluebubbles_value
+    assert env_values[bluebubbles_server_env] == bluebubbles_server_value
     assert "fake_redacted_credential" not in env_values
 
 
@@ -270,14 +276,25 @@ def test_deep_channel_archive_excludes_migrated_secret_sources(tmp_path):
         "channels": {
             "matrix": {
                 "accessToken": matrix_value,
+                "accessTokenSource": {"kind": "env", "name": "MATRIX_ACCESS_TOKEN"},
+                "accessTokenProvenance": {"loadedFrom": "openclaw-env"},
                 "scope": {"rooms": ["!alerts:example.invalid"]},
+                "accounts": {
+                    "default": {
+                        "accessToken": matrix_value,
+                        "accessTokenSource": {"kind": "env", "name": "MATRIX_ACCESS_TOKEN"},
+                        "displayName": "Hermes Matrix",
+                    },
+                },
             },
             "mattermost": {
                 "botToken": mattermost_value,
+                "botTokenSource": {"kind": "env", "name": "MATTERMOST_TOKEN"},
                 "webhookBindings": {"alerts": "ops"},
             },
             "bluebubbles": {
                 "password": bluebubbles_value,
+                "passwordProvenance": {"loadedFrom": "openclaw-env"},
                 "routing": {"defaultChat": "ops"},
             },
         },
@@ -287,11 +304,16 @@ def test_deep_channel_archive_excludes_migrated_secret_sources(tmp_path):
     archive_text = archive_path.read_text(encoding="utf-8")
     archived = json.loads(archive_text)
     assert archived["matrix"]["scope"] == {"rooms": ["!alerts:example.invalid"]}
+    assert archived["matrix"]["accounts"]["default"] == {"displayName": "Hermes Matrix"}
     assert archived["mattermost"]["webhookBindings"] == {"alerts": "ops"}
     assert archived["bluebubbles"]["routing"] == {"defaultChat": "ops"}
     assert "accessToken" not in archived["matrix"]
+    assert "accessTokenSource" not in archived["matrix"]
+    assert "accessTokenProvenance" not in archived["matrix"]
     assert "botToken" not in archived["mattermost"]
+    assert "botTokenSource" not in archived["mattermost"]
     assert "password" not in archived["bluebubbles"]
+    assert "passwordProvenance" not in archived["bluebubbles"]
     assert matrix_value not in archive_text
     assert mattermost_value not in archive_text
     assert bluebubbles_value not in archive_text

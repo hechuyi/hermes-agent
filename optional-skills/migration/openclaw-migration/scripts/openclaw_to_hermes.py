@@ -2570,13 +2570,13 @@ class Migrator:
         # Extended channel token/allowlist mapping
         CHANNEL_ENV_MAP = {
             "matrix": {"token": env_name("MATRIX", "ACCESS", "TOKEN"), "tokenField": "accessToken", "allowFrom": "MATRIX_ALLOWED_USERS",
-                        "extras": {"homeserverUrl": "MATRIX_HOMESERVER_URL", "userId": "MATRIX_USER_ID"}},
+                        "extras": {"homeserverUrl": "MATRIX_HOMESERVER", "userId": "MATRIX_USER_ID"}},
             "mattermost": {"token": env_name("MATTERMOST", "TOKEN"), "allowFrom": "MATTERMOST_ALLOWED_USERS",
                            "extras": {"url": "MATTERMOST_URL", "teamId": "MATTERMOST_TEAM_ID"}},
             "irc": {"extras": {"server": "IRC_SERVER", "nick": "IRC_NICK", "channels": "IRC_CHANNELS"}},
             "googlechat": {"extras": {"serviceAccountKeyPath": "GOOGLE_CHAT_SA_KEY_PATH"}},
             "imessage": {},
-            "bluebubbles": {"extras": {"server": "BLUEBUBBLES_SERVER", "password": env_name("BLUEBUBBLES", "PASSWORD")}},
+            "bluebubbles": {"extras": {"server": "BLUEBUBBLES_SERVER_URL", "password": env_name("BLUEBUBBLES", "PASSWORD")}},
             "msteams": {"token": "MSTEAMS_BOT_TOKEN", "allowFrom": "MSTEAMS_ALLOWED_USERS"},
             "nostr": {"extras": {"nsec": "NOSTR_NSEC", "relays": "NOSTR_RELAYS"}},
             "twitch": {"token": "TWITCH_BOT_TOKEN", "extras": {"channels": "TWITCH_CHANNELS"}},
@@ -2593,12 +2593,24 @@ class Migrator:
             if fields:
                 migrated_secret_fields[mapped_ch_name] = fields
 
+        def is_migrated_secret_archive_key(key: str, secret_fields: set[str]) -> bool:
+            normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
+            for field in secret_fields:
+                normalized_field = re.sub(r"[^a-z0-9]", "", field.lower())
+                if normalized_key == normalized_field:
+                    return True
+                if normalized_key.startswith(normalized_field):
+                    suffix = normalized_key[len(normalized_field):]
+                    if suffix in {"source", "provenance"}:
+                        return True
+            return False
+
         def without_migrated_secret_fields(value: Any, secret_fields: set[str]) -> Any:
             if isinstance(value, dict):
                 return {
                     k: without_migrated_secret_fields(v, secret_fields)
                     for k, v in value.items()
-                    if k not in secret_fields
+                    if not is_migrated_secret_archive_key(k, secret_fields)
                 }
             if isinstance(value, list):
                 return [without_migrated_secret_fields(item, secret_fields) for item in value]
@@ -2662,10 +2674,7 @@ class Migrator:
                             if k not in excluded_keys and v}
             secret_fields = migrated_secret_fields.get(ch_name, set())
             if secret_fields:
-                complex_keys = {
-                    k: without_migrated_secret_fields(v, secret_fields)
-                    for k, v in complex_keys.items()
-                }
+                complex_keys = without_migrated_secret_fields(complex_keys, secret_fields)
                 complex_keys = {k: v for k, v in complex_keys.items() if v}
             if complex_keys:
                 complex_archive[ch_name] = complex_keys
