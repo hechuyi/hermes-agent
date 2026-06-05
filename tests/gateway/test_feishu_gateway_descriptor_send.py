@@ -767,6 +767,7 @@ async def test_malformed_delivery_record_action_fail_closed_without_sdk(tmp_path
     ("status", "message_id"),
     [
         ("unknown", "om_existing_msg"),
+        ("pending", "bad/message/id"),
         ("sent", None),
         ("acked", "bad/message/id"),
     ],

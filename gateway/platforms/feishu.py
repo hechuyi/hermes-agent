@@ -5638,7 +5638,11 @@ class FeishuAdapter(BasePlatformAdapter):
             session_id=session_id,
             correlation_id=correlation_id,
         )
-        if identity_matches and record.get("status") == "pending":
+        if (
+            identity_matches
+            and record.get("status") == "pending"
+            and not record.get("feishu_message_id")
+        ):
             return None
         if identity_matches and record.get("status") in {"sent", "acked"}:
             if bool(message_id) and self._valid_feishu_message_id(str(message_id)):
