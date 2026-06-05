@@ -5592,6 +5592,24 @@ class FeishuAdapter(BasePlatformAdapter):
             and self._valid_feishu_message_id(str(message_id))
         )
 
+    @staticmethod
+    def _delivery_record_identity_matches(
+        record: Dict[str, Any],
+        *,
+        delivery_id: str,
+        inbound_id: str,
+        target: str,
+        session_id: str,
+        correlation_id: str,
+    ) -> bool:
+        return (
+            record.get("delivery_id") == delivery_id
+            and record.get("inbound_id") == inbound_id
+            and record.get("target") == target
+            and record.get("session_id") == session_id
+            and record.get("correlation_id") == correlation_id
+        )
+
     def _send_result_from_delivery_record_apply(
         self,
         result: Any,
@@ -5602,28 +5620,35 @@ class FeishuAdapter(BasePlatformAdapter):
         session_id: str,
         correlation_id: str,
     ) -> Optional[SendResult]:
-        if self._delivery_record_action_from_pending_apply(result) is None:
+        action = getattr(result, "action", None)
+        if action is None:
             return None
+        if not isinstance(action, dict) or action.get("type") != "delivery_record":
+            return SendResult(success=False, error="delivery_pending apply failed")
         record = self._delivery_record_from_pending_apply(result)
         if record is None:
             return SendResult(success=False, error="delivery_pending apply failed")
 
         message_id = record.get("feishu_message_id")
-        if not self._delivery_record_apply_is_reusable(
-            result,
+        identity_matches = self._delivery_record_identity_matches(
+            record,
             delivery_id=delivery_id,
             inbound_id=inbound_id,
             target=target,
             session_id=session_id,
             correlation_id=correlation_id,
-        ):
-            return SendResult(success=False, error="delivery_pending apply failed")
-
-        return SendResult(
-            success=True,
-            message_id=str(message_id),
-            raw_response={"type": "delivery_record", "record": record},
         )
+        if identity_matches and record.get("status") == "pending":
+            return None
+        if identity_matches and record.get("status") in {"sent", "acked"}:
+            if bool(message_id) and self._valid_feishu_message_id(str(message_id)):
+                return SendResult(
+                    success=True,
+                    message_id=str(message_id),
+                    raw_response={"type": "delivery_record", "record": record},
+                )
+
+        return SendResult(success=False, error="delivery_pending apply failed")
 
     async def _apply_delivery_sent(
         self,
