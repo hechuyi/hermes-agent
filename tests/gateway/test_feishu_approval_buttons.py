@@ -154,6 +154,17 @@ def _close_submitted_coro(coro, _loop):
     return SimpleNamespace(add_done_callback=lambda *_args, **_kwargs: None)
 
 
+def _schedule_submitted_coro_on_current_loop(tasks):
+    loop = asyncio.get_running_loop()
+
+    def schedule(coro, _loop):
+        task = loop.create_task(coro)
+        tasks.append(task)
+        return task
+
+    return schedule
+
+
 # ===========================================================================
 # send_exec_approval — interactive card with buttons
 # ===========================================================================
@@ -1166,6 +1177,73 @@ class TestCardActionCallbackResponse:
         assert "Approved once" in card["header"]["title"]["content"]
         assert "Bob" in card["elements"][0]["content"]
 
+    @pytest.mark.asyncio
+    async def test_approval_audited_click_restores_actionable_card_when_side_effect_fails(
+        self,
+        tmp_path,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        adapter._loop = asyncio.get_running_loop()
+        adapter._allowed_group_users = {"ou_user1"}
+        events = _install_event_recorder(adapter)
+        with patch.object(
+            adapter,
+            "_send_raw_message",
+            new_callable=AsyncMock,
+            return_value=_FakeResponse(message_id="om_approval_handler"),
+        ):
+            result = await adapter.send_exec_approval(
+                chat_id="oc_12345",
+                command="rm -rf /important",
+                session_key="agent:main:feishu:group:oc_12345",
+                description="dangerous deletion",
+                metadata={
+                    "inbound_id": "inbound-approval-handler",
+                    "session_id": "session-approval-handler",
+                    "correlation_id": "corr-approval-handler",
+                },
+            )
+        assert result.success is True
+        approval_id = next(iter(adapter._approval_state))
+        events.clear()
+
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        adapter._sender_name_cache["ou_user1"] = ("Alice", 9999999999)
+        tasks = []
+        data = _make_card_action_data(
+            {"hermes_action": "approve_once", "approval_id": approval_id},
+            open_id="ou_user1",
+        )
+
+        with (
+            patch("asyncio.run_coroutine_threadsafe", side_effect=_schedule_submitted_coro_on_current_loop(tasks)),
+            patch("tools.approval.resolve_gateway_approval", side_effect=RuntimeError("approval store unavailable")),
+        ):
+            response = adapter._on_card_action_trigger(data)
+            assert response is not None
+            assert response.card is None
+            assert len(tasks) == 1
+            await asyncio.gather(*tasks)
+
+        assert approval_id in adapter._approval_state
+        assert "resolution_claim" not in adapter._approval_state[approval_id]
+        assert len(message_api.update_calls) == 2
+        retry_card = _interactive_card_from_update_request(message_api.update_calls[1])
+        retry_values = _interactive_card_action_values(retry_card)
+        assert {value.get("hermes_action") for value in retry_values} == {
+            "approve_once",
+            "approve_session",
+            "approve_always",
+            "deny",
+        }
+        assert {value.get("approval_id") for value in retry_values} == {approval_id}
+        assert [event["operation"] for event in events if event["type"] == "delivery_sent"] == [
+            "approval_prompt_card_update",
+            "approval_prompt_card_update",
+        ]
+
     def test_returns_card_for_deny_action(self, _patch_callback_card_types):
         adapter = _make_adapter()
         adapter._loop = MagicMock()
@@ -1355,6 +1433,70 @@ class TestCardActionCallbackResponse:
         assert response is not None
         assert response.card is None
         mock_submit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_update_prompt_audited_click_restores_actionable_card_when_side_effect_fails(
+        self,
+        tmp_path,
+        monkeypatch,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        adapter._loop = asyncio.get_running_loop()
+        events = _install_event_recorder(adapter)
+        with patch.object(
+            adapter,
+            "_send_raw_message",
+            new_callable=AsyncMock,
+            return_value=_FakeResponse(message_id="om_update_handler"),
+        ):
+            result = await adapter.send_update_prompt(
+                chat_id="oc_12345",
+                prompt="Restore stashed changes after update?",
+                default="y",
+                session_key="agent:main:feishu:group:oc_12345",
+                metadata={
+                    "inbound_id": "inbound-update-handler",
+                    "session_id": "session-update-handler",
+                    "correlation_id": "corr-update-handler",
+                },
+            )
+        assert result.success is True
+        prompt_id = next(iter(adapter._update_prompt_state))
+        events.clear()
+
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        monkeypatch.setattr(
+            adapter,
+            "_write_update_prompt_response",
+            lambda _answer: (_ for _ in ()).throw(RuntimeError("response store unavailable")),
+        )
+        tasks = []
+        data = _make_card_action_data(
+            {"hermes_update_prompt_action": "y", "update_prompt_id": prompt_id},
+            open_id="ou_bob",
+        )
+        adapter._sender_name_cache["ou_bob"] = ("Bob", 9999999999)
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=_schedule_submitted_coro_on_current_loop(tasks)):
+            response = adapter._on_card_action_trigger(data)
+            assert response is not None
+            assert response.card is None
+            assert len(tasks) == 1
+            await asyncio.gather(*tasks)
+
+        assert prompt_id in adapter._update_prompt_state
+        assert "resolution_claim" not in adapter._update_prompt_state[prompt_id]
+        assert len(message_api.update_calls) == 2
+        retry_card = _interactive_card_from_update_request(message_api.update_calls[1])
+        retry_values = _interactive_card_action_values(retry_card)
+        assert {value.get("hermes_update_prompt_action") for value in retry_values} == {"y", "n"}
+        assert {value.get("update_prompt_id") for value in retry_values} == {prompt_id}
+        assert [event["operation"] for event in events if event["type"] == "delivery_sent"] == [
+            "update_prompt_card_update",
+            "update_prompt_card_update",
+        ]
 
     def test_returns_card_for_update_prompt_no(self, _patch_callback_card_types):
         adapter = _make_adapter()
