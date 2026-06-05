@@ -1091,6 +1091,8 @@ class SlackAdapter(BasePlatformAdapter):
                             local_path = _unquote(image_url[7:])
                             if not os.path.exists(local_path):
                                 logger.warning("[Slack] Skipping missing image: %s", local_path)
+                                failed = True
+                                last_error = "Missing image in Slack batch"
                                 continue
                             file_uploads.append({
                                 "file": local_path,
@@ -1099,6 +1101,8 @@ class SlackAdapter(BasePlatformAdapter):
                         else:
                             if not _is_safe_url(image_url):
                                 logger.warning("[Slack] Blocked unsafe image URL in batch")
+                                failed = True
+                                last_error = "Unsafe image URL in Slack batch"
                                 continue
                             try:
                                 response = await http_client.get(image_url)
@@ -1120,6 +1124,8 @@ class SlackAdapter(BasePlatformAdapter):
                                     "[Slack] Download failed for %s: %s",
                                     safe_url_for_log(image_url), dl_err,
                                 )
+                                failed = True
+                                last_error = "Image download failed in Slack batch"
                                 continue
 
                 if not file_uploads:

@@ -1129,6 +1129,7 @@ class SignalAdapter(BasePlatformAdapter):
                 len(images), skipped_download, skipped_missing, skipped_oversize,
             )
             return SendResult(success=False, error="No valid images in batch")
+        had_failure = bool(skipped_download or skipped_missing or skipped_oversize)
 
         logger.info(
             "Signal send_multiple_images: %d/%d images valid, sending in chunks",
@@ -1222,6 +1223,8 @@ class SignalAdapter(BasePlatformAdapter):
                     )
             if not batch_sent:
                 return SendResult(success=False, error=f"Signal image batch {idx + 1}/{len(att_batches)} failed")
+        if had_failure:
+            return SendResult(success=False, error="Some images were skipped in Signal batch")
         return SendResult(success=True)
 
     async def _notify_batch_pacing(

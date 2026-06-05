@@ -562,6 +562,8 @@ class MattermostAdapter(BasePlatformAdapter):
                         p = Path(local_path)
                         if not p.exists():
                             logger.warning("Mattermost: skipping missing image %s", local_path)
+                            failed = True
+                            last_error = "Missing image in Mattermost batch"
                             continue
                         fname = p.name
                         ct = mimetypes.guess_type(fname)[0] or "image/png"
@@ -570,6 +572,8 @@ class MattermostAdapter(BasePlatformAdapter):
                         from tools.url_safety import is_safe_url
                         if not is_safe_url(image_url):
                             logger.warning("Mattermost: blocked unsafe image URL in batch")
+                            failed = True
+                            last_error = "Unsafe image URL in Mattermost batch"
                             continue
                         try:
                             async with self._session.get(
@@ -580,17 +584,24 @@ class MattermostAdapter(BasePlatformAdapter):
                                         "Mattermost: failed to download image (HTTP %d): %s",
                                         resp.status, image_url[:80],
                                     )
+                                    failed = True
+                                    last_error = "Image download failed in Mattermost batch"
                                     continue
                                 file_data = await resp.read()
                                 ct = resp.content_type or "image/png"
                         except Exception as dl_err:
                             logger.warning("Mattermost: download failed for %s: %s", image_url[:80], dl_err)
+                            failed = True
+                            last_error = "Image download failed in Mattermost batch"
                             continue
                         fname = image_url.rsplit("/", 1)[-1].split("?")[0] or f"image_{len(file_ids)}.png"
 
                     fid = await self._upload_file(chat_id, file_data, fname, ct)
                     if fid:
                         file_ids.append(fid)
+                    else:
+                        failed = True
+                        last_error = "Image upload failed in Mattermost batch"
 
                 if not file_ids:
                     failed = True

@@ -3743,6 +3743,8 @@ class TelegramAdapter(BasePlatformAdapter):
                                 "[%s] Skipping missing image in media group: %s",
                                 self.name, local_path,
                             )
+                            failed = True
+                            last_error = "Missing image in Telegram media group"
                             continue
                         fh = open(local_path, "rb")
                         opened_files.append(fh)
@@ -3751,6 +3753,8 @@ class TelegramAdapter(BasePlatformAdapter):
                         media.append(InputMediaPhoto(media=image_url, caption=caption))
 
                 if not media:
+                    failed = True
+                    last_error = "No valid images in Telegram media group"
                     continue
 
                 logger.info(

@@ -89,10 +89,11 @@ class TestBaseDefaultLoop:
 
     def test_empty_batch_is_noop(self):
         a = _StubAdapter()
-        _run(a.send_multiple_images("chat1", []))
+        result = _run(a.send_multiple_images("chat1", []))
         assert a.sent_images == []
         assert a.sent_animations == []
         assert a.sent_files == []
+        assert result.success is False
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +190,24 @@ class TestTelegramMultiImage:
         assert adapter.send_image.await_count == 3
 
     def test_empty_noop(self, adapter):
-        _run(adapter.send_multiple_images("12345", []))
+        result = _run(adapter.send_multiple_images("12345", []))
         adapter._bot.send_media_group.assert_not_called()
+        assert result.success is False
+
+    def test_partial_missing_local_file_returns_failure(self, adapter, tmp_path):
+        import telegram
+        ok = tmp_path / "ok.png"
+        ok.write_bytes(b"\x89PNG" + b"\x00" * 20)
+        missing = tmp_path / "missing.png"
+        telegram.InputMediaPhoto = MagicMock(side_effect=lambda media, caption=None: {"media": media, "caption": caption})
+
+        result = _run(adapter.send_multiple_images(
+            "12345",
+            [(f"file://{missing}", ""), (f"file://{ok}", "")],
+        ))
+
+        adapter._bot.send_media_group.assert_awaited_once()
+        assert result.success is False
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +281,8 @@ class TestDiscordMultiImage:
 
     def test_empty_noop(self, adapter):
         adapter._client = MagicMock()
-        _run(adapter.send_multiple_images("67890", []))
+        result = _run(adapter.send_multiple_images("67890", []))
+        assert result.success is False
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +337,20 @@ class TestSlackMultiImage:
         kwargs = client.files_upload_v2.await_args.kwargs
         assert len(kwargs["file_uploads"]) == 3
 
+    def test_partial_missing_local_file_returns_failure(self, adapter, tmp_path):
+        ok = tmp_path / "ok.png"
+        ok.write_bytes(b"\x89PNG" + b"\x00" * 20)
+        missing = tmp_path / "missing.png"
+
+        result = _run(adapter.send_multiple_images(
+            "C12345",
+            [(f"file://{missing}", ""), (f"file://{ok}", "")],
+        ))
+
+        client = adapter._get_client("C12345")
+        client.files_upload_v2.assert_awaited_once()
+        assert result.success is False
+
     def test_batch_over_10_chunks(self, adapter, tmp_path):
         paths = []
         for i in range(12):
@@ -335,9 +367,10 @@ class TestSlackMultiImage:
         assert sizes == [10, 2]
 
     def test_empty_noop(self, adapter):
-        _run(adapter.send_multiple_images("C12345", []))
+        result = _run(adapter.send_multiple_images("C12345", []))
         client = adapter._get_client("C12345")
         client.files_upload_v2.assert_not_called()
+        assert result.success is False
 
 
 # ---------------------------------------------------------------------------
@@ -395,8 +428,25 @@ class TestMattermostMultiImage:
         assert sizes == [5, 2]
 
     def test_empty_noop(self, adapter):
-        _run(adapter.send_multiple_images("channel123", []))
+        result = _run(adapter.send_multiple_images("channel123", []))
         adapter._api_post.assert_not_called()
+        assert result.success is False
+
+    def test_partial_upload_failure_returns_failure(self, adapter, tmp_path):
+        ok1 = tmp_path / "ok1.png"
+        ok2 = tmp_path / "ok2.png"
+        ok1.write_bytes(b"\x89PNG" + b"\x00" * 20)
+        ok2.write_bytes(b"\x89PNG" + b"\x00" * 20)
+        adapter._upload_file = AsyncMock(side_effect=[None, "fid_ok"])
+
+        result = _run(adapter.send_multiple_images(
+            "channel123",
+            [(f"file://{ok1}", ""), (f"file://{ok2}", "")],
+        ))
+
+        assert adapter._upload_file.await_count == 2
+        adapter._api_post.assert_awaited_once()
+        assert result.success is False
 
 
 # ---------------------------------------------------------------------------
@@ -460,5 +510,21 @@ class TestEmailMultiImage:
         with patch.object(
             adapter, "_send_email_with_attachments", MagicMock()
         ) as mock_send:
-            _run(adapter.send_multiple_images("user@example.com", []))
+            result = _run(adapter.send_multiple_images("user@example.com", []))
         mock_send.assert_not_called()
+        assert result.success is False
+
+    def test_partial_missing_local_file_returns_failure(self, adapter, tmp_path):
+        missing = tmp_path / "missing.png"
+        images = [
+            (f"file://{missing}", ""),
+            ("https://x.com/a.png", "remote"),
+        ]
+
+        with patch.object(
+            adapter, "_send_email_with_attachments", MagicMock(return_value="<msgid@x>")
+        ) as mock_send:
+            result = _run(adapter.send_multiple_images("user@example.com", images))
+
+        mock_send.assert_called_once()
+        assert result.success is False

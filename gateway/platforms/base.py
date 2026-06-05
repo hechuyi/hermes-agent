@@ -2277,6 +2277,9 @@ class BasePlatformAdapter(ABC):
         """
         from urllib.parse import unquote as _unquote
 
+        if not images:
+            return SendResult(success=False, error="No images to send")
+
         succeeded = 0
         failed = 0
         last_message_id = None

@@ -598,6 +598,8 @@ class EmailAdapter(BasePlatformAdapter):
 
         body_parts: List[str] = []
         local_paths: List[str] = []
+        failed = False
+        last_error = None
         for image_url, alt_text in images:
             if alt_text:
                 body_parts.append(alt_text)
@@ -607,6 +609,8 @@ class EmailAdapter(BasePlatformAdapter):
                     local_paths.append(local_path)
                 else:
                     logger.warning("[Email] Skipping missing image: %s", local_path)
+                    failed = True
+                    last_error = "Missing image in email batch"
             else:
                 # Remote URLs just get linked in the body (parity with send_image)
                 body_parts.append(f"Image: {image_url}")
@@ -625,6 +629,8 @@ class EmailAdapter(BasePlatformAdapter):
                 body,
                 local_paths,
             )
+            if failed:
+                return SendResult(success=False, message_id=message_id, error=last_error or "Email image batch delivery failed")
             return SendResult(success=True, message_id=message_id)
         except Exception as e:
             logger.error("[Email] Multi-image send failed, falling back: %s", e, exc_info=True)

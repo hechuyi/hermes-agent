@@ -1749,11 +1749,15 @@ class DiscordAdapter(BasePlatformAdapter):
                         local_path = _unquote(image_url[7:])
                         if not os.path.exists(local_path):
                             logger.warning("[%s] Skipping missing image: %s", self.name, local_path)
+                            failed = True
+                            last_error = "Missing image in Discord batch"
                             continue
                         files.append(_discord_mod.File(local_path, filename=os.path.basename(local_path)))
                     else:
                         if not is_safe_url(image_url):
                             logger.warning("[%s] Blocked unsafe image URL in batch", self.name)
+                            failed = True
+                            last_error = "Unsafe image URL in Discord batch"
                             continue
                         # Download to BytesIO so it renders inline
                         try:
@@ -1771,6 +1775,8 @@ class DiscordAdapter(BasePlatformAdapter):
                                         "[%s] Failed to download image (HTTP %d) in batch: %s",
                                         self.name, resp.status, image_url[:80],
                                     )
+                                    failed = True
+                                    last_error = "Image download failed in Discord batch"
                                     continue
                                 data = await resp.read()
                                 ct = resp.headers.get("content-type", "image/png")
@@ -1784,6 +1790,8 @@ class DiscordAdapter(BasePlatformAdapter):
                                 files.append(_discord_mod.File(_io.BytesIO(data), filename=f"image_{len(files)}.{ext}"))
                         except Exception as dl_err:
                             logger.warning("[%s] Download failed for %s: %s", self.name, image_url[:80], dl_err)
+                            failed = True
+                            last_error = "Image download failed in Discord batch"
                             continue
 
                 if not files:
