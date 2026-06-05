@@ -193,11 +193,17 @@ def _assert_create_request_contract(
     receive_id_type="chat_id",
     msg_type,
     content=None,
+    idempotency_source_id=None,
 ):
     assert request.receive_id_type == receive_id_type
     assert request.request_body.receive_id == receive_id
     assert request.request_body.msg_type == msg_type
-    assert request.request_body.uuid == adapter._idempotency_key_for_delivery(delivery_id)
+    expected_idempotency_source_id = (
+        delivery_id if idempotency_source_id is None else idempotency_source_id
+    )
+    assert request.request_body.uuid == adapter._idempotency_key_for_delivery(
+        expected_idempotency_source_id
+    )
     if content is not None:
         assert request.request_body.content == content
 
@@ -1607,7 +1613,7 @@ async def test_audited_edit_does_not_fallback_on_ambiguous_invalid_post_response
     assert message_api.update_calls[0].request_body.msg_type == "post"
 
 
-def _create_descriptor(content):
+def _create_descriptor(content, *, uuid_value="descriptor-card-create"):
     return {
         "operation": "send_interactive_message",
         "method": "POST",
@@ -1617,7 +1623,7 @@ def _create_descriptor(content):
             "receive_id": "oc_chat",
             "msg_type": "interactive",
             "content": content,
-            "uuid": "delivery-card-create",
+            "uuid": uuid_value,
         },
     }
 
@@ -1677,10 +1683,16 @@ def _status_card_suppressed_action(**overrides):
 async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_http(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
+    delivery_id = "delivery-card-create"
+    descriptor_uuid = "descriptor-card-create"
+    assert descriptor_uuid != delivery_id
 
     result = await adapter.execute_feishu_request_descriptor(
-        _create_descriptor('{"config":{"wide_screen_mode":true}}'),
-        delivery_id="delivery-card-create",
+        _create_descriptor(
+            '{"config":{"wide_screen_mode":true}}',
+            uuid_value=descriptor_uuid,
+        ),
+        delivery_id=delivery_id,
         inbound_id="inbound-1",
         session_id="session-a",
         correlation_id="corr-a",
@@ -1692,8 +1704,12 @@ async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_htt
     assert request.receive_id_type == "chat_id"
     assert request.request_body.receive_id == "oc_chat"
     assert request.request_body.msg_type == "interactive"
-    assert request.request_body.uuid == "delivery-card-create"
+    assert request.request_body.uuid == adapter._idempotency_key_for_delivery(
+        descriptor_uuid
+    )
+    assert events[0]["delivery_id"] == delivery_id
     assert events[-1]["type"] == "delivery_sent"
+    assert events[-1]["delivery_id"] == delivery_id
     assert events[-1]["message_id"] == "om_created"
 
 
@@ -1703,10 +1719,21 @@ async def test_status_card_create_action_executes_descriptor_and_writes_delivery
 ):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
+    delivery_id = "delivery-card-create"
+    descriptor_uuid = "descriptor-card-create"
+    assert descriptor_uuid != delivery_id
 
     result = await adapter.execute_status_card_action(
-        {"type": "status_card", "card_action": _status_card_create_action()},
-        delivery_id="delivery-card-create",
+        {
+            "type": "status_card",
+            "card_action": _status_card_create_action(
+                feishu_request=_create_descriptor(
+                    '{"config":{"wide_screen_mode":true}}',
+                    uuid_value=descriptor_uuid,
+                )
+            ),
+        },
+        delivery_id=delivery_id,
         inbound_id="inbound-1",
         session_id="session-a",
         correlation_id="corr-a",
@@ -1716,9 +1743,14 @@ async def test_status_card_create_action_executes_descriptor_and_writes_delivery
     assert result.message_id == "om_created"
     assert len(message_api.create_calls) == 1
     assert message_api.update_calls == []
+    assert message_api.create_calls[0].request_body.uuid == adapter._idempotency_key_for_delivery(
+        descriptor_uuid
+    )
     assert _event_types(events) == ["delivery_pending", "delivery_sent"]
     assert events[0]["operation"] == "status_card_create"
+    assert events[0]["delivery_id"] == delivery_id
     assert events[1]["operation"] == "status_card_create"
+    assert events[1]["delivery_id"] == delivery_id
     assert events[-1]["message_id"] == "om_created"
 
 
@@ -1726,7 +1758,13 @@ async def test_status_card_create_action_executes_descriptor_and_writes_delivery
 async def test_status_card_create_operation_matrix_uses_descriptor_create_builder(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     timeline = []
-    descriptor = _create_descriptor('{"config":{"wide_screen_mode":true}}')
+    delivery_id = "delivery-card-create"
+    descriptor_uuid = "descriptor-card-create"
+    assert descriptor_uuid != delivery_id
+    descriptor = _create_descriptor(
+        '{"config":{"wide_screen_mode":true}}',
+        uuid_value=descriptor_uuid,
+    )
 
     async def apply(event):
         timeline.append(("event", event))
@@ -1742,7 +1780,7 @@ async def test_status_card_create_operation_matrix_uses_descriptor_create_builde
 
     result = await adapter.execute_status_card_action(
         _status_card_create_action(feishu_request=descriptor),
-        delivery_id="delivery-card-create",
+        delivery_id=delivery_id,
         inbound_id="task-1:create",
         session_id="session-a",
         correlation_id="corr-a",
@@ -1757,7 +1795,7 @@ async def test_status_card_create_operation_matrix_uses_descriptor_create_builde
     _assert_sent_matrix_events(
         events,
         operation="status_card_create",
-        delivery_id="delivery-card-create",
+        delivery_id=delivery_id,
         target="feishu:chat:oc_chat",
         inbound_id="task-1:create",
         session_id="session-a",
@@ -1769,11 +1807,12 @@ async def test_status_card_create_operation_matrix_uses_descriptor_create_builde
     _assert_create_request_contract(
         adapter,
         request,
-        delivery_id="delivery-card-create",
+        delivery_id=delivery_id,
         receive_id=descriptor["body"]["receive_id"],
         receive_id_type=descriptor["params"]["receive_id_type"],
         msg_type="interactive",
         content=descriptor["body"]["content"],
+        idempotency_source_id=descriptor_uuid,
     )
 
 
