@@ -3662,12 +3662,14 @@ class FeishuAdapter(BasePlatformAdapter):
             return False
         if getattr(result, "ok", False):
             action = getattr(result, "action", None)
-            if (
-                event_payload.get("type") == "delivery_pending"
-                and isinstance(action, dict)
-                and action.get("type") == "delivery_record"
-            ):
-                return result
+            if event_payload.get("type") == "delivery_pending":
+                if (
+                    getattr(result, "event_type", None) == "delivery_pending"
+                    and isinstance(action, dict)
+                    and action.get("type") == "delivery_record"
+                ):
+                    return result
+                return False
             return True
         logger.warning(
             "[Feishu] gateway-event apply failed: event_type=%s failure_class=%s reason=%s diagnostics=%s",

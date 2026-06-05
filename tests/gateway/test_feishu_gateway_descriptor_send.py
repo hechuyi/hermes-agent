@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import PlatformConfig
+import gateway.platforms.feishu as feishu_module
 from gateway.platforms.feishu import FeishuAdapter
 
 
@@ -803,6 +804,42 @@ async def test_malformed_delivery_record_action_fail_closed_without_sdk(tmp_path
     assert result.success is False
     assert result.error == "delivery_pending apply failed"
     assert _event_types(events) == ["delivery_pending"]
+    assert message_api.reply_calls == []
+    assert message_api.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_delivery_pending_rejects_success_envelope_with_wrong_event_action(
+    tmp_path,
+    monkeypatch,
+):
+    adapter, message_api = _adapter(tmp_path)
+    applied = []
+
+    async def apply_gateway_event_async(event, _state_dir):
+        applied.append(event)
+        return SimpleNamespace(
+            ok=True,
+            event_type="feishu_inbound",
+            action={"type": "inbound_admission", "inbound_id": "inbound-1"},
+        )
+
+    monkeypatch.setattr(
+        feishu_module.hermes_tools_gateway_event,
+        "apply_gateway_event_async",
+        apply_gateway_event_async,
+    )
+
+    result = await adapter.send(
+        "oc_chat",
+        "hello",
+        reply_to="om_parent",
+        metadata=_metadata("delivery-reply"),
+    )
+
+    assert result.success is False
+    assert result.error == "delivery_pending apply failed"
+    assert _event_types(applied) == ["delivery_pending"]
     assert message_api.reply_calls == []
     assert message_api.create_calls == []
 
