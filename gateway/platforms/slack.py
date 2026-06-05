@@ -1044,7 +1044,7 @@ class SlackAdapter(BasePlatformAdapter):
         images: List[Tuple[str, str]],
         metadata: Optional[Dict[str, Any]] = None,
         human_delay: float = 0.0,
-    ) -> None:
+    ) -> SendResult:
         """Send a batch of images as a single Slack message with multiple file uploads.
 
         Uses ``files_upload_v2`` with its ``file_uploads`` parameter so all
@@ -1055,22 +1055,25 @@ class SlackAdapter(BasePlatformAdapter):
         The batch limit is 10 file uploads per call (Slack server-side cap).
         """
         if not self._app:
-            return
+            return SendResult(success=False, error="Not connected")
         if not images:
-            return
+            return SendResult(success=False, error="No images to send")
 
         try:
             import httpx as _httpx
             from urllib.parse import unquote as _unquote
             from tools.url_safety import is_safe_url as _is_safe_url
         except Exception:
-            await super().send_multiple_images(chat_id, images, metadata, human_delay)
-            return
+            return await super().send_multiple_images(chat_id, images, metadata, human_delay)
 
         thread_ts = self._resolve_thread_ts(None, metadata)
 
         CHUNK = 10
         chunks = [images[i:i + CHUNK] for i in range(0, len(images), CHUNK)]
+        sent_any = False
+        failed = False
+        last_error = None
+        last_response = None
 
         for chunk_idx, chunk in enumerate(chunks):
             if human_delay > 0 and chunk_idx > 0:
@@ -1120,6 +1123,8 @@ class SlackAdapter(BasePlatformAdapter):
                                 continue
 
                 if not file_uploads:
+                    failed = True
+                    last_error = "No valid images in Slack batch"
                     continue
 
                 initial_comment = "\n".join(initial_comment_parts) if initial_comment_parts else ""
@@ -1134,14 +1139,24 @@ class SlackAdapter(BasePlatformAdapter):
                     thread_ts=thread_ts,
                 )
                 self._record_uploaded_file_thread(chat_id, thread_ts)
-                _ = result
+                sent_any = True
+                last_response = result
             except Exception as e:
                 logger.warning(
                     "[Slack] Multi-image files_upload_v2 failed (chunk %d/%d), falling back to per-image: %s",
                     chunk_idx + 1, len(chunks), e,
                     exc_info=True,
                 )
-                await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
+                fallback_result = await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
+                if getattr(fallback_result, "success", False):
+                    sent_any = True
+                    last_response = getattr(fallback_result, "raw_response", None) or last_response
+                else:
+                    failed = True
+                    last_error = getattr(fallback_result, "error", None) or str(e)
+        if failed:
+            return SendResult(success=False, error=last_error or "Slack image batch delivery failed", raw_response=last_response)
+        return SendResult(success=sent_any, error=None if sent_any else "No images delivered", raw_response=last_response)
 
     def _record_uploaded_file_thread(self, chat_id: str, thread_ts: Optional[str]) -> None:
         """Treat successful file uploads as bot participation in a thread."""

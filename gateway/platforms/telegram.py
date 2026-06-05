@@ -3666,7 +3666,7 @@ class TelegramAdapter(BasePlatformAdapter):
         images: List[tuple],
         metadata: Optional[Dict[str, Any]] = None,
         human_delay: float = 0.0,
-    ) -> None:
+    ) -> SendResult:
         """Send a batch of images natively via Telegram's media group API.
 
         Telegram's ``send_media_group`` bundles up to 10 photos/videos into
@@ -3679,9 +3679,9 @@ class TelegramAdapter(BasePlatformAdapter):
         the base adapter's per-image loop.
         """
         if not self._bot:
-            return
+            return SendResult(success=False, error="Not connected")
         if not images:
-            return
+            return SendResult(success=False, error="No images to send")
 
         try:
             from telegram import InputMediaPhoto
@@ -3690,8 +3690,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 "[%s] InputMediaPhoto unavailable, falling back to per-image send: %s",
                 self.name, exc,
             )
-            await super().send_multiple_images(chat_id, images, metadata, human_delay)
-            return
+            return await super().send_multiple_images(chat_id, images, metadata, human_delay)
 
         # Peel off animations — they need send_animation, not send_media_group
         animations: List[tuple] = []
@@ -3703,13 +3702,23 @@ class TelegramAdapter(BasePlatformAdapter):
                 photos.append((image_url, alt_text))
 
         # Animations: route through the base default (per-image send_animation)
+        sent_any = False
+        failed = False
+        last_message_id = None
+        last_error = None
         if animations:
-            await super().send_multiple_images(
+            animation_result = await super().send_multiple_images(
                 chat_id, animations, metadata, human_delay=human_delay,
             )
+            if getattr(animation_result, "success", False):
+                sent_any = True
+                last_message_id = getattr(animation_result, "message_id", None) or last_message_id
+            else:
+                failed = True
+                last_error = getattr(animation_result, "error", None) or "animation delivery failed"
 
         if not photos:
-            return
+            return SendResult(success=sent_any and not failed, message_id=last_message_id, error=last_error)
 
         from urllib.parse import unquote as _unquote
         _thread = self._metadata_thread_id(metadata)
@@ -3764,7 +3773,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         except Exception:
                             pass
 
-                await self._send_with_dm_topic_reply_anchor_retry(
+                result = await self._send_with_dm_topic_reply_anchor_retry(
                     self._bot.send_media_group,
                     {
                         "chat_id": int(chat_id),
@@ -3778,6 +3787,10 @@ class TelegramAdapter(BasePlatformAdapter):
                     "media group",
                     reset_media=_reset_opened_files,
                 )
+                sent_any = True
+                if isinstance(result, list) and result:
+                    msg = result[-1]
+                    last_message_id = str(getattr(msg, "message_id", "")) or last_message_id
             except Exception as e:
                 logger.warning(
                     "[%s] send_media_group failed (chunk %d/%d), falling back to per-image: %s",
@@ -3785,15 +3798,24 @@ class TelegramAdapter(BasePlatformAdapter):
                     exc_info=True,
                 )
                 # Fallback: send each photo in this chunk individually
-                await super().send_multiple_images(
+                fallback_result = await super().send_multiple_images(
                     chat_id, chunk, metadata, human_delay=human_delay,
                 )
+                if getattr(fallback_result, "success", False):
+                    sent_any = True
+                    last_message_id = getattr(fallback_result, "message_id", None) or last_message_id
+                else:
+                    failed = True
+                    last_error = getattr(fallback_result, "error", None) or str(e)
             finally:
                 for fh in opened_files:
                     try:
                         fh.close()
                     except Exception:
                         pass
+        if failed:
+            return SendResult(success=False, message_id=last_message_id, error=last_error or "image batch delivery failed")
+        return SendResult(success=sent_any, message_id=last_message_id, error=None if sent_any else "No images delivered")
 
     async def send_image_file(
         self,

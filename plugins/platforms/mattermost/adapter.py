@@ -523,7 +523,7 @@ class MattermostAdapter(BasePlatformAdapter):
         images: List[Tuple[str, str]],
         metadata: Optional[Dict[str, Any]] = None,
         human_delay: float = 0.0,
-    ) -> None:
+    ) -> SendResult:
         """Send a batch of images as a single Mattermost post with multiple attachments.
 
         Mattermost supports up to 5 ``file_ids`` per post. Each image is
@@ -533,7 +533,7 @@ class MattermostAdapter(BasePlatformAdapter):
         base per-image loop on total failure.
         """
         if not images:
-            return
+            return SendResult(success=False, error="No images to send")
 
         import mimetypes
         import aiohttp
@@ -541,6 +541,10 @@ class MattermostAdapter(BasePlatformAdapter):
 
         CHUNK = 5  # Mattermost post file_ids cap
         chunks = [images[i:i + CHUNK] for i in range(0, len(images), CHUNK)]
+        sent_any = False
+        failed = False
+        last_message_id = None
+        last_error = None
 
         for chunk_idx, chunk in enumerate(chunks):
             if human_delay > 0 and chunk_idx > 0:
@@ -589,6 +593,8 @@ class MattermostAdapter(BasePlatformAdapter):
                         file_ids.append(fid)
 
                 if not file_ids:
+                    failed = True
+                    last_error = "No valid images in Mattermost batch"
                     continue
 
                 payload: Dict[str, Any] = {
@@ -603,13 +609,31 @@ class MattermostAdapter(BasePlatformAdapter):
                 data = await self._api_post("posts", payload)
                 if not data or "id" not in data:
                     logger.warning("Mattermost: multi-image post failed, falling back")
-                    await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
+                    fallback_result = await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
+                    if getattr(fallback_result, "success", False):
+                        sent_any = True
+                        last_message_id = getattr(fallback_result, "message_id", None) or last_message_id
+                    else:
+                        failed = True
+                        last_error = getattr(fallback_result, "error", None) or "Mattermost multi-image post failed"
+                else:
+                    sent_any = True
+                    last_message_id = data["id"]
             except Exception as e:
                 logger.warning(
                     "Mattermost: multi-image send failed (chunk %d/%d), falling back: %s",
                     chunk_idx + 1, len(chunks), e, exc_info=True,
                 )
-                await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
+                fallback_result = await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
+                if getattr(fallback_result, "success", False):
+                    sent_any = True
+                    last_message_id = getattr(fallback_result, "message_id", None) or last_message_id
+                else:
+                    failed = True
+                    last_error = getattr(fallback_result, "error", None) or str(e)
+        if failed:
+            return SendResult(success=False, message_id=last_message_id, error=last_error or "Mattermost image batch delivery failed")
+        return SendResult(success=sent_any, message_id=last_message_id, error=None if sent_any else "No images delivered")
 
     # ------------------------------------------------------------------
     # WebSocket
