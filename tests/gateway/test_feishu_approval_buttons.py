@@ -725,6 +725,52 @@ class TestResolveApproval:
         assert message_api.update_calls == []
 
     @pytest.mark.asyncio
+    async def test_audited_prompt_card_update_replay_message_id_mismatch_fails_closed(
+        self,
+        tmp_path,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        message_api = _FakeMessageApi()
+        adapter._client = SimpleNamespace(im=SimpleNamespace(v1=SimpleNamespace(message=message_api)))
+        events = []
+
+        async def apply(event):
+            events.append(event)
+            if event.get("type") == "delivery_pending":
+                return SimpleNamespace(
+                    ok=True,
+                    action=_delivery_record_action(
+                        delivery_id=event["delivery_id"],
+                        inbound_id=event["inbound_id"],
+                        target=event["target"],
+                        session_id=event["session_id"],
+                        correlation_id=event["correlation_id"],
+                        status="sent",
+                        feishu_message_id="om_other_message",
+                    ),
+                )
+            return True
+
+        adapter._apply_gateway_event = apply
+        updated = await adapter._audited_prompt_card_update(
+            operation="approval_prompt_card_update",
+            state={
+                "session_key": "agent:main:feishu:group:oc_12345",
+                "message_id": "om_approval_22",
+                "inbound_id": "inbound-approval",
+                "session_id": "session-approval",
+                "correlation_id": "corr-approval",
+            },
+            prompt_id=22,
+            choice="once",
+            card={"elements": []},
+        )
+
+        assert updated is False
+        assert _event_types(events) == ["delivery_pending"]
+        assert message_api.update_calls == []
+
+    @pytest.mark.asyncio
     async def test_approval_audited_resolution_patches_card_before_resolving_gateway_approval(self, tmp_path):
         adapter = _make_audited_adapter(tmp_path)
         message_api = _FakeMessageApi()
