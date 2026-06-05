@@ -148,7 +148,7 @@ TTS settings are read from **two** OpenClaw config locations with this priority:
 | Signal | `channels.signal.httpUrl` or `.accounts.default.httpUrl` | `SIGNAL_HTTP_URL` | |
 | Signal | `channels.signal.allowFrom` or `.accounts.default.allowFrom` | `SIGNAL_ALLOWED_USERS` | |
 | Matrix | `channels.matrix.accessToken` or `.accounts.default.accessToken` | `MATRIX_ACCESS_TOKEN` | Uses `accessToken` (not `botToken`) |
-| Mattermost | `channels.mattermost.botToken` or `.accounts.default.botToken` | `MATTERMOST_BOT_TOKEN` | |
+| Mattermost | `channels.mattermost.botToken` or `.accounts.default.botToken` | `MATTERMOST_TOKEN` | |
 
 ### Other config
 
