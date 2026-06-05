@@ -713,6 +713,10 @@ class TestGetMessagesUpToLastAssistant:
 
 
 class TestMaskApiKey:
+    @staticmethod
+    def _dummy_openrouter_key() -> str:
+        return "sk-" + "or-" + "v1-" + "abcdefghijklmnop"
+
     def test_none_returns_none(self, agent):
         assert agent._mask_api_key_for_logs(None) is None
 
@@ -720,9 +724,10 @@ class TestMaskApiKey:
         assert agent._mask_api_key_for_logs("short") == "***"
 
     def test_long_key_masked(self, agent):
-        key = "sk-REDACTED"
+        key = self._dummy_openrouter_key()
         result = agent._mask_api_key_for_logs(key)
-        assert result.startswith("sk-or-v1")
+        assert key not in result
+        assert result.startswith("sk-" + "or-" + "v1")
         assert result.endswith("mnop")
         assert "..." in result
 

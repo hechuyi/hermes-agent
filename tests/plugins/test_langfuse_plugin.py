@@ -202,6 +202,14 @@ class _FakeLangfuse:
         _FakeLangfuse.instances.append(self)
 
 
+def _dummy_langfuse_public_key() -> str:
+    return "pk-" + "lf-" + "publicfixturevalue"
+
+
+def _dummy_langfuse_secret_key() -> str:
+    return "sk-" + "lf-" + "abcdefghijmnop"
+
+
 class TestPlaceholderKeyDetection:
     LOGGER_NAME = "plugins.observability.langfuse"
 
@@ -247,19 +255,21 @@ class TestPlaceholderKeyDetection:
         preview must NOT echo it in full — only the leading 6 chars."""
         self._clear_env(monkeypatch)
         plugin = self._fresh_plugin()
-        result = plugin._redact_key_preview("sk-REDACTED")
+        key = _dummy_langfuse_secret_key()
+        result = plugin._redact_key_preview(key)
+        assert key not in result
         assert "abcdefghij" not in result
-        assert result.startswith("'sk-lf-")
+        assert result.startswith("'" + "sk-" + "lf-")
         assert result.endswith("...'")
 
     def test_validate_langfuse_key_accepts_documented_prefix(self, monkeypatch):
         self._clear_env(monkeypatch)
         plugin = self._fresh_plugin()
         assert plugin._validate_langfuse_key(
-            "HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz"
+            "HERMES_LANGFUSE_PUBLIC_KEY", _dummy_langfuse_public_key()
         ) is None
         assert plugin._validate_langfuse_key(
-            "HERMES_LANGFUSE_SECRET_KEY", "sk-REDACTED"
+            "HERMES_LANGFUSE_SECRET_KEY", _dummy_langfuse_secret_key()
         ) is None
 
     def test_validate_langfuse_key_rejects_wrong_prefix(self, monkeypatch):
@@ -432,14 +442,16 @@ class TestPlaceholderKeyDetection:
         constructed — the latter is the success signal the bug report
         wanted."""
         self._clear_env(monkeypatch)
-        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
-        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-REDACTED")
+        public_key = _dummy_langfuse_public_key()
+        secret_key = _dummy_langfuse_secret_key()
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", public_key)
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", secret_key)
         plugin = self._fresh_plugin(monkeypatch)
         with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
             client = plugin._get_langfuse()
         assert isinstance(client, _FakeLangfuse)
-        assert client.kwargs["public_key"] == "pk-lf-real-public-xyz"
-        assert client.kwargs["secret_key"] == "sk-REDACTED"
+        assert client.kwargs["public_key"] == public_key
+        assert client.kwargs["secret_key"] == secret_key
         assert "placeholders" not in caplog.text.lower(), (
             f"Valid Langfuse keys tripped the placeholder guard: {caplog.text!r}"
         )
@@ -703,4 +715,3 @@ class TestToolObservationKeying:
         assert ended["obs"] is obs
         assert ended["output"] == {"status": "done"}
         assert not state.tools
-
