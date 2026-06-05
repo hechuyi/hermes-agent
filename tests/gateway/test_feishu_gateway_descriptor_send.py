@@ -120,6 +120,31 @@ def _event_types(calls):
     return [call.get("type") for call in calls if "type" in call]
 
 
+def _delivery_record_action(
+    *,
+    delivery_id="delivery-reply",
+    target="feishu:chat:oc_chat",
+    status="sent",
+    feishu_message_id="om_existing_msg",
+):
+    return {
+        "type": "delivery_record",
+        "record": {
+            "delivery_id": delivery_id,
+            "inbound_id": "inbound-1",
+            "target": target,
+            "session_id": "session-a",
+            "correlation_id": "corr-a",
+            "status": status,
+            "created_at": 1,
+            "updated_at": 2,
+            "feishu_message_id": feishu_message_id,
+            "failure_class": "unknown_delivery_state" if status == "unknown" else None,
+            "ack_event_id": None,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_audited_image_file_records_pending_and_sent_after_upload(tmp_path):
     adapter, message_api = _adapter(tmp_path)
@@ -546,6 +571,92 @@ async def test_repeat_pending_delivery_does_not_call_sdk_twice(tmp_path):
     assert _event_types(events) == ["delivery_pending", "delivery_sent", "delivery_pending"]
     assert len(message_api.reply_calls) == 1
     assert message_api.reply_calls[0].request_body.uuid == "delivery-reply"
+
+
+@pytest.mark.asyncio
+async def test_repeat_pending_delivery_reuses_durable_sent_record_without_sdk_or_sent_write(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = []
+    pending_count = 0
+
+    async def apply(event):
+        nonlocal pending_count
+        events.append(event)
+        if event.get("type") == "delivery_pending":
+            pending_count += 1
+            if pending_count == 2:
+                return SimpleNamespace(
+                    ok=True,
+                    action=_delivery_record_action(
+                        delivery_id="delivery-reply",
+                        status="sent",
+                        feishu_message_id="om_existing_msg",
+                    ),
+                )
+        return True
+
+    adapter._apply_gateway_event = apply
+
+    metadata = _metadata("delivery-reply")
+    first = await adapter.send("oc_chat", "hello", reply_to="om_parent", metadata=metadata)
+    second = await adapter.send("oc_chat", "hello", reply_to="om_parent", metadata=metadata)
+
+    assert first.success is True
+    assert second.success is True
+    assert second.message_id == "om_existing_msg"
+    assert _event_types(events) == [
+        "delivery_pending",
+        "delivery_sent",
+        "delivery_pending",
+    ]
+    assert len(message_api.reply_calls) == 1
+    assert message_api.create_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "message_id"),
+    [
+        ("unknown", "om_existing_msg"),
+        ("sent", None),
+        ("acked", "bad/message/id"),
+    ],
+)
+async def test_repeat_pending_delivery_record_fail_closed_when_not_reusable(
+    tmp_path,
+    status,
+    message_id,
+):
+    adapter, message_api = _adapter(tmp_path)
+    events = []
+
+    async def apply(event):
+        events.append(event)
+        if event.get("type") == "delivery_pending":
+            return SimpleNamespace(
+                ok=True,
+                action=_delivery_record_action(
+                    delivery_id="delivery-reply",
+                    status=status,
+                    feishu_message_id=message_id,
+                ),
+            )
+        return True
+
+    adapter._apply_gateway_event = apply
+
+    result = await adapter.send(
+        "oc_chat",
+        "hello",
+        reply_to="om_parent",
+        metadata=_metadata("delivery-reply"),
+    )
+
+    assert result.success is False
+    assert result.error == "delivery_pending apply failed"
+    assert _event_types(events) == ["delivery_pending"]
+    assert message_api.reply_calls == []
+    assert message_api.create_calls == []
 
 
 @pytest.mark.asyncio
@@ -1197,6 +1308,76 @@ async def test_descriptor_rejects_extra_fields_before_network(tmp_path):
     )
 
     assert result.success is False
+    assert _event_types(events) == ["delivery_pending", "delivery_failed"]
+    assert events[1]["failure_class"] == "invalid_feishu_request_descriptor"
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_descriptor_durable_delivery_record_does_not_write_failed(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = []
+
+    async def apply(event):
+        events.append(event)
+        if event.get("type") == "delivery_pending":
+            return SimpleNamespace(
+                ok=True,
+                action=_delivery_record_action(
+                    delivery_id="delivery-bad-descriptor",
+                    target="feishu:descriptor",
+                    status="sent",
+                    feishu_message_id="om_existing_msg",
+                ),
+            )
+        return True
+
+    adapter._apply_gateway_event = apply
+    descriptor = {**_create_descriptor("{}"), "url": "https://example.invalid"}
+
+    result = await adapter.execute_feishu_request_descriptor(
+        descriptor,
+        delivery_id="delivery-bad-descriptor",
+        inbound_id="inbound-1",
+        session_id="session-a",
+        correlation_id="corr-a",
+    )
+
+    assert result.success is False
+    assert result.error == "invalid Feishu request descriptor"
+    assert _event_types(events) == ["delivery_pending"]
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_descriptor_malformed_delivery_record_still_writes_failed(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = []
+
+    async def apply(event):
+        events.append(event)
+        if event.get("type") == "delivery_pending":
+            return SimpleNamespace(
+                ok=True,
+                action={"type": "delivery_record", "record": object()},
+            )
+        return True
+
+    adapter._apply_gateway_event = apply
+    descriptor = {**_create_descriptor("{}"), "url": "https://example.invalid"}
+
+    result = await adapter.execute_feishu_request_descriptor(
+        descriptor,
+        delivery_id="delivery-bad-descriptor",
+        inbound_id="inbound-1",
+        session_id="session-a",
+        correlation_id="corr-a",
+    )
+
+    assert result.success is False
+    assert result.error == "invalid Feishu request descriptor"
     assert _event_types(events) == ["delivery_pending", "delivery_failed"]
     assert events[1]["failure_class"] == "invalid_feishu_request_descriptor"
     assert message_api.create_calls == []

@@ -3614,7 +3614,7 @@ class FeishuAdapter(BasePlatformAdapter):
             return int(timestamp)
         return int(time.time())
 
-    async def _apply_gateway_event(self, event_payload: Dict[str, Any]) -> bool:
+    async def _apply_gateway_event(self, event_payload: Dict[str, Any]) -> Any:
         if self._hermes_tools_state_dir is None:
             return True
         try:
@@ -3630,6 +3630,13 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             return False
         if getattr(result, "ok", False):
+            action = getattr(result, "action", None)
+            if (
+                event_payload.get("type") == "delivery_pending"
+                and isinstance(action, dict)
+                and action.get("type") == "delivery_record"
+            ):
+                return result
             return True
         logger.warning(
             "[Feishu] gateway-event apply failed: event_type=%s failure_class=%s reason=%s diagnostics=%s",
@@ -5261,9 +5268,19 @@ class FeishuAdapter(BasePlatformAdapter):
         validated = self._validate_feishu_request_descriptor(descriptor)
         target = "feishu:descriptor"
         if validated is None:
-            if await self._apply_delivery_pending(
+            pending_result = await self._apply_delivery_pending(
                 delivery_id=delivery_id,
                 operation="invalid_feishu_request_descriptor",
+                inbound_id=inbound_id,
+                target=target,
+                session_id=session_id,
+                correlation_id=correlation_id,
+            )
+            if self._gateway_event_apply_succeeded(
+                pending_result
+            ) and not self._delivery_record_apply_is_reusable(
+                pending_result,
+                delivery_id=delivery_id,
                 inbound_id=inbound_id,
                 target=target,
                 session_id=session_id,
@@ -5397,14 +5414,25 @@ class FeishuAdapter(BasePlatformAdapter):
         existing_message_id: Optional[str] = None,
         terminal_exception_matcher: Any = None,
     ) -> Any | SendResult:
-        if not await self._apply_delivery_pending(
+        pending_result = await self._apply_delivery_pending(
             delivery_id=delivery_id,
             operation=operation,
             inbound_id=inbound_id,
             target=target,
             session_id=session_id,
             correlation_id=correlation_id,
-        ):
+        )
+        replay_result = self._send_result_from_delivery_record_apply(
+            pending_result,
+            delivery_id=delivery_id,
+            inbound_id=inbound_id,
+            target=target,
+            session_id=session_id,
+            correlation_id=correlation_id,
+        )
+        if replay_result is not None:
+            return replay_result
+        if not self._gateway_event_apply_succeeded(pending_result):
             return SendResult(
                 success=False,
                 error="delivery_pending apply failed",
@@ -5499,7 +5527,7 @@ class FeishuAdapter(BasePlatformAdapter):
         target: str,
         session_id: str,
         correlation_id: str,
-    ) -> bool:
+    ) -> Any:
         return await self._apply_gateway_event(
             {
                 "type": "delivery_pending",
@@ -5511,6 +5539,90 @@ class FeishuAdapter(BasePlatformAdapter):
                 "correlation_id": correlation_id,
                 "timestamp": int(time.time()),
             }
+        )
+
+    @staticmethod
+    def _gateway_event_apply_succeeded(result: Any) -> bool:
+        if isinstance(result, bool):
+            return result
+        return bool(getattr(result, "ok", False))
+
+    @staticmethod
+    def _delivery_record_action_from_pending_apply(
+        result: Any,
+    ) -> Optional[Dict[str, Any]]:
+        action = getattr(result, "action", None)
+        if not isinstance(action, dict) or action.get("type") != "delivery_record":
+            return None
+        return action
+
+    @classmethod
+    def _delivery_record_from_pending_apply(
+        cls,
+        result: Any,
+    ) -> Optional[Dict[str, Any]]:
+        action = cls._delivery_record_action_from_pending_apply(result)
+        if action is None:
+            return None
+        record = action.get("record")
+        return record if isinstance(record, dict) else None
+
+    def _delivery_record_apply_is_reusable(
+        self,
+        result: Any,
+        *,
+        delivery_id: str,
+        inbound_id: str,
+        target: str,
+        session_id: str,
+        correlation_id: str,
+    ) -> bool:
+        record = self._delivery_record_from_pending_apply(result)
+        if record is None:
+            return False
+        message_id = record.get("feishu_message_id")
+        return (
+            record.get("delivery_id") == delivery_id
+            and record.get("inbound_id") == inbound_id
+            and record.get("target") == target
+            and record.get("session_id") == session_id
+            and record.get("correlation_id") == correlation_id
+            and record.get("status") in {"sent", "acked"}
+            and bool(message_id)
+            and self._valid_feishu_message_id(str(message_id))
+        )
+
+    def _send_result_from_delivery_record_apply(
+        self,
+        result: Any,
+        *,
+        delivery_id: str,
+        inbound_id: str,
+        target: str,
+        session_id: str,
+        correlation_id: str,
+    ) -> Optional[SendResult]:
+        if self._delivery_record_action_from_pending_apply(result) is None:
+            return None
+        record = self._delivery_record_from_pending_apply(result)
+        if record is None:
+            return SendResult(success=False, error="delivery_pending apply failed")
+
+        message_id = record.get("feishu_message_id")
+        if not self._delivery_record_apply_is_reusable(
+            result,
+            delivery_id=delivery_id,
+            inbound_id=inbound_id,
+            target=target,
+            session_id=session_id,
+            correlation_id=correlation_id,
+        ):
+            return SendResult(success=False, error="delivery_pending apply failed")
+
+        return SendResult(
+            success=True,
+            message_id=str(message_id),
+            raw_response={"type": "delivery_record", "record": record},
         )
 
     async def _apply_delivery_sent(
