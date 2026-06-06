@@ -49,12 +49,21 @@ def test_stamp_file_takes_precedence(tmp_path):
         assert detect_install_method(project_root=tmp_path) == "docker"
 
 
-def test_docker_detected_via_dockerenv(tmp_path):
+def test_container_without_stamp_is_not_docker(tmp_path):
+    (tmp_path / ".git").mkdir()
     with patch("hermes_cli.config.get_managed_system", return_value=None), \
          patch("hermes_cli.config.get_hermes_home", return_value=tmp_path), \
          patch("hermes_constants.is_container", return_value=True):
         from hermes_cli.config import detect_install_method
-        assert detect_install_method(project_root=tmp_path) == "docker"
+        assert detect_install_method(project_root=tmp_path) == "git"
+
+
+def test_container_pip_install_without_stamp_is_pip(tmp_path):
+    with patch("hermes_cli.config.get_managed_system", return_value=None), \
+         patch("hermes_cli.config.get_hermes_home", return_value=tmp_path), \
+         patch("hermes_constants.is_container", return_value=True):
+        from hermes_cli.config import detect_install_method
+        assert detect_install_method(project_root=tmp_path) == "pip"
 
 
 def test_recommended_update_command_docker():

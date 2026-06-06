@@ -285,9 +285,13 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     Resolution order:
     1. Stamped ``~/.hermes/.install_method`` file (written by installers)
     2. HERMES_MANAGED env / .managed marker (NixOS, Homebrew)
-    3. Container detection (/.dockerenv, /run/.containerenv, cgroup)
-    4. .git directory presence -> 'git'
-    5. Fallback -> 'pip'
+    3. .git directory presence -> 'git'
+    4. Fallback -> 'pip'
+
+    Running inside a container is not sufficient evidence for the published
+    Docker install. Supported Docker images stamp ``.install_method`` as
+    ``docker``; unstamped manual/container installs should continue through
+    the git/pip detection path.
     """
     stamp = get_hermes_home() / ".install_method"
     try:
@@ -299,9 +303,6 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     managed = get_managed_system()
     if managed:
         return managed.lower().replace(" ", "-")
-    from hermes_constants import is_container
-    if is_container():
-        return "docker"
     if project_root is None:
         project_root = Path(__file__).parent.parent.resolve()
     if (project_root / ".git").is_dir():

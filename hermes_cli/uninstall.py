@@ -117,6 +117,31 @@ def remove_wrapper_script():
     return removed
 
 
+def remove_node_symlinks(hermes_home: Path) -> list[Path]:
+    """Remove POSIX installer node/npm/npx symlinks that point into HERMES_HOME."""
+    node_dir = (hermes_home / "node").resolve()
+    removed: list[Path] = []
+
+    for name in ("node", "npm", "npx"):
+        link = Path.home() / ".local" / "bin" / name
+        try:
+            if not link.is_symlink():
+                continue
+
+            target = Path(os.readlink(link))
+            if not target.is_absolute():
+                target = link.parent / target
+            target = target.resolve()
+
+            if target == node_dir or node_dir in target.parents:
+                link.unlink()
+                removed.append(link)
+        except Exception as e:
+            log_warn(f"Could not remove {link}: {e}")
+
+    return removed
+
+
 def uninstall_gateway_service():
     """Stop and uninstall the gateway service (systemd, launchd, Windows
     Scheduled Task / Startup folder) and kill any standalone gateway processes.
@@ -594,6 +619,14 @@ def run_uninstall(args):
             log_success(f"Removed {wrapper}")
     else:
         log_info("No wrapper script found")
+
+    log_info("Removing Hermes-managed node/npm/npx symlinks...")
+    removed_node_links = remove_node_symlinks(hermes_home)
+    if removed_node_links:
+        for link in removed_node_links:
+            log_success(f"Removed {link}")
+    else:
+        log_info("No Hermes-managed node/npm/npx symlinks found")
     
     # 4. Remove installation directory (code)
     log_info("Removing installation directory...")
