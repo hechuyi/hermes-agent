@@ -108,6 +108,50 @@ class TestAuxiliaryMaxTokensParam:
             assert auxiliary_max_tokens_param(2048) == {"max_completion_tokens": 2048}
 
 
+class TestBuildCallKwargsMaxTokens:
+    @pytest.mark.parametrize(
+        "provider,model,base_url",
+        [
+            ("copilot", "gpt-5.5", "https://api.githubcopilot.com"),
+            ("custom", "gpt-5", "https://api.openai.com/v1"),
+            ("openrouter", "anthropic/claude-sonnet-4.6", "https://openrouter.ai/api/v1"),
+            ("nous", "qwen3.6-plus", "https://inference-api.nousresearch.com/v1"),
+            ("custom", "local-model", "http://localhost:8080/v1"),
+            ("zai", "glm-4v-flash", "https://open.bigmodel.cn/api/paas/v4"),
+        ],
+    )
+    def test_omits_max_tokens_for_openai_compatible_chat(self, provider, model, base_url):
+        kwargs = _build_call_kwargs(
+            provider=provider,
+            model=model,
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1234,
+            base_url=base_url,
+        )
+
+        assert "max_tokens" not in kwargs
+        assert "max_completion_tokens" not in kwargs
+
+    @pytest.mark.parametrize(
+        "provider,model,base_url",
+        [
+            ("minimax", "minimax-m2", "https://api.minimax.io/v1"),
+            ("custom", "claude", "https://proxy.example.com/anthropic/v1"),
+        ],
+    )
+    def test_keeps_max_tokens_for_anthropic_messages_wire(self, provider, model, base_url):
+        kwargs = _build_call_kwargs(
+            provider=provider,
+            model=model,
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1234,
+            base_url=base_url,
+        )
+
+        assert kwargs["max_tokens"] == 1234
+        assert "max_completion_tokens" not in kwargs
+
+
 class TestNormalizeAuxProvider:
     def test_maps_github_copilot_aliases(self):
         assert _normalize_aux_provider("github") == "copilot"

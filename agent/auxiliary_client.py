@@ -4734,24 +4734,14 @@ def _build_call_kwargs(
         kwargs["temperature"] = temperature
 
     if max_tokens is not None:
-        # Codex adapter handles max_tokens internally; OpenRouter/Nous use max_tokens.
-        # Direct OpenAI api.openai.com with newer models needs max_completion_tokens.
-        # ZAI vision models (glm-4v-flash, glm-4v-plus, etc.) reject max_tokens with
-        # error code 1210 ("API 调用参数有误") on multimodal requests — skip it.
-        _model_lower = (model or "").lower()
-        _skip_max_tokens = (
-            provider == "zai"
-            and ("4v" in _model_lower or "5v" in _model_lower or "-v" in _model_lower)
+        # Do not cap auxiliary output by default. Most OpenAI-compatible chat
+        # endpoints treat omitted max_tokens as "use the model max"; sending an
+        # explicit cap risks truncation or provider-specific 400s. Anthropic
+        # Messages wire is the exception: max_tokens is mandatory there.
+        _effective_base = base_url or (
+            _current_custom_base_url() if provider == "custom" else ""
         )
-        if _skip_max_tokens:
-            pass  # ZAI vision models do not accept max_tokens
-        elif provider == "custom":
-            custom_base = base_url or _current_custom_base_url()
-            if base_url_hostname(custom_base) == "api.openai.com":
-                kwargs["max_completion_tokens"] = max_tokens
-            else:
-                kwargs["max_tokens"] = max_tokens
-        else:
+        if _is_anthropic_compat_endpoint(provider, _effective_base):
             kwargs["max_tokens"] = max_tokens
 
     if tools:

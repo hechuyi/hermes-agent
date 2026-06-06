@@ -112,8 +112,9 @@ class TestCallLlmUnsupportedTemperatureRetry:
         retry_kwargs = client.chat.completions.create.call_args_list[1].kwargs
         assert first_kwargs["temperature"] == 0.3
         assert "temperature" not in retry_kwargs
-        # other kwargs preserved
-        assert retry_kwargs["max_tokens"] == 500
+        assert "max_tokens" not in first_kwargs
+        assert "max_tokens" not in retry_kwargs
+        assert retry_kwargs["model"] == first_kwargs["model"]
 
     def test_non_temperature_400_does_not_retry_as_temperature(self):
         """Unrelated 400s (e.g. bad tool role) must not silently drop temp."""
@@ -207,7 +208,9 @@ class TestAsyncCallLlmUnsupportedTemperatureRetry:
         retry_kwargs = client.chat.completions.create.call_args_list[1].kwargs
         assert first_kwargs["temperature"] == 0.3
         assert "temperature" not in retry_kwargs
-        assert retry_kwargs["max_tokens"] == 500
+        assert "max_tokens" not in first_kwargs
+        assert "max_tokens" not in retry_kwargs
+        assert retry_kwargs["model"] == first_kwargs["model"]
 
     @pytest.mark.asyncio
     async def test_async_non_temperature_400_does_not_retry(self):
