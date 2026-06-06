@@ -81,3 +81,26 @@ def install_ctrl_enter_alias() -> int:
             ANSI_SEQUENCES[seq] = alt_enter
             changed += 1
     return changed
+
+
+def install_ignored_terminal_sequences() -> int:
+    """Map terminal-emitted focus reports to ``Keys.Ignore``.
+
+    Focus-in/focus-out reports can arrive while the user switches terminal
+    windows or tabs. If prompt_toolkit treats them as unknown escape
+    sequences, their visible tails can land in the prompt buffer.
+
+    Returns the number of sequences whose mapping was changed.
+    """
+    try:
+        from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+        from prompt_toolkit.keys import Keys
+    except Exception:
+        return 0
+
+    changed = 0
+    for seq in ("\x1b[I", "\x1b[O"):
+        if seq not in ANSI_SEQUENCES:
+            ANSI_SEQUENCES[seq] = Keys.Ignore
+            changed += 1
+    return changed

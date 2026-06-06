@@ -74,10 +74,15 @@ except (ImportError, AttributeError):
     _STEADY_CURSOR = None
 
 try:
-    from hermes_cli.pt_input_extras import install_shift_enter_alias, install_ctrl_enter_alias
+    from hermes_cli.pt_input_extras import (
+        install_ctrl_enter_alias,
+        install_ignored_terminal_sequences,
+        install_shift_enter_alias,
+    )
     install_shift_enter_alias()
     install_ctrl_enter_alias()
-    del install_shift_enter_alias, install_ctrl_enter_alias
+    install_ignored_terminal_sequences()
+    del install_shift_enter_alias, install_ctrl_enter_alias, install_ignored_terminal_sequences
 except Exception:
     pass
 import threading
@@ -12718,6 +12723,12 @@ class HermesCLI:
         
         # Key bindings for the input area
         kb = KeyBindings()
+
+        from prompt_toolkit.keys import Keys as _Keys
+
+        @kb.add(_Keys.Ignore, eager=True)
+        def handle_ignored_terminal_sequence(event):
+            return None
         
         def handle_enter(event):
             """Handle Enter key - submit input.
