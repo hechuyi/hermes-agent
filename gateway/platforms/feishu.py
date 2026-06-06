@@ -2764,9 +2764,15 @@ class FeishuAdapter(BasePlatformAdapter):
             return
 
         message_id = getattr(message, "message_id", None)
-        if not message_id or self._is_duplicate(message_id):
-            logger.debug("[Feishu] Dropping duplicate/missing message_id: %s", message_id)
+        if not message_id:
+            logger.debug("[Feishu] Dropping inbound event without message_id")
             return
+        if self._gateway_event_state_dir is None:
+            if self._is_duplicate(message_id):
+                logger.debug("[Feishu] Dropping duplicate message_id: %s", message_id)
+                return
+        else:
+            self._remember_legacy_seen_message_id(message_id)
 
         reason = self._admit(sender, message)
         if reason is not None:
@@ -3679,6 +3685,20 @@ class FeishuAdapter(BasePlatformAdapter):
                     and action.get("type") == "delivery_record"
                 ):
                     return result
+                return False
+            if event_payload.get("type") == "feishu_inbound":
+                if (
+                    getattr(result, "event_type", None) == "feishu_inbound"
+                    and isinstance(action, dict)
+                    and action.get("type") == "inbound_admission"
+                    and action.get("decision") == "continue"
+                ):
+                    if action.get("duplicate") is True:
+                        logger.debug(
+                            "[Feishu] Dropping duplicate inbound event admitted by ledger"
+                        )
+                        return False
+                    return True
                 return False
             return True
         logger.warning(
@@ -5162,6 +5182,19 @@ class FeishuAdapter(BasePlatformAdapter):
                 self._seen_message_ids.pop(stale, None)
             self._persist_seen_message_ids()
             return False
+
+    def _remember_legacy_seen_message_id(self, message_id: str) -> None:
+        """Maintain the old seen-id file without using it as admission authority."""
+        now = time.time()
+        with self._dedup_lock:
+            self._seen_message_ids[message_id] = now
+            if message_id in self._seen_message_order:
+                self._seen_message_order.remove(message_id)
+            self._seen_message_order.append(message_id)
+            while len(self._seen_message_order) > self._dedup_cache_size:
+                stale = self._seen_message_order.pop(0)
+                self._seen_message_ids.pop(stale, None)
+            self._persist_seen_message_ids()
 
     # =========================================================================
     # Outbound payload construction and send pipeline

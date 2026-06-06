@@ -1,6 +1,7 @@
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+import time
 
 import pytest
 
@@ -50,6 +51,26 @@ def _message_event(adapter, *, message_id="om_inbound", message_type=MessageType
         message_id=message_id,
         timestamp=datetime.fromtimestamp(1_700_000_000),
     )
+
+
+def _raw_message_event_data(*, message_id="om_inbound"):
+    message = SimpleNamespace(
+        message_id=message_id,
+        chat_id="oc_chat",
+        chat_type="p2p",
+        message_type="text",
+        content='{"text": "/ping"}',
+        mentions=[],
+        thread_id=None,
+        parent_id=None,
+        upper_message_id=None,
+        root_id=None,
+    )
+    sender = SimpleNamespace(
+        sender_type="user",
+        sender_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+    )
+    return SimpleNamespace(event=SimpleNamespace(message=message, sender=sender))
 
 
 def _read_event(*, message_id="om_sent", event_id="ev_read_1"):
@@ -129,6 +150,49 @@ async def test_normalized_inbound_event_applies_before_handle_message(monkeypatc
     assert calls[0][1]["timestamp"] == 1_700_000_000
     assert calls[0][2] == tmp_path
     assert calls[1] == ("handle", "om_inbound")
+
+
+@pytest.mark.asyncio
+async def test_legacy_seen_hit_still_enters_inbound_ledger(monkeypatch, tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._seen_message_ids = {"om_legacy_seen": time.time()}
+    adapter._seen_message_order = ["om_legacy_seen"]
+    calls = []
+
+    async def fake_apply(event, state_dir):
+        calls.append(("apply", event, state_dir))
+        return _ok("feishu_inbound")
+
+    async def fake_process_inbound_message(**kwargs):
+        await adapter._handle_message_with_guards(
+            _message_event(adapter, message_id=kwargs["message_id"])
+        )
+
+    monkeypatch.setattr(
+        "gateway.platforms.feishu.gateway_event_ledger.apply_gateway_event_async",
+        fake_apply,
+    )
+    adapter._process_inbound_message = fake_process_inbound_message
+
+    await adapter._handle_message_event_data(
+        _raw_message_event_data(message_id="om_legacy_seen")
+    )
+
+    assert calls[0][0] == "apply"
+    assert calls[0][1]["type"] == "feishu_inbound"
+    assert calls[0][1]["inbound_id"] == "om_legacy_seen"
+    adapter.handle_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_inbound_ledger_duplicate_blocks_second_handle_message(tmp_path):
+    adapter = _adapter(tmp_path)
+    event = _message_event(adapter, message_id="om_duplicate")
+
+    await adapter._handle_message_with_guards(event)
+    await adapter._handle_message_with_guards(event)
+
+    assert adapter.handle_message.await_count == 1
 
 
 @pytest.mark.asyncio
