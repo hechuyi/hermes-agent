@@ -379,6 +379,24 @@ approval semantics, gateway event ledgers, media extraction, delivery outcomes,
 model catalogs, Nous legacy authentication, or the fork's `5.5`
 customizations.
 
+### Voice PipeWire audio-probe batch
+
+`c834624f7de8136b0010f0771ee7a89dc5e92942`
+(`fix(voice): honor PIPEWIRE_REMOTE in PortAudio fallback checks`) was manually
+absorbed in local commit `02f1d489f`.
+
+Voice environment detection already recognized `PIPEWIRE_REMOTE` during the
+container-level forwarding check. It now also treats `PIPEWIRE_REMOTE` as host
+audio forwarding when PortAudio returns an empty device list or raises during
+device probing, matching the existing `PULSE_SERVER` fallback behavior. Docker
+and Podman voice mode therefore remains available when PipeWire is forwarded
+but PortAudio cannot enumerate devices inside the container.
+
+This batch is limited to CLI voice environment detection. It does not change
+gateway voice-message handling, media extraction, delivery outcomes, provider
+routing, model catalogs, Nous legacy authentication, or the fork's `5.5`
+customizations.
+
 ### CLI MCP startup batch
 
 `0c6e133c0434ec856d4aea2b08f216f36c0e7dac`
@@ -789,6 +807,28 @@ Result: `12 passed, 1 warning`.
 
 ```bash
 uv run --extra dev ruff check agent/tool_executor.py tests/tools/test_interrupt.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` produced no output.
+
+Voice PipeWire audio-probe batch verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_voice_mode.py::TestDetectAudioEnvironment::test_docker_with_pipewire_remote_and_no_devices_allows_voice tests/tools/test_voice_mode.py::TestDetectAudioEnvironment::test_docker_with_pipewire_remote_and_query_failure_allows_voice -q -rs
+```
+
+Result: `2 passed`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_voice_mode.py -q -rs
+```
+
+Result: `67 passed`.
+
+```bash
+uv run --extra dev ruff check tools/voice_mode.py tests/tools/test_voice_mode.py
 ```
 
 Result: `All checks passed!`.
