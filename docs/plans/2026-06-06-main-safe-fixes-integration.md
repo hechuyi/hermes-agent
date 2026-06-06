@@ -259,6 +259,28 @@ limited to download retry classification and does not change native vision
 routing, auxiliary model resolution, gateway event contracts, or model catalog
 customizations.
 
+### CLI/browser low-risk runtime batch
+
+Three independent CLI/browser fixes were absorbed as separate local commits:
+
+- `26b83a5f5f0acf32599f6449b685bec5a136e3d8` in local commit `b52891de5`.
+- `92ad7cc62cf030820d1eee9ceabd40f9b4c2cd9e` in local commit `d45402451`.
+- `433bffff51ec1a731fabc29637a17d5f4fc9f422` in local commit `eb1bf53f1`.
+
+Terminal focus-in/focus-out reports are now mapped to `Keys.Ignore` at the
+prompt_toolkit parser layer and consumed by a no-op key binding before their
+visible tails can enter the prompt buffer. The CDP supervisor now retries only
+the specific DOM-node serialization failure (`Object reference chain is too
+long`) with `returnByValue=false`, while the subprocess fallback converts that
+protocol error into guidance to extract a primitive or stringify the value.
+Oneshot mode now fails closed with `rc=1` and a real-stderr error when the
+agent raises a normal exception, while preserving `KeyboardInterrupt` and
+`SystemExit` propagation.
+
+The upstream `scripts/release.py` author-map hunk from `433bffff` was
+intentionally omitted as release metadata unrelated to this fork's runtime
+behavior.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -304,10 +326,13 @@ These must not be merged mechanically:
 
 - `7427b9d58`: tool-search session toolset scoping. Defer until the
   progressive tool-search base exists in this fork.
-- `2062a8400`, `40fcb9658`, `622e53437`, `f6a2ba626`, `41ff6e593`,
-  `7e958dafc`, `95cf8f984`, `a22c25000`: auxiliary/auth-provider behavior.
-  Review together so the credential and provider fallback semantics stay
-  coherent.
+- `2062a8400`, `40fcb9658`, `622e53437`, `f6a2ba626`, `6a72af044`:
+  auxiliary/auth-provider behavior that has been read-only audited as a
+  reasonable next absorption subset. Review and port in provider-focused
+  batches so credential refresh and fallback semantics stay coherent.
+- `41ff6e593`, `7e958dafc`, `4e4984a`, `95cf8f984`, `a22c25000`: Nous
+  JWT-only behavior. Defer until there is an explicit decision to remove this
+  fork's retained legacy Nous session-key inference paths.
 - `5ad2b4c6d`, `97ecfa0fc`, `4fa20f9a8`, `a7421dc7d`, `38695254f`,
   `904c0b479`, `794519c6a`: session/state/SQLite/FTS work. Valuable, but should
   be tested against the current session database and migration contracts.
@@ -330,16 +355,20 @@ being accepted.
 The next pass should stay narrow: one behavior domain, one targeted test set,
 and no broad `origin/main` merge. Recommended order:
 
-1. `2062a8400`, `40fcb9658`, `622e53437`, `f6a2ba626`, `41ff6e593`,
-   `7e958dafc`, `95cf8f984`, `a22c25000`: review the auth/Nous/provider
-   behavior together so fallback and credential semantics stay coherent.
-2. `08c0b2241`, `781604ce4`, `51d165a8e`: media extraction and tool-result
+1. `f6a2ba626`: xAI OAuth bad-credentials recovery, as a narrow auth-error
+   classification batch.
+2. `40fcb9658` / `622e53437`: runtime main custom-provider base URL/API key/API
+   mode propagation, as a paired provider-routing batch.
+3. `2062a8400`: auxiliary chat-completions default `max_tokens` behavior.
+4. `6a72af044`: managed gateway availability checks that avoid synchronous
+   token refresh.
+5. `08c0b2241`, `781604ce4`, `51d165a8e`: media extraction and tool-result
    scan semantics need a separate gateway ledger attribution review.
 
 The Docker reuse/orphan-reaper group, tool-search base/scoping group,
-auth/Nous/provider group, compression/state group, and MEDIA extraction group
-should remain separate batches because each changes a runtime contract rather
-than just a local implementation detail.
+provider-routing subset, Nous JWT-only decision group, compression/state group,
+and MEDIA extraction group should remain separate batches because each changes
+a runtime contract rather than just a local implementation detail.
 
 ## Verification
 
@@ -463,6 +492,64 @@ uv run --extra dev ruff check tools/vision_tools.py tests/tools/test_vision_tool
 Result: `All checks passed!`.
 
 `git diff --check` produced no output.
+
+CLI/browser low-risk runtime batch verification:
+
+```bash
+uv run --extra dev pytest tests/cli/test_cli_terminal_shortcuts.py -q -rs
+```
+
+Result: `4 passed`.
+
+```bash
+uv run --extra dev pytest tests/cli/test_cli_shift_enter_newline.py tests/cli/test_ctrl_enter_newline.py -q -rs
+```
+
+Result: `15 passed`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_browser_eval_supervisor_path.py -q -rs
+```
+
+Result: `17 passed`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_browser_console.py -q -rs
+```
+
+Result: `27 passed, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_tui_resume_flow.py -q -k 'oneshot_fails_closed_on_empty_final_response or oneshot_prints_nonempty_final_response or oneshot_fails_closed_on_agent_exception or oneshot_reraises_control_flow_exceptions or oneshot_rejects_invalid_only_toolsets'
+```
+
+Result: `6 passed, 40 deselected`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_tui_resume_flow.py -q -rs
+```
+
+Result: `46 passed`.
+
+```bash
+uv run --extra dev ruff check cli.py hermes_cli/pt_input_extras.py tests/cli/test_cli_terminal_shortcuts.py tests/cli/test_cli_shift_enter_newline.py tests/cli/test_ctrl_enter_newline.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev ruff check tools/browser_supervisor.py tools/browser_tool.py tests/tools/test_browser_eval_supervisor_path.py tests/tools/test_browser_console.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev ruff check hermes_cli/oneshot.py tests/hermes_cli/test_tui_resume_flow.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` produced no output for each code batch.
 
 Manual service `WorkingDirectory` port verification:
 
