@@ -174,28 +174,42 @@ def run_oneshot(
     # Redirect stderr AND stdout to devnull for the entire call tree.
     # We'll print the final response to the real stdout at the end.
     real_stdout = sys.stdout
+    real_stderr = sys.stderr
     devnull = open(os.devnull, "w", encoding="utf-8")
 
+    response: Optional[str] = None
+    failure: BaseException | None = None
     try:
         with redirect_stdout(devnull), redirect_stderr(devnull):
-            response = _run_agent(
-                prompt,
-                model=model,
-                provider=provider,
-                toolsets=explicit_toolsets,
-                use_config_toolsets=use_config_toolsets,
-            )
+            try:
+                response = _run_agent(
+                    prompt,
+                    model=model,
+                    provider=provider,
+                    toolsets=explicit_toolsets,
+                    use_config_toolsets=use_config_toolsets,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                failure = exc
     finally:
         try:
             devnull.close()
         except Exception:
             pass
 
-    if not (response or "").strip():
-        sys.stderr.write("hermes -z: no final response was produced; treating the run as failed.\n")
-        sys.stderr.flush()
+    if failure is not None:
+        if isinstance(failure, (KeyboardInterrupt, SystemExit)):
+            raise failure
+        real_stderr.write(f"hermes -z: agent failed: {failure}\n")
+        real_stderr.flush()
         return 1
 
+    if not (response or "").strip():
+        real_stderr.write("hermes -z: no final response was produced; treating the run as failed.\n")
+        real_stderr.flush()
+        return 1
+
+    assert response is not None
     real_stdout.write(response)
     if not response.endswith("\n"):
         real_stdout.write("\n")
