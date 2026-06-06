@@ -307,6 +307,23 @@ This batch does not modify curated model catalogs or the fork's `5.5`
 customizations. Nous JWT-only behavior remains deferred separately because this
 fork still intentionally retains legacy Nous session-key inference paths.
 
+### CLI MCP startup batch
+
+`0c6e133c0434ec856d4aea2b08f216f36c0e7dac`
+(`perf(cli): stop eager MCP discovery from blocking agent-capable startup`) was
+manually absorbed in local commit `e53a6fb11`.
+
+CLI chat/rl startup now launches MCP discovery in a shared background thread
+when MCP servers are configured, while TUI chat and entrypoints with dedicated
+runtime startup paths (`acp`, `gateway run`, `cron run` / `cron tick`) avoid
+duplicating MCP bootstrap work. The first tool snapshot and agent construction
+briefly wait for the background discovery thread, preserving tool availability
+without allowing slow or dead MCP servers to block interactive startup.
+
+This batch is limited to CLI startup and tool snapshot timing. It does not
+change gateway event ledgers, media extraction, delivery outcomes, Nous
+authentication behavior, model catalogs, or the fork's `5.5` customizations.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -606,6 +623,22 @@ Result: `All checks passed!`.
 
 ```bash
 uv run --extra dev ruff check tools/managed_tool_gateway.py tools/web_tools.py plugins/browser/browser_use/provider.py plugins/web/firecrawl/provider.py tests/tools/test_managed_tool_gateway.py tests/tools/test_managed_browserbase_and_modal.py tests/tools/test_web_tools_config.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` produced no output.
+
+CLI MCP startup batch verification:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_mcp_startup.py tests/cli/test_cli_light_mode.py -q -rs
+```
+
+Result: `24 passed`.
+
+```bash
+uv run --extra dev ruff check cli.py hermes_cli/main.py hermes_cli/mcp_startup.py tests/hermes_cli/test_mcp_startup.py
 ```
 
 Result: `All checks passed!`.
