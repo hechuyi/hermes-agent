@@ -281,6 +281,32 @@ The upstream `scripts/release.py` author-map hunk from `433bffff` was
 intentionally omitted as release metadata unrelated to this fork's runtime
 behavior.
 
+### Auth/provider runtime batch
+
+The read-only audited auth/provider subset was absorbed as focused local
+commits:
+
+- `f6a2ba62611dd92c659df683060174d14425913a` in local commit `806c0912e`.
+- `40fcb96585395c6adb58d4d43156a6d0e68522cb` and
+  `622e534379fa2f4bdf43e4e6f3d480a74b4106e5` in local commit `b8119df2a`.
+- `2062a84000a666c449b9fb7768a4b4e4718e2c88` in local commit `b55418a3e`.
+- `6a72af044c44c9a05137bc448bc65ecf0ace5a89` in local commit `c44ec8685`.
+
+xAI OAuth now treats 403 `unauthenticated:bad-credentials` failures as auth
+errors, maps `api.x.ai` clients to the `xai-oauth` credential pool, and can
+refresh xAI OAuth credentials before retrying. Runtime main custom-provider
+metadata now carries `base_url`, `api_key`, and `api_mode` into auxiliary
+auto-routing so config-less `custom:<name>` live endpoints do not fall through
+to unrelated aggregators. Auxiliary OpenAI-compatible chat calls no longer send
+default `max_tokens` / `max_completion_tokens`; only Anthropic Messages wire
+keeps mandatory `max_tokens`. Managed gateway availability checks now use a
+cached-token peek path and avoid synchronous Nous OAuth refresh, while actual
+gateway request/client paths still use the refresh-aware token reader.
+
+This batch does not modify curated model catalogs or the fork's `5.5`
+customizations. Nous JWT-only behavior remains deferred separately because this
+fork still intentionally retains legacy Nous session-key inference paths.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -326,10 +352,6 @@ These must not be merged mechanically:
 
 - `7427b9d58`: tool-search session toolset scoping. Defer until the
   progressive tool-search base exists in this fork.
-- `2062a8400`, `40fcb9658`, `622e53437`, `f6a2ba626`, `6a72af044`:
-  auxiliary/auth-provider behavior that has been read-only audited as a
-  reasonable next absorption subset. Review and port in provider-focused
-  batches so credential refresh and fallback semantics stay coherent.
 - `41ff6e593`, `7e958dafc`, `4e4984a`, `95cf8f984`, `a22c25000`: Nous
   JWT-only behavior. Defer until there is an explicit decision to remove this
   fork's retained legacy Nous session-key inference paths.
@@ -355,18 +377,17 @@ being accepted.
 The next pass should stay narrow: one behavior domain, one targeted test set,
 and no broad `origin/main` merge. Recommended order:
 
-1. `f6a2ba626`: xAI OAuth bad-credentials recovery, as a narrow auth-error
-   classification batch.
-2. `40fcb9658` / `622e53437`: runtime main custom-provider base URL/API key/API
-   mode propagation, as a paired provider-routing batch.
-3. `2062a8400`: auxiliary chat-completions default `max_tokens` behavior.
-4. `6a72af044`: managed gateway availability checks that avoid synchronous
-   token refresh.
-5. `08c0b2241`, `781604ce4`, `51d165a8e`: media extraction and tool-result
+1. `08c0b2241`, `781604ce4`, `51d165a8e`: media extraction and tool-result
    scan semantics need a separate gateway ledger attribution review.
+2. `5ad2b4c6d`, `97ecfa0fc`, `4fa20f9a8`, `a7421dc7d`, `38695254f`,
+   `904c0b479`, `794519c6a`: session/state/SQLite/FTS work should be reviewed
+   as a state-schema and migration batch.
+3. `a30480bd2`, `db2ce9e7d`, `e38b0b55d`, `020601d41`, `56b8dccf2`,
+   `42bbd221e`: compression/resume behavior should be reviewed as a
+   conversation-compression batch.
 
 The Docker reuse/orphan-reaper group, tool-search base/scoping group,
-provider-routing subset, Nous JWT-only decision group, compression/state group,
+Nous JWT-only decision group, session/state group, compression/resume group,
 and MEDIA extraction group should remain separate batches because each changes
 a runtime contract rather than just a local implementation detail.
 
@@ -550,6 +571,46 @@ uv run --extra dev ruff check hermes_cli/oneshot.py tests/hermes_cli/test_tui_re
 Result: `All checks passed!`.
 
 `git diff --check` produced no output for each code batch.
+
+Auth/provider runtime batch verification:
+
+```bash
+uv run --extra dev pytest tests/agent/test_auxiliary_client_xai_oauth_recovery.py tests/agent/test_set_runtime_main_custom_provider.py -q -rs
+```
+
+Result: `14 passed`.
+
+```bash
+uv run --extra dev pytest tests/agent/test_auxiliary_client.py::TestBuildCallKwargsMaxTokens tests/agent/test_unsupported_temperature_retry.py -q -rs
+```
+
+Result: `27 passed, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_managed_tool_gateway.py tests/tools/test_managed_browserbase_and_modal.py tests/tools/test_web_tools_config.py -q -rs
+```
+
+Result: `67 passed`.
+
+```bash
+uv run --extra dev pytest tests/agent/test_auxiliary_client.py tests/gateway/test_model_command_custom_providers.py tests/gateway/test_session_model_override_routing.py -q -rs
+```
+
+Result: `195 passed`.
+
+```bash
+uv run --extra dev ruff check agent/auxiliary_client.py agent/conversation_loop.py tests/agent/test_auxiliary_client.py tests/agent/test_auxiliary_client_xai_oauth_recovery.py tests/agent/test_set_runtime_main_custom_provider.py tests/agent/test_unsupported_temperature_retry.py tests/gateway/test_model_command_custom_providers.py tests/gateway/test_session_model_override_routing.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev ruff check tools/managed_tool_gateway.py tools/web_tools.py plugins/browser/browser_use/provider.py plugins/web/firecrawl/provider.py tests/tools/test_managed_tool_gateway.py tests/tools/test_managed_browserbase_and_modal.py tests/tools/test_web_tools_config.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` produced no output.
 
 Manual service `WorkingDirectory` port verification:
 
