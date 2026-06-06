@@ -231,6 +231,20 @@ wrappers, pip installs check native `Scripts/` launchers as well as POSIX
 and the LSP client wraps `.cmd`/`.bat` shims through `cmd.exe /c` before
 spawning on Windows.
 
+### Send-message email target batch
+
+The send-message email target batch was absorbed in local commit `6d38906e8`:
+
+- `d3724c0be68858e9a2816526c5b5e7f5f9f12ebc`
+- `bfc4a26032cbc3bab1c33c98d40a17fd7802342c`
+
+Raw email addresses are now explicit `send_message` targets for the email
+platform instead of falling through to channel-name resolution, and the
+no-home-channel guidance now points email users at `EMAIL_HOME_ADDRESS` rather
+than the unused generic `EMAIL_HOME_CHANNEL`. A focused test file was added so
+this coverage does not get skipped when optional Telegram dependencies are
+absent.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
