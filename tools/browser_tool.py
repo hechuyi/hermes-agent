@@ -2875,6 +2875,17 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
                 "error": f"JavaScript evaluation is not supported by this browser backend. {err}",
             }
             return json.dumps(_copy_fallback_warning(response, result))
+        if "reference chain is too long" in err.lower():
+            response = {
+                "success": False,
+                "error": (
+                    "Expression returned a live DOM node / NodeList / Window, "
+                    "which can't be serialized. Extract a primitive value "
+                    "(e.g. .innerText, .href, .src, .value) or use "
+                    "JSON.stringify() / a snapshot tool instead."
+                ),
+            }
+            return json.dumps(_copy_fallback_warning(response, result))
         response = {
             "success": False,
             "error": err,
