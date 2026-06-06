@@ -193,6 +193,19 @@ output.
 Both were manually ported with focused regression tests and do not touch the
 live-gateway/hermes-tools boundary.
 
+### Ntfy echo-loop batch
+
+The ntfy echo-loop batch was absorbed in local commit `0972935ad`:
+
+- `9405cdc8dd0347fee65b554e3aba0d2eab7a7b7f`
+- `8055d0f09246555d9a7d9b95295def612e500c70`
+
+Outgoing ntfy gateway sends and standalone cron/`send_message` sends now carry
+`X-Tags: hermes-agent`, and inbound ntfy events carrying that tag are ignored
+as echoed self-messages. Events with unrelated ntfy tags still dispatch
+normally. The port intentionally omitted the unrelated `scripts/release.py`
+author-map hunk from upstream.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
