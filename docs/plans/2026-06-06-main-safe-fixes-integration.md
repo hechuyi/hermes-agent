@@ -361,6 +361,24 @@ provider implementation behavior, gateway event ledgers, media extraction,
 delivery outcomes, model catalogs, Nous legacy authentication, or the fork's
 `5.5` customizations.
 
+### Tool executor interrupt cleanup batch
+
+`bede3cf12d1492043f4ca604fdb2158ffd6bc619`
+(`fix(tools): wrap _run_tool cleanup in finally to prevent interrupt state leak`)
+was manually absorbed in local commit `730cf589d`.
+
+Concurrent tool worker cleanup now runs in a `finally` block around
+`_invoke_tool`, so `BaseException` subclasses such as cancellation-style
+failures still remove the recycled worker thread id from
+`_tool_worker_threads` and clear its per-thread interrupt bit. This prevents a
+stale interrupt marker from poisoning the next tool scheduled on the same
+`ThreadPoolExecutor` worker.
+
+This batch is limited to agent tool executor cleanup. It does not change tool
+approval semantics, gateway event ledgers, media extraction, delivery outcomes,
+model catalogs, Nous legacy authentication, or the fork's `5.5`
+customizations.
+
 ### CLI MCP startup batch
 
 `0c6e133c0434ec856d4aea2b08f216f36c0e7dac`
@@ -749,6 +767,28 @@ Result: `65 passed, 1 warning`.
 
 ```bash
 uv run --extra dev ruff check tools/web_tools.py tests/tools/test_web_providers.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` produced no output.
+
+Tool executor interrupt cleanup batch verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_interrupt.py::TestRunToolCleanupOnBaseException::test_worker_interrupt_state_is_cleared_when_tool_raises_base_exception -q -rs
+```
+
+Result: `1 passed, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_interrupt.py tests/run_agent/test_tool_executor_contextvar_propagation.py -q -rs
+```
+
+Result: `12 passed, 1 warning`.
+
+```bash
+uv run --extra dev ruff check agent/tool_executor.py tests/tools/test_interrupt.py
 ```
 
 Result: `All checks passed!`.
