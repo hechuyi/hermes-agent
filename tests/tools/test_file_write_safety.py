@@ -183,5 +183,92 @@ class TestAtomicWrite:
         assert (os.stat(target).st_mode & 0o777) == 0o600
 
 
+class TestBomHandling:
+    """UTF-8 BOM is stripped on read and preserved across write/patch."""
+
+    BOM = "\ufeff"
+
+    @pytest.fixture
+    def ops(self, tmp_path: Path):
+        from tools.environments.local import LocalEnvironment
+        from tools.file_operations import ShellFileOperations
+        env = LocalEnvironment(cwd=str(tmp_path))
+        return ShellFileOperations(env, cwd=str(tmp_path))
+
+    def test_helpers(self):
+        from tools.file_operations import _has_bom, _strip_bom
+
+        assert _strip_bom("\ufeffhello") == ("hello", True)
+        assert _strip_bom("hello") == ("hello", False)
+        assert _strip_bom("") == ("", False)
+        assert _strip_bom("a\ufeffb") == ("a\ufeffb", False)
+        assert _has_bom("\ufeffx") is True
+        assert _has_bom("x") is False
+        assert _has_bom(None) is False
+
+    def test_read_strips_bom(self, ops, tmp_path: Path):
+        target = tmp_path / "bom.py"
+        target.write_bytes(self.BOM.encode("utf-8") + b"import os\nx = 1\n")
+        res = ops.read_file(str(target))
+        assert res.error is None, res.error
+        first_line = res.content.split("\n", 1)[0]
+        assert self.BOM not in first_line
+        assert first_line.endswith("import os")
+
+    def test_read_raw_strips_bom(self, ops, tmp_path: Path):
+        target = tmp_path / "bom.txt"
+        target.write_bytes(self.BOM.encode("utf-8") + b"hello\nworld\n")
+        res = ops.read_file_raw(str(target))
+        assert res.error is None, res.error
+        assert not res.content.startswith(self.BOM)
+        assert res.content == "hello\nworld\n"
+
+    def test_write_preserves_bom(self, ops, tmp_path: Path):
+        target = tmp_path / "config.txt"
+        target.write_bytes(self.BOM.encode("utf-8") + b"old\n")
+        res = ops.write_file(str(target), "new content\n")
+        assert res.error is None, res.error
+        raw = target.read_bytes()
+        assert raw == self.BOM.encode("utf-8") + b"new content\n"
+
+    def test_write_no_bom_when_original_had_none(self, ops, tmp_path: Path):
+        target = tmp_path / "plain.txt"
+        target.write_text("old\n")
+        res = ops.write_file(str(target), "new\n")
+        assert res.error is None, res.error
+        assert not target.read_bytes().startswith(self.BOM.encode("utf-8"))
+
+    def test_write_does_not_double_bom(self, ops, tmp_path: Path):
+        target = tmp_path / "config.txt"
+        target.write_bytes(self.BOM.encode("utf-8") + b"old\n")
+        res = ops.write_file(str(target), self.BOM + "new\n")
+        assert res.error is None, res.error
+        assert target.read_bytes() == self.BOM.encode("utf-8") + b"new\n"
+
+    def test_patch_roundtrip_preserves_bom(self, ops, tmp_path: Path):
+        target = tmp_path / "edit.py"
+        target.write_bytes(self.BOM.encode("utf-8") + b"a = 1\nb = 2\nc = 3\n")
+        res = ops.patch_replace(str(target), "b = 2", "b = 22")
+        assert res.success, res.error
+        assert target.read_bytes() == self.BOM.encode("utf-8") + b"a = 1\nb = 22\nc = 3\n"
+
+    def test_patch_matches_first_line_through_bom(self, ops, tmp_path: Path):
+        target = tmp_path / "mod.py"
+        target.write_bytes(self.BOM.encode("utf-8") + b"import os\nimport sys\n")
+        res = ops.patch_replace(str(target), "import os", "import os, json")
+        assert res.success, res.error
+        assert target.read_bytes() == self.BOM.encode("utf-8") + b"import os, json\nimport sys\n"
+
+    def test_python_write_preserves_bom_without_lint_noise(self, ops, tmp_path: Path):
+        target = tmp_path / "mod.py"
+        target.write_bytes(self.BOM.encode("utf-8") + b"x = 1\n")
+        res = ops.write_file(str(target), "x = 2\n")
+        assert res.error is None, res.error
+        assert target.read_bytes() == self.BOM.encode("utf-8") + b"x = 2\n"
+        assert res.lint is not None
+        assert res.lint["status"] == "ok"
+        assert "FEFF" not in str(res.lint)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

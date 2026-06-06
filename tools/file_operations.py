@@ -114,6 +114,21 @@ def _normalize_line_endings(text: str, target: str) -> str:
     return text
 
 
+_UTF8_BOM = "\ufeff"
+
+
+def _strip_bom(text: str) -> tuple[str, bool]:
+    """Strip one leading UTF-8 BOM marker, preserving mid-content markers."""
+    if text and text.startswith(_UTF8_BOM):
+        return text[len(_UTF8_BOM):], True
+    return text, False
+
+
+def _has_bom(text: Optional[str]) -> bool:
+    """Return whether text begins with a UTF-8 BOM marker."""
+    return bool(text) and text.startswith(_UTF8_BOM)
+
+
 def _get_safe_write_root() -> Optional[str]:
     """Return the resolved HERMES_WRITE_SAFE_ROOT path, or None if unset.
 
@@ -830,6 +845,16 @@ class ShellFileOperations(FileOperations):
             return None
         return _detect_line_ending(head_result.stdout)
 
+    def _file_has_bom(self, path: str, pre_content: Optional[str] = None) -> bool:
+        """Return whether the existing on-disk file starts with a UTF-8 BOM."""
+        if pre_content is not None:
+            return _has_bom(pre_content)
+        head_cmd = f"head -c 3 {self._escape_shell_arg(path)} 2>/dev/null"
+        head_result = self._exec(head_cmd)
+        if head_result.exit_code != 0 or not head_result.stdout:
+            return False
+        return _has_bom(head_result.stdout)
+
 
     def _unified_diff(self, old_content: str, new_content: str, filename: str) -> str:
         """Generate unified diff between old and new content."""
@@ -914,6 +939,8 @@ class ShellFileOperations(FileOperations):
         if read_result.exit_code != 0:
             return ReadResult(error=f"Failed to read file: {read_result.stdout}")
         read_output = _strip_terminal_fence_leaks(read_result.stdout)
+        if offset == 1:
+            read_output, _ = _strip_bom(read_output)
         
         # Get total line count
         wc_cmd = f"wc -l < {self._escape_shell_arg(path)}"
@@ -1018,8 +1045,9 @@ class ShellFileOperations(FileOperations):
         cat_result = self._exec(f"cat {self._escape_shell_arg(path)}")
         if cat_result.exit_code != 0:
             return ReadResult(error=f"Failed to read file: {cat_result.stdout}")
+        raw_content, _ = _strip_bom(_strip_terminal_fence_leaks(cat_result.stdout))
         return ReadResult(
-            content=_strip_terminal_fence_leaks(cat_result.stdout),
+            content=raw_content,
             file_size=file_size,
         )
 
@@ -1119,6 +1147,12 @@ class ShellFileOperations(FileOperations):
         if original_ending == "\r\n":
             content = _normalize_line_endings(content, "\r\n")
 
+        analysis_pre_content = _strip_bom(pre_content)[0] if pre_content is not None else None
+        analysis_content, _ = _strip_bom(content)
+        disk_content = content
+        if self._file_has_bom(path, pre_content) and not _has_bom(content):
+            disk_content = _UTF8_BOM + content
+
         # Snapshot LSP diagnostics for this file (best-effort) so the
         # post-write LSP layer can return only diagnostics introduced
         # by this specific edit.  Mirrors claude-code's
@@ -1151,7 +1185,7 @@ class ShellFileOperations(FileOperations):
         # the atomic swap doesn't silently widen or narrow permissions, and
         # clean the temp up on any failure so we never leak a ``.hermes-tmp``
         # turd next to the user's file.
-        write_result = self._atomic_write(path, content)
+        write_result = self._atomic_write(path, disk_content)
 
         if write_result.exit_code != 0:
             return WriteResult(error=f"Failed to write file: {write_result.stdout}")
@@ -1163,10 +1197,14 @@ class ShellFileOperations(FileOperations):
         try:
             bytes_written = int(stat_result.stdout.strip())
         except ValueError:
-            bytes_written = len(content.encode('utf-8'))
+            bytes_written = len(disk_content.encode('utf-8'))
 
         # Post-write lint with delta refinement.
-        lint_result = self._check_lint_delta(path, pre_content=pre_content, post_content=content)
+        lint_result = self._check_lint_delta(
+            path,
+            pre_content=analysis_pre_content,
+            post_content=analysis_content,
+        )
 
         # Semantic diagnostics from the LSP layer — separate channel.
         # Only fired when the syntax tier reported clean (no point asking
@@ -1177,7 +1215,7 @@ class ShellFileOperations(FileOperations):
         lsp_diagnostics: Optional[str] = None
         if lint_result.success or lint_result.skipped:
             block = self._maybe_lsp_diagnostics(
-                path, pre_content=pre_content, post_content=content
+                path, pre_content=analysis_pre_content, post_content=analysis_content
             )
             if block:
                 lsp_diagnostics = block
@@ -1221,7 +1259,7 @@ class ShellFileOperations(FileOperations):
         if read_result.exit_code != 0:
             return PatchResult(error=f"Failed to read file: {path}")
         
-        content = read_result.stdout
+        content, _ = _strip_bom(read_result.stdout)
         
         # Import and use fuzzy matching
         from tools.fuzzy_match import fuzzy_find_and_replace
@@ -1272,7 +1310,8 @@ class ShellFileOperations(FileOperations):
         # every patch on Windows returns a bogus "wrote 39, read 42"
         # false-negative even though the edit landed correctly.  POSIX
         # backends don't translate, so this is a no-op there.
-        _verify_stdout_normalized = verify_result.stdout.replace("\r\n", "\n").replace("\r", "\n")
+        _verify_bomless, _ = _strip_bom(verify_result.stdout)
+        _verify_stdout_normalized = _verify_bomless.replace("\r\n", "\n").replace("\r", "\n")
         _new_content_normalized = new_content.replace("\r\n", "\n").replace("\r", "\n")
         if _verify_stdout_normalized != _new_content_normalized:
             return PatchResult(error=(
