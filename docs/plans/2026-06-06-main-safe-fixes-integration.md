@@ -89,6 +89,21 @@ still be treated as handled for the purposes above, not retried mechanically.
 patch because the effective plugin-manifest packaging metadata was already
 present in the current fork.
 
+### Manual Feishu P0 port
+
+`91b174038c7e2bf6cde056da05f8f90673e8c87a`
+(`fix(feishu): bound _chat_locks with LRU eviction`) was manually ported in
+local commit `3cef0b1df`. The port is intentionally narrower than a mechanical
+cherry-pick: it reuses the fork's existing `OrderedDict` import style, only
+touches `_chat_locks` and focused tests, and does not change Feishu inbound
+ledger application, delivery outcome handling, replay, media extraction, or
+`hermes-tools` gateway event contracts.
+
+One upstream edge was adjusted for the fork: held locks are never evicted. If
+all cached chat locks are currently held, the cache may temporarily exceed
+`CHAT_LOCK_MAX_SIZE` rather than creating a second live lock for a chat and
+weakening per-chat serialization.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -131,9 +146,6 @@ These must not be merged mechanically:
 - `2b16b756a`: post-interrupt model recovery and fallback status behavior.
 - `45465b0d5`: reconnect/pause policy for transient network and DNS failures.
 - `7379f1755`: planned-stop/takeover marker behavior.
-- `91b174038`: Feishu chat-lock LRU. This looks narrow and likely desirable,
-  but it still touches the Feishu P0 file and should be ported with Feishu
-  gateway tests rather than mixed into this safe-fix batch.
 
 ### Tooling and runtime commits requiring separate batches
 
@@ -172,22 +184,17 @@ being accepted.
 The next pass should stay narrow: one behavior domain, one targeted test set,
 and no broad `origin/main` merge. Recommended order:
 
-1. `91b174038` (`fix(feishu): bound _chat_locks with LRU eviction`) should be
-   reviewed first. It touches the Feishu P0 file, so it must not be merged
-   mechanically, but the behavior is localized: bound an in-memory per-chat
-   lock cache for long-running Feishu gateways. It is production-relevant to
-   the current fork, does not intentionally change delivery ledger, replay,
-   media, status-card, or hermes-tools event contracts, and can be validated
-   with focused Feishu gateway tests.
-2. `a1cb5fa2c` (`fix(gateway): anchor service WorkingDirectory at HERMES_HOME`)
+1. `a1cb5fa2c` (`fix(gateway): anchor service WorkingDirectory at HERMES_HOME`)
    is the next operational candidate. It is relevant to packaged/live service
    durability, but it touches `hermes_cli/gateway.py` and service cwd semantics,
    so it should be reviewed against the fork's NixOS/live preflight path before
    porting.
-3. `5f84c9144` (`fix(file-tools): handle UTF-8 BOM in read_file / write_file /
+2. `5f84c9144` (`fix(file-tools): handle UTF-8 BOM in read_file / write_file /
    patch`) is a good file-tools candidate after the service/Feishu checks. It
    is self-contained, but it changes file content handling and should be tested
    with the fork's existing file-safety and atomic-write behavior.
+3. The tool-search/code-exec approval group should follow only as a separate
+   security/runtime batch because it changes approval context contracts.
 
 The Docker reuse/orphan-reaper group, tool-search/code-exec approval group,
 auth/Nous/provider group, compression/state group, and MEDIA extraction group
@@ -245,5 +252,27 @@ bash -n docker/stage2-hook.sh
 ```
 
 Result: exit `0`.
+
+`git diff --check` produced no output.
+
+Manual Feishu chat-lock port verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_feishu.py::TestChatLockEviction -q -rs
+```
+
+Result: `5 passed`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_feishu.py -q -rs
+```
+
+Result: `213 passed`.
+
+```bash
+uv run --extra dev ruff check gateway/platforms/feishu.py tests/gateway/test_feishu.py
+```
+
+Result: `All checks passed!`.
 
 `git diff --check` produced no output.
