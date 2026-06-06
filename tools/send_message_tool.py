@@ -41,6 +41,8 @@ _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 # downstream adapters (signal, etc.) expect.
 _PHONE_PLATFORMS = frozenset({"signal", "sms", "whatsapp"})
 _E164_TARGET_RE = re.compile(r"^\s*\+(\d{7,15})\s*$")
+_EMAIL_TARGET_RE = re.compile(r"^\s*[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\s*$")
+_HOME_CHANNEL_ENV_OVERRIDES = {"email": "EMAIL_HOME_ADDRESS"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".3gp"}
 _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".wav", ".m4a", ".flac"}
@@ -266,10 +268,13 @@ def _handle_send(args):
             chat_id = home.chat_id
             used_home_channel = True
         else:
+            home_env = _HOME_CHANNEL_ENV_OVERRIDES.get(
+                platform_name, f"{platform_name.upper()}_HOME_CHANNEL"
+            )
             return json.dumps({
                 "error": f"No home channel set for {platform_name} to determine where to send the message. "
                 f"Either specify a channel directly with '{platform_name}:CHANNEL_NAME', "
-                f"or set a home channel via: hermes config set {platform_name.upper()}_HOME_CHANNEL <channel_id>"
+                f"or set a home channel via: hermes config set {home_env} <channel_id>"
             })
 
     duplicate_skip = _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id)
@@ -384,6 +389,10 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         if target_ref.strip().isdigit():
             return f"group:{target_ref.strip()}", None, True
         return None, None, False
+    if platform_name == "email":
+        match = _EMAIL_TARGET_RE.fullmatch(target_ref)
+        if match:
+            return target_ref.strip(), None, True
     if platform_name in _PHONE_PLATFORMS:
         match = _E164_TARGET_RE.fullmatch(target_ref)
         if match:
