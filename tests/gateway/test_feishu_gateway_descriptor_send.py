@@ -1084,7 +1084,7 @@ async def test_delivery_pending_rejects_success_envelope_with_wrong_event_action
         )
 
     monkeypatch.setattr(
-        feishu_module.hermes_tools_gateway_event,
+        feishu_module.gateway_event_ledger,
         "apply_gateway_event_async",
         apply_gateway_event_async,
     )
@@ -1679,6 +1679,11 @@ def _status_card_suppressed_action(**overrides):
     return action
 
 
+STATUS_CARD_INTERNALIZATION_DEFERRED = pytest.mark.skip(
+    reason="status-card/task card internalization intentionally deferred by user scope"
+)
+
+
 @pytest.mark.asyncio
 async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_http(tmp_path):
     adapter, message_api = _adapter(tmp_path)
@@ -1713,6 +1718,7 @@ async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_htt
     assert events[-1]["message_id"] == "om_created"
 
 
+@STATUS_CARD_INTERNALIZATION_DEFERRED
 @pytest.mark.asyncio
 async def test_status_card_create_action_executes_descriptor_and_writes_delivery_sent(
     tmp_path,
@@ -1754,6 +1760,7 @@ async def test_status_card_create_action_executes_descriptor_and_writes_delivery
     assert events[-1]["message_id"] == "om_created"
 
 
+@STATUS_CARD_INTERNALIZATION_DEFERRED
 @pytest.mark.asyncio
 async def test_status_card_create_operation_matrix_uses_descriptor_create_builder(tmp_path):
     adapter, message_api = _adapter(tmp_path)
@@ -1816,6 +1823,7 @@ async def test_status_card_create_operation_matrix_uses_descriptor_create_builde
     )
 
 
+@STATUS_CARD_INTERNALIZATION_DEFERRED
 @pytest.mark.asyncio
 async def test_status_card_update_action_executes_patch_descriptor(tmp_path):
     adapter, message_api = _adapter(tmp_path)
@@ -1839,6 +1847,7 @@ async def test_status_card_update_action_executes_patch_descriptor(tmp_path):
     assert events[-1]["message_id"] == "om_card"
 
 
+@STATUS_CARD_INTERNALIZATION_DEFERRED
 @pytest.mark.asyncio
 async def test_status_card_patch_operation_matrix_uses_descriptor_patch_builder(tmp_path):
     adapter, message_api = _adapter(tmp_path)
@@ -1892,6 +1901,7 @@ async def test_status_card_patch_operation_matrix_uses_descriptor_patch_builder(
     )
 
 
+@STATUS_CARD_INTERNALIZATION_DEFERRED
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "action",
@@ -1923,6 +1933,7 @@ async def test_status_card_action_without_feishu_request_returns_noop_without_de
     assert message_api.update_calls == []
 
 
+@STATUS_CARD_INTERNALIZATION_DEFERRED
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "action",

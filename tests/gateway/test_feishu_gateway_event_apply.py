@@ -5,9 +5,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from gateway.config import PlatformConfig
-from gateway.hermes_tools_gateway_event import HermesToolsGatewayEventResult
+from gateway.platforms.feishu import FeishuAdapter, GatewayEventResult
 from gateway.platforms.base import MessageEvent, MessageType
-from gateway.platforms.feishu import FeishuAdapter
 
 
 def _adapter(tmp_path):
@@ -16,6 +15,23 @@ def _adapter(tmp_path):
     )
     adapter.handle_message = AsyncMock()
     return adapter
+
+
+def test_gateway_event_state_dir_prefers_new_config_key(tmp_path):
+    old_dir = tmp_path / "old"
+    new_dir = tmp_path / "new"
+
+    adapter = FeishuAdapter(
+        PlatformConfig(
+            extra={
+                "hermes_tools_state_dir": str(old_dir),
+                "gateway_event_state_dir": str(new_dir),
+            }
+        )
+    )
+
+    assert adapter._gateway_event_state_dir == new_dir
+    assert adapter._hermes_tools_state_dir == new_dir
 
 
 def _message_event(adapter, *, message_id="om_inbound", message_type=MessageType.COMMAND):
@@ -44,7 +60,7 @@ def _read_event(*, message_id="om_sent", event_id="ev_read_1"):
 
 
 def _ok(event_type):
-    return HermesToolsGatewayEventResult(
+    return GatewayEventResult(
         ok=True,
         event_type=event_type,
         action={"type": "inbound_admission", "decision": "continue"},
@@ -52,7 +68,7 @@ def _ok(event_type):
 
 
 def _failure(event_type, failure_class):
-    return HermesToolsGatewayEventResult(
+    return GatewayEventResult(
         ok=False,
         event_type=event_type,
         failure_class=failure_class,
@@ -99,7 +115,7 @@ async def test_normalized_inbound_event_applies_before_handle_message(monkeypatc
         calls.append(("handle", event.message_id))
 
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        "gateway.platforms.feishu.gateway_event_ledger.apply_gateway_event_async",
         fake_apply,
     )
     adapter.handle_message = AsyncMock(side_effect=fake_handle)
@@ -123,7 +139,7 @@ async def test_inbound_apply_failure_blocks_handle_message(monkeypatch, tmp_path
         return _failure("feishu_inbound", "implicit_session_switch")
 
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        "gateway.platforms.feishu.gateway_event_ledger.apply_gateway_event_async",
         fake_apply,
     )
 
@@ -143,7 +159,7 @@ async def test_text_batch_flush_applies_only_flushed_normalized_event(monkeypatc
         return _ok("feishu_inbound")
 
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        "gateway.platforms.feishu.gateway_event_ledger.apply_gateway_event_async",
         fake_apply,
     )
 
@@ -167,7 +183,7 @@ async def test_media_batch_flush_applies_only_flushed_normalized_event(monkeypat
         return _ok("feishu_inbound")
 
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        "gateway.platforms.feishu.gateway_event_ledger.apply_gateway_event_async",
         fake_apply,
     )
 
@@ -193,7 +209,7 @@ async def test_synthetic_reaction_and_card_command_events_are_applied(monkeypatc
         return _ok("feishu_inbound")
 
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        "gateway.platforms.feishu.gateway_event_ledger.apply_gateway_event_async",
         fake_apply,
     )
 
@@ -292,7 +308,7 @@ async def test_read_event_applies_feishu_ack_with_stable_feishu_event_id(
         return _ok("feishu_ack")
 
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        "gateway.platforms.feishu.gateway_event_ledger.apply_gateway_event_async",
         fake_apply,
     )
 
@@ -317,7 +333,7 @@ async def test_read_event_applies_one_ack_per_sdk_message_id(monkeypatch, tmp_pa
         return _ok("feishu_ack")
 
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        "gateway.platforms.feishu.gateway_event_ledger.apply_gateway_event_async",
         fake_apply,
     )
 
@@ -366,7 +382,7 @@ async def test_read_event_adapter_failures_are_classified_not_swallowed(
         return _failure("feishu_ack", failure_class)
 
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        "gateway.platforms.feishu.gateway_event_ledger.apply_gateway_event_async",
         fake_apply,
     )
 
@@ -386,7 +402,7 @@ async def test_duplicate_read_event_success_is_recorded_without_failure(
         return _ok("feishu_ack")
 
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        "gateway.platforms.feishu.gateway_event_ledger.apply_gateway_event_async",
         fake_apply,
     )
 
@@ -410,7 +426,7 @@ async def test_malformed_read_event_without_reliable_ids_is_dropped(monkeypatch,
     adapter = _adapter(tmp_path)
     apply_mock = AsyncMock()
     monkeypatch.setattr(
-        "gateway.hermes_tools_gateway_event.apply_gateway_event_async",
+        "gateway.platforms.feishu.gateway_event_ledger.apply_gateway_event_async",
         apply_mock,
     )
 

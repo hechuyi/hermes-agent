@@ -408,6 +408,7 @@ async def _send_or_update_status_coro(adapter, chat_id, status_key, content, met
 
 
 _HERMES_STATUS_CARD_MIN_UPDATE_INTERVAL_SECONDS = 1
+_HERMES_TASK_STATUS_ENABLED = False
 _HERMES_STALE_PENDING_SCAN_MAX_AGE_SECONDS = 3600
 _HERMES_STALE_PENDING_SCAN_INTERVAL_TICKS = 5
 _HERMES_SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]+")
@@ -446,16 +447,33 @@ def _status_card_delivery_id(
 
 
 def _adapter_hermes_tools_state_dir(adapter: Any, platform: Any = None, config: Any = None) -> Optional[Path]:
-    state_dir = getattr(adapter, "_hermes_tools_state_dir", None)
+    state_dir = getattr(adapter, "_gateway_event_state_dir", None)
     if state_dir:
         return Path(state_dir)
 
     adapter_config = getattr(adapter, "config", None)
     adapter_extra = getattr(adapter_config, "extra", None)
+    if isinstance(adapter_extra, dict) and adapter_extra.get("gateway_event_state_dir"):
+        return Path(str(adapter_extra["gateway_event_state_dir"]))
+
+    platforms = getattr(config, "platforms", None)
+    if platform is not None and isinstance(platforms, dict):
+        platform_config = platforms.get(platform)
+        platform_extra = getattr(platform_config, "extra", None)
+        if isinstance(platform_extra, dict) and platform_extra.get("gateway_event_state_dir"):
+            return Path(str(platform_extra["gateway_event_state_dir"]))
+
+    env_state_dir = os.getenv("HERMES_GATEWAY_EVENT_STATE_DIR", "")
+    if env_state_dir:
+        return Path(env_state_dir)
+
+    state_dir = getattr(adapter, "_hermes_tools_state_dir", None)
+    if state_dir:
+        return Path(state_dir)
+
     if isinstance(adapter_extra, dict) and adapter_extra.get("hermes_tools_state_dir"):
         return Path(str(adapter_extra["hermes_tools_state_dir"]))
 
-    platforms = getattr(config, "platforms", None)
     if platform is not None and isinstance(platforms, dict):
         platform_config = platforms.get(platform)
         platform_extra = getattr(platform_config, "extra", None)
@@ -501,12 +519,16 @@ async def _emit_hermes_task_status(
     min_update_interval_seconds: int = _HERMES_STATUS_CARD_MIN_UPDATE_INTERVAL_SECONDS,
     allow_create: bool = False,
 ) -> bool:
-    """Emit a Hermes task_status event and execute a validated status-card action.
+    """Return whether task_status/status-card handled this progress update.
 
-    Returns True when the adapter is eligible for Hermes status handling, even
-    if apply/execute fails closed. Callers use that to avoid creating fallback
-    heartbeat cards when the audited path is configured but unhealthy.
+    Task-status/status-card internalization is intentionally deferred for this
+    scope. While disabled, callers must continue through the normal progress
+    send/edit fallback instead of constructing or applying a ``task_status``
+    gateway event.
     """
+    if not _HERMES_TASK_STATUS_ENABLED:
+        return False
+
     if not adapter or not callable(getattr(adapter, "execute_status_card_action", None)):
         return False
     state_dir = _adapter_hermes_tools_state_dir(adapter, platform=platform, config=config)
@@ -640,8 +662,13 @@ async def _run_stale_pending_scan_for_adapters(
             "now": scan_now,
             "max_age_seconds": scan_max_age,
         }
+        if apply_gateway_event_ledger_async is None:
+            logger.warning(
+                "Hermes stale_pending_scan blocker: failure_class=gateway_event_ledger_unavailable"
+            )
+            continue
         try:
-            result = await apply_gateway_event_async(event, state_dir)
+            result = await apply_gateway_event_ledger_async(event, state_dir)
         except Exception as exc:
             logger.warning(
                 "Hermes stale_pending_scan failed closed: failure_class=%s",
@@ -1382,6 +1409,12 @@ from gateway.platforms.base import (
     _reply_anchor_for_event,
     merge_pending_message_event,
 )
+try:
+    from gateway.gateway_event_ledger import apply_gateway_event_async as apply_gateway_event_ledger_async
+except ModuleNotFoundError as exc:
+    if exc.name != "gateway.gateway_event_ledger":
+        raise
+    apply_gateway_event_ledger_async = None
 from gateway.hermes_tools_gateway_event import apply_gateway_event_async
 from gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,

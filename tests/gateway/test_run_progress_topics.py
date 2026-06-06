@@ -16,6 +16,11 @@ from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageTyp
 from gateway.session import SessionSource
 
 
+STATUS_CARD_DEFERRED_SKIP = pytest.mark.skip(
+    reason="status-card/task card internalization intentionally deferred by user scope"
+)
+
+
 class ProgressCaptureAdapter(BasePlatformAdapter):
     def __init__(self, platform=Platform.TELEGRAM):
         super().__init__(PlatformConfig(enabled=True, token="***"), platform)
@@ -633,6 +638,72 @@ async def test_run_agent_feishu_progress_replies_inside_existing_thread(monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("state_attr", ["_gateway_event_state_dir", "_hermes_tools_state_dir"])
+async def test_run_agent_feishu_state_dir_uses_normal_progress_fallback(
+    monkeypatch, tmp_path, state_attr
+):
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+    _install_fake_agent(monkeypatch, FakeAgent)
+
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"})
+
+    events = []
+
+    async def fake_apply_gateway_event_async(event, state_dir, **kwargs):
+        events.append((dict(event), state_dir))
+        return SimpleNamespace(
+            ok=True,
+            event_type="task_status",
+            action=None,
+            failure_class=None,
+            reason=None,
+            diagnostics="",
+        )
+
+    monkeypatch.setattr(
+        gateway_run,
+        "apply_gateway_event_async",
+        fake_apply_gateway_event_async,
+        raising=False,
+    )
+
+    adapter = StatusCardProgressAdapter()
+    setattr(adapter, state_attr, tmp_path / f"{state_attr.removeprefix('_')}-state")
+    runner = _make_runner(adapter)
+    source = SessionSource(
+        platform=Platform.FEISHU,
+        chat_id="oc_chat",
+        chat_type="group",
+        thread_id="topic_17585",
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id=f"sess-feishu-progress-fallback-{state_attr}",
+        session_key=f"agent:main:feishu:group:oc_chat:topic_17585:{state_attr}",
+        event_message_id="om_triggering_user_message",
+    )
+
+    assert result["final_response"] == "done"
+    assert events == []
+    assert adapter.status_card_actions == []
+    assert adapter.sent
+    assert adapter.sent[0]["reply_to"] == "om_triggering_user_message"
+    assert adapter.sent[0]["metadata"] == {
+        "thread_id": "topic_17585",
+        "reply_to_message_id": "om_triggering_user_message",
+    }
+    assert adapter.edits
+    assert adapter.edits[0]["message_id"] == "progress-1"
+
+
+@STATUS_CARD_DEFERRED_SKIP
+@pytest.mark.asyncio
 async def test_run_agent_feishu_progress_emits_task_status_create_then_patch(monkeypatch, tmp_path):
     adapter, events, result = await _run_feishu_status_card_agent(monkeypatch, tmp_path)
 
@@ -652,6 +723,7 @@ async def test_run_agent_feishu_progress_emits_task_status_create_then_patch(mon
     ]
 
 
+@STATUS_CARD_DEFERRED_SKIP
 @pytest.mark.asyncio
 async def test_run_agent_feishu_status_card_delivery_ids_distinguish_patch_sequence(
     monkeypatch, tmp_path
@@ -682,6 +754,7 @@ async def test_run_agent_feishu_status_card_delivery_ids_distinguish_patch_seque
     assert "patch" in delivery_ids[2]
 
 
+@STATUS_CARD_DEFERRED_SKIP
 @pytest.mark.asyncio
 async def test_hermes_status_card_delivery_ids_keep_sequence_when_task_id_is_max_length(
     monkeypatch, tmp_path
@@ -744,6 +817,7 @@ async def test_hermes_status_card_delivery_ids_keep_sequence_when_task_id_is_max
     assert delivery_ids[2].startswith("status-card-patch-2-")
 
 
+@STATUS_CARD_DEFERRED_SKIP
 @pytest.mark.asyncio
 async def test_run_agent_terminal_task_status_requires_final_reply_without_suppressing_normal_final(
     monkeypatch, tmp_path
@@ -766,6 +840,7 @@ async def test_run_agent_terminal_task_status_requires_final_reply_without_suppr
     assert result.get("already_sent") is not True
 
 
+@STATUS_CARD_DEFERRED_SKIP
 @pytest.mark.asyncio
 async def test_run_agent_feishu_no_progress_does_not_create_completed_status_card(
     monkeypatch, tmp_path
@@ -783,6 +858,7 @@ async def test_run_agent_feishu_no_progress_does_not_create_completed_status_car
     assert adapter.edits == []
 
 
+@STATUS_CARD_DEFERRED_SKIP
 @pytest.mark.asyncio
 async def test_run_agent_terminal_task_status_without_binding_is_noop(monkeypatch, tmp_path):
     adapter, events, result = await _run_feishu_status_card_agent(
@@ -800,6 +876,7 @@ async def test_run_agent_terminal_task_status_without_binding_is_noop(monkeypatc
     ]
 
 
+@STATUS_CARD_DEFERRED_SKIP
 @pytest.mark.asyncio
 async def test_run_agent_terminal_task_status_with_binding_patches_completed(
     monkeypatch, tmp_path
@@ -820,6 +897,7 @@ async def test_run_agent_terminal_task_status_with_binding_patches_completed(
     assert terminal_actions[-1]["type"] == "update"
 
 
+@STATUS_CARD_DEFERRED_SKIP
 @pytest.mark.asyncio
 async def test_run_agent_feishu_status_card_apply_failure_suppresses_progress_fallback(
     monkeypatch, tmp_path
@@ -847,6 +925,7 @@ async def test_run_agent_feishu_status_card_apply_failure_suppresses_progress_fa
     assert adapter.edits == []
 
 
+@STATUS_CARD_DEFERRED_SKIP
 @pytest.mark.asyncio
 async def test_run_agent_feishu_status_card_execute_failure_suppresses_progress_fallback(
     monkeypatch, tmp_path
@@ -869,6 +948,7 @@ async def test_run_agent_feishu_status_card_execute_failure_suppresses_progress_
     assert adapter.edits == []
 
 
+@STATUS_CARD_DEFERRED_SKIP
 @pytest.mark.asyncio
 async def test_run_agent_feishu_status_card_execute_failure_logs_stable_failure_class(
     monkeypatch, tmp_path, caplog
@@ -951,10 +1031,13 @@ async def test_start_gateway_runs_stale_pending_scan_after_runner_start_before_w
 async def test_stale_pending_scan_deduplicates_shared_state_dir(monkeypatch, tmp_path):
     gateway_run = importlib.import_module("gateway.run")
     shared_state_dir = tmp_path / "shared-hermes-tools-state"
+    gateway_event_state_dir = tmp_path / "shared-gateway-event-state"
     adapter_a = ProgressCaptureAdapter(platform=Platform.FEISHU)
     adapter_b = ProgressCaptureAdapter(platform=Platform.SLACK)
     adapter_a._hermes_tools_state_dir = shared_state_dir
     adapter_b._hermes_tools_state_dir = shared_state_dir
+    adapter_a._gateway_event_state_dir = gateway_event_state_dir
+    adapter_b._gateway_event_state_dir = gateway_event_state_dir
     calls = []
 
     async def fake_apply_gateway_event_async(event, state_dir, **kwargs):
@@ -974,7 +1057,7 @@ async def test_stale_pending_scan_deduplicates_shared_state_dir(monkeypatch, tmp
             diagnostics="",
         )
 
-    monkeypatch.setattr(gateway_run, "apply_gateway_event_async", fake_apply_gateway_event_async, raising=False)
+    monkeypatch.setattr(gateway_run, "apply_gateway_event_ledger_async", fake_apply_gateway_event_async, raising=False)
 
     await gateway_run._run_stale_pending_scan_for_adapters(
         {Platform.FEISHU: adapter_a, Platform.SLACK: adapter_b}
@@ -982,7 +1065,7 @@ async def test_stale_pending_scan_deduplicates_shared_state_dir(monkeypatch, tmp
 
     assert len(calls) == 1
     assert calls[0][0]["type"] == "stale_pending_scan"
-    assert calls[0][1] == shared_state_dir
+    assert calls[0][1] == gateway_event_state_dir
 
 
 @pytest.mark.asyncio
@@ -1005,7 +1088,7 @@ async def test_cron_ticker_runs_periodic_stale_pending_scan_without_resend(monke
         )
 
     monkeypatch.setattr("cron.scheduler.tick", lambda **kwargs: None)
-    monkeypatch.setattr(gateway_run, "apply_gateway_event_async", fake_apply_gateway_event_async, raising=False)
+    monkeypatch.setattr(gateway_run, "apply_gateway_event_ledger_async", fake_apply_gateway_event_async, raising=False)
 
     thread = threading.Thread(
         target=gateway_run._start_cron_ticker,

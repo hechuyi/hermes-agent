@@ -71,6 +71,13 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from gateway import hermes_tools_gateway_event
+
+try:
+    from gateway import gateway_event_ledger
+    from gateway.gateway_event_contract import GatewayEventResult
+except ImportError:
+    gateway_event_ledger = hermes_tools_gateway_event
+    GatewayEventResult = hermes_tools_gateway_event.HermesToolsGatewayEventResult
 # aiohttp/websockets are independent optional deps — import outside lark_oapi
 # so they remain available for tests and webhook mode even if lark_oapi is missing.
 try:
@@ -1451,13 +1458,16 @@ class FeishuAdapter(BasePlatformAdapter):
         self._seen_message_ids: Dict[str, float] = {}  # message_id → seen_at (time.time())
         self._seen_message_order: List[str] = []
         self._dedup_state_path = get_hermes_home() / "feishu_seen_message_ids.json"
-        hermes_tools_state_dir = (
-            config.extra.get("hermes_tools_state_dir")
+        gateway_event_state_dir = (
+            config.extra.get("gateway_event_state_dir")
+            or config.extra.get("hermes_tools_state_dir")
+            or os.getenv("HERMES_GATEWAY_EVENT_STATE_DIR", "")
             or os.getenv("HERMES_TOOLS_STATE_DIR", "")
         )
-        self._hermes_tools_state_dir = (
-            Path(str(hermes_tools_state_dir)) if hermes_tools_state_dir else None
+        self._gateway_event_state_dir = (
+            Path(str(gateway_event_state_dir)) if gateway_event_state_dir else None
         )
+        self._hermes_tools_state_dir = self._gateway_event_state_dir
         self._dedup_lock = threading.Lock()
         self._sender_name_cache: Dict[str, tuple[str, float]] = {}  # sender_id → (name, expire_at)
         self._webhook_rate_counts: Dict[str, tuple[int, float]] = {}  # rate_key → (count, window_start)
@@ -1816,7 +1826,7 @@ class FeishuAdapter(BasePlatformAdapter):
         try:
             for chunk_index, chunk in enumerate(chunks):
                 msg_type, payload = self._build_outbound_payload(chunk)
-                if self._hermes_tools_state_dir is not None:
+                if self._gateway_event_state_dir is not None:
                     operation, operation_error = self._send_delivery_operation(
                         reply_to=reply_to,
                         metadata=metadata,
@@ -1983,7 +1993,7 @@ class FeishuAdapter(BasePlatformAdapter):
             msg_type, payload = self._build_outbound_payload(content)
             body = self._build_update_message_body(msg_type=msg_type, content=payload)
             request = self._build_update_message_request(message_id=message_id, request_body=body)
-            if self._hermes_tools_state_dir is not None:
+            if self._gateway_event_state_dir is not None:
                 delivery_id = self._delivery_id_for(
                     "message_edit",
                     metadata=metadata,
@@ -2131,7 +2141,7 @@ class FeishuAdapter(BasePlatformAdapter):
             }
 
             payload = json.dumps(card, ensure_ascii=False)
-            if self._hermes_tools_state_dir is not None:
+            if self._gateway_event_state_dir is not None:
                 operation = "approval_prompt_card_create"
                 delivery_id = self._delivery_id_for(
                     operation,
@@ -2179,7 +2189,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     "chat_id": chat_id,
                     **card_scope,
                 }
-                if self._hermes_tools_state_dir is not None:
+                if self._gateway_event_state_dir is not None:
                     approval_state.update(
                         {
                             "prompt_card": copy.deepcopy(card),
@@ -2266,7 +2276,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 payload = json.dumps(card_payload, ensure_ascii=False)
             except Exception:
                 logger.debug("[Feishu] Failed to attach update prompt card scope metadata", exc_info=True)
-            if self._hermes_tools_state_dir is not None:
+            if self._gateway_event_state_dir is not None:
                 operation = "update_prompt_card_create"
                 delivery_id = self._delivery_id_for(
                     operation,
@@ -2314,7 +2324,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     "chat_id": chat_id,
                     **card_scope,
                 }
-                if self._hermes_tools_state_dir is not None:
+                if self._gateway_event_state_dir is not None:
                     prompt_state.update(
                         {
                             "prompt_card": copy.deepcopy(card_payload),
@@ -2775,7 +2785,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
     def _on_message_read_event(self, data: P2ImMessageMessageReadV1) -> None:
         """Schedule Feishu read acknowledgements through the Hermes event ledger."""
-        if self._hermes_tools_state_dir is None:
+        if self._gateway_event_state_dir is None:
             return
         loop = self._loop
         if not self._loop_accepts_callbacks(loop):
@@ -3097,7 +3107,7 @@ class FeishuAdapter(BasePlatformAdapter):
         if P2CardActionTriggerResponse is None:
             return None
         response = P2CardActionTriggerResponse()
-        if self._hermes_tools_state_dir is not None:
+        if self._gateway_event_state_dir is not None:
             return response
         if CallBackCard is not None:
             card = CallBackCard()
@@ -3134,7 +3144,7 @@ class FeishuAdapter(BasePlatformAdapter):
         if P2CardActionTriggerResponse is None:
             return None
         response = P2CardActionTriggerResponse()
-        if self._hermes_tools_state_dir is not None:
+        if self._gateway_event_state_dir is not None:
             return response
         if CallBackCard is not None:
             card = CallBackCard()
@@ -3293,7 +3303,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 approval_id, expected_chat_id, chat_id,
             )
             return
-        if self._hermes_tools_state_dir is not None:
+        if self._gateway_event_state_dir is not None:
             claim = self._claim_audited_prompt_resolution(
                 state,
                 choice=choice,
@@ -3322,7 +3332,7 @@ class FeishuAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
-            if self._hermes_tools_state_dir is not None:
+            if self._gateway_event_state_dir is not None:
                 await self._restore_audited_prompt_card_after_side_effect_failure(
                     operation="approval_prompt_card_update",
                     state=state,
@@ -3340,7 +3350,7 @@ class FeishuAdapter(BasePlatformAdapter):
         if not state:
             logger.debug("[Feishu] Update prompt %s already resolved or unknown", prompt_id)
             return
-        if self._hermes_tools_state_dir is not None:
+        if self._gateway_event_state_dir is not None:
             claim = self._claim_audited_prompt_resolution(
                 state,
                 choice=answer,
@@ -3368,7 +3378,7 @@ class FeishuAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             logger.error("Failed to resolve Feishu update prompt: %s", exc)
-            if self._hermes_tools_state_dir is not None:
+            if self._gateway_event_state_dir is not None:
                 await self._restore_audited_prompt_card_after_side_effect_failure(
                     operation="update_prompt_card_update",
                     state=state,
@@ -3618,7 +3628,7 @@ class FeishuAdapter(BasePlatformAdapter):
         return ""
 
     async def _apply_inbound_gateway_event(self, event: MessageEvent) -> bool:
-        if self._hermes_tools_state_dir is None:
+        if self._gateway_event_state_dir is None:
             return True
         inbound_id = str(getattr(event, "message_id", "") or "").strip()
         if not inbound_id:
@@ -3646,12 +3656,12 @@ class FeishuAdapter(BasePlatformAdapter):
         return int(time.time())
 
     async def _apply_gateway_event(self, event_payload: Dict[str, Any]) -> Any:
-        if self._hermes_tools_state_dir is None:
+        if self._gateway_event_state_dir is None:
             return True
         try:
-            result = await hermes_tools_gateway_event.apply_gateway_event_async(
+            result = await gateway_event_ledger.apply_gateway_event_async(
                 event_payload,
-                self._hermes_tools_state_dir,
+                self._gateway_event_state_dir,
             )
         except Exception as exc:
             logger.warning(
@@ -5243,7 +5253,7 @@ class FeishuAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]],
         default_message: str,
     ) -> SendResult:
-        if self._hermes_tools_state_dir is None:
+        if self._gateway_event_state_dir is None:
             response = await self._feishu_send_with_retry(
                 chat_id=chat_id,
                 msg_type=msg_type,
