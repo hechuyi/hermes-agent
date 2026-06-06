@@ -5,6 +5,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 """
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -40,6 +41,78 @@ from hermes_cli.setup import (
 from hermes_cli.colors import Colors, color
 
 logger = logging.getLogger(__name__)
+
+
+def _preflight_gateway_event(state_dir: str | Path, *, lock_timeout: float = 10):
+    from gateway.gateway_event_ledger import preflight_gateway_event
+
+    return preflight_gateway_event(state_dir, timeout_seconds=lock_timeout)
+
+
+def _gateway_event_preflight_payload(result) -> dict:
+    return {
+        "ok": bool(getattr(result, "ok", False)),
+        "event_type": getattr(result, "event_type", None),
+        "action": getattr(result, "action", None),
+        "failure_class": getattr(result, "failure_class", None),
+        "reason": getattr(result, "reason", None),
+        "diagnostics": getattr(result, "diagnostics", ""),
+    }
+
+
+def _gateway_event_preflight_state_dir(args) -> str | None:
+    return (
+        getattr(args, "state_dir", None)
+        or os.environ.get("HERMES_GATEWAY_EVENT_STATE_DIR")
+        or os.environ.get("HERMES_TOOLS_STATE_DIR")
+    )
+
+
+def _run_gateway_event_preflight(args) -> None:
+    state_dir = _gateway_event_preflight_state_dir(args)
+    json_output = bool(getattr(args, "json", False))
+    if not state_dir:
+        payload = {
+            "ok": False,
+            "event_type": "preflight",
+            "action": None,
+            "failure_class": "gateway_event_state_dir_missing",
+            "reason": "gateway event state dir is not configured",
+            "diagnostics": "",
+        }
+        if json_output:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print(
+                "gateway_event_preflight "
+                "failure_class=gateway_event_state_dir_missing "
+                "reason=state_dir_not_configured",
+                file=sys.stderr,
+            )
+        sys.exit(1)
+
+    result = _preflight_gateway_event(
+        Path(state_dir),
+        lock_timeout=float(getattr(args, "lock_timeout", 10)),
+    )
+    payload = _gateway_event_preflight_payload(result)
+    if json_output:
+        print(json.dumps(payload, sort_keys=True))
+    elif payload["ok"]:
+        action = payload.get("action")
+        checks = action.get("checks") if isinstance(action, dict) else None
+        check_count = len(checks) if isinstance(checks, list) else 0
+        print(f"gateway_event_preflight ok=true checks={check_count}")
+    else:
+        failure_class = payload.get("failure_class") or "gateway_event_preflight_failed"
+        reason = payload.get("reason") or "gateway event preflight failed"
+        print(
+            f"gateway_event_preflight failure_class={failure_class} reason={reason}",
+            file=sys.stderr,
+        )
+
+    if not payload["ok"]:
+        sys.exit(1)
 
 # =============================================================================
 # Process Management (for manual gateway runs)
@@ -5235,6 +5308,10 @@ def _gateway_command_inner(args):
 
     if subcmd == "setup":
         gateway_setup()
+        return
+
+    if subcmd == "preflight":
+        _run_gateway_event_preflight(args)
         return
 
     # Service management commands

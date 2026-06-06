@@ -11647,6 +11647,32 @@ def main():
     # gateway setup
     gateway_subparsers.add_parser("setup", help="Configure messaging platforms")
 
+    # gateway preflight
+    gateway_preflight = gateway_subparsers.add_parser(
+        "preflight",
+        help="Run the internal gateway-event ledger preflight",
+    )
+    gateway_preflight.add_argument(
+        "--state-dir",
+        dest="state_dir",
+        help=(
+            "Durable gateway-event state directory. Defaults to "
+            "HERMES_GATEWAY_EVENT_STATE_DIR, then legacy HERMES_TOOLS_STATE_DIR."
+        ),
+    )
+    gateway_preflight.add_argument(
+        "--lock-timeout",
+        dest="lock_timeout",
+        type=float,
+        default=10,
+        help="Ledger lock timeout in seconds",
+    )
+    gateway_preflight.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable preflight result JSON",
+    )
+
     # gateway migrate-legacy
     gateway_migrate_legacy = gateway_subparsers.add_parser(
         "migrate-legacy",

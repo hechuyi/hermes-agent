@@ -1,6 +1,7 @@
 """Tests for gateway service management helpers."""
 
 import os
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,87 @@ class TestUserSystemdPrivateSocketPreflight:
 
         assert gateway_cli._wait_for_user_dbus_socket(timeout=0.1) is True
         assert calls == ["env"]
+
+
+class TestGatewayEventPreflight:
+    def test_gateway_preflight_runs_internal_ledger(self, tmp_path, monkeypatch, capsys):
+        calls = []
+
+        def fake_preflight(state_dir, *, lock_timeout=10):
+            calls.append((Path(state_dir), lock_timeout))
+            return SimpleNamespace(
+                ok=True,
+                event_type="preflight",
+                action={"type": "preflight", "checks": [{"name": "state_dir_writable", "ok": True}]},
+                failure_class=None,
+                reason=None,
+                diagnostics="",
+            )
+
+        monkeypatch.setattr(gateway_cli, "_preflight_gateway_event", fake_preflight)
+
+        gateway_cli.gateway_command(
+            SimpleNamespace(
+                gateway_command="preflight",
+                state_dir=str(tmp_path),
+                lock_timeout=2.5,
+                json=False,
+            )
+        )
+
+        assert calls == [(tmp_path, 2.5)]
+        assert "gateway_event_preflight ok=true checks=1" in capsys.readouterr().out
+
+    def test_gateway_preflight_json_failure_exits_nonzero(self, tmp_path, monkeypatch, capsys):
+        def fake_preflight(state_dir, *, lock_timeout=10):
+            return SimpleNamespace(
+                ok=False,
+                event_type="preflight",
+                action={"type": "preflight", "checks": []},
+                failure_class="gateway_event_preflight_failed",
+                reason="gateway event preflight failed",
+                diagnostics="state_dir_writable=false",
+            )
+
+        monkeypatch.setattr(gateway_cli, "_preflight_gateway_event", fake_preflight)
+
+        with pytest.raises(SystemExit) as exc:
+            gateway_cli.gateway_command(
+                SimpleNamespace(
+                    gateway_command="preflight",
+                    state_dir=str(tmp_path),
+                    lock_timeout=10,
+                    json=True,
+                )
+            )
+
+        assert exc.value.code == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload == {
+            "action": {"checks": [], "type": "preflight"},
+            "diagnostics": "state_dir_writable=false",
+            "event_type": "preflight",
+            "failure_class": "gateway_event_preflight_failed",
+            "ok": False,
+            "reason": "gateway event preflight failed",
+        }
+
+    def test_gateway_preflight_requires_state_dir_when_env_absent(self, monkeypatch, capsys):
+        monkeypatch.delenv("HERMES_GATEWAY_EVENT_STATE_DIR", raising=False)
+        monkeypatch.delenv("HERMES_TOOLS_STATE_DIR", raising=False)
+
+        with pytest.raises(SystemExit) as exc:
+            gateway_cli.gateway_command(
+                SimpleNamespace(
+                    gateway_command="preflight",
+                    state_dir=None,
+                    lock_timeout=10,
+                    json=False,
+                )
+            )
+
+        assert exc.value.code == 1
+        assert "failure_class=gateway_event_state_dir_missing" in capsys.readouterr().err
 
 
 class TestSystemdServiceRefresh:
