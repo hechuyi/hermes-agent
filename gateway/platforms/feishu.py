@@ -1430,6 +1430,8 @@ class FeishuAdapter(BasePlatformAdapter):
     """Feishu/Lark bot adapter."""
 
     MAX_MESSAGE_LENGTH = 8000
+    # Max distinct chat IDs retained before LRU eviction bounds memory growth.
+    CHAT_LOCK_MAX_SIZE: int = 1000
     _DELIVERY_OPERATION_HINT_KEY = "delivery_operation_hint"
     _SEND_DELIVERY_OPERATION_HINTS = frozenset(
         {"queued_followup_first_reply", "stream_fresh_final"}
@@ -1480,7 +1482,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._pending_inbound_lock = threading.Lock()
         self._pending_drain_scheduled = False
         self._pending_inbound_max_depth = 1000  # cap queue; drop oldest beyond
-        self._chat_locks: Dict[str, asyncio.Lock] = {}  # chat_id → lock (per-chat serial processing)
+        self._chat_locks: "OrderedDict[str, asyncio.Lock]" = OrderedDict()  # chat_id → lock (per-chat serial processing, LRU-bounded)
         self._sent_message_ids_to_chat: Dict[str, str] = {}  # message_id → chat_id (for reaction routing)
         self._sent_message_id_order: List[str] = []  # LRU order for _sent_message_ids_to_chat
         self._chat_info_cache: Dict[str, Dict[str, Any]] = {}
@@ -3570,11 +3572,24 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _get_chat_lock(self, chat_id: str) -> asyncio.Lock:
-        """Return (creating if needed) the per-chat asyncio.Lock for serial message processing."""
+        """Return (creating if needed) the per-chat asyncio.Lock for serial message processing.
+
+        The cache is LRU-bounded so long-running gateways that see many chats
+        do not retain one lock per historical chat forever. Held locks are
+        skipped during eviction. If all cached locks are held, the cache may
+        temporarily exceed the cap instead of breaking per-chat serialization.
+        """
         lock = self._chat_locks.get(chat_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._chat_locks[chat_id] = lock
+        if lock is not None:
+            self._chat_locks.move_to_end(chat_id)
+            return lock
+        if len(self._chat_locks) >= self.CHAT_LOCK_MAX_SIZE:
+            for key in list(self._chat_locks):
+                if not self._chat_locks[key].locked():
+                    self._chat_locks.pop(key)
+                    break
+        lock = asyncio.Lock()
+        self._chat_locks[chat_id] = lock
         return lock
 
     async def _handle_message_with_guards(self, event: MessageEvent) -> None:
