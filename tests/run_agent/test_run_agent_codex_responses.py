@@ -383,6 +383,92 @@ def test_build_api_kwargs_copilot_responses_omits_reasoning_for_non_reasoning_mo
     assert "prompt_cache_key" not in kwargs
 
 
+def _build_xai_agent_with_slash_enum_tool(monkeypatch):
+    def _fake_get_tool_definitions(**_kwargs):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "brave_like",
+                    "description": "Tool with slash-containing enum and validators",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "accept": {
+                                "type": "string",
+                                "enum": ["application/json", "*/*"],
+                            },
+                            "match": {
+                                "type": "string",
+                                "pattern": "^[a-z]+$",
+                                "format": "regex",
+                            },
+                        },
+                    },
+                },
+            }
+        ]
+
+    monkeypatch.setattr(run_agent, "get_tool_definitions", _fake_get_tool_definitions)
+    monkeypatch.setattr(run_agent, "check_toolset_requirements", lambda: {})
+
+    agent = run_agent.AIAgent(
+        model="grok-4.3",
+        provider="xai-oauth",
+        api_mode="codex_responses",
+        base_url="https://api.x.ai/v1",
+        api_key="xai-token",
+        quiet_mode=True,
+        max_iterations=4,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    agent._cleanup_task_resources = lambda task_id: None
+    agent._persist_session = lambda messages, history=None: None
+    agent._save_trajectory = lambda messages, user_message, completed: None
+    return agent
+
+
+def test_build_api_kwargs_xai_strips_schema_from_outgoing_request(monkeypatch):
+    agent = _build_xai_agent_with_slash_enum_tool(monkeypatch)
+
+    kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+    params = kwargs["tools"][0]["parameters"]
+    assert "enum" not in params["properties"]["accept"]
+    assert "pattern" not in params["properties"]["match"]
+    assert "format" not in params["properties"]["match"]
+
+
+def test_build_api_kwargs_xai_does_not_mutate_agent_tools(monkeypatch):
+    agent = _build_xai_agent_with_slash_enum_tool(monkeypatch)
+
+    agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+    accept = agent.tools[0]["function"]["parameters"]["properties"]["accept"]
+    match = agent.tools[0]["function"]["parameters"]["properties"]["match"]
+    assert accept.get("enum") == ["application/json", "*/*"]
+    assert match.get("pattern") == "^[a-z]+$"
+    assert match.get("format") == "regex"
+
+
+def test_build_api_kwargs_xai_is_idempotent_across_repeated_calls(monkeypatch):
+    agent = _build_xai_agent_with_slash_enum_tool(monkeypatch)
+
+    kwargs1 = agent._build_api_kwargs([{"role": "user", "content": "first"}])
+    kwargs2 = agent._build_api_kwargs([{"role": "user", "content": "second"}])
+    kwargs3 = agent._build_api_kwargs([{"role": "user", "content": "third"}])
+
+    for kwargs in (kwargs1, kwargs2, kwargs3):
+        params = kwargs["tools"][0]["parameters"]
+        assert "enum" not in params["properties"]["accept"]
+        assert "pattern" not in params["properties"]["match"]
+        assert "format" not in params["properties"]["match"]
+
+    accept = agent.tools[0]["function"]["parameters"]["properties"]["accept"]
+    assert accept.get("enum") == ["application/json", "*/*"]
+
+
 def test_run_codex_stream_returns_collected_items_when_stream_ends_without_terminal(monkeypatch):
     """The event-driven path tolerates streams that end without a terminal frame.
 

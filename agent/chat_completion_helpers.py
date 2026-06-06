@@ -616,10 +616,12 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
         # the same opaque message; strip those enums too.
         if is_xai_responses:
             try:
+                import copy as _copy
                 from tools.schema_sanitizer import (
                     strip_pattern_and_format,
                     strip_slash_enum,
                 )
+                tools_for_api = _copy.deepcopy(tools_for_api)
                 tools_for_api, _ = strip_pattern_and_format(tools_for_api)
                 tools_for_api, _ = strip_slash_enum(tools_for_api)
             except Exception as exc:

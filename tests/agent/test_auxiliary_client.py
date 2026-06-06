@@ -2464,6 +2464,46 @@ class TestCodexAdapterReasoningTranslation:
         )
         assert captured.get("reasoning") == {"effort": "high", "summary": "auto"}
 
+    def test_tool_schema_sanitization_does_not_mutate_input_tools(self):
+        adapter, captured = self._build_adapter()
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "brave_like",
+                    "description": "Tool with slash-containing enum and validators",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "accept": {
+                                "type": "string",
+                                "enum": ["application/json", "*/*"],
+                            },
+                            "match": {
+                                "type": "string",
+                                "pattern": "^[a-z]+$",
+                                "format": "regex",
+                            },
+                        },
+                    },
+                },
+            }
+        ]
+
+        adapter.create(messages=[{"role": "user", "content": "hi"}], tools=tools)
+
+        sent_params = captured["tools"][0]["parameters"]
+        assert "enum" not in sent_params["properties"]["accept"]
+        assert "pattern" not in sent_params["properties"]["match"]
+        assert "format" not in sent_params["properties"]["match"]
+        original_params = tools[0]["function"]["parameters"]
+        assert original_params["properties"]["accept"].get("enum") == [
+            "application/json",
+            "*/*",
+        ]
+        assert original_params["properties"]["match"].get("pattern") == "^[a-z]+$"
+        assert original_params["properties"]["match"].get("format") == "regex"
+
     def test_reasoning_disabled_omits_reasoning_and_include(self):
         adapter, captured = self._build_adapter()
         adapter.create(
