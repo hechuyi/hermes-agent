@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import math
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -21,6 +24,9 @@ from gateway.gateway_event_contract import (
 
 
 LEDGER_FILENAME = "gateway_event_ledger.json"
+LOCK_FILENAME = ".gateway_event_ledger.lock"
+_DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
+_IS_WINDOWS = os.name == "nt"
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.Lock] = {}
 
@@ -32,11 +38,12 @@ def apply_gateway_event(
     timeout_seconds: int | float = 10,
     binary: str | None = None,
 ) -> GatewayEventResult:
-    del timeout_seconds, binary
+    del binary
     event_type = _safe_event_type(event)
+    lock_timeout = _lock_timeout_seconds(timeout_seconds)
     try:
         validated_event_type = validate_gateway_event(event)
-        with _lock_for(state_dir):
+        with _state_lock(state_dir, lock_timeout):
             state_path = _state_path(state_dir)
             state_path.parent.mkdir(parents=True, exist_ok=True)
             state = _read_state(state_path)
@@ -74,13 +81,14 @@ def preflight_gateway_event(
     timeout_seconds: int | float = 10,
     binary: str | None = None,
 ) -> GatewayEventResult:
-    del timeout_seconds, binary
+    del binary
+    lock_timeout = _lock_timeout_seconds(timeout_seconds)
     checks: list[dict[str, Any]] = []
     try:
         _check_state_dir_writable(state_dir)
         checks.append(_check("state_dir_writable", True))
         with tempfile.TemporaryDirectory(dir=Path(state_dir)) as probe_dir:
-            checks.extend(_run_preflight_event_checks(Path(probe_dir)))
+            checks.extend(_run_preflight_event_checks(Path(probe_dir), lock_timeout))
     except OSError:
         checks.append(_check("state_dir_writable", False))
     except Exception:
@@ -319,7 +327,7 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     with state_path.open("r", encoding="utf-8") as handle:
         raw = json.load(handle)
     if not isinstance(raw, dict) or raw.get("version") != 1:
-        raise ValueError("invalid ledger schema")
+        raise _state_schema_error()
     state = _empty_state()
     for key in (
         "inbounds",
@@ -330,10 +338,11 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     ):
         value = raw.get(key, {})
         if not isinstance(value, dict):
-            raise ValueError("invalid ledger section")
+            raise _state_schema_error()
         state[key] = value
+    _validate_persisted_inbound_records(state["inbounds"])
     _validate_persisted_delivery_records(state["deliveries"])
-    _backfill_ack_event_index(state)
+    _reconcile_persisted_indexes(state)
     return state
 
 
@@ -355,6 +364,7 @@ def _write_state_atomic(state_path: Path, state: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, state_path)
+        _fsync_parent_dir(state_path)
     except Exception:
         try:
             os.unlink(tmp_name)
@@ -375,29 +385,88 @@ def _empty_state() -> dict[str, Any]:
 
 
 def _validate_persisted_delivery_records(deliveries: Mapping[str, Any]) -> None:
-    for record in deliveries.values():
+    for delivery_key, record in deliveries.items():
         try:
             validate_gateway_action({"type": "delivery_record", "record": record})
         except ValueError as exc:
-            raise GatewayEventContractError(
-                "gateway_event_state_schema_invalid",
-                "gateway event state schema invalid",
-            ) from exc
+            raise _state_schema_error() from exc
+        if not isinstance(delivery_key, str) or record.get("delivery_id") != delivery_key:
+            raise _state_schema_error()
 
 
-def _backfill_ack_event_index(state: dict[str, Any]) -> None:
-    ack_event_index = state["ack_event_index"]
+def _validate_persisted_inbound_records(inbounds: Mapping[str, Any]) -> None:
+    for record in inbounds.values():
+        try:
+            validate_gateway_action(
+                {
+                    "type": "inbound_admission",
+                    "decision": "continue",
+                    "duplicate": False,
+                    "record": record,
+                }
+            )
+        except ValueError as exc:
+            raise _state_schema_error() from exc
+
+
+def _reconcile_persisted_indexes(state: dict[str, Any]) -> None:
+    expected_identity_index: dict[str, str] = {}
+    expected_message_index: dict[str, str] = {}
+    expected_ack_index: dict[str, str] = {}
     for record in state["deliveries"].values():
         if not isinstance(record, Mapping):
-            continue
-        ack_event_id = record.get("ack_event_id")
+            raise _state_schema_error()
+        delivery_id = record.get("delivery_id")
+        if not isinstance(delivery_id, str) or not delivery_id:
+            raise _state_schema_error()
+
+        identity_values = [
+            record.get(field)
+            for field in ("inbound_id", "target", "session_id", "correlation_id")
+        ]
+        if all(isinstance(value, str) and value for value in identity_values):
+            identity_key = _identity_key(_delivery_identity_from_record(record))
+            existing_delivery_id = expected_identity_index.get(identity_key)
+            if existing_delivery_id is not None and existing_delivery_id != delivery_id:
+                raise _state_schema_error()
+            expected_identity_index[identity_key] = delivery_id
+        elif any(value is not None for value in identity_values):
+            raise _state_schema_error()
+
         message_id = record.get("feishu_message_id")
-        if not isinstance(ack_event_id, str) or not isinstance(message_id, str):
-            continue
-        indexed_message_id = ack_event_index.get(ack_event_id)
-        if indexed_message_id is not None and indexed_message_id != message_id:
-            raise ValueError("conflicting ack event index")
-        ack_event_index[ack_event_id] = message_id
+        if isinstance(message_id, str):
+            existing_delivery_id = expected_message_index.get(message_id)
+            if existing_delivery_id is not None and existing_delivery_id != delivery_id:
+                raise _state_schema_error()
+            expected_message_index[message_id] = delivery_id
+
+        ack_event_id = record.get("ack_event_id")
+        if isinstance(ack_event_id, str):
+            if not isinstance(message_id, str):
+                raise _state_schema_error()
+            indexed_message_id = expected_ack_index.get(ack_event_id)
+            if indexed_message_id is not None and indexed_message_id != message_id:
+                raise _state_schema_error()
+            expected_ack_index[ack_event_id] = message_id
+
+    _validate_persisted_index_subset(
+        state["delivery_identity_index"], expected_identity_index
+    )
+    _validate_persisted_index_subset(state["feishu_message_index"], expected_message_index)
+    _validate_persisted_index_subset(state["ack_event_index"], expected_ack_index)
+    state["delivery_identity_index"] = expected_identity_index
+    state["feishu_message_index"] = expected_message_index
+    state["ack_event_index"] = expected_ack_index
+
+
+def _validate_persisted_index_subset(
+    persisted: Mapping[str, Any], expected: Mapping[str, str]
+) -> None:
+    for key, value in persisted.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise _state_schema_error()
+        if expected.get(key) != value:
+            raise _state_schema_error()
 
 
 def _minimal_delivery_record(delivery_id: str, timestamp: int | float) -> dict[str, Any]:
@@ -463,6 +532,89 @@ def _lock_for(state_dir: str | Path) -> threading.Lock:
         return lock
 
 
+@contextlib.contextmanager
+def _state_lock(state_dir: str | Path, timeout_seconds: float):
+    path = Path(state_dir).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout_seconds
+    thread_lock = _lock_for(path)
+    if not thread_lock.acquire(timeout=timeout_seconds):
+        raise GatewayEventContractError(
+            "gateway_event_state_lock_timeout",
+            "gateway event state lock timeout",
+        )
+    try:
+        with _state_file_lock(path / LOCK_FILENAME, deadline):
+            yield
+    finally:
+        thread_lock.release()
+
+
+@contextlib.contextmanager
+def _state_file_lock(lock_path: Path, deadline: float):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        _acquire_file_lock(handle, deadline)
+        yield
+    finally:
+        try:
+            _release_file_lock(handle)
+        finally:
+            handle.close()
+
+
+def _acquire_file_lock(handle: Any, deadline: float) -> None:
+    while True:
+        try:
+            if _IS_WINDOWS:
+                import msvcrt  # type: ignore[import-not-found]
+
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                    try:
+                        os.fsync(handle.fileno())
+                    except OSError:
+                        pass
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except ImportError as exc:
+            raise GatewayEventContractError(
+                "gateway_event_state_lock_unavailable",
+                "gateway event state lock unavailable",
+            ) from exc
+        except (BlockingIOError, OSError, PermissionError) as exc:
+            now = time.monotonic()
+            if now >= deadline:
+                raise GatewayEventContractError(
+                    "gateway_event_state_lock_timeout",
+                    "gateway event state lock timeout",
+                ) from exc
+            time.sleep(min(0.05, max(0.0, deadline - now)))
+
+
+def _release_file_lock(handle: Any) -> None:
+    try:
+        if _IS_WINDOWS:
+            import msvcrt  # type: ignore[import-not-found]
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (ImportError, OSError, IOError):
+        pass
+
+
 def _safe_event_type(event: Any) -> str | None:
     if isinstance(event, Mapping):
         return event_type_from(event)
@@ -479,6 +631,38 @@ def _failure(
         reason=reason,
         diagnostics="",
     )
+
+
+def _state_schema_error() -> GatewayEventContractError:
+    return GatewayEventContractError(
+        "gateway_event_state_schema_invalid",
+        "gateway event state schema invalid",
+    )
+
+
+def _lock_timeout_seconds(value: int | float) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return _DEFAULT_LOCK_TIMEOUT_SECONDS
+    if not math.isfinite(timeout) or timeout <= 0:
+        return _DEFAULT_LOCK_TIMEOUT_SECONDS
+    return timeout
+
+
+def _fsync_parent_dir(path: Path) -> None:
+    if _IS_WINDOWS:
+        return
+    try:
+        fd = os.open(str(path.parent), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _check(name: str, ok: bool) -> dict[str, Any]:
@@ -501,7 +685,9 @@ def _check_state_dir_writable(state_dir: str | Path) -> None:
             pass
 
 
-def _run_preflight_event_checks(probe_dir: Path) -> list[dict[str, Any]]:
+def _run_preflight_event_checks(
+    probe_dir: Path, timeout_seconds: float
+) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     inbound = {
         "type": "feishu_inbound",
@@ -510,7 +696,14 @@ def _run_preflight_event_checks(probe_dir: Path) -> list[dict[str, Any]]:
         "message_type": "text",
         "timestamp": 1,
     }
-    checks.append(_check("feishu_inbound", apply_gateway_event(inbound, probe_dir).ok))
+    checks.append(
+        _check(
+            "feishu_inbound",
+            apply_gateway_event(
+                inbound, probe_dir, timeout_seconds=timeout_seconds
+            ).ok,
+        )
+    )
 
     pending = {
         "type": "delivery_pending",
@@ -527,7 +720,9 @@ def _run_preflight_event_checks(probe_dir: Path) -> list[dict[str, Any]]:
         "message_id": "preflight-feishu-message",
         "timestamp": 3,
     }
-    lifecycle_ok = apply_gateway_event(pending, probe_dir).ok and apply_gateway_event(sent, probe_dir).ok
+    lifecycle_ok = apply_gateway_event(
+        pending, probe_dir, timeout_seconds=timeout_seconds
+    ).ok and apply_gateway_event(sent, probe_dir, timeout_seconds=timeout_seconds).ok
     checks.append(_check("delivery_lifecycle", lifecycle_ok))
 
     ack = {
@@ -536,7 +731,12 @@ def _run_preflight_event_checks(probe_dir: Path) -> list[dict[str, Any]]:
         "ack_event_id": "preflight-ack",
         "timestamp": 4,
     }
-    checks.append(_check("feishu_ack", apply_gateway_event(ack, probe_dir).ok))
+    checks.append(
+        _check(
+            "feishu_ack",
+            apply_gateway_event(ack, probe_dir, timeout_seconds=timeout_seconds).ok,
+        )
+    )
 
     stale_pending = {
         "type": "delivery_pending",
@@ -548,9 +748,13 @@ def _run_preflight_event_checks(probe_dir: Path) -> list[dict[str, Any]]:
         "timestamp": 1,
     }
     scan = {"type": "stale_pending_scan", "now": 10, "max_age_seconds": 1}
-    stale_result = apply_gateway_event(stale_pending, probe_dir)
+    stale_result = apply_gateway_event(
+        stale_pending, probe_dir, timeout_seconds=timeout_seconds
+    )
     if stale_result.ok:
-        stale_result = apply_gateway_event(scan, probe_dir)
+        stale_result = apply_gateway_event(
+            scan, probe_dir, timeout_seconds=timeout_seconds
+        )
     stale_ok = (
         stale_result.ok
         and stale_result.action is not None
@@ -558,6 +762,8 @@ def _run_preflight_event_checks(probe_dir: Path) -> list[dict[str, Any]]:
     )
     checks.append(_check("stale_pending_scan", bool(stale_ok)))
 
-    unsupported = apply_gateway_event({"type": "task_status"}, probe_dir)
+    unsupported = apply_gateway_event(
+        {"type": "task_status"}, probe_dir, timeout_seconds=timeout_seconds
+    )
     checks.append(_check("session_guard", unsupported.ok is False))
     return checks

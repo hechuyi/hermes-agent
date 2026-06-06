@@ -1,5 +1,6 @@
 import importlib
 import json
+import multiprocessing
 
 import pytest
 
@@ -7,7 +8,8 @@ from gateway.gateway_event_contract import (
     validate_feishu_request_descriptor,
     validate_gateway_action,
 )
-from gateway.gateway_event_ledger import LEDGER_FILENAME
+from gateway import gateway_event_ledger
+from gateway.gateway_event_ledger import LEDGER_FILENAME, LOCK_FILENAME
 from gateway.hermes_tools_gateway_event import (
     _validated_feishu_request,
     apply_gateway_event,
@@ -53,6 +55,12 @@ def _stale_pending_scan(now: int = 100, max_age_seconds: int = 1) -> dict[str, o
         "now": now,
         "max_age_seconds": max_age_seconds,
     }
+
+
+def _apply_pending_from_process(state_dir, delivery_id, start_event, result_queue):
+    start_event.wait(5)
+    result = apply_gateway_event(_delivery_pending(delivery_id), state_dir)
+    result_queue.put((delivery_id, result.ok, result.failure_class))
 
 
 def test_facade_does_not_expose_subprocess_adapter():
@@ -132,6 +140,23 @@ def test_feishu_patch_interactive_descriptor_is_allowed():
     ],
 )
 def test_feishu_descriptor_generic_or_extra_paths_are_rejected(descriptor):
+    assert validate_feishu_request_descriptor(descriptor) is None
+    assert _validated_feishu_request(descriptor) is None
+
+
+def test_feishu_descriptor_receive_id_must_be_safe():
+    descriptor = {
+        "operation": "send_interactive_message",
+        "method": "POST",
+        "path": "/open-apis/im/v1/messages",
+        "params": {"receive_id_type": "chat_id"},
+        "body": {
+            "receive_id": "oc chat",
+            "msg_type": "interactive",
+            "content": '{"config":{"wide_screen_mode":true}}',
+        },
+    }
+
     assert validate_feishu_request_descriptor(descriptor) is None
     assert _validated_feishu_request(descriptor) is None
 
@@ -275,11 +300,143 @@ def test_corrupted_non_mapping_delivery_record_fails_closed_on_stale_scan(tmp_pa
     result = apply_gateway_event(_stale_pending_scan(), tmp_path)
 
     assert result.ok is False
-    assert result.failure_class in {
-        "gateway_event_state_schema_invalid",
-        "gateway_event_apply_failed",
-    }
+    assert result.failure_class == "gateway_event_state_schema_invalid"
     assert result.diagnostics == ""
+
+
+def test_invalid_persisted_ledger_version_fails_with_schema_class(tmp_path):
+    (tmp_path / LEDGER_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "inbounds": {},
+                "deliveries": {},
+                "delivery_identity_index": {},
+                "feishu_message_index": {},
+                "ack_event_index": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_gateway_event(_stale_pending_scan(), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "gateway_event_state_schema_invalid"
+    assert result.diagnostics == ""
+
+
+def test_mismatched_persisted_delivery_key_fails_with_schema_class(tmp_path):
+    ledger = {
+        "version": 1,
+        "inbounds": {},
+        "deliveries": {
+            "delivery-wrong": {
+                "delivery_id": "delivery-1",
+                "inbound_id": "inbound-delivery-1",
+                "target": "feishu:chat",
+                "session_id": "session-1",
+                "correlation_id": "correlation-delivery-1",
+                "status": "pending",
+                "created_at": 1,
+                "updated_at": 1,
+                "feishu_message_id": None,
+                "failure_class": None,
+                "ack_event_id": None,
+            }
+        },
+        "delivery_identity_index": {},
+        "feishu_message_index": {},
+        "ack_event_index": {},
+    }
+    (tmp_path / LEDGER_FILENAME).write_text(json.dumps(ledger), encoding="utf-8")
+
+    result = apply_gateway_event(_stale_pending_scan(), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "gateway_event_state_schema_invalid"
+    assert result.diagnostics == ""
+
+
+def test_conflicting_persisted_message_index_fails_with_schema_class(tmp_path):
+    ledger = {
+        "version": 1,
+        "inbounds": {},
+        "deliveries": {
+            "delivery-1": {
+                "delivery_id": "delivery-1",
+                "inbound_id": "inbound-delivery-1",
+                "target": "feishu:chat",
+                "session_id": "session-1",
+                "correlation_id": "correlation-delivery-1",
+                "status": "sent",
+                "created_at": 1,
+                "updated_at": 2,
+                "feishu_message_id": "om_message_1",
+                "failure_class": None,
+                "ack_event_id": None,
+            }
+        },
+        "delivery_identity_index": {},
+        "feishu_message_index": {"om_message_1": "delivery-other"},
+        "ack_event_index": {},
+    }
+    (tmp_path / LEDGER_FILENAME).write_text(json.dumps(ledger), encoding="utf-8")
+
+    result = apply_gateway_event(_feishu_ack("om_message_1", "ev_read"), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "gateway_event_state_schema_invalid"
+    assert result.diagnostics == ""
+
+
+def test_apply_gateway_event_uses_sidecar_file_lock(monkeypatch, tmp_path):
+    lock_names = []
+    original = gateway_event_ledger._acquire_file_lock
+
+    def wrapped(handle, deadline):
+        lock_names.append(handle.name)
+        return original(handle, deadline)
+
+    monkeypatch.setattr(gateway_event_ledger, "_acquire_file_lock", wrapped)
+
+    result = apply_gateway_event(_delivery_pending("delivery-1"), tmp_path)
+
+    assert result.ok is True
+    assert lock_names
+    assert lock_names[0].endswith(LOCK_FILENAME)
+
+
+def test_concurrent_process_writes_preserve_all_deliveries(tmp_path):
+    ctx = multiprocessing.get_context("spawn")
+    start_event = ctx.Event()
+    result_queue = ctx.Queue()
+    delivery_ids = [f"delivery-process-{index}" for index in range(8)]
+    processes = [
+        ctx.Process(
+            target=_apply_pending_from_process,
+            args=(tmp_path, delivery_id, start_event, result_queue),
+        )
+        for delivery_id in delivery_ids
+    ]
+
+    try:
+        for process in processes:
+            process.start()
+        start_event.set()
+        results = [result_queue.get(timeout=15) for _ in processes]
+    finally:
+        for process in processes:
+            process.join(timeout=15)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    assert all(process.exitcode == 0 for process in processes)
+    assert sorted(delivery_id for delivery_id, ok, _ in results if ok) == delivery_ids
+    with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    assert sorted(state["deliveries"]) == delivery_ids
 
 
 @pytest.mark.parametrize("timestamp", [float("nan"), float("inf"), float("-inf")])

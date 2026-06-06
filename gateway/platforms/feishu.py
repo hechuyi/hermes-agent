@@ -5353,7 +5353,7 @@ class FeishuAdapter(BasePlatformAdapter):
             request = self._build_create_message_request(receive_id_type, request_body)
             response_or_result = await self._audited_delivery(
                 delivery_id=delivery_id,
-                operation="status_card_create",
+                operation="feishu_interactive_send",
                 target=f"feishu:chat:{receive_id}",
                 inbound_id=inbound_id,
                 session_id=session_id,
@@ -5375,7 +5375,7 @@ class FeishuAdapter(BasePlatformAdapter):
             )
             response_or_result = await self._audited_delivery(
                 delivery_id=delivery_id,
-                operation="status_card_patch",
+                operation="feishu_interactive_patch",
                 target=f"feishu:message:{message_id}",
                 inbound_id=inbound_id,
                 session_id=session_id,

@@ -55,6 +55,7 @@ _SAFE_EVENT_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
 _SAFE_FAILURE_CLASS_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _FNV1A64_RE = re.compile(r"^fnv1a64:[a-f0-9]{16}$")
 _SAFE_FEISHU_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_]{1,256}$")
+_SAFE_FEISHU_RECEIVE_ID_RE = re.compile(r"^[A-Za-z0-9_@.+-]{1,256}$")
 _SAFE_DESCRIPTOR_UUID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,127}$")
 _FEISHU_PATCH_MESSAGE_PATH_RE = re.compile(
     r"^/open-apis/im/v1/messages/([A-Za-z0-9_]{1,256})$"
@@ -180,7 +181,7 @@ def _validate_send_interactive_message_descriptor(
         {"receive_id", "msg_type", "content", "uuid"},
     ):
         return None
-    if not _is_nonempty_string(body.get("receive_id")):
+    if not _is_safe_feishu_receive_id(body.get("receive_id")):
         return None
     if body.get("msg_type") != "interactive":
         return None
@@ -382,6 +383,10 @@ def _is_nonempty_string(value: Any) -> bool:
 
 def _is_safe_descriptor_uuid(value: Any) -> bool:
     return isinstance(value, str) and bool(_SAFE_DESCRIPTOR_UUID_RE.fullmatch(value))
+
+
+def _is_safe_feishu_receive_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(_SAFE_FEISHU_RECEIVE_ID_RE.fullmatch(value))
 
 
 def _is_nonempty_json_object_string(value: Any) -> bool:

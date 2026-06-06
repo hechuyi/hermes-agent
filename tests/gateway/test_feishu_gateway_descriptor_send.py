@@ -1713,8 +1713,10 @@ async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_htt
         descriptor_uuid
     )
     assert events[0]["delivery_id"] == delivery_id
+    assert events[0]["operation"] == "feishu_interactive_send"
     assert events[-1]["type"] == "delivery_sent"
     assert events[-1]["delivery_id"] == delivery_id
+    assert events[-1]["operation"] == "feishu_interactive_send"
     assert events[-1]["message_id"] == "om_created"
 
 
@@ -1981,7 +1983,9 @@ async def test_descriptor_patch_interactive_uses_sdk_update_builder_and_path_mes
     request = message_api.update_calls[0]
     assert request.message_id == "om_card"
     assert request.request_body.msg_type == "interactive"
+    assert events[0]["operation"] == "feishu_interactive_patch"
     assert events[-1]["type"] == "delivery_sent"
+    assert events[-1]["operation"] == "feishu_interactive_patch"
     assert events[-1]["message_id"] == "om_card"
 
 
