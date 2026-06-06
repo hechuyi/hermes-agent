@@ -60,6 +60,31 @@ integration branch:
 | `9d4c81130a39f4a725b8301610d52c7cbff06fc6` | status UX | Names the `/status` token number more explicitly. |
 | `0437137fff821854066088fbcd590d7af54c6857` | security | Pins `starlette==1.0.1` in server-surface extras and lazy deps for CVE-2026-48710. |
 
+### Supplemental low-risk batch
+
+After the remaining `origin/main` changes were reviewed again under the stricter
+rule "do not absorb anything that conflicts with or changes the current
+live-gateway/hermes-tools boundary", the following additional commits were
+absorbed:
+
+| Upstream commit | Local commit | Category | Reason |
+| --- | --- | --- | --- |
+| `66265a0571347ce6c88f940d79869002b09af0ca` | `6af1be0cc` | Nix | Drops stale `vercel` group from the `#full` package variant. |
+| `593e4b435ea5bb5ff73ee8972977388911c062ec` | `c7ee191e1` | Docker image | Adds `iputils-ping` to the image for network diagnostics. |
+| `8d129d013bae4293c9232a36ec4b8e4f184dbab0` | `8424f10b9` | Docker metadata | Adds identifying labels to Hermes-created containers without enabling reuse semantics. |
+| `40fa0c1d19d5c24955e9b9c6b1f3c6c625d1f81a` | `f4e0ac9f2` | Docker mounts | Minimally ported credential/skills/cache mount shape guards; the conflict resolution intentionally omitted upstream container-reuse/orphan-reaper tests. |
+| `48083211ef606f3305c09df576514ac99bc7f594` | `f66a1491d` | Docker UID/GID | Minimally ported `PUID`/`PGID` aliases and stage2-hook tests; Docker docs were resolved in the current s6 wording. |
+| `ec7736f8a7fc867405e33ca3356a8bfba423dff9` | `94531dd6b` | Docker socket | Adds Docker socket group membership setup in the stage2 hook. |
+| `83a7d0b6016495a5d67f341a5252642ab8128f14` | `fef4ebcc1` | skills sync | Preserves bundled-skill manifests on failed restore and removes read-only backups safely. |
+| `8ae0802d59b26b5fdf104c902ca82e434132dd9a` | `cdba35200` | skills sync | Handles read-only directories as well as read-only files. |
+| `6a08fd3c3f9046c3037f4924904cfc95df557fb7` | `3046c2e51` | skills test | Makes the restore assertion resilient to redirected `HERMES_HOME`. |
+| `41decf2c4a6a0e18387bec52b57a2ab531535e99` | `bb3ad1773` | MCP test | Minimally resolved import-only test collection fix; no MCP runtime code was changed. |
+| `1c53d39eaaf2fc57a7fb5039911e28d07ad71cb1` | `396efde69` | test deflake | Prevents process-registry tests from touching real process groups and deflakes PTY resize receive handling. |
+
+`git cherry` marks `40fa0c1d1`, `48083211e`, and `41decf2c4` as non-equivalent
+because their conflict resolutions were narrowed for this fork. They should
+still be treated as handled for the purposes above, not retried mechanically.
+
 `2765b02021c1e6eb743e2ce2eb359fc66a5aa89e` was attempted and became an empty
 patch because the effective plugin-manifest packaging metadata was already
 present in the current fork.
@@ -89,6 +114,11 @@ the current production target.
 
 These must not be merged mechanically:
 
+- `ac8e238bc` / `d77d87766` / `5c2170a7c` / `2f0f03c40`: Docker container
+  reuse, orphan reaper, and persist-mode cleanup semantics. Although adjacent
+  Docker metadata was absorbed, these commits touch `gateway/run.py` and
+  session-close/container-lifecycle behavior and need a separate Docker runtime
+  contract review.
 - `100536134` / `db96fc60d`: topic recovery/session identity changes.
 - `655090b3d` / `6a2e3c2d2` / `fd09b2c55`: startup risk warnings and adapter
   access-policy changes, including default-deny semantics.
@@ -129,9 +159,9 @@ These must not be merged mechanically:
 
 ### Low priority or out of current production scope
 
-Docker-only, Kanban, optional skill catalog, docs-only, release author mapping,
-voice/video, and platform-specific changes for unused adapters remain out of
-scope for this pass unless the corresponding feature becomes production-relevant.
+Kanban, optional skill catalog, docs-only, release author mapping, voice/video,
+and platform-specific changes for unused adapters remain out of scope for this
+pass unless the corresponding feature becomes production-relevant.
 
 Special caution: dashboard commits that allow insecure public binds and external
 skill-tap commits should be reviewed under a separate security model before
@@ -166,5 +196,27 @@ uv run --extra dev ruff check pyproject.toml tools/lazy_deps.py tests/test_packa
 ```
 
 Result: `All checks passed!`.
+
+`git diff --check` produced no output.
+
+Supplemental low-risk batch verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_docker_environment.py tests/tools/test_stage2_hook_puid_pgid.py tests/tools/test_skills_sync.py tests/tools/test_mcp_stability.py tests/tools/test_process_registry.py tests/hermes_cli/test_web_server.py::TestPtyWebSocket::test_resize_escape_is_forwarded -q -rs
+```
+
+Result: `171 passed`.
+
+```bash
+uv run --extra dev ruff check tests/tools/test_docker_environment.py tests/tools/test_stage2_hook_puid_pgid.py tests/tools/test_skills_sync.py tests/tools/test_mcp_stability.py tests/tools/test_process_registry.py tests/hermes_cli/test_web_server.py tools/environments/docker.py tools/skills_sync.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+bash -n docker/stage2-hook.sh
+```
+
+Result: exit `0`.
 
 `git diff --check` produced no output.
