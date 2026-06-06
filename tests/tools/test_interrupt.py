@@ -203,6 +203,66 @@ class TestSIGKILLEscalation:
         assert "interrupted" in result_holder["value"]["output"].lower()
 
 
+class TestRunToolCleanupOnBaseException:
+    def test_worker_interrupt_state_is_cleared_when_tool_raises_base_exception(self):
+        from types import SimpleNamespace
+
+        from agent.tool_executor import execute_tool_calls_concurrent
+        from tools.interrupt import _interrupted_threads, _lock, set_interrupt
+
+        with _lock:
+            _interrupted_threads.clear()
+
+        leaked_tid = {"value": None}
+
+        def _raise_after_setting_interrupt(*_args, **_kwargs):
+            tid = threading.current_thread().ident
+            leaked_tid["value"] = tid
+            set_interrupt(True, thread_id=tid)
+            raise BaseException("simulated cancellation")
+
+        agent = SimpleNamespace(
+            _interrupt_requested=False,
+            _tool_worker_threads=set(),
+            _tool_worker_threads_lock=threading.Lock(),
+            _checkpoint_mgr=SimpleNamespace(enabled=False),
+            _tool_guardrails=SimpleNamespace(
+                before_call=lambda *_args, **_kwargs: SimpleNamespace(allows_execution=True)
+            ),
+            _invoke_tool=_raise_after_setting_interrupt,
+            quiet_mode=True,
+            verbose_logging=False,
+            log_prefix="",
+            log_prefix_chars=80,
+            tool_progress_callback=None,
+            tool_start_callback=None,
+            tool_complete_callback=None,
+            _current_tool=None,
+            _touch_activity=lambda *_args, **_kwargs: None,
+            _should_emit_quiet_tool_messages=lambda: False,
+            _should_start_quiet_spinner=lambda: False,
+            _subdirectory_hints=SimpleNamespace(check_tool_call=lambda *_args: ""),
+            _tool_result_content_for_active_model=lambda _name, result: result,
+            _apply_pending_steer_to_tool_results=lambda *_args, **_kwargs: None,
+            _safe_print=lambda *_args, **_kwargs: None,
+            _append_guardrail_observation=lambda _name, _args, result, failed=False: result,
+            _record_file_mutation_result=lambda *_args, **_kwargs: None,
+        )
+        tool_call = SimpleNamespace(
+            id="tc_base_exception",
+            function=SimpleNamespace(name="dummy_tool", arguments="{}"),
+        )
+        assistant_message = SimpleNamespace(tool_calls=[tool_call])
+        messages = []
+
+        execute_tool_calls_concurrent(agent, assistant_message, messages, "task")
+
+        assert leaked_tid["value"] is not None
+        assert agent._tool_worker_threads == set()
+        with _lock:
+            assert leaked_tid["value"] not in _interrupted_threads
+
+
 # ---------------------------------------------------------------------------
 # Manual smoke test checklist (not automated)
 # ---------------------------------------------------------------------------
