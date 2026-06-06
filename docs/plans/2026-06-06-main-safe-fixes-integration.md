@@ -307,6 +307,24 @@ This batch does not modify curated model catalogs or the fork's `5.5`
 customizations. Nous JWT-only behavior remains deferred separately because this
 fork still intentionally retains legacy Nous session-key inference paths.
 
+### xAI schema sanitizer batch
+
+`1386a7e4789c9b886395804e8475a4252217e4ac`
+(`fix(xai-sanitize): deepcopy tools_for_api before in-place mutation`) was
+manually absorbed in local commit `7cfd1d782`.
+
+xAI Responses requests still strip `pattern`, `format`, and slash-containing
+`enum` values from outgoing tool schemas to avoid xAI schema validation
+failures. The main-agent and auxiliary Responses paths now deep-copy tool
+schemas before invoking the in-place sanitizers, so a first xAI request no
+longer permanently removes constraints from the shared `agent.tools` registry
+or caller-provided auxiliary tool list. Subsequent non-xAI calls, fallback
+paths, and model switches therefore keep the original schema constraints.
+
+This batch does not change the sanitizer contract, provider routing, model
+catalogs, gateway event ledgers, media extraction, delivery outcomes, or the
+fork's `5.5` customizations.
+
 ### CLI MCP startup batch
 
 `0c6e133c0434ec856d4aea2b08f216f36c0e7dac`
@@ -623,6 +641,34 @@ Result: `All checks passed!`.
 
 ```bash
 uv run --extra dev ruff check tools/managed_tool_gateway.py tools/web_tools.py plugins/browser/browser_use/provider.py plugins/web/firecrawl/provider.py tests/tools/test_managed_tool_gateway.py tests/tools/test_managed_browserbase_and_modal.py tests/tools/test_web_tools_config.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` produced no output.
+
+xAI schema sanitizer batch verification:
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_run_agent_codex_responses.py::test_build_api_kwargs_xai_strips_schema_from_outgoing_request tests/run_agent/test_run_agent_codex_responses.py::test_build_api_kwargs_xai_does_not_mutate_agent_tools tests/run_agent/test_run_agent_codex_responses.py::test_build_api_kwargs_xai_is_idempotent_across_repeated_calls tests/agent/test_auxiliary_client.py::TestCodexAdapterReasoningTranslation::test_tool_schema_sanitization_does_not_mutate_input_tools -q -rs
+```
+
+Result: `4 passed, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_run_agent_codex_responses.py tests/tools/test_schema_sanitizer.py -q -rs
+```
+
+Result: `111 passed, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/agent/test_auxiliary_client.py -q -rs
+```
+
+Result: `191 passed, 1 warning`.
+
+```bash
+uv run --extra dev ruff check agent/chat_completion_helpers.py agent/auxiliary_client.py tests/run_agent/test_run_agent_codex_responses.py tests/agent/test_auxiliary_client.py
 ```
 
 Result: `All checks passed!`.
