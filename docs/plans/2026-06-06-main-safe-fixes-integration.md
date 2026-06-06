@@ -175,6 +175,24 @@ because the port is consolidated and conflict-resolved against this fork's
 current update implementation. Treat them as handled and do not retry them
 mechanically.
 
+### Additional low-risk tool/plugin fixes
+
+Two independent low-risk fixes were absorbed in local commit `432f41f80`:
+
+- `44df52005a1b59ae2c8439c4e68e7696851b7035`
+- `d473e7c9385e04c975b32d2d2cde3a02ba7d4f47`
+
+The first makes direct Modal credential detection fail closed to `False` when
+`Path.home()` or the home-directory probe raises `PermissionError`/`OSError`,
+while preserving environment-variable credentials as the higher-priority
+signal. The second narrows disk-cleanup cron auto-categorization to
+`cron/output/...` and `cronjobs/output/...`, so control-plane files such as
+`cron/jobs.json` and `.tick.lock` are not tracked or deleted as disposable cron
+output.
+
+Both were manually ported with focused regression tests and do not touch the
+live-gateway/hermes-tools boundary.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
