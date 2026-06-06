@@ -112,8 +112,12 @@ def preflight_gateway_event(
     try:
         _check_state_dir_writable(state_dir)
         checks.append(_check("state_dir_writable", True))
+        with _state_lock(state_dir, lock_timeout):
+            _read_state(_state_path(state_dir))
         with tempfile.TemporaryDirectory(dir=Path(state_dir)) as probe_dir:
             checks.extend(_run_preflight_event_checks(Path(probe_dir), lock_timeout))
+    except GatewayEventContractError as exc:
+        return _failure(exc.failure_class, exc.reason, event_type="preflight")
     except OSError:
         checks.append(_check("state_dir_writable", False))
     except Exception:

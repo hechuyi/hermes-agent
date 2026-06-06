@@ -950,6 +950,28 @@ def test_preflight_checks_exclude_status_card_descriptor(tmp_path):
     assert "feishu_request" not in result.action
 
 
+def test_preflight_fails_closed_when_live_ledger_schema_is_invalid(tmp_path):
+    ledger_path = tmp_path / LEDGER_FILENAME
+    ledger_path.write_text(
+        json.dumps(
+            {
+                "version": 999,
+                "secret": "super-secret-token-value",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = preflight_gateway_event(tmp_path)
+
+    assert result.ok is False
+    assert result.event_type == "preflight"
+    assert result.failure_class == "gateway_event_state_schema_invalid"
+    assert result.reason == "gateway event state schema invalid"
+    assert result.action is None
+    assert "super-secret-token-value" not in result.diagnostics
+
+
 def test_preflight_session_guard_uses_real_lock_and_mismatch_rejection(tmp_path):
     result = preflight_gateway_event(tmp_path)
 
