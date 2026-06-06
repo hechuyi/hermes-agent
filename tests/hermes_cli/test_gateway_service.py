@@ -1788,7 +1788,57 @@ class TestSystemUnitPathRemapping:
         assert str(root_home) not in unit
         # Target user paths should be present
         assert "/home/alice" in unit
-        assert "WorkingDirectory=/home/alice/.hermes/hermes-agent" in unit
+        assert "WorkingDirectory=/home/alice/.hermes\n" in unit
+
+
+class TestServiceWorkingDirIsStable:
+    """CLI-managed services should not pin cwd to a volatile source checkout."""
+
+    def test_stable_working_dir_uses_hermes_home(self, tmp_path, monkeypatch):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: home)
+
+        assert Path(gateway_cli._stable_service_working_dir()) == home.resolve()
+
+    def test_stable_working_dir_falls_back_to_project_root(self, tmp_path, monkeypatch):
+        missing = tmp_path / "missing" / ".hermes"
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: missing)
+
+        assert gateway_cli._stable_service_working_dir() == str(gateway_cli.PROJECT_ROOT)
+
+    def test_user_unit_workingdirectory_is_hermes_home_not_checkout(self, tmp_path, monkeypatch):
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        checkout = tmp_path / ".worktrees" / "hermes"
+        checkout.mkdir(parents=True)
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: home)
+        monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", checkout)
+
+        unit = gateway_cli.generate_systemd_unit(system=False)
+
+        wd = [line for line in unit.splitlines() if line.startswith("WorkingDirectory=")]
+        assert wd, "unit has no WorkingDirectory line"
+        value = wd[0].split("=", 1)[1]
+        assert Path(value).resolve() == home.resolve()
+        assert "/.worktrees/" not in value
+
+    def test_launchd_workingdirectory_is_hermes_home(self, tmp_path, monkeypatch):
+        import re
+
+        home = tmp_path / ".hermes"
+        home.mkdir()
+        checkout = tmp_path / ".worktrees" / "hermes"
+        checkout.mkdir(parents=True)
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: home)
+        monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", checkout)
+
+        plist = gateway_cli.generate_launchd_plist()
+
+        match = re.search(r"<key>WorkingDirectory</key>\s*<string>(.*?)</string>", plist)
+        assert match, "plist has no WorkingDirectory entry"
+        assert Path(match.group(1)).resolve() == home.resolve()
+        assert "/.worktrees/" not in match.group(1)
 
 
 class TestDockerAwareGateway:
