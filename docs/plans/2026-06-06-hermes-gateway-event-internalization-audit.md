@@ -3,7 +3,8 @@
 > Date: 2026-06-06
 > Repository: `hermes-agent-live-gateway`
 > Branch: `fix/live-gateway-hermes-tools`
-> Audit head: `2255058e9bc16250d6562d3c349e10787ec28f09`
+> Runtime fix: `2255058e9bc16250d6562d3c349e10787ec28f09`
+> Audit refresh: Base maintenance and final verification evidence added on 2026-06-06
 
 ## 审计范围
 
@@ -11,11 +12,12 @@
 内化工作。技术目标是：在自有 Hermes fork 内化旧 external
 `hermes-tools gateway-event/preflight` 能力，使 live gateway 不再在运行路径上外挂
 `hermes-tools`。本记录只沉淀工程事实、风险判断、修复链路、审查结论、部署证据和剩余边界；
-不更新飞书、任务卡片或多维表格，也不触碰 `rtoc-nixos-infra`。
+不更新任务卡片，也不触碰 `rtoc-nixos-infra`。本轮运维 Base 维护已作为外部台账事实另行完成，
+记录见下文“多维表格维护证据”。
 
 本轮变更的直接运行边界是 live gateway 的事件账本和 preflight。`task` /
-`status-card` internalization 以及多维表格维护按用户指令暂停，因此本轮 goal
-不能标记为 complete。此处的文档可作为后续恢复多维表格维护时的事实来源，但不是外部系统更新本身。
+`status-card` internalization 仍按用户指令暂停，不纳入本轮完成条件；多维表格维护已完成，
+因此不再构成本轮 goal 的阻断项。
 
 ## 目标与根因
 
@@ -102,6 +104,23 @@ NixOS 侧本轮相关提交如下；本 worker 未修改该仓库，仅记录已
 显式指定，运行时没有依赖 `HERMES_TOOLS_STATE_DIR`，active bin 也没有外置
 `hermes-tools` 可执行文件残留在运行路径上。
 
+## 多维表格维护证据
+
+运维 Base `Hermes 运维全生命周期台账`
+(`L4dxb1V3vaMyn9sJLH0cLdQinah`) 已补齐本轮 gateway-event/preflight 内化的窄域记录。
+回读检查使用 `lark-cli base +record-list --as user`，按业务键筛选，三次查询均为
+`has_more=false`，每个业务键恰好命中一条记录：
+
+| 表 | 业务键 | Record ID | 结论 |
+| --- | --- | --- | --- |
+| `03 执行任务 决策阻断` | `ACT-032` | `recvlKyjhij8TP` | 记录 Hermes gateway-event/preflight 内化与 live gateway 部署收束 |
+| `04 验证验收` | `VAL-20260606-HERMES-GATEWAY-EVENT-PREFLIGHT` | `recvlKyqfTQBDo` | 记录本地专项测试、ruff、远端 service 与 runtime pin 验证 |
+| `05 变更发布记录` | `CHG-20260606-HERMES-GW-EVENT-PREFLIGHT` | `recvlKyx0yfyDU` | 记录 NixOS live pin、部署状态、验证结果和回滚边界 |
+
+这些记录没有把 `task` / `status-card` internalization 写成本轮已完成内容；相关文字仅作为
+“用户范围内暂停”或“不要混写”的边界说明出现。Base 子代理复核三张目标表内按
+`gateway-event` 扫描未发现明显重复；本轮未更新状态卡、长任务状态卡或任务卡片表。
+
 ## 本地验证
 
 最终本地验证命令：
@@ -112,8 +131,15 @@ uv run pytest tests/hermes_cli/test_gateway_service.py::TestGatewayEventPrefligh
 
 结果为 `123 passed, 10 skipped, 2 warnings`。10 个 skipped 全部是
 `status-card/task card internalization intentionally deferred by user scope`，
-与本轮明确暂停 `task` / `status-card` internalization 的范围一致。`ruff check`
-已通过。
+与本轮明确暂停 `task` / `status-card` internalization 的范围一致。
+
+最终 ruff 验证命令：
+
+```bash
+uv run ruff check gateway/gateway_event_ledger.py gateway/gateway_event_contract.py gateway/hermes_tools_gateway_event.py tests/hermes_cli/test_gateway_service.py tests/gateway/test_gateway_event_ledger.py tests/gateway/test_hermes_tools_gateway_event.py tests/gateway/test_feishu_gateway_event_apply.py tests/gateway/test_run_progress_topics.py
+```
+
+结果为 `All checks passed!`。
 
 ## 审查结论
 
@@ -133,15 +159,22 @@ failure class，不把未知、损坏或不兼容状态降级为成功。
 第四，legacy 残留审查不建议立即清理。残留项不在 live 运行路径，但仍可能影响配置卫生和人工排障判断。
 真正清理应先处理声明源和安装脚本迁移逻辑，避免手工删除造成后续 rebuild、安装或迁移脚本重新引入不一致状态。
 
+第五，Base 维护复核无 Critical 或 Important。`ACT-032`、
+`VAL-20260606-HERMES-GATEWAY-EVENT-PREFLIGHT` 和
+`CHG-20260606-HERMES-GW-EVENT-PREFLIGHT` 均唯一命中，内容限定在 Hermes
+gateway-event/preflight 内化与 live gateway 部署验收，不把状态卡或任务卡片内化纳入本轮完成范围。
+
 ## 剩余边界
 
-`task` / `status-card` internalization 和多维表格维护按用户指令暂停；因此这些项不是本轮
-Hermes live gateway preflight 内化的完成条件，也不能被本记录描述为已完成。
+`task` / `status-card` internalization 按用户指令暂停；因此这些项不是本轮
+Hermes live gateway preflight 内化的完成条件，也不能被本记录描述为已完成。多维表格维护已经按
+上述三条 Base 记录完成，不再是当前 goal 的剩余阻断项。
 
 legacy `hermes-tools` state、quarantine、source-pin 等残留不在当前 live 运行路径。
 它们的主要风险是配置卫生风险和人工排障混淆风险，而不是已证实的 live service 阻断风险。
 不建议现在手动立即删除；清理应以声明源和安装脚本迁移逻辑为入口，先明确哪些配置仍由 NixOS
 声明、哪些由安装脚本或 uv pin 生成，再通过可复现变更移除。
 
-由于多维表格维护尚未恢复，本轮 goal 不能标记为 complete。当前可闭环的是 Hermes
-gateway-event/preflight 内化、live service 运行证据、Important 修复和审查记录本身。
+当前可闭环的是 Hermes gateway-event/preflight 内化、live service 运行证据、Important
+修复、Base 维护和审查记录本身。未完成的 `task` / `status-card` internalization 属于用户明确暂停的
+后续范围，不应反向阻断本轮 Hermes live gateway preflight 内化收束。
