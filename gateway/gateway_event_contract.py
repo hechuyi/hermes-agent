@@ -59,6 +59,7 @@ _FNV1A64_RE = re.compile(r"^fnv1a64:[a-f0-9]{16}$")
 _SAFE_FEISHU_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_]{1,256}$")
 _SAFE_FEISHU_RECEIVE_ID_RE = re.compile(r"^[A-Za-z0-9_@.+-]{1,256}$")
 _SAFE_DESCRIPTOR_UUID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,127}$")
+_SAFE_FEISHU_EVENT_ID_RE = _SAFE_DESCRIPTOR_UUID_RE
 _SAFE_SESSION_ROUTE_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,256}$")
 _FEISHU_PATCH_MESSAGE_PATH_RE = re.compile(
     r"^/open-apis/im/v1/messages/([A-Za-z0-9_]{1,256})$"
@@ -114,6 +115,18 @@ def validate_gateway_event(event: Mapping[str, Any]) -> str:
     if event_type in {"session_locked", "compression_result"}:
         for field in required:
             _require_session_route_value(event, field)
+        return event_type
+    if event_type == "delivery_sent":
+        _require_nonempty_string(event, "delivery_id")
+        _require_feishu_message_id(event, "message_id")
+        _require_number(event, "timestamp")
+        return event_type
+    if event_type == "unknown_delivery_state" and "message_id" in event:
+        _require_feishu_message_id(event, "message_id")
+    if event_type == "feishu_ack":
+        _require_feishu_message_id(event, "message_id")
+        _require_feishu_event_id(event, "ack_event_id")
+        _require_number(event, "timestamp")
         return event_type
     for field in required:
         if field == "timestamp":
@@ -307,8 +320,11 @@ def _validate_delivery_record(value: Any) -> dict[str, Any]:
     status = value.get("status")
     if status not in {"pending", "sent", "failed", "acked", "unknown"}:
         raise ValueError("invalid delivery status")
-    if status == "unknown" and value.get("failure_class") is None:
-        raise ValueError("unknown delivery state requires failure_class")
+    failure_class = value.get("failure_class")
+    if status in {"failed", "unknown"} and failure_class is None:
+        raise ValueError("non-success delivery state requires failure_class")
+    if status in {"pending", "sent", "acked"} and failure_class is not None:
+        raise ValueError("successful delivery state cannot have failure_class")
     for field in ("delivery_id", "status"):
         if not isinstance(value.get(field), str) or not value[field]:
             raise ValueError(f"invalid {field}")
@@ -326,8 +342,8 @@ def _validate_delivery_record(value: Any) -> dict[str, Any]:
     ):
         if value.get(field) is not None and not isinstance(value.get(field), str):
             raise ValueError(f"invalid {field}")
-    if value.get("failure_class") is not None:
-        require_failure_class(value["failure_class"])
+    if failure_class is not None:
+        require_failure_class(failure_class)
     return dict(value)
 
 
@@ -456,6 +472,26 @@ def _require_nonempty_string(event: Mapping[str, Any], field: str) -> str:
 def _require_session_route_value(event: Mapping[str, Any], field: str) -> str:
     value = event.get(field)
     if not _is_safe_session_route_value(value):
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            f"{field} is missing or invalid",
+        )
+    return value
+
+
+def _require_feishu_message_id(event: Mapping[str, Any], field: str) -> str:
+    value = event.get(field)
+    if not isinstance(value, str) or not _SAFE_FEISHU_MESSAGE_ID_RE.fullmatch(value):
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            f"{field} is missing or invalid",
+        )
+    return value
+
+
+def _require_feishu_event_id(event: Mapping[str, Any], field: str) -> str:
+    value = event.get(field)
+    if not isinstance(value, str) or not _SAFE_FEISHU_EVENT_ID_RE.fullmatch(value):
         raise GatewayEventContractError(
             "invalid_gateway_event_contract",
             f"{field} is missing or invalid",

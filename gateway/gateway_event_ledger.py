@@ -27,6 +27,15 @@ LEDGER_FILENAME = "gateway_event_ledger.json"
 LOCK_FILENAME = ".gateway_event_ledger.lock"
 _DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
 _MAX_COMPRESSION_REJECTIONS = 1000
+_STATE_DICT_SECTIONS: tuple[str, ...] = (
+    "inbounds",
+    "deliveries",
+    "delivery_identity_index",
+    "feishu_message_index",
+    "ack_event_index",
+    "session_routes",
+)
+_STATE_LIST_SECTIONS: tuple[str, ...] = ("compression_rejections",)
 _IS_WINDOWS = os.name == "nt"
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.Lock] = {}
@@ -71,7 +80,7 @@ def apply_gateway_event(
         return _failure(exc.failure_class, exc.reason, event_type=event_type)
     except OSError:
         return _failure("gateway_event_state_io_failed", "state ledger IO failed", event_type=event_type)
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return _failure("gateway_event_apply_failed", "gateway event apply failed", event_type=event_type)
 
 
@@ -218,6 +227,7 @@ def _apply_delivery_sent(event: Mapping[str, Any], state: dict[str, Any]) -> dic
     record = state["deliveries"].get(delivery_id)
     if record is None:
         raise GatewayEventContractError("unknown_delivery_id", "unknown delivery id")
+    _reject_timestamp_regression(event, record)
     message_id = str(event["message_id"])
     existing_message_id = record.get("feishu_message_id")
     if existing_message_id is not None and existing_message_id != message_id:
@@ -236,6 +246,7 @@ def _apply_delivery_sent(event: Mapping[str, Any], state: dict[str, Any]) -> dic
     record["status"] = "sent"
     record["updated_at"] = event["timestamp"]
     record["feishu_message_id"] = message_id
+    record["failure_class"] = None
     state["feishu_message_index"][message_id] = delivery_id
     return {"type": "delivery_record", "record": dict(record)}
 
@@ -246,6 +257,8 @@ def _apply_delivery_failed(event: Mapping[str, Any], state: dict[str, Any]) -> d
     if record is None:
         record = _minimal_delivery_record(delivery_id, event["timestamp"])
         state["deliveries"][delivery_id] = record
+    else:
+        _reject_timestamp_regression(event, record)
     status = record.get("status")
     if status not in {"pending", "unknown", "failed"}:
         raise GatewayEventContractError(
@@ -265,6 +278,8 @@ def _apply_unknown_delivery_state(event: Mapping[str, Any], state: dict[str, Any
     if record is None:
         record = _minimal_delivery_record(delivery_id, event["timestamp"])
         state["deliveries"][delivery_id] = record
+    else:
+        _reject_timestamp_regression(event, record)
     if record.get("status") not in {"pending", "unknown"}:
         raise GatewayEventContractError(
             "invalid_delivery_state_transition", "invalid delivery state transition"
@@ -272,11 +287,6 @@ def _apply_unknown_delivery_state(event: Mapping[str, Any], state: dict[str, Any
     message_id = None
     if "message_id" in event:
         raw_message_id = event["message_id"]
-        if not isinstance(raw_message_id, str) or not raw_message_id:
-            raise GatewayEventContractError(
-                "invalid_gateway_event_contract",
-                "message_id is missing or invalid",
-            )
         message_id = raw_message_id
         existing_message_id = record.get("feishu_message_id")
         if existing_message_id is not None and existing_message_id != message_id:
@@ -307,6 +317,7 @@ def _apply_feishu_ack(event: Mapping[str, Any], state: dict[str, Any]) -> dict[s
         raise GatewayEventContractError(
             "invalid_delivery_state_transition", "invalid delivery state transition"
         )
+    _reject_timestamp_regression(event, record)
     ack_event_id = str(event["ack_event_id"])
     indexed_message_id = state["ack_event_index"].get(ack_event_id)
     if indexed_message_id is not None and indexed_message_id != message_id:
@@ -316,6 +327,7 @@ def _apply_feishu_ack(event: Mapping[str, Any], state: dict[str, Any]) -> dict[s
     record["status"] = "acked"
     record["updated_at"] = event["timestamp"]
     record["ack_event_id"] = ack_event_id
+    record["failure_class"] = None
     state["ack_event_index"][ack_event_id] = message_id
     return {"type": "delivery_record", "record": dict(record)}
 
@@ -404,24 +416,23 @@ def _apply_compression_result(
 def _read_state(state_path: Path) -> dict[str, Any]:
     if not state_path.exists():
         return _empty_state()
-    with state_path.open("r", encoding="utf-8") as handle:
-        raw = json.load(handle)
+    try:
+        with state_path.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise _state_schema_error() from exc
     if not isinstance(raw, dict) or raw.get("version") != 1:
         raise _state_schema_error()
     state = _empty_state()
-    for key in (
-        "inbounds",
-        "deliveries",
-        "delivery_identity_index",
-        "feishu_message_index",
-        "ack_event_index",
-        "session_routes",
-    ):
-        value = raw.get(key, {})
+    required_keys = {"version", *_STATE_DICT_SECTIONS, *_STATE_LIST_SECTIONS}
+    if not required_keys.issubset(raw):
+        raise _state_schema_error()
+    for key in _STATE_DICT_SECTIONS:
+        value = raw[key]
         if not isinstance(value, dict):
             raise _state_schema_error()
         state[key] = value
-    compression_rejections = raw.get("compression_rejections", [])
+    compression_rejections = raw["compression_rejections"]
     if not isinstance(compression_rejections, list):
         raise _state_schema_error()
     state["compression_rejections"] = compression_rejections
@@ -641,6 +652,23 @@ def _identity_key(identity: Mapping[str, Any]) -> str:
     )
 
 
+def _reject_timestamp_regression(
+    event: Mapping[str, Any], record: Mapping[str, Any]
+) -> None:
+    updated_at = record.get("updated_at")
+    event_timestamp = event.get("timestamp")
+    if _is_ordered_number(event_timestamp) and _is_ordered_number(updated_at):
+        if event_timestamp < updated_at:
+            raise GatewayEventContractError(
+                "delivery_timestamp_regression",
+                "delivery timestamp regression",
+            )
+
+
+def _is_ordered_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
 def _fnv1a64(value: str) -> str:
     digest = 0xCBF29CE484222325
     for byte in value.encode("utf-8"):
@@ -784,14 +812,9 @@ def _lock_timeout_seconds(value: int | float) -> float:
 def _fsync_parent_dir(path: Path) -> None:
     if _IS_WINDOWS:
         return
-    try:
-        fd = os.open(str(path.parent), os.O_RDONLY)
-    except OSError:
-        return
+    fd = os.open(str(path.parent), os.O_RDONLY)
     try:
         os.fsync(fd)
-    except OSError:
-        pass
     finally:
         os.close(fd)
 
@@ -848,7 +871,7 @@ def _run_preflight_event_checks(
     sent = {
         "type": "delivery_sent",
         "delivery_id": "delivery-preflight",
-        "message_id": "preflight-feishu-message",
+        "message_id": "preflight_feishu_message",
         "timestamp": 3,
     }
     lifecycle_ok = apply_gateway_event(
@@ -858,7 +881,7 @@ def _run_preflight_event_checks(
 
     ack = {
         "type": "feishu_ack",
-        "message_id": "preflight-feishu-message",
+        "message_id": "preflight_feishu_message",
         "ack_event_id": "preflight-ack",
         "timestamp": 4,
     }

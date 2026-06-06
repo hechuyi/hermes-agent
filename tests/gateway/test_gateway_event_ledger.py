@@ -353,6 +353,37 @@ def test_invalid_persisted_ledger_version_fails_with_schema_class(tmp_path):
     assert result.diagnostics == ""
 
 
+def test_missing_persisted_ledger_section_fails_without_overwriting_state(tmp_path):
+    ledger = {
+        "version": 1,
+        "inbounds": {},
+        "delivery_identity_index": {},
+        "feishu_message_index": {},
+        "ack_event_index": {},
+        "session_routes": {},
+        "compression_rejections": [],
+    }
+    ledger_path = tmp_path / LEDGER_FILENAME
+    ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+
+    result = apply_gateway_event(_delivery_pending("delivery-1"), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "gateway_event_state_schema_invalid"
+    with ledger_path.open(encoding="utf-8") as handle:
+        assert json.load(handle) == ledger
+
+
+def test_corrupt_persisted_json_fails_with_schema_class(tmp_path):
+    (tmp_path / LEDGER_FILENAME).write_text('{"version": 1,', encoding="utf-8")
+
+    result = apply_gateway_event(_delivery_pending("delivery-1"), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "gateway_event_state_schema_invalid"
+    assert result.reason == "gateway event state schema invalid"
+
+
 def test_mismatched_persisted_delivery_key_fails_with_schema_class(tmp_path):
     ledger = {
         "version": 1,
@@ -415,6 +446,84 @@ def test_conflicting_persisted_message_index_fails_with_schema_class(tmp_path):
     assert result.ok is False
     assert result.failure_class == "gateway_event_state_schema_invalid"
     assert result.diagnostics == ""
+
+
+def test_persisted_failed_delivery_without_failure_class_fails_with_schema_class(tmp_path):
+    ledger = {
+        "version": 1,
+        "inbounds": {},
+        "deliveries": {
+            "delivery-1": {
+                "delivery_id": "delivery-1",
+                "inbound_id": "inbound-delivery-1",
+                "target": "feishu:chat",
+                "session_id": "session-1",
+                "correlation_id": "correlation-delivery-1",
+                "status": "failed",
+                "created_at": 1,
+                "updated_at": 2,
+                "feishu_message_id": None,
+                "failure_class": None,
+                "ack_event_id": None,
+            }
+        },
+        "delivery_identity_index": {},
+        "feishu_message_index": {},
+        "ack_event_index": {},
+        "session_routes": {},
+        "compression_rejections": [],
+    }
+    (tmp_path / LEDGER_FILENAME).write_text(json.dumps(ledger), encoding="utf-8")
+
+    result = apply_gateway_event(_stale_pending_scan(), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "gateway_event_state_schema_invalid"
+
+
+def test_validate_delivery_record_rejects_stale_failure_class_on_sent():
+    with pytest.raises(ValueError):
+        validate_gateway_action(
+            {
+                "type": "delivery_record",
+                "record": {
+                    "delivery_id": "delivery-1",
+                    "inbound_id": "inbound-delivery-1",
+                    "target": "feishu:chat",
+                    "session_id": "session-1",
+                    "correlation_id": "correlation-delivery-1",
+                    "status": "sent",
+                    "created_at": 1,
+                    "updated_at": 2,
+                    "feishu_message_id": "om_message_1",
+                    "failure_class": "provider_state_unknown",
+                    "ack_event_id": None,
+                },
+            }
+        )
+
+
+def test_unknown_delivery_to_sent_clears_failure_class(tmp_path):
+    assert apply_gateway_event(_delivery_pending("delivery-1"), tmp_path).ok is True
+    assert (
+        apply_gateway_event(
+            {
+                "type": "unknown_delivery_state",
+                "delivery_id": "delivery-1",
+                "failure_class": "provider_state_unknown",
+                "timestamp": 2,
+            },
+            tmp_path,
+        ).ok
+        is True
+    )
+
+    result = apply_gateway_event(_delivery_sent("delivery-1", "om_message_1", timestamp=3), tmp_path)
+
+    assert result.ok is True
+    assert result.action is not None
+    assert result.action["record"]["status"] == "sent"
+    assert result.action["record"]["failure_class"] is None
 
 
 def test_apply_gateway_event_uses_sidecar_file_lock(monkeypatch, tmp_path):
@@ -513,6 +622,84 @@ def test_pending_delivery_can_transition_to_failed(tmp_path):
     assert result.action is not None
     assert result.action["record"]["status"] == "failed"
     assert result.action["record"]["failure_class"] == "send_failed"
+
+
+def test_delivery_sent_rejects_unsafe_feishu_message_id(tmp_path):
+    assert apply_gateway_event(_delivery_pending("delivery-1"), tmp_path).ok is True
+
+    result = apply_gateway_event(_delivery_sent("delivery-1", "om bad id"), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    assert state["deliveries"]["delivery-1"]["feishu_message_id"] is None
+    assert state["feishu_message_index"] == {}
+
+
+def test_feishu_ack_rejects_unsafe_ack_event_id(tmp_path):
+    assert apply_gateway_event(_delivery_pending("delivery-1"), tmp_path).ok is True
+    assert apply_gateway_event(_delivery_sent("delivery-1", "om_message_1"), tmp_path).ok is True
+
+    result = apply_gateway_event(_feishu_ack("om_message_1", "ev bad\nid"), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    assert state["deliveries"]["delivery-1"]["status"] == "sent"
+    assert state["ack_event_index"] == {}
+
+
+def test_late_delivery_sent_timestamp_fails_without_moving_updated_at_back(tmp_path):
+    assert apply_gateway_event(_delivery_pending("delivery-1", timestamp=10), tmp_path).ok is True
+
+    result = apply_gateway_event(_delivery_sent("delivery-1", "om_message_1", timestamp=9), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "delivery_timestamp_regression"
+    with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    assert state["deliveries"]["delivery-1"]["updated_at"] == 10
+    assert state["feishu_message_index"] == {}
+
+
+def test_parent_directory_fsync_failure_fails_apply(monkeypatch, tmp_path):
+    def fail_parent_fsync(_path):
+        raise OSError("parent dir fsync failed")
+
+    monkeypatch.setattr(gateway_event_ledger, "_fsync_parent_dir", fail_parent_fsync)
+
+    result = apply_gateway_event(_delivery_pending("delivery-1"), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "gateway_event_state_io_failed"
+
+
+def test_parent_directory_fsync_propagates_durability_failure(monkeypatch, tmp_path):
+    parent_fd = 987654
+    original_fsync = gateway_event_ledger.os.fsync
+    original_close = gateway_event_ledger.os.close
+
+    def fake_open(_path, _flags):
+        return parent_fd
+
+    def fake_fsync(fd):
+        if fd == parent_fd:
+            raise OSError("parent dir fsync failed")
+        return original_fsync(fd)
+
+    def fake_close(fd):
+        if fd == parent_fd:
+            return None
+        return original_close(fd)
+
+    monkeypatch.setattr(gateway_event_ledger.os, "open", fake_open)
+    monkeypatch.setattr(gateway_event_ledger.os, "fsync", fake_fsync)
+    monkeypatch.setattr(gateway_event_ledger.os, "close", fake_close)
+
+    with pytest.raises(OSError):
+        gateway_event_ledger._fsync_parent_dir(tmp_path / LEDGER_FILENAME)
 
 
 def test_pending_delivery_can_transition_to_unknown(tmp_path):
