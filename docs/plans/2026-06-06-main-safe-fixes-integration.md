@@ -145,6 +145,36 @@ but this fork does not currently contain the `tools/tool_search.py` /
 progressive-disclosure base that commit depends on. It should be reviewed only
 with the tool-search base, not as part of the code-exec approval batch.
 
+### Update and uninstall path batch
+
+The update/uninstall edge-case batch was absorbed in local commit `fe121bb74`:
+
+- `2334228ecaf972818b987bd3ce6a29042f6e18a8`
+- `2475244ca01fa5eb82bb0e3107119ae6258f5d88`
+- `c1b2d0917fff3ff68064757c229cef8d717aa4e0`
+- `54aa4db1de76a7c4bb02c8a7f7411727384b8fea`
+
+This is a manual equivalent port rather than a mechanical cherry-pick. The
+final behavior is: pipx-managed installs use `pipx upgrade hermes-agent`;
+bare uv/pip installs outside a venv use `uv pip install --system --upgrade`;
+launcher-shim venv installs inject `VIRTUAL_ENV` only for the `uv pip install`
+venv path; Windows concurrent-update detection excludes only launcher-shim
+ancestors and shows an exact `taskkill /PID ... /F` remediation; container
+installation detection trusts the `.install_method=docker` stamp instead of
+classifying every container as the published Docker image; uninstall removes
+Hermes-managed `node`/`npm`/`npx` symlinks only when they still resolve into
+the current `HERMES_HOME/node`.
+
+The container detection change was checked against the current Docker startup
+path: `docker/stage2-hook.sh` writes `.install_method=docker` as the `hermes`
+user during boot, so published images still fail closed to Docker update
+guidance while unstamped manual container installs fall through to git/pip.
+
+`git cherry` may continue to mark these upstream commits as non-equivalent
+because the port is consolidated and conflict-resolved against this fork's
+current update implementation. Treat them as handled and do not retry them
+mechanically.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -190,9 +220,6 @@ These must not be merged mechanically:
 
 - `7427b9d58`: tool-search session toolset scoping. Defer until the
   progressive tool-search base exists in this fork.
-- `2334228ec`, `2475244ca`, `c1b2d0917`, `54aa4db1d`: update/uninstall edge
-  cases. One update commit conflicted in `hermes_cli/main.py`; port the final
-  update behavior as a single update-path batch.
 - `2062a8400`, `40fcb9658`, `622e53437`, `f6a2ba626`, `41ff6e593`,
   `7e958dafc`, `95cf8f984`, `a22c25000`: auxiliary/auth-provider behavior.
   Review together so the credential and provider fallback semantics stay
@@ -219,12 +246,10 @@ being accepted.
 The next pass should stay narrow: one behavior domain, one targeted test set,
 and no broad `origin/main` merge. Recommended order:
 
-1. `2334228ec`, `2475244ca`, `c1b2d0917`, `54aa4db1d`: review the final
-   update/uninstall behavior as a single update-path batch.
-2. `2062a8400`, `40fcb9658`, `622e53437`, `f6a2ba626`, `41ff6e593`,
+1. `2062a8400`, `40fcb9658`, `622e53437`, `f6a2ba626`, `41ff6e593`,
    `7e958dafc`, `95cf8f984`, `a22c25000`: review the auth/Nous/provider
    behavior together so fallback and credential semantics stay coherent.
-3. `08c0b2241`, `781604ce4`, `51d165a8e`: media extraction and tool-result
+2. `08c0b2241`, `781604ce4`, `51d165a8e`: media extraction and tool-result
    scan semantics need a separate gateway ledger attribution review.
 
 The Docker reuse/orphan-reaper group, tool-search base/scoping group,
