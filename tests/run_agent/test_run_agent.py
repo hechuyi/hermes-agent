@@ -2601,6 +2601,48 @@ class TestHandleMaxIterations:
         ]
         assert len(stub_ids) >= 1, f"No stub result for assistant tool_call: {stub_ids}"
 
+    def test_summary_strips_strict_schema_foreign_fields(self, agent):
+        """The max-iterations summary request must not carry internal
+        fields rejected by strict Chat Completions gateways."""
+        agent.client.chat.completions.create.return_value = _mock_response(content="Summary")
+        agent._cached_system_prompt = "You are helpful."
+        messages = [
+            {"role": "user", "content": "do stuff"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "function": {"name": "execute_code", "arguments": "{}"},
+                    }
+                ],
+                "codex_reasoning_items": [{"id": "rs_1"}],
+                "codex_message_items": [{"id": "msg_1"}],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "result",
+                "tool_name": "execute_code",
+            },
+            {"role": "assistant", "content": "Done.", "_empty_recovery_synthetic": True},
+        ]
+
+        result = agent._handle_max_iterations(messages, 60)
+
+        assert result == "Summary"
+        sent_msgs = agent.client.chat.completions.create.call_args.kwargs.get("messages", [])
+        for msg in sent_msgs:
+            assert "tool_name" not in msg, msg
+            assert "codex_reasoning_items" not in msg, msg
+            assert "codex_message_items" not in msg, msg
+            assert not any(
+                isinstance(key, str) and key.startswith("_")
+                for key in msg
+            ), msg
+        assert messages[2]["tool_name"] == "execute_code"
+        assert messages[1]["codex_reasoning_items"] == [{"id": "rs_1"}]
+
     def test_summary_omits_provider_preferences_for_non_openrouter(self, agent):
         agent.base_url = "https://api.openai.com/v1"
         agent._base_url_lower = agent.base_url.lower()

@@ -1300,6 +1300,17 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             agent._copy_reasoning_content_for_api(msg, api_msg)
             for internal_field in ("reasoning", "finish_reason", "_thinking_prefill"):
                 api_msg.pop(internal_field, None)
+            for schema_foreign in (
+                "tool_name",
+                "codex_reasoning_items",
+                "codex_message_items",
+            ):
+                api_msg.pop(schema_foreign, None)
+            for internal_key in [
+                key for key in api_msg
+                if isinstance(key, str) and key.startswith("_")
+            ]:
+                api_msg.pop(internal_key, None)
             if _needs_sanitize:
                 agent._sanitize_tool_calls_for_strict_api(api_msg)
             api_messages.append(api_msg)
