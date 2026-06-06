@@ -325,6 +325,25 @@ This batch does not change the sanitizer contract, provider routing, model
 catalogs, gateway event ledgers, media extraction, delivery outcomes, or the
 fork's `5.5` customizations.
 
+### Agent summary strict-schema batch
+
+`636ff636d7d819503035b87655d2c7247e84def7`
+(`fix(agent): strip schema-foreign keys from max-iterations summary request`)
+was manually absorbed in local commit `56819b78d`.
+
+The max-iterations summary path hand-builds Chat Completions messages and
+calls `chat.completions.create()` directly. It now mirrors the main transport's
+strict-schema cleanup for internal bookkeeping fields: `tool_name`,
+`codex_reasoning_items`, `codex_message_items`, and underscore-prefixed Hermes
+internal keys are removed from copied API messages before the request is sent.
+The original in-memory history remains unchanged, preserving FTS and Codex
+reasoning bookkeeping for local state.
+
+This batch is limited to agent summary request sanitation. It does not change
+gateway event ledgers, media extraction, delivery outcomes, compression
+semantics, provider routing, model catalogs, Nous legacy authentication, or the
+fork's `5.5` customizations.
+
 ### CLI MCP startup batch
 
 `0c6e133c0434ec856d4aea2b08f216f36c0e7dac`
@@ -669,6 +688,28 @@ Result: `191 passed, 1 warning`.
 
 ```bash
 uv run --extra dev ruff check agent/chat_completion_helpers.py agent/auxiliary_client.py tests/run_agent/test_run_agent_codex_responses.py tests/agent/test_auxiliary_client.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` produced no output.
+
+Agent summary strict-schema batch verification:
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_run_agent.py::TestHandleMaxIterations::test_summary_strips_strict_schema_foreign_fields -q -rs
+```
+
+Result: `1 passed, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_run_agent.py::TestHandleMaxIterations -q -rs
+```
+
+Result: `10 passed, 1 warning`.
+
+```bash
+uv run --extra dev ruff check agent/chat_completion_helpers.py tests/run_agent/test_run_agent.py
 ```
 
 Result: `All checks passed!`.
