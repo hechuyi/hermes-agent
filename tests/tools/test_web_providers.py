@@ -312,3 +312,127 @@ class TestUnconfiguredErrorEnvelopeParity:
         # No per-result burying
         assert "results" not in result
 
+
+class TestDispatchersTriggerPluginDiscovery:
+    def _reset_registry(self):
+        from agent.web_search_registry import _reset_for_tests
+
+        _reset_for_tests()
+
+    def test_web_search_tool_runs_discovery_before_registry_lookup(self, monkeypatch):
+        import json
+        from unittest.mock import MagicMock
+
+        from agent.web_search_provider import WebSearchProvider
+        from agent import web_search_registry
+        from tools import web_tools
+
+        self._reset_registry()
+
+        class FakeBrave(WebSearchProvider):
+            @property
+            def name(self) -> str:
+                return "brave-free"
+
+            @property
+            def display_name(self) -> str:
+                return "Fake Brave"
+
+            def is_available(self) -> bool:
+                return True
+
+            def supports_search(self) -> bool:
+                return True
+
+            def search(self, query, limit=5):
+                return {
+                    "success": True,
+                    "data": {
+                        "web": [
+                            {
+                                "title": "ok",
+                                "url": "https://example.com",
+                                "description": "",
+                                "position": 0,
+                            }
+                        ]
+                    },
+                }
+
+        def _register_fake() -> None:
+            web_search_registry.register_provider(FakeBrave())
+
+        mock_hook = MagicMock(wraps=_register_fake)
+        monkeypatch.setattr(web_tools, "_ensure_web_plugins_loaded", mock_hook, raising=False)
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"search_backend": "brave-free"})
+
+        try:
+            assert web_search_registry.get_provider("brave-free") is None
+            result = json.loads(web_tools.web_search_tool("hello", limit=1))
+
+            assert mock_hook.called
+            assert result["success"] is True
+            assert web_search_registry.get_provider("brave-free") is not None
+        finally:
+            self._reset_registry()
+
+    def test_web_extract_tool_runs_discovery_before_registry_lookup(self, monkeypatch):
+        import asyncio
+        import json
+        from unittest.mock import MagicMock
+
+        from agent.web_search_provider import WebSearchProvider
+        from agent import web_search_registry
+        from tools import web_tools
+
+        self._reset_registry()
+
+        class FakeFirecrawl(WebSearchProvider):
+            @property
+            def name(self) -> str:
+                return "firecrawl"
+
+            @property
+            def display_name(self) -> str:
+                return "Fake Firecrawl"
+
+            def is_available(self) -> bool:
+                return True
+
+            def supports_extract(self) -> bool:
+                return True
+
+            async def extract(self, urls, format=None):
+                return [
+                    {
+                        "url": url,
+                        "title": "",
+                        "content": "ok",
+                        "raw_content": "ok",
+                        "metadata": {},
+                    }
+                    for url in urls
+                ]
+
+        def _register_fake() -> None:
+            web_search_registry.register_provider(FakeFirecrawl())
+
+        mock_hook = MagicMock(wraps=_register_fake)
+        monkeypatch.setattr(web_tools, "_ensure_web_plugins_loaded", mock_hook, raising=False)
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"extract_backend": "firecrawl"})
+
+        try:
+            assert web_search_registry.get_provider("firecrawl") is None
+            result = json.loads(asyncio.run(
+                web_tools.web_extract_tool(
+                    ["https://example.com"],
+                    use_llm_processing=False,
+                )
+            ))
+
+            assert mock_hook.called
+            assert "No web extract provider configured" not in json.dumps(result)
+            assert result["results"][0]["content"] == "ok"
+            assert web_search_registry.get_provider("firecrawl") is not None
+        finally:
+            self._reset_registry()

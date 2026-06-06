@@ -744,6 +744,16 @@ def clean_base64_images(text: str) -> str:
 # dispatchers in this file resolve them via get_active_*_provider().
 
 
+def _ensure_web_plugins_loaded() -> None:
+    """Idempotently trigger plugin discovery so the web registry is populated."""
+    try:
+        from hermes_cli.plugins import _ensure_plugins_discovered
+
+        _ensure_plugins_discovered()
+    except Exception as exc:
+        logger.warning("Web plugin discovery failed (non-fatal): %s", exc)
+
+
 def web_search_tool(query: str, limit: int = 5) -> str:
     """
     Search the web for information using available search API backend.
@@ -804,6 +814,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         # (brave-free, ddgs, searxng, exa, parallel, tavily, firecrawl)
         # now live as plugins; the dispatcher is just a registry lookup +
         # delegation. Sync only — every provider's search() is sync.
+        _ensure_web_plugins_loaded()
         from agent.web_search_registry import (
             get_active_search_provider,
             get_provider as _wsp_get_provider,
@@ -936,6 +947,7 @@ async def web_extract_tool(
             # detect coroutine functions and await; sync functions run
             # inline (the policy gate, SSRF re-check, etc. live inside the
             # provider itself for the firecrawl per-URL loop).
+            _ensure_web_plugins_loaded()
             from agent.web_search_registry import (
                 get_active_extract_provider,
                 get_provider as _wsp_get_provider,
