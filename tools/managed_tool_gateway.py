@@ -72,6 +72,19 @@ def _access_token_is_expiring(expires_at: object, skew_seconds: int) -> bool:
     return remaining <= max(0, int(skew_seconds))
 
 
+def peek_nous_access_token() -> Optional[str]:
+    """Read a cached Nous gateway token without triggering OAuth refresh."""
+    explicit = os.getenv("TOOL_GATEWAY_USER_TOKEN")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+
+    nous_provider = _read_nous_provider_state() or {}
+    access_token = nous_provider.get("access_token")
+    if isinstance(access_token, str) and access_token.strip():
+        return access_token.strip()
+    return None
+
+
 def read_nous_access_token() -> Optional[str]:
     """Read a Nous Subscriber OAuth access token from auth store or env override."""
     explicit = os.getenv("TOOL_GATEWAY_USER_TOKEN")
@@ -79,8 +92,7 @@ def read_nous_access_token() -> Optional[str]:
         return explicit.strip()
 
     nous_provider = _read_nous_provider_state() or {}
-    access_token = nous_provider.get("access_token")
-    cached_token = access_token.strip() if isinstance(access_token, str) and access_token.strip() else None
+    cached_token = peek_nous_access_token()
 
     if cached_token and not _access_token_is_expiring(
         nous_provider.get("expires_at"),
@@ -159,9 +171,9 @@ def is_managed_tool_gateway_ready(
     gateway_builder: Optional[Callable[[str], str]] = None,
     token_reader: Optional[Callable[[], Optional[str]]] = None,
 ) -> bool:
-    """Return True when gateway URL and Nous access token are available."""
+    """Return True when gateway URL and cached Nous access token are available."""
     return resolve_managed_tool_gateway(
         vendor,
         gateway_builder=gateway_builder,
-        token_reader=token_reader,
+        token_reader=token_reader or peek_nous_access_token,
     ) is not None
