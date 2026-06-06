@@ -104,6 +104,47 @@ all cached chat locks are currently held, the cache may temporarily exceed
 `CHAT_LOCK_MAX_SIZE` rather than creating a second live lock for a chat and
 weakening per-chat serialization.
 
+### Manual service and file-tools ports
+
+`a1cb5fa2c7cd5239a4909261888453d97086986d`
+(`fix(gateway): anchor service WorkingDirectory at HERMES_HOME`) was manually
+ported in local commit `582f665ea`. The port is limited to CLI-managed
+systemd/launchd service generation: user services anchor `WorkingDirectory` at
+the current `HERMES_HOME`, and system-scope services anchor it at the target
+user's remapped `HERMES_HOME`. The NixOS module was intentionally not changed:
+its `WorkingDirectory` continues to represent the configured workspace while
+`HERMES_HOME` remains the state/profile root.
+
+`5f84c9144a2c1f1248e92f53eeb2ea8146ad0883`
+(`fix(file-tools): handle UTF-8 BOM in read_file / write_file / patch`) was
+manually ported in local commit `6c6557dfc`. The port preserves the upstream
+disk-byte behavior and adds a fork-specific guard: lint/LSP analysis receives
+BOM-stripped in-memory content while atomic writes still preserve a single
+leading UTF-8 BOM on disk. This avoids spurious parser noise such as Python's
+`invalid non-printable character U+FEFF` while keeping byte signatures stable.
+
+### Code-exec approval security batch
+
+The code-exec approval-context batch was absorbed in local commit `bf08f524f`:
+
+- `21aeefe5fd1cbed15f6e8c479d3b100b091eae57`
+- `1083977261ec96a3234851c74f2dada0eec20518`
+- `4bdae3477139129ac0e4774bc4d81c1cc5de0ae2`
+- `3171845479f459ed95d052770b35b38254d4a71a`
+
+This batch adds shared thread-context propagation for ContextVars plus
+thread-local approval/sudo callbacks, wraps both local and remote
+`execute_code` RPC threads, adds a whole-script `execute_code` approval guard
+for gateway/ask/cron-deny surfaces before child spawn, tightens child
+environment scrubbing from broad `HERMES_` passthrough to an explicit
+operational allowlist, and logs dropped non-secret `HERMES_*` vars for
+diagnosability.
+
+`7427b9d58` remains deferred: it is a tool-search session toolset scoping fix,
+but this fork does not currently contain the `tools/tool_search.py` /
+progressive-disclosure base that commit depends on. It should be reviewed only
+with the tool-search base, not as part of the code-exec approval batch.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -137,8 +178,6 @@ These must not be merged mechanically:
 - `100536134` / `db96fc60d`: topic recovery/session identity changes.
 - `655090b3d` / `6a2e3c2d2` / `fd09b2c55`: startup risk warnings and adapter
   access-policy changes, including default-deny semantics.
-- `a1cb5fa2c`: service `WorkingDirectory` behavior, adjacent to the NixOS live
-  service and internal preflight path.
 - `08c0b2241` / `781604ce4` / `51d165a8e`: media extraction and tool-result
   scan semantics, adjacent to gateway ledger event attribution.
 - `45bc65abb`: delivery outcome semantics for silence narration filtering.
@@ -149,12 +188,8 @@ These must not be merged mechanically:
 
 ### Tooling and runtime commits requiring separate batches
 
-- `7427b9d58`, `21aeefe5f`, `108397726`, `317184547`, `4bdae3477`: tool-search
-  scope and code-exec approval-context changes. These have security value but
-  touch tool execution/session context contracts; port them as an approval and
-  tool-execution batch.
-- `5f84c9144`: UTF-8 BOM handling for file tools. This depends on the file-tool
-  behavior around atomic writes and should be tested as a file-tools batch.
+- `7427b9d58`: tool-search session toolset scoping. Defer until the
+  progressive tool-search base exists in this fork.
 - `2334228ec`, `2475244ca`, `c1b2d0917`, `54aa4db1d`: update/uninstall edge
   cases. One update commit conflicted in `hermes_cli/main.py`; port the final
   update behavior as a single update-path batch.
@@ -184,19 +219,15 @@ being accepted.
 The next pass should stay narrow: one behavior domain, one targeted test set,
 and no broad `origin/main` merge. Recommended order:
 
-1. `a1cb5fa2c` (`fix(gateway): anchor service WorkingDirectory at HERMES_HOME`)
-   is the next operational candidate. It is relevant to packaged/live service
-   durability, but it touches `hermes_cli/gateway.py` and service cwd semantics,
-   so it should be reviewed against the fork's NixOS/live preflight path before
-   porting.
-2. `5f84c9144` (`fix(file-tools): handle UTF-8 BOM in read_file / write_file /
-   patch`) is a good file-tools candidate after the service/Feishu checks. It
-   is self-contained, but it changes file content handling and should be tested
-   with the fork's existing file-safety and atomic-write behavior.
-3. The tool-search/code-exec approval group should follow only as a separate
-   security/runtime batch because it changes approval context contracts.
+1. `2334228ec`, `2475244ca`, `c1b2d0917`, `54aa4db1d`: review the final
+   update/uninstall behavior as a single update-path batch.
+2. `2062a8400`, `40fcb9658`, `622e53437`, `f6a2ba626`, `41ff6e593`,
+   `7e958dafc`, `95cf8f984`, `a22c25000`: review the auth/Nous/provider
+   behavior together so fallback and credential semantics stay coherent.
+3. `08c0b2241`, `781604ce4`, `51d165a8e`: media extraction and tool-result
+   scan semantics need a separate gateway ledger attribution review.
 
-The Docker reuse/orphan-reaper group, tool-search/code-exec approval group,
+The Docker reuse/orphan-reaper group, tool-search base/scoping group,
 auth/Nous/provider group, compression/state group, and MEDIA extraction group
 should remain separate batches because each changes a runtime contract rather
 than just a local implementation detail.
@@ -276,3 +307,87 @@ uv run --extra dev ruff check gateway/platforms/feishu.py tests/gateway/test_fei
 Result: `All checks passed!`.
 
 `git diff --check` produced no output.
+
+Manual file-tools BOM port verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_file_write_safety.py::TestBomHandling -q -rs
+```
+
+Result: `9 passed`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_file_write_safety.py tests/tools/test_file_operations.py tests/tools/test_file_operations_edge_cases.py tests/tools/test_resolve_path.py -q -rs
+```
+
+Result: `150 passed`.
+
+```bash
+uv run --extra dev ruff check tools/file_operations.py tests/tools/test_file_write_safety.py
+```
+
+Result: `All checks passed!`.
+
+`tests/tools/test_line_ending_preservation.py` was also run and produced
+`6 failed, 6 passed`; the failures are existing tool-entry sensitive-path
+refusals for macOS `/private/var/...` pytest temp paths, not BOM-layer
+regressions.
+
+Manual service `WorkingDirectory` port verification:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_gateway_service.py::TestSystemUnitPathRemapping::test_system_unit_has_no_root_paths tests/hermes_cli/test_gateway_service.py::TestServiceWorkingDirIsStable -q -rs
+```
+
+Result: `5 passed`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_gateway_service.py -k "WorkingDirectory or stable_working_dir or SystemUnitPathRemapping or HermesHome or launchd or systemd_unit" -q -rs
+```
+
+Result: `28 passed, 110 deselected`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_gateway_event_ledger.py tests/gateway/test_hermes_tools_gateway_event.py -q -rs
+```
+
+Result: `64 passed`.
+
+```bash
+uv run --extra dev ruff check hermes_cli/gateway.py tests/hermes_cli/test_gateway_service.py
+```
+
+Result: `All checks passed!`.
+
+Full `tests/hermes_cli/test_gateway_service.py` was also run and produced
+`6 failed, 132 passed`; the failures are current macOS/user-systemd D-Bus
+preflight availability failures in systemctl routing tests, not
+`WorkingDirectory` regressions.
+
+Code-exec approval batch verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_execute_code_approval_cluster.py -q -rs
+```
+
+Result: `17 passed`.
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_tool_executor_contextvar_propagation.py tests/tools/test_code_execution.py tests/tools/test_code_execution_windows_env.py tests/tools/test_code_execution_modes.py -q -rs
+```
+
+Result: `134 passed, 3 skipped`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_approval.py tests/gateway/test_session_boundary_security_state.py tests/gateway/test_session_boundary_hooks.py tests/gateway/test_command_bypass_active_session.py -q -rs
+```
+
+Result: `242 passed`.
+
+```bash
+uv run --extra dev ruff check agent/tool_executor.py tools/thread_context.py tools/approval.py tools/code_execution_tool.py tests/run_agent/test_tool_executor_contextvar_propagation.py tests/tools/test_code_execution_windows_env.py tests/tools/test_execute_code_approval_cluster.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` produced no output after the implementation batches.
