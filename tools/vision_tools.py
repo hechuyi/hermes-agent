@@ -127,6 +127,16 @@ def _detect_image_mime_type(image_path: Path) -> Optional[str]:
     return None
 
 
+def _is_retryable_download_error(error: Exception) -> bool:
+    """Return whether an image download failure is worth retrying."""
+    if isinstance(error, (PermissionError, ValueError)):
+        return False
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code
+        return not (400 <= status < 500 and status != 429)
+    return True
+
+
 async def _download_image(image_url: str, destination: Path, max_retries: int = 3) -> Path:
     """
     Download an image from a URL to a local destination (async) with retry logic.
@@ -210,18 +220,23 @@ async def _download_image(image_url: str, destination: Path, max_retries: int = 
             return destination
         except Exception as e:
             last_error = e
-            if attempt < max_retries - 1:
-                wait_time = 2 ** (attempt + 1)  # 2s, 4s, 8s
-                logger.warning("Image download failed (attempt %s/%s): %s", attempt + 1, max_retries, str(e)[:50])
-                logger.warning("Retrying in %ss...", wait_time)
-                await asyncio.sleep(wait_time)
-            else:
+            if not _is_retryable_download_error(e) or attempt >= max_retries - 1:
                 logger.error(
-                    "Image download failed after %s attempts: %s",
-                    max_retries,
+                    "Image download failed after %s attempt(s): %s",
+                    attempt + 1,
                     str(e)[:100],
                     exc_info=True,
                 )
+                raise
+            wait_time = 2 ** (attempt + 1)  # 2s, 4s, 8s
+            logger.warning(
+                "Image download failed (attempt %s/%s): %s",
+                attempt + 1,
+                max_retries,
+                str(e)[:50],
+            )
+            logger.warning("Retrying in %ss...", wait_time)
+            await asyncio.sleep(wait_time)
     
     if last_error is None:
         raise RuntimeError(

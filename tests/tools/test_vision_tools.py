@@ -918,3 +918,81 @@ class TestIsImageSizeError:
 
     def test_empty_message(self):
         assert not _is_image_size_error(Exception(""))
+
+
+class TestDownloadRetryClassification:
+    """Image download retry policy distinguishes terminal and transient errors."""
+
+    @staticmethod
+    def _status_error(status_code):
+        import httpx
+
+        request = httpx.Request("GET", "https://example.com/img.jpg")
+        response = httpx.Response(status_code, request=request)
+        return httpx.HTTPStatusError(
+            f"{status_code}", request=request, response=response
+        )
+
+    def _make_client_raising_status(self, status_code):
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock(
+            side_effect=self._status_error(status_code)
+        )
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=mock_response)
+        return mock_client
+
+    def test_is_retryable_classification(self):
+        from tools.vision_tools import _is_retryable_download_error
+
+        for code in (400, 403, 404, 410):
+            assert _is_retryable_download_error(self._status_error(code)) is False
+        for code in (429, 500, 502, 503):
+            assert _is_retryable_download_error(self._status_error(code)) is True
+        assert _is_retryable_download_error(PermissionError("blocked")) is False
+        assert _is_retryable_download_error(ValueError("too large")) is False
+        assert _is_retryable_download_error(ConnectionError("reset")) is True
+
+    @pytest.mark.asyncio
+    async def test_404_fails_fast_without_retry(self, tmp_path):
+        import httpx
+        from tools.vision_tools import _download_image
+
+        mock_client = self._make_client_raising_status(404)
+        with (
+            patch("tools.vision_tools.httpx.AsyncClient", return_value=mock_client),
+            patch("tools.vision_tools.check_website_access", return_value=None),
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await _download_image(
+                "https://example.com/missing.jpg",
+                tmp_path / "x.jpg",
+                max_retries=3,
+            )
+
+        assert mock_client.get.await_count == 1
+        mock_sleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_503_retries_then_raises(self, tmp_path):
+        import httpx
+        from tools.vision_tools import _download_image
+
+        mock_client = self._make_client_raising_status(503)
+        with (
+            patch("tools.vision_tools.httpx.AsyncClient", return_value=mock_client),
+            patch("tools.vision_tools.check_website_access", return_value=None),
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await _download_image(
+                "https://example.com/flaky.jpg",
+                tmp_path / "y.jpg",
+                max_retries=3,
+            )
+
+        assert mock_client.get.await_count == 3
+        assert mock_sleep.await_count == 2
