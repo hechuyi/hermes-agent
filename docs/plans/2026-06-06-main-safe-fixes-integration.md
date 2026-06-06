@@ -245,6 +245,20 @@ than the unused generic `EMAIL_HOME_CHANNEL`. A focused test file was added so
 this coverage does not get skipped when optional Telegram dependencies are
 absent.
 
+### Vision download retry batch
+
+The vision image-download retry batch was absorbed in local commit `63a33f303`:
+
+- `b4cf114f68da5d1de6b53cdc4a208d270e0654d7`
+
+Image downloads now fail fast for deterministic terminal failures:
+non-429 HTTP 4xx responses, website-policy `PermissionError`, and local
+validation `ValueError` cases such as oversized images or blocked redirects.
+429, 5xx, and unclassified transport-style errors remain retryable. The port is
+limited to download retry classification and does not change native vision
+routing, auxiliary model resolution, gateway event contracts, or model catalog
+customizations.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -427,6 +441,28 @@ Result: `All checks passed!`.
 `6 failed, 6 passed`; the failures are existing tool-entry sensitive-path
 refusals for macOS `/private/var/...` pytest temp paths, not BOM-layer
 regressions.
+
+Vision download retry batch verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_vision_tools.py::TestDownloadRetryClassification -q -rs
+```
+
+Result: `3 passed`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_vision_tools.py -q -rs
+```
+
+Result: `67 passed, 6 skipped, 1 warning`. The skipped tests require Pillow.
+
+```bash
+uv run --extra dev ruff check tools/vision_tools.py tests/tools/test_vision_tools.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` produced no output.
 
 Manual service `WorkingDirectory` port verification:
 
