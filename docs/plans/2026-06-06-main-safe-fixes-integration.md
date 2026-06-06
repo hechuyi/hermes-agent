@@ -218,6 +218,19 @@ Profile aliases now use `where` for Windows collision detection, create
 custom alias names through the same platform-aware wrapper generator instead
 of rewriting the file with a POSIX `#!/bin/sh` body.
 
+### LSP Windows shim batch
+
+The LSP Windows wrapper/shim batch was absorbed in local commit `735a642eb`:
+
+- `460771bf0f20ed8f931e17ce9c57a65eaa9d6ec0`
+- `296fcdfa52f464feeaa3d345e9d5c89a7727e161`
+
+LSP installer probes now recognize staged Windows `.cmd`, `.exe`, and `.bat`
+wrappers, pip installs check native `Scripts/` launchers as well as POSIX
+`bin/`, `hermes lsp which` and backend warnings reuse the same binary probe,
+and the LSP client wraps `.cmd`/`.bat` shims through `cmd.exe /c` before
+spawning on Windows.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
