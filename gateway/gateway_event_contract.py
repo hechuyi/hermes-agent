@@ -40,6 +40,8 @@ EVENT_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "unknown_delivery_state": ("delivery_id", "failure_class", "timestamp"),
     "feishu_ack": ("message_id", "ack_event_id", "timestamp"),
     "stale_pending_scan": ("now", "max_age_seconds"),
+    "session_locked": ("session_key", "session_id", "correlation_id"),
+    "compression_result": ("session_key", "observed_session_id", "correlation_id"),
 }
 
 PREFLIGHT_CHECK_NAMES: tuple[str, ...] = (
@@ -57,6 +59,7 @@ _FNV1A64_RE = re.compile(r"^fnv1a64:[a-f0-9]{16}$")
 _SAFE_FEISHU_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_]{1,256}$")
 _SAFE_FEISHU_RECEIVE_ID_RE = re.compile(r"^[A-Za-z0-9_@.+-]{1,256}$")
 _SAFE_DESCRIPTOR_UUID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,127}$")
+_SAFE_SESSION_ROUTE_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,256}$")
 _FEISHU_PATCH_MESSAGE_PATH_RE = re.compile(
     r"^/open-apis/im/v1/messages/([A-Za-z0-9_]{1,256})$"
 )
@@ -108,6 +111,10 @@ def validate_gateway_event(event: Mapping[str, Any]) -> str:
         _require_number(event, "now")
         _require_number(event, "max_age_seconds", minimum=0)
         return event_type
+    if event_type in {"session_locked", "compression_result"}:
+        for field in required:
+            _require_session_route_value(event, field)
+        return event_type
     for field in required:
         if field == "timestamp":
             _require_number(event, field)
@@ -137,6 +144,10 @@ def validate_gateway_action(action: Mapping[str, Any]) -> dict[str, Any]:
         return _validate_delivery_record_action(action)
     if action_type == "stale_pending_alert":
         return _validate_stale_pending_alert(action)
+    if action_type == "session_route":
+        return _validate_session_route_action(action)
+    if action_type == "compression_record":
+        return _validate_compression_record_action(action)
     if action_type == "preflight":
         return _validate_preflight_action(action)
     raise ValueError("unsupported gateway action type")
@@ -345,6 +356,71 @@ def _validate_stale_pending_alert(action: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_session_route_action(action: Mapping[str, Any]) -> dict[str, Any]:
+    if set(action) != {"type", "record"}:
+        raise ValueError("invalid session route action keys")
+    record = _validate_session_route_record(action.get("record"))
+    return {"type": "session_route", "record": record}
+
+
+def _validate_session_route_record(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid session route record")
+    if set(value) != {"session_key", "session_id", "correlation_id"}:
+        raise ValueError("invalid session route record keys")
+    for field in ("session_key", "session_id", "correlation_id"):
+        if not _is_safe_session_route_value(value.get(field)):
+            raise ValueError(f"invalid {field}")
+    return {
+        "session_key": value["session_key"],
+        "session_id": value["session_id"],
+        "correlation_id": value["correlation_id"],
+    }
+
+
+def _validate_compression_record_action(action: Mapping[str, Any]) -> dict[str, Any]:
+    if set(action) != {"type", "record"}:
+        raise ValueError("invalid compression action keys")
+    record = _validate_compression_record(action.get("record"))
+    return {"type": "compression_record", "record": record}
+
+
+def _validate_compression_record(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid compression record")
+    keys = {
+        "session_key",
+        "locked_session_id",
+        "observed_session_id",
+        "correlation_id",
+        "status",
+        "failure_class",
+    }
+    if set(value) != keys:
+        raise ValueError("invalid compression record keys")
+    for field in ("session_key", "locked_session_id", "observed_session_id", "correlation_id"):
+        if not _is_safe_session_route_value(value.get(field)):
+            raise ValueError(f"invalid {field}")
+    status = value.get("status")
+    if status not in {"accepted", "rejected"}:
+        raise ValueError("invalid compression status")
+    failure_class = value.get("failure_class")
+    if failure_class is not None:
+        require_failure_class(failure_class)
+    if status == "accepted" and failure_class is not None:
+        raise ValueError("accepted compression cannot have failure_class")
+    if status == "rejected" and failure_class != "implicit_session_switch":
+        raise ValueError("invalid compression rejection failure_class")
+    return {
+        "session_key": value["session_key"],
+        "locked_session_id": value["locked_session_id"],
+        "observed_session_id": value["observed_session_id"],
+        "correlation_id": value["correlation_id"],
+        "status": status,
+        "failure_class": failure_class,
+    }
+
+
 def _validate_preflight_action(action: Mapping[str, Any]) -> dict[str, Any]:
     if set(action) != {"type", "checks"}:
         raise ValueError("invalid preflight action keys")
@@ -377,8 +453,22 @@ def _require_nonempty_string(event: Mapping[str, Any], field: str) -> str:
     return value
 
 
+def _require_session_route_value(event: Mapping[str, Any], field: str) -> str:
+    value = event.get(field)
+    if not _is_safe_session_route_value(value):
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            f"{field} is missing or invalid",
+        )
+    return value
+
+
 def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value)
+
+
+def _is_safe_session_route_value(value: Any) -> bool:
+    return isinstance(value, str) and bool(_SAFE_SESSION_ROUTE_VALUE_RE.fullmatch(value))
 
 
 def _is_safe_descriptor_uuid(value: Any) -> bool:

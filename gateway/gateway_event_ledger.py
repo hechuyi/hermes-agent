@@ -26,9 +26,17 @@ from gateway.gateway_event_contract import (
 LEDGER_FILENAME = "gateway_event_ledger.json"
 LOCK_FILENAME = ".gateway_event_ledger.lock"
 _DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
+_MAX_COMPRESSION_REJECTIONS = 1000
 _IS_WINDOWS = os.name == "nt"
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.Lock] = {}
+
+
+class _GatewayEventPersistedFailure(Exception):
+    def __init__(self, failure_class: str, reason: str):
+        super().__init__(reason)
+        self.failure_class = failure_class
+        self.reason = reason
 
 
 def apply_gateway_event(
@@ -47,7 +55,15 @@ def apply_gateway_event(
             state_path = _state_path(state_dir)
             state_path.parent.mkdir(parents=True, exist_ok=True)
             state = _read_state(state_path)
-            action = _apply_validated_event(validated_event_type, event, state)
+            try:
+                action = _apply_validated_event(validated_event_type, event, state)
+            except _GatewayEventPersistedFailure as exc:
+                _write_state_atomic(state_path, state)
+                return _failure(
+                    exc.failure_class,
+                    exc.reason,
+                    event_type=validated_event_type,
+                )
             validate_gateway_action(action)
             _write_state_atomic(state_path, state)
         return GatewayEventResult(ok=True, event_type=validated_event_type, action=action)
@@ -130,6 +146,10 @@ def _apply_validated_event(
         return _apply_feishu_ack(event, state)
     if event_type == "stale_pending_scan":
         return _apply_stale_pending_scan(event, state)
+    if event_type == "session_locked":
+        return _apply_session_locked(event, state)
+    if event_type == "compression_result":
+        return _apply_compression_result(event, state)
     raise GatewayEventContractError(
         "unsupported_gateway_event_type", "unsupported gateway event type"
     )
@@ -321,6 +341,66 @@ def _apply_stale_pending_scan(event: Mapping[str, Any], state: dict[str, Any]) -
     }
 
 
+def _apply_session_locked(event: Mapping[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    session_key = str(event["session_key"])
+    session_id = str(event["session_id"])
+    correlation_id = str(event["correlation_id"])
+    routes = state["session_routes"]
+    existing = routes.get(session_key)
+    if existing is not None:
+        if existing.get("session_id") != session_id:
+            raise GatewayEventContractError(
+                "session_route_conflict", "session route conflict"
+            )
+        return {"type": "session_route", "record": dict(existing)}
+    record = {
+        "session_key": session_key,
+        "session_id": session_id,
+        "correlation_id": correlation_id,
+    }
+    routes[session_key] = record
+    return {"type": "session_route", "record": dict(record)}
+
+
+def _apply_compression_result(
+    event: Mapping[str, Any], state: dict[str, Any]
+) -> dict[str, Any]:
+    session_key = str(event["session_key"])
+    observed_session_id = str(event["observed_session_id"])
+    correlation_id = str(event["correlation_id"])
+    route = state["session_routes"].get(session_key)
+    if route is None:
+        raise GatewayEventContractError(
+            "session_route_missing", "session route missing"
+        )
+    locked_session_id = str(route["session_id"])
+    record = {
+        "session_key": session_key,
+        "locked_session_id": locked_session_id,
+        "observed_session_id": observed_session_id,
+        "correlation_id": correlation_id,
+        "status": "accepted",
+        "failure_class": None,
+    }
+    if observed_session_id == locked_session_id:
+        return {"type": "compression_record", "record": record}
+
+    rejection = {
+        "session_key": session_key,
+        "locked_session_id": locked_session_id,
+        "observed_session_id": observed_session_id,
+        "correlation_id": correlation_id,
+        "failure_class": "implicit_session_switch",
+    }
+    rejections = state["compression_rejections"]
+    rejections.append(rejection)
+    if len(rejections) > _MAX_COMPRESSION_REJECTIONS:
+        del rejections[: len(rejections) - _MAX_COMPRESSION_REJECTIONS]
+    raise _GatewayEventPersistedFailure(
+        "implicit_session_switch", "implicit session switch"
+    )
+
+
 def _read_state(state_path: Path) -> dict[str, Any]:
     if not state_path.exists():
         return _empty_state()
@@ -335,13 +415,20 @@ def _read_state(state_path: Path) -> dict[str, Any]:
         "delivery_identity_index",
         "feishu_message_index",
         "ack_event_index",
+        "session_routes",
     ):
         value = raw.get(key, {})
         if not isinstance(value, dict):
             raise _state_schema_error()
         state[key] = value
+    compression_rejections = raw.get("compression_rejections", [])
+    if not isinstance(compression_rejections, list):
+        raise _state_schema_error()
+    state["compression_rejections"] = compression_rejections
     _validate_persisted_inbound_records(state["inbounds"])
     _validate_persisted_delivery_records(state["deliveries"])
+    _validate_persisted_session_routes(state["session_routes"])
+    _validate_persisted_compression_rejections(state["compression_rejections"])
     _reconcile_persisted_indexes(state)
     return state
 
@@ -381,6 +468,8 @@ def _empty_state() -> dict[str, Any]:
         "delivery_identity_index": {},
         "feishu_message_index": {},
         "ack_event_index": {},
+        "session_routes": {},
+        "compression_rejections": [],
     }
 
 
@@ -406,6 +495,48 @@ def _validate_persisted_inbound_records(inbounds: Mapping[str, Any]) -> None:
                 }
             )
         except ValueError as exc:
+            raise _state_schema_error() from exc
+
+
+def _validate_persisted_session_routes(routes: Mapping[str, Any]) -> None:
+    for route_key, record in routes.items():
+        try:
+            validated = validate_gateway_action(
+                {"type": "session_route", "record": record}
+            )
+        except ValueError as exc:
+            raise _state_schema_error() from exc
+        if not isinstance(route_key, str) or validated["record"]["session_key"] != route_key:
+            raise _state_schema_error()
+
+
+def _validate_persisted_compression_rejections(rejections: list[Any]) -> None:
+    for rejection in rejections:
+        if not isinstance(rejection, Mapping):
+            raise _state_schema_error()
+        if set(rejection) != {
+            "session_key",
+            "locked_session_id",
+            "observed_session_id",
+            "correlation_id",
+            "failure_class",
+        }:
+            raise _state_schema_error()
+        try:
+            validate_gateway_action(
+                {
+                    "type": "compression_record",
+                    "record": {
+                        "session_key": rejection["session_key"],
+                        "locked_session_id": rejection["locked_session_id"],
+                        "observed_session_id": rejection["observed_session_id"],
+                        "correlation_id": rejection["correlation_id"],
+                        "status": "rejected",
+                        "failure_class": rejection["failure_class"],
+                    },
+                }
+            )
+        except (GatewayEventContractError, ValueError) as exc:
             raise _state_schema_error() from exc
 
 
@@ -762,8 +893,32 @@ def _run_preflight_event_checks(
     )
     checks.append(_check("stale_pending_scan", bool(stale_ok)))
 
-    unsupported = apply_gateway_event(
-        {"type": "task_status"}, probe_dir, timeout_seconds=timeout_seconds
+    session_lock = apply_gateway_event(
+        {
+            "type": "session_locked",
+            "session_key": "preflight-session-key",
+            "session_id": "preflight-session-a",
+            "correlation_id": "preflight-correlation",
+        },
+        probe_dir,
+        timeout_seconds=timeout_seconds,
     )
-    checks.append(_check("session_guard", unsupported.ok is False))
+    session_mismatch = apply_gateway_event(
+        {
+            "type": "compression_result",
+            "session_key": "preflight-session-key",
+            "observed_session_id": "preflight-session-b",
+            "correlation_id": "preflight-correlation",
+        },
+        probe_dir,
+        timeout_seconds=timeout_seconds,
+    )
+    checks.append(
+        _check(
+            "session_guard",
+            session_lock.ok
+            and session_mismatch.ok is False
+            and session_mismatch.failure_class == "implicit_session_switch",
+        )
+    )
     return checks

@@ -57,6 +57,33 @@ def _stale_pending_scan(now: int = 100, max_age_seconds: int = 1) -> dict[str, o
     }
 
 
+def _session_locked(
+    session_key: str = "feishu:chat:oc_1",
+    session_id: str = "session-a",
+    correlation_id: str = "corr-1",
+) -> dict[str, object]:
+    return {
+        "type": "session_locked",
+        "session_key": session_key,
+        "session_id": session_id,
+        "correlation_id": correlation_id,
+    }
+
+
+def _compression_result(
+    observed_session_id: str,
+    *,
+    session_key: str = "feishu:chat:oc_1",
+    correlation_id: str = "corr-1",
+) -> dict[str, object]:
+    return {
+        "type": "compression_result",
+        "session_key": session_key,
+        "observed_session_id": observed_session_id,
+        "correlation_id": correlation_id,
+    }
+
+
 def _apply_pending_from_process(state_dir, delivery_id, start_event, result_queue):
     start_event.wait(5)
     result = apply_gateway_event(_delivery_pending(delivery_id), state_dir)
@@ -635,6 +662,88 @@ def test_unknown_delivery_state_message_id_conflict_fails_closed(tmp_path):
     assert state["feishu_message_index"] == {"om_message_1": "delivery-1"}
 
 
+def test_session_locked_persists_route(tmp_path):
+    result = apply_gateway_event(_session_locked(), tmp_path)
+
+    assert result.ok is True
+    assert result.event_type == "session_locked"
+    assert result.action is not None
+    assert result.action["type"] == "session_route"
+    assert result.action["record"] == {
+        "session_key": "feishu:chat:oc_1",
+        "session_id": "session-a",
+        "correlation_id": "corr-1",
+    }
+    with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    assert state["session_routes"]["feishu:chat:oc_1"]["session_id"] == "session-a"
+
+
+def test_session_locked_same_key_same_session_is_idempotent(tmp_path):
+    first = apply_gateway_event(_session_locked(), tmp_path)
+    repeat = apply_gateway_event(_session_locked(correlation_id="corr-repeat"), tmp_path)
+
+    assert first.ok is True
+    assert repeat.ok is True
+    assert repeat.action is not None
+    assert repeat.action["record"]["session_id"] == "session-a"
+    assert repeat.action["record"]["correlation_id"] == "corr-1"
+
+
+def test_session_locked_same_key_different_session_conflicts(tmp_path):
+    assert apply_gateway_event(_session_locked(), tmp_path).ok is True
+
+    result = apply_gateway_event(_session_locked(session_id="session-b"), tmp_path)
+
+    assert result.ok is False
+    assert result.event_type == "session_locked"
+    assert result.failure_class == "session_route_conflict"
+    assert result.reason == "session route conflict"
+
+
+def test_compression_result_matching_locked_session_succeeds(tmp_path):
+    assert apply_gateway_event(_session_locked(), tmp_path).ok is True
+
+    result = apply_gateway_event(_compression_result("session-a"), tmp_path)
+
+    assert result.ok is True
+    assert result.event_type == "compression_result"
+    assert result.action is not None
+    assert result.action["type"] == "compression_record"
+    assert result.action["record"] == {
+        "session_key": "feishu:chat:oc_1",
+        "locked_session_id": "session-a",
+        "observed_session_id": "session-a",
+        "correlation_id": "corr-1",
+        "status": "accepted",
+        "failure_class": None,
+    }
+
+
+def test_compression_result_mismatch_fails_closed_and_persists_audit(tmp_path):
+    assert apply_gateway_event(_session_locked(), tmp_path).ok is True
+
+    result = apply_gateway_event(_compression_result("session-b"), tmp_path)
+
+    assert result.ok is False
+    assert result.event_type == "compression_result"
+    assert result.failure_class == "implicit_session_switch"
+    assert result.reason == "implicit session switch"
+    assert result.action is None
+    with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    assert state["session_routes"]["feishu:chat:oc_1"]["session_id"] == "session-a"
+    assert state["compression_rejections"] == [
+        {
+            "session_key": "feishu:chat:oc_1",
+            "locked_session_id": "session-a",
+            "observed_session_id": "session-b",
+            "correlation_id": "corr-1",
+            "failure_class": "implicit_session_switch",
+        }
+    ]
+
+
 def test_preflight_checks_exclude_status_card_descriptor(tmp_path):
     result = preflight_gateway_event(tmp_path)
 
@@ -652,3 +761,21 @@ def test_preflight_checks_exclude_status_card_descriptor(tmp_path):
     }
     assert "status_card_request_descriptor" not in names
     assert "feishu_request" not in result.action
+
+
+def test_preflight_session_guard_uses_real_lock_and_mismatch_rejection(tmp_path):
+    result = preflight_gateway_event(tmp_path)
+
+    assert result.ok is True
+    assert result.action is not None
+    checks = {check["name"]: check for check in result.action["checks"]}
+    assert checks["session_guard"] == {
+        "name": "session_guard",
+        "ok": True,
+        "detail": "ok",
+    }
+    ledger_path = tmp_path / LEDGER_FILENAME
+    if ledger_path.exists():
+        with ledger_path.open(encoding="utf-8") as handle:
+            state = json.load(handle)
+        assert "preflight-session-key" not in state.get("session_routes", {})
