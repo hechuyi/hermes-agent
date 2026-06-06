@@ -167,6 +167,33 @@ Special caution: dashboard commits that allow insecure public binds and external
 skill-tap commits should be reviewed under a separate security model before
 being accepted.
 
+## Recommended next absorption order
+
+The next pass should stay narrow: one behavior domain, one targeted test set,
+and no broad `origin/main` merge. Recommended order:
+
+1. `91b174038` (`fix(feishu): bound _chat_locks with LRU eviction`) should be
+   reviewed first. It touches the Feishu P0 file, so it must not be merged
+   mechanically, but the behavior is localized: bound an in-memory per-chat
+   lock cache for long-running Feishu gateways. It is production-relevant to
+   the current fork, does not intentionally change delivery ledger, replay,
+   media, status-card, or hermes-tools event contracts, and can be validated
+   with focused Feishu gateway tests.
+2. `a1cb5fa2c` (`fix(gateway): anchor service WorkingDirectory at HERMES_HOME`)
+   is the next operational candidate. It is relevant to packaged/live service
+   durability, but it touches `hermes_cli/gateway.py` and service cwd semantics,
+   so it should be reviewed against the fork's NixOS/live preflight path before
+   porting.
+3. `5f84c9144` (`fix(file-tools): handle UTF-8 BOM in read_file / write_file /
+   patch`) is a good file-tools candidate after the service/Feishu checks. It
+   is self-contained, but it changes file content handling and should be tested
+   with the fork's existing file-safety and atomic-write behavior.
+
+The Docker reuse/orphan-reaper group, tool-search/code-exec approval group,
+auth/Nous/provider group, compression/state group, and MEDIA extraction group
+should remain separate batches because each changes a runtime contract rather
+than just a local implementation detail.
+
 ## Verification
 
 Fresh verification on the integration branch:
