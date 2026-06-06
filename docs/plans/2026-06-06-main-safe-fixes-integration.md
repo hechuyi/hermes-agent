@@ -206,6 +206,18 @@ as echoed self-messages. Events with unrelated ntfy tags still dispatch
 normally. The port intentionally omitted the unrelated `scripts/release.py`
 author-map hunk from upstream.
 
+### Windows profile-wrapper batch
+
+The Windows profile-wrapper batch was absorbed in local commit `c8dadb385`:
+
+- `6312dd8c3a3d2da2c5276c652ea4a21df29ddf47`
+- `8836b3a113f8b8781a1935217f008fe67ae8e09f`
+
+Profile aliases now use `where` for Windows collision detection, create
+`.bat` wrappers on Windows, remove Windows `.bat` wrappers safely, and route
+custom alias names through the same platform-aware wrapper generator instead
+of rewriting the file with a POSIX `#!/bin/sh` body.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
