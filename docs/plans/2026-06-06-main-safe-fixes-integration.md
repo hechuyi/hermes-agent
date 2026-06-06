@@ -344,6 +344,23 @@ gateway event ledgers, media extraction, delivery outcomes, compression
 semantics, provider routing, model catalogs, Nous legacy authentication, or the
 fork's `5.5` customizations.
 
+### Web plugin discovery batch
+
+`6e179c44b16d0149f5fa014be29490aff15a6b20`
+(`fix(web): ensure plugin discovery before web_*_tool registry lookups`) was
+manually absorbed in local commit `0dd44f223`.
+
+`web_search_tool` and `web_extract_tool` now trigger idempotent plugin
+discovery before consulting `agent.web_search_registry`. This prevents
+cold-start subprocesses, delegate children, and standalone imports from seeing
+an empty web registry and returning misleading "No web provider configured"
+errors when a configured plugin-backed provider is available.
+
+This batch is limited to web tool dispatch registration. It does not change
+provider implementation behavior, gateway event ledgers, media extraction,
+delivery outcomes, model catalogs, Nous legacy authentication, or the fork's
+`5.5` customizations.
+
 ### CLI MCP startup batch
 
 `0c6e133c0434ec856d4aea2b08f216f36c0e7dac`
@@ -710,6 +727,28 @@ Result: `10 passed, 1 warning`.
 
 ```bash
 uv run --extra dev ruff check agent/chat_completion_helpers.py tests/run_agent/test_run_agent.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` produced no output.
+
+Web plugin discovery batch verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_web_providers.py::TestDispatchersTriggerPluginDiscovery -q -rs
+```
+
+Result: `2 passed, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_web_providers.py tests/tools/test_web_tools_config.py -q -rs
+```
+
+Result: `65 passed, 1 warning`.
+
+```bash
+uv run --extra dev ruff check tools/web_tools.py tests/tools/test_web_providers.py
 ```
 
 Result: `All checks passed!`.
