@@ -646,31 +646,49 @@ def run_conversation(
             system_prompt=active_system_prompt or "",
             tools=agent.tools or None,
         )
-
-        _should_preflight_compress = agent.context_compressor.should_compress(
-            _preflight_tokens
+        _compressor = agent.context_compressor
+        _defer_preflight = getattr(
+            _compressor,
+            "should_defer_preflight_to_real_usage",
+            lambda _tokens: False,
         )
 
+        _preflight_deferred = _defer_preflight(_preflight_tokens)
+        _should_preflight_compress = (
+            False
+            if _preflight_deferred
+            else _compressor.should_compress(_preflight_tokens)
+        )
+
+        if _preflight_deferred:
+            logger.info(
+                "Skipping preflight compression: rough estimate ~%s >= %s, "
+                "but last real provider prompt was %s after compression",
+                f"{_preflight_tokens:,}",
+                f"{_compressor.threshold_tokens:,}",
+                f"{getattr(_compressor, 'last_real_prompt_tokens', 0):,}",
+            )
+
         if _should_preflight_compress and _preflight_tokens > (
-            agent.context_compressor.last_prompt_tokens or 0
+            _compressor.last_prompt_tokens or 0
         ):
             # The CLI/ACP context display reads last_prompt_tokens, which
             # otherwise updates only from successful provider usage. Seed it
             # with the fresh preflight estimate so a failed/no-op compression
             # does not leave the display stuck at an older, smaller value.
-            agent.context_compressor.last_prompt_tokens = _preflight_tokens
+            _compressor.last_prompt_tokens = _preflight_tokens
 
         if _should_preflight_compress:
             logger.info(
                 "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
                 f"{_preflight_tokens:,}",
-                f"{agent.context_compressor.threshold_tokens:,}",
+                f"{_compressor.threshold_tokens:,}",
                 agent.model,
-                f"{agent.context_compressor.context_length:,}",
+                f"{_compressor.context_length:,}",
             )
             agent._emit_status(
                 f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
-                f">= {agent.context_compressor.threshold_tokens:,} threshold. "
+                f">= {_compressor.threshold_tokens:,} threshold. "
                 "This may take a moment."
             )
             # May need multiple passes for very large sessions with small
@@ -705,8 +723,8 @@ def run_conversation(
                     system_prompt=active_system_prompt or "",
                     tools=agent.tools or None,
                 )
-                if _preflight_tokens < agent.context_compressor.threshold_tokens:
-                    break  # Under threshold
+                if not _compressor.should_compress(_preflight_tokens):
+                    break  # Under threshold or anti-thrash guard stopped it
 
     # Plugin hook: pre_llm_call
     # Fired once per turn before the tool-calling loop.  Plugins can
@@ -3910,6 +3928,12 @@ def run_conversation(
                     # inflate completion_tokens with reasoning,
                     # causing premature compression.  (#12026)
                     _real_tokens = _compressor.last_prompt_tokens
+                elif _compressor.last_prompt_tokens == -1:
+                    # Freshly compressed sessions keep only a rough diagnostic
+                    # estimate until the provider returns real usage. Do not
+                    # let that known-noisy estimate immediately trigger another
+                    # compaction cycle.
+                    _real_tokens = 0
                 else:
                     # Include tool schemas — with 50+ tools enabled
                     # these add 20-30K tokens the messages-only
