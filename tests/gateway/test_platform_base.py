@@ -361,6 +361,30 @@ class TestExtractMedia:
         assert "[[audio_as_voice]]" not in cleaned
         assert "[[as_document]]" not in cleaned
 
+    def test_media_tag_windows_backslash_path(self):
+        """MEDIA tags should recognise Windows backslash absolute paths."""
+        media, cleaned = BasePlatformAdapter.extract_media(r"MEDIA:C:\Users\test\file.pdf")
+        assert media == [(r"C:\Users\test\file.pdf", False)]
+        assert cleaned == ""
+
+    def test_media_tag_windows_forward_slash_path(self):
+        """MEDIA tags should recognise Windows forward-slash absolute paths."""
+        media, cleaned = BasePlatformAdapter.extract_media("MEDIA:C:/Users/test/file.pdf")
+        assert media == [("C:/Users/test/file.pdf", False)]
+        assert cleaned == ""
+
+    def test_media_tag_windows_drive_root(self):
+        """MEDIA tags should recognise files at a Windows drive root."""
+        media, cleaned = BasePlatformAdapter.extract_media(r"MEDIA:D:\report.pdf")
+        assert media == [(r"D:\report.pdf", False)]
+        assert cleaned == ""
+
+    def test_media_tag_relative_windows_path_still_ignored(self):
+        """Windows-style relative paths must not be treated as deliverable media."""
+        media, cleaned = BasePlatformAdapter.extract_media(r"MEDIA:Users\test\file.pdf")
+        assert media == []
+        assert cleaned == r"MEDIA:Users\test\file.pdf"
+
 
 class TestMediaDeliveryPathValidation:
     def _patch_roots(self, monkeypatch, *roots):

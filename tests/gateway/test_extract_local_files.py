@@ -337,9 +337,24 @@ class TestEdgeCases:
         paths, _ = _extract("File at /tmp/my file.png here")
         assert paths == []
 
-    def test_windows_path_not_matched(self):
-        """Windows-style paths should not match."""
-        paths, _ = _extract("See C:\\Users\\test\\image.png")
+    @pytest.mark.parametrize(
+        "content, expected",
+        [
+            (r"See C:\Users\test\image.png here", r"C:\Users\test\image.png"),
+            ("See C:/Users/test/image.png here", "C:/Users/test/image.png"),
+            ("Video at D:/data/clip.mp4 ready", "D:/data/clip.mp4"),
+            ("Path e:/audio/track.mp3 done", "e:/audio/track.mp3"),
+        ],
+    )
+    def test_windows_drive_letter_paths_matched(self, content, expected):
+        """Windows drive-letter paths should be detected as absolute local files."""
+        paths, cleaned = _extract(content)
+        assert paths == [expected]
+        assert expected not in cleaned
+
+    def test_relative_windows_path_not_matched(self):
+        """Windows-style relative paths should not match."""
+        paths, _ = _extract(r"File at foo\bar.png here")
         assert paths == []
 
     def test_relative_path_not_matched(self):
