@@ -3572,3 +3572,48 @@ python -m py_compile agent/conversation_loop.py hermes_cli/config.py run_agent.p
 Result: exit `0`.
 
 `git diff --cached --check` produced no output before the code commit.
+
+## 2026-06-07 — Native vision fast-path equivalence
+
+Upstream commits reviewed for the vision half of the native-image routing
+stack:
+
+- `f05353397d036a1d072f7e0230e6850f1e453efd` — respect
+  `supports_vision` in `vision_analyze`.
+- `2402ec5e7b251d115efdc24c231463f33b587902` — native image routing test
+  coverage for the vision fast path.
+- `c77a697fa4f3a5bc839bf569d6405489b0301c09` — shared helper direction for
+  native fast-path gating, for the `vision_analyze` side.
+
+Local result:
+
+- No code change was required for `vision_analyze`. The current fork already
+  gates native image routing on the active main model's `supports_vision`
+  state and provider tool-result media support, with conservative fallback to
+  the auxiliary vision path for unsupported providers.
+- `tools/vision_tools.py` already contains `_supports_media_in_tool_results`,
+  `_vision_analyze_native`, `_build_native_vision_tool_result`, and the
+  `_handle_vision_analyze` fast-path gate.
+- The related browser-side commits (`f8b8dffc`, `c3f28c65`, browser portions
+  of `c77a697f`) remain under separate review because `browser_vision` has a
+  distinct screenshot capture and fallback contract.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_vision_native_fast_path.py tests/tools/test_browser_console.py -q -rs -k "vision or browser_vision or native"
+```
+
+Result: `23 passed, 22 deselected`.
+
+```bash
+uv run --extra dev ruff check tools/vision_tools.py tools/browser_tool.py tests/tools/test_vision_native_fast_path.py tests/tools/test_browser_console.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile tools/vision_tools.py tools/browser_tool.py tests/tools/test_vision_native_fast_path.py tests/tools/test_browser_console.py
+```
+
+Result: exit `0`.
