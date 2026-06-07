@@ -39,6 +39,7 @@ from gateway.platforms.yuanbao import (
     OwnerCommandMiddleware,
     BuildSourceMiddleware,
     GroupAtGuardMiddleware,
+    MediaResolveMiddleware,
     DispatchMiddleware,
     InboundPipelineBuilder,
     YuanbaoAdapter,
@@ -632,6 +633,48 @@ class TestPlaceholderFilterMiddleware:
 
         await PlaceholderFilterMiddleware()(ctx, next_fn)
         next_fn.assert_awaited_once()
+
+
+class TestMediaResolveMiddleware:
+    @pytest.mark.asyncio
+    async def test_download_cache_reuses_existing_resource_id(self, tmp_path):
+        """Repeated resourceId resolutions should reuse the existing local cache file."""
+        from gateway.platforms import yuanbao as yuanbao_module
+
+        adapter = make_adapter()
+        cached_path = tmp_path / "rid-1.jpg"
+        cached_path.write_bytes(b"cached-image")
+
+        MediaResolveMiddleware._resource_cache.clear()
+        download = AsyncMock(return_value=(b"image-bytes", "image/jpeg"))
+        try:
+            with (
+                patch.object(yuanbao_module, "media_download_url", download),
+                patch.object(
+                    yuanbao_module,
+                    "cache_image_from_bytes",
+                    return_value=str(cached_path),
+                ) as cache_image,
+            ):
+                first = await MediaResolveMiddleware._download_and_cache(
+                    adapter,
+                    fetch_url="https://cdn.example.test/a.jpg",
+                    kind="image",
+                    resource_id="rid-1",
+                )
+                second = await MediaResolveMiddleware._download_and_cache(
+                    adapter,
+                    fetch_url="https://cdn.example.test/b.jpg",
+                    kind="image",
+                    resource_id="rid-1",
+                )
+        finally:
+            MediaResolveMiddleware._resource_cache.clear()
+
+        assert first == (str(cached_path), "image/jpeg")
+        assert second == first
+        assert download.await_count == 1
+        assert cache_image.call_count == 1
 
 
 class TestGroupAtGuardMiddleware:
