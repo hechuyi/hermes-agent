@@ -2653,9 +2653,9 @@ An `npm ci` attempt was terminated after several minutes without progress; the
 worktree remained clean and only ignored `website/node_modules` content was
 left behind.
 
-## 2026-06-07 — Deferred cron jobs auto-restore port
+## 2026-06-08 — Cron jobs auto-restore typed-result absorption
 
-Upstream commit reviewed:
+Upstream commit reviewed and absorbed:
 
 - `3845d86b9330d8952fc1e9534d438f62ad1d53e5` — restore `cron/jobs.json`
   from a pre-update quick snapshot if config migration leaves the live file
@@ -2663,27 +2663,48 @@ Upstream commit reviewed:
 
 Local result:
 
-- Deferred, not absorbed.
-- Reason: the upstream implementation is directionally useful, but it lives in
-  backup/recovery code and currently collapses restore-copy failures and
-  safety-net exceptions into `None`/debug-only paths. This conflicts with this
-  workspace's disaster-recovery error discipline: unknown, unreadable,
-  unsupported, or failed restore states must surface as stable failure/unknown
-  categories with sanitized context instead of silently joining the no-op path.
+- Absorbed with a local typed-result implementation rather than upstream's
+  `None`/dict return shape.
+- Added `CronJobsRestoreResult` with stable `state`, `reason`, `evidence_state`,
+  `rel_path`, and sanitized count/snapshot metadata.
+- Restores only when evidence proves loss: live `cron/jobs.json` is readable
+  empty, or missing while the pre-update snapshot has one or more jobs.
+- Preserves healthy no-op cases for live jobs present, empty snapshot, and the
+  common no-cron case where both live and snapshot cron material are missing.
+- Surfaces unreadable live file, missing/unreadable snapshot material, missing
+  snapshot id for an empty live file, restore-copy failure, post-restore
+  verification failure, and safety-net exceptions as explicit failed outcomes.
+- Copies snapshot material through a same-directory temporary file, atomically
+  replaces the live file, and re-reads the result before returning `restored`.
+- Wires `hermes update` to print a visible warning for failed safety-net states
+  without aborting the otherwise completed update.
 
-Required shape before absorption:
+Verification:
 
-- Preserve the conservative restore condition: only restore when the live
-  `cron/jobs.json` is readable and empty while the snapshot has one or more
-  jobs.
-- Represent restore-copy failure, unreadable live file, unreadable snapshot
-  material, and missing restore material as explicit result states or warnings
-  with stable reason codes.
-- Keep `hermes update` from bricking on this safety net, but print/log a
-  visible warning when the safety-net check itself fails or cannot prove a
-  safe restore.
-- Add tests for restored, healthy-noop, empty-snapshot-noop, unreadable-live,
-  unreadable-snapshot, missing-snapshot-material, and copy-failure outcomes.
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_backup.py -q -rs
+```
+
+Result: `112 passed`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_cmd_update.py -q -rs
+```
+
+Result: `24 passed`.
+
+```bash
+uv run --extra dev ruff check hermes_cli/backup.py hermes_cli/main.py tests/hermes_cli/test_backup.py tests/hermes_cli/test_cmd_update.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile hermes_cli/backup.py hermes_cli/main.py tests/hermes_cli/test_backup.py tests/hermes_cli/test_cmd_update.py
+git diff --check
+```
+
+Result: both commands exited `0`.
 
 ## 2026-06-07 — MEDIA extension allowlist absorption
 

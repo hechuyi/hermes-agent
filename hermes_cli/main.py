@@ -9189,12 +9189,13 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # though `git pull` can't touch $HERMES_HOME, this is cheap
         # belt-and-suspenders insurance and gives the user something to
         # restore from via `/snapshot list` / `/snapshot restore <id>`.
+        pre_update_snapshot_id = None
         try:
             from hermes_cli.backup import create_quick_snapshot
 
-            snap_id = create_quick_snapshot(label="pre-update", keep=1)
-            if snap_id:
-                print(f"  ✓ Pre-update snapshot: {snap_id}")
+            pre_update_snapshot_id = create_quick_snapshot(label="pre-update", keep=1)
+            if pre_update_snapshot_id:
+                print(f"  ✓ Pre-update snapshot: {pre_update_snapshot_id}")
         except Exception as exc:
             # Never let a snapshot failure block an update.
             logger.debug("Pre-update snapshot failed: %s", exc)
@@ -9530,6 +9531,39 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 print("Skipped. Run 'hermes config migrate' later to configure.")
         else:
             print("  ✓ Configuration is up to date")
+
+        try:
+            from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+            cron_restore = restore_cron_jobs_if_emptied(pre_update_snapshot_id)
+            if cron_restore.state == "restored":
+                print()
+                print(
+                    "  ⚠ cron/jobs.json was emptied during this update; "
+                    f"restored {cron_restore.snapshot_job_count} job(s) "
+                    f"from pre-update snapshot {cron_restore.snapshot_id}."
+                )
+            elif cron_restore.state == "failed":
+                print()
+                print(
+                    "  ⚠ Cron jobs auto-restore safety net failed: "
+                    f"reason={cron_restore.reason} "
+                    f"evidence={cron_restore.evidence_state} "
+                    f"rel_path={cron_restore.rel_path} "
+                    f"snapshot_id={cron_restore.snapshot_id}"
+                )
+        except Exception as exc:
+            evidence = type(exc).__name__
+            logger.warning(
+                "Cron jobs auto-restore safety net failed: reason=safety_net_exception evidence=%s",
+                evidence,
+            )
+            print()
+            print(
+                "  ⚠ Cron jobs auto-restore safety net failed: "
+                f"reason=safety_net_exception evidence={evidence} "
+                "rel_path=cron/jobs.json"
+            )
 
         print()
         print("✓ Update complete!")

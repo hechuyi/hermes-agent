@@ -188,8 +188,9 @@ class TestCmdUpdateBranchFallback:
         # Mock it so the test doesn't actually shell out to ``tsc``.
         import subprocess as _subprocess
         build_ok = _subprocess.CompletedProcess([], 0, stdout="", stderr="")
-        with patch.object(hm, "_is_termux_env", return_value=False), \
-             patch.object(hm, "_run_with_idle_timeout", return_value=build_ok) as mock_idle:
+        with patch.object(hm, "_is_termux_env", return_value=False), patch.object(
+            hm, "_web_ui_build_needed", return_value=True
+        ), patch.object(hm, "_run_with_idle_timeout", return_value=build_ok) as mock_idle:
             cmd_update(mock_args)
 
         npm_calls = [
@@ -279,6 +280,53 @@ class TestCmdUpdateBranchFallback:
             captured = capsys.readouterr()
             assert "applying safe config migrations" in captured.out
             assert "API keys require manual entry" in captured.out
+
+    def test_update_runs_cron_restore_safety_net_after_migration(self, mock_args, capsys):
+        """Cron restore failures must be visible but must not abort update."""
+        from hermes_cli import main as hm
+
+        restore_result = SimpleNamespace(
+            state="failed",
+            reason="snapshot_jobs_missing",
+            evidence_state="missing_file",
+            snapshot_id="snap-pre-update",
+            rel_path="cron/jobs.json",
+            snapshot_job_count=None,
+        )
+
+        with patch("shutil.which", return_value=None), patch(
+            "subprocess.run"
+        ) as mock_run, patch(
+            "hermes_cli.backup.create_quick_snapshot", return_value="snap-pre-update"
+        ) as create_snapshot, patch(
+            "hermes_cli.backup.restore_cron_jobs_if_emptied",
+            return_value=restore_result,
+        ) as restore_cron, patch(
+            "hermes_cli.config.get_missing_env_vars", return_value=[]
+        ), patch(
+            "hermes_cli.config.get_missing_config_fields",
+            return_value=[{"key": "new.option", "default": True}],
+        ), patch("hermes_cli.config.check_config_version", return_value=(1, 2)), patch(
+            "hermes_cli.config.migrate_config",
+            return_value={"env_added": [], "config_added": ["new.option"]},
+        ), patch("hermes_cli.main.sys") as mock_sys, patch.object(
+            hm, "_is_termux_env", return_value=False
+        ):
+            mock_sys.stdin.isatty.return_value = False
+            mock_sys.stdout.isatty.return_value = False
+            mock_run.side_effect = _make_run_side_effect(
+                branch="main", verify_ok=True, commit_count="1"
+            )
+
+            cmd_update(mock_args)
+
+        create_snapshot.assert_called_once_with(label="pre-update", keep=1)
+        restore_cron.assert_called_once_with("snap-pre-update")
+        captured = capsys.readouterr()
+        assert "Cron jobs auto-restore safety net failed" in captured.out
+        assert "reason=snapshot_jobs_missing" in captured.out
+        assert "evidence=missing_file" in captured.out
+        assert "✓ Update complete!" in captured.out
 
 
 class TestCmdUpdateProfileSkillSync:

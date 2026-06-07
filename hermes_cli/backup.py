@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -502,6 +503,30 @@ _QUICK_STATE_FILES = (
 
 _QUICK_SNAPSHOTS_DIR = "state-snapshots"
 _QUICK_DEFAULT_KEEP = 20
+_CRON_JOBS_REL = "cron/jobs.json"
+
+
+@dataclass(frozen=True)
+class CronJobsRestoreResult:
+    """Structured outcome for the post-update cron jobs restore safety net."""
+
+    state: str
+    reason: str
+    snapshot_id: Optional[str] = None
+    live_job_count: Optional[int] = None
+    snapshot_job_count: Optional[int] = None
+    evidence_state: Optional[str] = None
+    rel_path: str = _CRON_JOBS_REL
+
+
+@dataclass(frozen=True)
+class _CronJobsRead:
+    count: Optional[int]
+    evidence_state: str
+
+    @property
+    def readable(self) -> bool:
+        return self.evidence_state == "readable"
 
 
 def _quick_snapshot_root(hermes_home: Optional[Path] = None) -> Path:
@@ -668,6 +693,266 @@ def restore_quick_snapshot(
 
     logger.info("Restored %d files from snapshot %s", restored, snapshot_id)
     return restored > 0
+
+
+def _read_cron_jobs_count(path: Path) -> _CronJobsRead:
+    """Read a cron jobs file as evidence, without collapsing failures to zero."""
+    if not path.exists():
+        return _CronJobsRead(count=None, evidence_state="missing_file")
+    if not path.is_file():
+        return _CronJobsRead(count=None, evidence_state="not_regular_file")
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        return _CronJobsRead(count=None, evidence_state="invalid_json")
+    except UnicodeDecodeError:
+        return _CronJobsRead(count=None, evidence_state="invalid_text")
+    except OSError as exc:
+        return _CronJobsRead(count=None, evidence_state=type(exc).__name__)
+
+    if isinstance(data, dict):
+        jobs = data.get("jobs")
+        if isinstance(jobs, list):
+            return _CronJobsRead(count=len(jobs), evidence_state="readable")
+        return _CronJobsRead(count=None, evidence_state="invalid_shape")
+
+    if isinstance(data, list):
+        return _CronJobsRead(count=len(data), evidence_state="readable")
+
+    return _CronJobsRead(count=None, evidence_state="invalid_shape")
+
+
+def _copy_cron_jobs_snapshot_atomically(src: Path, dst: Path) -> None:
+    """Copy cron jobs into place without partially overwriting the live file."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(dst.parent),
+        prefix=f".{dst.name}.",
+        suffix=".restore",
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as tmp_f:
+            with open(src, "rb") as src_f:
+                shutil.copyfileobj(src_f, tmp_f)
+            tmp_f.flush()
+            os.fsync(tmp_f.fileno())
+        shutil.copystat(src, tmp_path, follow_symlinks=True)
+        os.replace(tmp_path, dst)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _restore_cron_jobs_from_snapshot(
+    *,
+    snapshot_id: str,
+    home: Path,
+    live_path: Path,
+    live: _CronJobsRead,
+) -> CronJobsRestoreResult:
+    snap_path = _quick_snapshot_root(home) / snapshot_id / _CRON_JOBS_REL
+    snapshot = _read_cron_jobs_count(snap_path)
+    if not snapshot.readable:
+        if snapshot.evidence_state == "missing_file" and live.evidence_state == "missing_file":
+            return CronJobsRestoreResult(
+                state="noop",
+                reason="live_jobs_missing",
+                snapshot_id=snapshot_id,
+                snapshot_job_count=snapshot.count,
+                evidence_state=live.evidence_state,
+            )
+
+        result = CronJobsRestoreResult(
+            state="failed",
+            reason="snapshot_jobs_missing"
+            if snapshot.evidence_state == "missing_file"
+            else "snapshot_jobs_unreadable",
+            snapshot_id=snapshot_id,
+            live_job_count=live.count,
+            evidence_state=snapshot.evidence_state,
+        )
+        logger.warning(
+            "Cron jobs auto-restore skipped: reason=%s evidence=%s rel_path=%s snapshot_id=%s",
+            result.reason,
+            result.evidence_state,
+            result.rel_path,
+            snapshot_id,
+        )
+        return result
+
+    if snapshot.count == 0:
+        return CronJobsRestoreResult(
+            state="noop",
+            reason="snapshot_jobs_empty",
+            snapshot_id=snapshot_id,
+            live_job_count=live.count,
+            snapshot_job_count=snapshot.count,
+            evidence_state=live.evidence_state
+            if live.evidence_state != "readable"
+            else None,
+        )
+
+    try:
+        _copy_cron_jobs_snapshot_atomically(snap_path, live_path)
+    except OSError as exc:
+        result = CronJobsRestoreResult(
+            state="failed",
+            reason="restore_copy_failed",
+            snapshot_id=snapshot_id,
+            live_job_count=live.count,
+            snapshot_job_count=snapshot.count,
+            evidence_state=type(exc).__name__,
+        )
+        logger.warning(
+            "Cron jobs auto-restore failed: reason=%s evidence=%s rel_path=%s snapshot_id=%s",
+            result.reason,
+            result.evidence_state,
+            result.rel_path,
+            snapshot_id,
+        )
+        return result
+
+    restored = _read_cron_jobs_count(live_path)
+    if not restored.readable or restored.count != snapshot.count:
+        result = CronJobsRestoreResult(
+            state="failed",
+            reason="post_restore_verification_failed",
+            snapshot_id=snapshot_id,
+            live_job_count=restored.count,
+            snapshot_job_count=snapshot.count,
+            evidence_state=restored.evidence_state,
+        )
+        logger.warning(
+            "Cron jobs auto-restore failed: reason=%s evidence=%s rel_path=%s snapshot_id=%s live_count=%s snapshot_count=%s",
+            result.reason,
+            result.evidence_state,
+            result.rel_path,
+            snapshot_id,
+            restored.count,
+            snapshot.count,
+        )
+        return result
+
+    result = CronJobsRestoreResult(
+        state="restored",
+        reason="restored_from_snapshot",
+        snapshot_id=snapshot_id,
+        live_job_count=live.count,
+        snapshot_job_count=snapshot.count,
+        evidence_state=live.evidence_state
+        if live.evidence_state != "readable"
+        else None,
+    )
+    logger.warning(
+        "Restored %d cron job(s) from pre-update snapshot %s after live %s evidence=%s",
+        snapshot.count,
+        snapshot_id,
+        _CRON_JOBS_REL,
+        live.evidence_state,
+    )
+    return result
+
+
+def restore_cron_jobs_if_emptied(
+    snapshot_id: Optional[str],
+    hermes_home: Optional[Path] = None,
+) -> CronJobsRestoreResult:
+    """Restore cron/jobs.json only on clear evidence of migration data loss.
+
+    The safety net is intentionally narrow: live cron/jobs.json must be empty
+    or missing, and the named quick snapshot must contain a readable
+    cron/jobs.json with at least one job. Unknown, unreadable, and copy-failure
+    cases are returned as explicit failed outcomes instead of joining the
+    no-op path.
+    """
+    try:
+        home = hermes_home or get_hermes_home()
+        live_path = home / _CRON_JOBS_REL
+        live = _read_cron_jobs_count(live_path)
+        if not live.readable:
+            if live.evidence_state == "missing_file":
+                if not snapshot_id:
+                    return CronJobsRestoreResult(
+                        state="noop",
+                        reason="live_jobs_missing",
+                        snapshot_id=snapshot_id,
+                        evidence_state=live.evidence_state,
+                    )
+
+                return _restore_cron_jobs_from_snapshot(
+                    snapshot_id=snapshot_id,
+                    home=home,
+                    live_path=live_path,
+                    live=live,
+                )
+
+            result = CronJobsRestoreResult(
+                state="failed",
+                reason="live_jobs_unreadable",
+                snapshot_id=snapshot_id,
+                evidence_state=live.evidence_state,
+            )
+            logger.warning(
+                "Cron jobs auto-restore skipped: reason=%s evidence=%s rel_path=%s snapshot_id=%s",
+                result.reason,
+                result.evidence_state,
+                result.rel_path,
+                snapshot_id,
+            )
+            return result
+
+        if live.count and live.count > 0:
+            return CronJobsRestoreResult(
+                state="noop",
+                reason="live_jobs_present",
+                snapshot_id=snapshot_id,
+                live_job_count=live.count,
+            )
+
+        if not snapshot_id:
+            result = CronJobsRestoreResult(
+                state="failed",
+                reason="snapshot_id_missing",
+                snapshot_id=snapshot_id,
+                live_job_count=live.count,
+                evidence_state="missing_restore_material",
+            )
+            logger.warning(
+                "Cron jobs auto-restore skipped: reason=%s evidence=%s rel_path=%s snapshot_id=%s",
+                result.reason,
+                result.evidence_state,
+                result.rel_path,
+                snapshot_id,
+            )
+            return result
+
+        return _restore_cron_jobs_from_snapshot(
+            snapshot_id=snapshot_id,
+            home=home,
+            live_path=live_path,
+            live=live,
+        )
+    except Exception as exc:
+        result = CronJobsRestoreResult(
+            state="failed",
+            reason="safety_net_exception",
+            snapshot_id=snapshot_id,
+            evidence_state=type(exc).__name__,
+        )
+        logger.warning(
+            "Cron jobs auto-restore failed: reason=%s evidence=%s rel_path=%s snapshot_id=%s",
+            result.reason,
+            result.evidence_state,
+            result.rel_path,
+            snapshot_id,
+        )
+        return result
 
 
 def _prune_quick_snapshots(root: Path, keep: int = _QUICK_DEFAULT_KEEP) -> int:

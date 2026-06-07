@@ -1299,6 +1299,253 @@ class TestQuickSnapshot:
         # Other state still present → snapshot succeeds.
         assert snap_id is not None
 
+
+class TestRestoreCronJobsIfEmptied:
+    """Post-update safety net for cron/jobs.json emptied by config migration."""
+
+    @staticmethod
+    def _seed_jobs(path: Path, jobs: list[dict[str, str]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+
+    def _make_snapshot(self, hermes_home: Path) -> str:
+        from hermes_cli.backup import create_quick_snapshot
+
+        snap_id = create_quick_snapshot(label="pre-update", hermes_home=hermes_home, keep=5)
+        assert snap_id is not None
+        return snap_id
+
+    def test_restores_when_live_empty_and_snapshot_has_jobs(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [{"id": "a"}, {"id": "b"}])
+        snap_id = self._make_snapshot(hermes_home)
+        self._seed_jobs(jobs_path, [])
+
+        result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+
+        assert result.state == "restored"
+        assert result.reason == "restored_from_snapshot"
+        assert result.live_job_count == 0
+        assert result.snapshot_job_count == 2
+        assert result.snapshot_id == snap_id
+        assert json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"] == [
+            {"id": "a"},
+            {"id": "b"},
+        ]
+
+    def test_restores_when_live_missing_and_snapshot_has_jobs(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [{"id": "a"}, {"id": "b"}])
+        snap_id = self._make_snapshot(hermes_home)
+        jobs_path.unlink()
+
+        result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+
+        assert result.state == "restored"
+        assert result.reason == "restored_from_snapshot"
+        assert result.live_job_count is None
+        assert result.snapshot_job_count == 2
+        assert result.evidence_state == "missing_file"
+        assert json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"] == [
+            {"id": "a"},
+            {"id": "b"},
+        ]
+
+    def test_noop_when_live_file_still_has_jobs(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [{"id": "a"}])
+        snap_id = self._make_snapshot(hermes_home)
+
+        result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+
+        assert result.state == "noop"
+        assert result.reason == "live_jobs_present"
+        assert result.live_job_count == 1
+        assert result.snapshot_job_count is None
+
+    def test_noop_when_live_and_snapshot_are_empty(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [])
+        snap_id = self._make_snapshot(hermes_home)
+
+        result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+
+        assert result.state == "noop"
+        assert result.reason == "snapshot_jobs_empty"
+        assert result.live_job_count == 0
+        assert result.snapshot_job_count == 0
+
+    def test_failed_when_live_file_unreadable(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [{"id": "a"}])
+        snap_id = self._make_snapshot(hermes_home)
+        jobs_path.write_text("{not json", encoding="utf-8")
+
+        result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+
+        assert result.state == "failed"
+        assert result.reason == "live_jobs_unreadable"
+        assert result.evidence_state == "invalid_json"
+        assert jobs_path.read_text(encoding="utf-8") == "{not json"
+
+    def test_failed_when_live_file_read_raises_permission_error(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [{"id": "a"}])
+        snap_id = self._make_snapshot(hermes_home)
+
+        real_open = open
+
+        def guarded_open(path, *args, **kwargs):
+            if Path(path) == jobs_path:
+                raise PermissionError("denied")
+            return real_open(path, *args, **kwargs)
+
+        with patch("builtins.open", side_effect=guarded_open):
+            result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+
+        assert result.state == "failed"
+        assert result.reason == "live_jobs_unreadable"
+        assert result.evidence_state == "PermissionError"
+
+    def test_noop_when_live_file_missing(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+
+        result = restore_cron_jobs_if_emptied("snap-pre-update", hermes_home=hermes_home)
+
+        assert result.state == "noop"
+        assert result.reason == "live_jobs_missing"
+        assert result.evidence_state == "missing_file"
+
+    def test_noop_when_live_missing_and_snapshot_had_no_jobs(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [])
+        snap_id = self._make_snapshot(hermes_home)
+        jobs_path.unlink()
+
+        result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+
+        assert result.state == "noop"
+        assert result.reason == "snapshot_jobs_empty"
+        assert result.snapshot_job_count == 0
+        assert result.evidence_state == "missing_file"
+        assert not jobs_path.exists()
+
+    def test_failed_when_snapshot_material_missing(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [{"id": "a"}])
+        snap_id = self._make_snapshot(hermes_home)
+        (hermes_home / "state-snapshots" / snap_id / "cron" / "jobs.json").unlink()
+        self._seed_jobs(jobs_path, [])
+
+        result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+
+        assert result.state == "failed"
+        assert result.reason == "snapshot_jobs_missing"
+        assert result.evidence_state == "missing_file"
+        assert json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"] == []
+
+    def test_failed_when_live_empty_but_snapshot_id_missing(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [])
+
+        result = restore_cron_jobs_if_emptied(None, hermes_home=hermes_home)
+
+        assert result.state == "failed"
+        assert result.reason == "snapshot_id_missing"
+        assert result.live_job_count == 0
+        assert result.evidence_state == "missing_restore_material"
+
+    def test_failed_when_snapshot_file_unreadable(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [{"id": "a"}])
+        snap_id = self._make_snapshot(hermes_home)
+        snapshot_jobs = hermes_home / "state-snapshots" / snap_id / "cron" / "jobs.json"
+        snapshot_jobs.write_text('{"jobs": "not-a-list"}', encoding="utf-8")
+        self._seed_jobs(jobs_path, [])
+
+        result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+
+        assert result.state == "failed"
+        assert result.reason == "snapshot_jobs_unreadable"
+        assert result.evidence_state == "invalid_shape"
+        assert json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"] == []
+
+    def test_failed_when_restore_copy_fails(self, tmp_path):
+        from hermes_cli.backup import restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [{"id": "a"}])
+        snap_id = self._make_snapshot(hermes_home)
+        self._seed_jobs(jobs_path, [])
+
+        with patch("hermes_cli.backup.os.replace", side_effect=OSError("replace failed")):
+            result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+
+        assert result.state == "failed"
+        assert result.reason == "restore_copy_failed"
+        assert result.evidence_state == "OSError"
+        assert result.live_job_count == 0
+        assert result.snapshot_job_count == 1
+        assert json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"] == []
+
+    def test_failed_when_post_restore_verification_fails(self, tmp_path):
+        from hermes_cli.backup import _CronJobsRead, restore_cron_jobs_if_emptied
+
+        hermes_home = tmp_path / ".hermes"
+        jobs_path = hermes_home / "cron" / "jobs.json"
+        self._seed_jobs(jobs_path, [{"id": "a"}])
+        snap_id = self._make_snapshot(hermes_home)
+        self._seed_jobs(jobs_path, [])
+
+        with patch(
+            "hermes_cli.backup._read_cron_jobs_count",
+            side_effect=[
+                _CronJobsRead(count=0, evidence_state="readable"),
+                _CronJobsRead(count=1, evidence_state="readable"),
+                _CronJobsRead(count=0, evidence_state="readable"),
+            ],
+        ):
+            result = restore_cron_jobs_if_emptied(snap_id, hermes_home=hermes_home)
+
+        assert result.state == "failed"
+        assert result.reason == "post_restore_verification_failed"
+        assert result.live_job_count == 0
+        assert result.snapshot_job_count == 1
+        assert result.evidence_state == "readable"
+
 # ---------------------------------------------------------------------------
 # Pre-update backup (hermes update safety net)
 # ---------------------------------------------------------------------------
