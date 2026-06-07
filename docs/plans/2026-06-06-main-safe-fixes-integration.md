@@ -769,9 +769,13 @@ These must not be merged mechanically:
   session/state behavior. This was later absorbed as local commit
   `069e183e2`, with explicit degraded-capability semantics rather than
   upstream's silent empty-search degradation.
-- `a30480bd2`, `db2ce9e7d`, `e38b0b55d`, `020601d41`, `56b8dccf2`,
-  `42bbd221e`: compression/resume behavior. Port as a conversation-compression
-  batch, not together with gateway runtime changes.
+- `020601d41`, `56b8dccf2`, `42bbd221e`: compression handoff/prefix
+  semantics. This was later absorbed as local commits `20bacb8ac` and
+  `42d80036b`, limited to context-compressor prompt and resumed-handoff
+  normalization.
+- `a30480bd2`, `db2ce9e7d`, `e38b0b55d`: compression lock/preflight
+  behavior. Keep separate from the handoff/prefix batch because these touch
+  session compression locking, rough-token preflight, and state compatibility.
 
 ### Low priority or out of current production scope
 
@@ -788,9 +792,8 @@ being accepted.
 The next pass should stay narrow: one behavior domain, one targeted test set,
 and no broad `origin/main` merge. Recommended order:
 
-1. `a30480bd2`, `db2ce9e7d`, `e38b0b55d`, `020601d41`, `56b8dccf2`,
-   `42bbd221e`: compression/resume behavior should be reviewed as a
-   conversation-compression batch.
+1. `a30480bd2`, `db2ce9e7d`, `e38b0b55d`: compression lock/preflight behavior
+   should be reviewed as its own conversation-compression batch.
 2. Additional session/state behavior should exclude the already handled
    no-FTS5 group (`069e183e2`), FTS optimize pair, and model-switch
    persistence work.
@@ -799,9 +802,9 @@ and no broad `origin/main` merge. Recommended order:
    need a separate gateway ledger attribution review.
 
 The Docker reuse/orphan-reaper group, tool-search base/scoping group,
-Nous JWT-only decision group, session/state group, compression/resume group,
-and MEDIA extraction group should remain separate batches because each changes
-a runtime contract rather than just a local implementation detail.
+Nous JWT-only decision group, session/state group, compression lock/preflight
+group, and MEDIA extraction group should remain separate batches because each
+changes a runtime contract rather than just a local implementation detail.
 
 ## Verification
 
@@ -4398,6 +4401,66 @@ cd ui-tui && npm run type-check
 Result: failed in pre-existing `packages/hermes-ink/src/utils/execFileNoThrow.ts`
 typing errors (`readonly` stdio tuple and resulting `never` child-process
 type). The failure does not point at files touched by this absorption.
+
+## 2026-06-07 — Compression handoff semantics absorption
+
+Upstream commits reviewed and selectively absorbed:
+
+- `020601d41ea76492311c2ba41c65acc805060d8a` — drop the conflicting
+  "resume Active Task exactly" summary-prefix directive.
+- `56b8dccf252fcb60fa7b69c623071e096d2e2ce2` — treat unanswered questions,
+  decision requests, and ongoing discussion turns as Active Task inputs.
+- `42bbd221e8e38a0c8213cff9e2d16a640d0d8760` — strip historical stale
+  handoff prefixes on resume/re-compaction.
+
+Local result:
+
+- `020601d41` was absorbed as `20bacb8ac`.
+- `56b8dccf2` and `42bbd221e` were absorbed as `42d80036b`.
+- The current `SUMMARY_PREFIX` now frames compaction handoffs as reference-only
+  background, makes the latest user message the single source of truth, and
+  explicitly discards stale `## Active Task`, `## In Progress`,
+  `## Pending User Asks`, and `## Remaining Work` items when the latest user
+  message contradicts or supersedes them.
+- Historical pre-fix handoffs containing the old "resume exactly" directive
+  are recognized by `_is_context_summary_content()` and stripped by
+  `_strip_summary_prefix()` before `_with_summary_prefix()` re-normalizes them
+  to the current latest-message-wins prefix.
+- The summarizer template now instructs the LLM to copy the most recent
+  unfulfilled input, including unanswered questions, decision requests, and
+  discussion turns where the assistant owes the next substantive response.
+  `"None"` is reserved for a fully resolved last exchange.
+- This absorption is limited to `agent/context_compressor.py` prompt/handoff
+  semantics and regression tests. It does not touch gateway ledgers, state
+  schema, model catalogs, Nous authentication, or compression locking/preflight
+  runtime contracts.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/agent/test_summary_prefix_semantics.py tests/agent/test_resume_stale_active_task.py tests/agent/test_context_compressor.py tests/agent/test_context_compressor_summary_continuity.py tests/agent/test_compress_focus.py -q -rs
+```
+
+Result: `102 passed, 1 warning` (`discord.player` importing deprecated
+`audioop`).
+
+```bash
+uv run --extra dev ruff check agent/context_compressor.py tests/agent/test_summary_prefix_semantics.py tests/agent/test_resume_stale_active_task.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile agent/context_compressor.py tests/agent/test_summary_prefix_semantics.py tests/agent/test_resume_stale_active_task.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --check -- agent/context_compressor.py tests/agent/test_summary_prefix_semantics.py tests/agent/test_resume_stale_active_task.py
+```
+
+Result: exit `0`.
 
 ## 2026-06-07 — Kanban attachments absorption
 
