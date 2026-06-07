@@ -473,6 +473,7 @@ check_python() {
     if PYTHON_PATH="$("$UV_CMD" python find "$PYTHON_VERSION" 2>/dev/null)"; then
         PYTHON_FOUND_VERSION="$("$PYTHON_PATH" --version 2>/dev/null)"
         log_success "Python found: $PYTHON_FOUND_VERSION"
+        ensure_fts5
         return 0
     fi
 
@@ -482,10 +483,44 @@ check_python() {
         PYTHON_PATH="$("$UV_CMD" python find "$PYTHON_VERSION")"
         PYTHON_FOUND_VERSION="$("$PYTHON_PATH" --version 2>/dev/null)"
         log_success "Python installed: $PYTHON_FOUND_VERSION"
+        ensure_fts5
     else
         log_error "Failed to install Python $PYTHON_VERSION"
         log_info "Install Python $PYTHON_VERSION manually, then re-run this script"
         exit 1
+    fi
+}
+
+_python_has_fts5() {
+    "$1" - <<'PY' 2>/dev/null
+import sqlite3
+import sys
+
+try:
+    sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(x)")
+except Exception:
+    sys.exit(1)
+PY
+}
+
+ensure_fts5() {
+    [ -n "${PYTHON_PATH:-}" ] || return 0
+    if _python_has_fts5 "$PYTHON_PATH"; then
+        return 0
+    fi
+
+    log_warn "Resolved Python's SQLite lacks the FTS5 module required for session search."
+    log_info "Reinstalling a current Python $PYTHON_VERSION with FTS5 via uv..."
+    if "$UV_CMD" python install "$PYTHON_VERSION" --reinstall >/dev/null 2>&1; then
+        PYTHON_PATH="$("$UV_CMD" python find "$PYTHON_VERSION" 2>/dev/null)"
+        PYTHON_FOUND_VERSION="$("$PYTHON_PATH" --version 2>/dev/null)"
+    fi
+
+    if [ -n "${PYTHON_PATH:-}" ] && _python_has_fts5 "$PYTHON_PATH"; then
+        log_success "FTS5 available ($PYTHON_FOUND_VERSION)"
+    else
+        log_warn "Could not obtain an FTS5-capable Python."
+        log_warn "Hermes will run, but session_search will be marked degraded until FTS5 is present."
     fi
 }
 

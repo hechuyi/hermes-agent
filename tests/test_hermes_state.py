@@ -1,10 +1,26 @@
 """Tests for hermes_state.py — SessionDB SQLite CRUD, FTS5 search, export."""
 
+import sqlite3
 import time
 import pytest
 from pathlib import Path
 
-from hermes_state import SessionDB
+from hermes_state import SessionDB, SessionDBCapabilityError
+
+
+class _NoFtsCursor(sqlite3.Cursor):
+    """Simulate a SQLite build without the fts5 module."""
+
+    def execute(self, sql, parameters=()):
+        normalized = " ".join(str(sql).split()).lower()
+        if "create virtual table" in normalized and " using fts5" in normalized:
+            raise sqlite3.OperationalError("no such module: fts5")
+        return super().execute(sql, parameters)
+
+
+class _NoFtsConnection(sqlite3.Connection):
+    def cursor(self, factory=None):
+        return super().cursor(factory or _NoFtsCursor)
 
 
 @pytest.fixture()
@@ -159,6 +175,46 @@ class TestSessionLifecycle:
 
         child = db.get_session("child")
         assert child["parent_session_id"] == "parent"
+
+    def test_db_initializes_without_fts5_as_explicit_degraded_capability(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        real_connect = sqlite3.connect
+
+        def connect_without_fts(*args, **kwargs):
+            kwargs["factory"] = _NoFtsConnection
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr("hermes_state.sqlite3.connect", connect_without_fts)
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            degraded = db.get_degraded_capabilities()
+            assert degraded["session_search"]["reason"] == "sqlite_fts5_unavailable"
+            assert degraded["session_search"]["stage"] == "fts_integrity"
+            assert db.get_meta("hermes_degraded_capability:session_search")
+
+            assert db._fts_table_exists("messages_fts") is False
+            assert db._fts_table_exists("messages_fts_trigram") is False
+
+            db.create_session(session_id="s1", source="cli")
+            db.append_message("s1", role="user", content="hello without fts")
+
+            messages = db.get_messages("s1")
+            assert len(messages) == 1
+            assert messages[0]["content"] == "hello without fts"
+            assert db.optimize_fts() == 0
+            assert db.search_messages("") == []
+
+            with pytest.raises(SessionDBCapabilityError) as excinfo:
+                db.search_messages("hello")
+            msg = str(excinfo.value)
+            assert "capability=session_search" in msg
+            assert "reason=sqlite_fts5_unavailable" in msg
+        finally:
+            db.close()
 
     def test_scope_lifecycle_create_session_writes_scope_columns(self, db):
         db.create_session(

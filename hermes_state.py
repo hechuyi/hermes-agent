@@ -62,6 +62,31 @@ class SessionDBAppendMessagesError(RuntimeError):
         self.role = role
         self.atomic_rolled_back = True
 
+
+class SessionDBCapabilityError(RuntimeError):
+    """Raised when a requested SessionDB capability is explicitly unavailable."""
+
+    def __init__(
+        self,
+        capability: str,
+        *,
+        reason: str,
+        stage: str,
+        detail: Optional[str] = None,
+    ) -> None:
+        msg = (
+            "session database capability unavailable: "
+            f"capability={capability} reason={reason} stage={stage}"
+        )
+        if detail:
+            msg = f"{msg} detail={detail}"
+        super().__init__(msg)
+        self.capability = capability
+        self.reason = reason
+        self.stage = stage
+        self.detail = detail
+
+
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
 # ---------------------------------------------------------------------------
@@ -399,6 +424,7 @@ FTS_TRIGGERS = (
     "messages_fts_trigram_delete",
     "messages_fts_trigram_update",
 )
+DEGRADED_CAPABILITY_META_PREFIX = "hermes_degraded_capability:"
 
 SCOPE_CONTRACT_COLUMNS = {
     "sessions": {
@@ -467,6 +493,8 @@ class SessionDB:
 
         self._lock = threading.Lock()
         self._write_count = 0
+        self._fts_enabled = False
+        self._degraded_capabilities: Dict[str, Dict[str, str]] = {}
         try:
             self._conn = sqlite3.connect(
                 str(self.db_path),
@@ -1045,6 +1073,107 @@ class SessionDB:
                 f"table={table if 'table' in locals() else 'unknown'}"
             ) from exc
 
+    @staticmethod
+    def _exception_chain_text(exc: BaseException) -> str:
+        parts = []
+        current: Optional[BaseException] = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            parts.append(str(current))
+            current = current.__cause__ or current.__context__
+        return " | ".join(parts)
+
+    @classmethod
+    def _is_missing_fts5_error(cls, exc: BaseException) -> bool:
+        text = cls._exception_chain_text(exc).lower()
+        return "no such module: fts5" in text or "module fts5" in text
+
+    def _record_degraded_capability(
+        self,
+        cursor: sqlite3.Cursor,
+        capability: str,
+        *,
+        reason: str,
+        stage: str,
+        detail: Optional[str] = None,
+    ) -> None:
+        payload = {
+            "capability": capability,
+            "reason": reason,
+            "stage": stage,
+        }
+        if detail:
+            payload["detail"] = detail
+        self._degraded_capabilities[capability] = payload
+        cursor.execute(
+            "INSERT INTO state_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (
+                f"{DEGRADED_CAPABILITY_META_PREFIX}{capability}",
+                json.dumps(payload, sort_keys=True),
+            ),
+        )
+
+    def _clear_degraded_capability(
+        self,
+        cursor: sqlite3.Cursor,
+        capability: str,
+    ) -> None:
+        self._degraded_capabilities.pop(capability, None)
+        cursor.execute(
+            "DELETE FROM state_meta WHERE key = ?",
+            (f"{DEGRADED_CAPABILITY_META_PREFIX}{capability}",),
+        )
+
+    def get_degraded_capabilities(self) -> Dict[str, Dict[str, str]]:
+        """Return explicit degraded SessionDB capabilities for this connection."""
+        return {k: dict(v) for k, v in self._degraded_capabilities.items()}
+
+    def _disable_fts_for_missing_module(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        stage: str,
+        exc: BaseException,
+    ) -> None:
+        for trigger in FTS_TRIGGERS:
+            try:
+                cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            except sqlite3.OperationalError as drop_exc:
+                raise sqlite3.OperationalError(
+                    "schema migration failed: "
+                    "stage=fts_degraded reason=disable_trigger_failed "
+                    f"trigger={trigger}"
+                ) from drop_exc
+
+        for table in FTS_TABLES:
+            try:
+                cursor.execute(f"DROP TABLE IF EXISTS {table}")
+            except sqlite3.OperationalError as drop_exc:
+                if not self._is_missing_fts5_error(drop_exc):
+                    raise sqlite3.OperationalError(
+                        "schema migration failed: "
+                        "stage=fts_degraded reason=disable_table_failed "
+                        f"table={table}"
+                    ) from drop_exc
+
+        self._fts_enabled = False
+        self._record_degraded_capability(
+            cursor,
+            "session_search",
+            reason="sqlite_fts5_unavailable",
+            stage=stage,
+            detail=self._exception_chain_text(exc),
+        )
+        logger.warning(
+            "SQLite FTS5 unavailable for state.db; session search disabled. "
+            "capability=session_search reason=sqlite_fts5_unavailable stage=%s "
+            "Install with an FTS5-capable Python/SQLite. Underlying error: %s",
+            stage,
+            self._exception_chain_text(exc),
+        )
+
     def _backfill_fts(self, cursor: sqlite3.Cursor) -> None:
         cursor.execute(
             "INSERT INTO messages_fts(rowid, content) "
@@ -1174,6 +1303,8 @@ class SessionDB:
                     "stage=fts_integrity reason=missing_trigger "
                     f"trigger={trigger}"
                 )
+        self._fts_enabled = True
+        self._clear_degraded_capability(cursor, "session_search")
 
     def _set_schema_version(self, cursor: sqlite3.Cursor, current_version: Optional[int]) -> None:
         if current_version is None:
@@ -1245,9 +1376,18 @@ class SessionDB:
                 "ON sessions(title) WHERE title IS NOT NULL"
             )
 
-            if current_version is not None and current_version < 11:
-                self._drop_and_rebuild_fts(cursor)
-            self._ensure_fts_integrity(cursor)
+            try:
+                if current_version is not None and current_version < 11:
+                    self._drop_and_rebuild_fts(cursor)
+                self._ensure_fts_integrity(cursor)
+            except sqlite3.OperationalError as exc:
+                if not self._is_missing_fts5_error(exc):
+                    raise
+                self._disable_fts_for_missing_module(
+                    cursor,
+                    stage="fts_integrity",
+                    exc=exc,
+                )
             self._validate_schema_contract(cursor)
             self._write_schema_contract_marker(cursor)
             self._set_schema_version(cursor, current_version)
@@ -3399,6 +3539,15 @@ class SessionDB:
         query = self._sanitize_fts5_query(query)
         if not query:
             return []
+
+        if not self._fts_enabled:
+            degraded = self._degraded_capabilities.get("session_search", {})
+            raise SessionDBCapabilityError(
+                "session_search",
+                reason=degraded.get("reason", "fts_unavailable"),
+                stage=degraded.get("stage", "search_messages"),
+                detail=degraded.get("detail"),
+            )
 
         # Normalise sort. Anything not in the allowed set falls back to None
         # (FTS5 rank-only) so callers can pass through user input without
