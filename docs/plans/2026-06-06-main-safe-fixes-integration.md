@@ -2021,3 +2021,70 @@ Result: exit `0`.
 
 `git diff --check -- hermes_state.py gateway/run.py tests/test_hermes_state.py tests/gateway/test_model_command_flat_string_config.py scripts/release.py`
 produced no output.
+
+## 2026-06-07 — Docker s6 container documentation refresh
+
+Upstream commits reviewed:
+
+- `3c6e70aef18f59f1d67b7e2be83ab51be7a35673` — documents terminal Docker
+  backend cross-process persistence and orphan reaper configuration.
+- `42612aa350a389b577acd57f5b7c071f8ef3eed3` — refreshes the
+  Hermes-in-Docker user guide for the current s6-overlay image behavior.
+
+Local result:
+
+- Absorbed the s6-overlay user-guide refresh from `42612aa3` as
+  `c793476af`, resolving the local conflict by keeping both the upstream
+  `docker exec` privilege-drop note and the local NAS/PUID bind-mount
+  troubleshooting note.
+- Did not absorb the `3c6e70a` terminal-backend documentation. Local code has
+  Docker labels for future reuse (`hermes-task-id`, `hermes-profile`) and the
+  existing `docker_env` / `docker_extra_args` plumbing, but it does not expose
+  `docker_persist_across_processes` or `docker_orphan_reaper` config/env keys.
+  Publishing that text here would document behavior this branch cannot prove.
+- Adjusted the resulting `docker.md` cross-link text to avoid mentioning those
+  unsupported terminal-backend keys.
+
+Verification:
+
+```bash
+git diff --check --cached -- website/docs/user-guide/docker.md
+```
+
+Result before commit: exit `0`.
+
+```bash
+rg -n "<<<<<<<|=======|>>>>>>>|docker_persist_across_processes|docker_orphan_reaper|#20561|shared across Hermes processes" website/docs/user-guide/docker.md
+```
+
+Result before commit: no output.
+
+Code-fact checks used to validate the documented behavior:
+
+```bash
+rg -n "dash_host=|HERMES_DASHBOARD_HOST|HERMES_DASHBOARD_INSECURE|exec s6-setuidgid hermes hermes dashboard" docker/s6-rc.d/dashboard/run hermes_cli/web_server.py
+```
+
+Confirmed `docker/s6-rc.d/dashboard/run` defaults
+`HERMES_DASHBOARD_HOST` to `0.0.0.0`, keeps `HERMES_DASHBOARD_INSECURE`
+as an explicit opt-in, and runs the dashboard as the `hermes` user.
+
+```bash
+rg -n "HERMES_DOCKER_EXEC_AS_ROOT|s6-setuidgid hermes|exit 126|docker exec" docker/hermes-exec-shim.sh docker/stage2-hook.sh docker/main-wrapper.sh
+```
+
+Confirmed the documented `docker exec` privilege-drop shim and root opt-out.
+
+```bash
+rg -n "container-boot.log|gateway_state.json|logs/gateways|s6-svstat|register_profile_gateway|reconcile_profile_gateways" hermes_cli/container_boot.py hermes_cli/profiles.py hermes_cli/service_manager.py website/docs/user-guide/docker.md
+```
+
+Confirmed per-profile service registration, restart-state reconciliation, and
+gateway log paths.
+
+Website build status:
+
+- Attempted `npm --prefix website ci` to enable `npm --prefix website run build`.
+- `npm ci` continued for more than 20 minutes and had to be killed; partial
+  `website/node_modules` output was removed before commit.
+- Therefore Docusaurus build was not completed for this doc-only node.
