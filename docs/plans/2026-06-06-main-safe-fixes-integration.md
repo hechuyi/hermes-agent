@@ -2181,3 +2181,64 @@ git show --stat --oneline --find-renames --find-copies bfecfabd0f16b59cd532f82d7
 
 Confirmed both commits touch the same eight files with opposite add/remove
 changes.
+
+## 2026-06-07 — Kanban unblock reason flag
+
+Upstream commit reviewed:
+
+- `ae6817f7f735735d8b6bf928c672002df0fca07a` — adds `--reason` to
+  `hermes kanban unblock` so unblock notes are not parsed as extra task ids.
+
+Local result:
+
+- Absorbed as `090477b22`.
+- Added `unblock --reason ... <task_ids...>` to the Kanban CLI parser while
+  preserving the existing bulk `unblock <id> <id>` syntax.
+- `_cmd_unblock()` now records `UNBLOCK: <reason>` as a task comment before
+  transitioning the task and includes the reason in successful CLI output.
+- Added the upstream co-author mapping
+  `211828103+julio-cloudvisor@users.noreply.github.com`.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_kanban_core_functionality.py -q -rs -k cli_unblock_reason_records_comment
+```
+
+Result before the code change: `1 failed, 167 deselected`; argparse reported
+`unrecognized arguments: --reason`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_kanban_core_functionality.py -q -rs -k "cli_unblock_reason_records_comment or cli_unblock_bulk or cli_block_bulk_via_ids_flag"
+```
+
+Result: `3 passed, 165 deselected`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_kanban_cli.py tests/hermes_cli/test_kanban_core_functionality.py -q -rs -k "unblock or block_bulk or run_slash_block_unblock_cycle"
+```
+
+Result: `6 passed, 208 deselected`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_kanban_cli.py tests/hermes_cli/test_kanban_core_functionality.py -q -rs
+```
+
+Result: `213 passed, 1 skipped` (zombie detection is Linux-specific).
+
+```bash
+uv run --extra dev ruff check hermes_cli/kanban.py tests/hermes_cli/test_kanban_core_functionality.py scripts/release.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile hermes_cli/kanban.py tests/hermes_cli/test_kanban_core_functionality.py scripts/release.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- hermes_cli/kanban.py tests/hermes_cli/test_kanban_core_functionality.py scripts/release.py`
+produced no output before the code commit.
