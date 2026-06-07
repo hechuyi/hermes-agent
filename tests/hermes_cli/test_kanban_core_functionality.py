@@ -817,6 +817,27 @@ def test_cli_unblock_bulk(kanban_home):
     assert out.count("Unblocked") == 2
 
 
+def test_cli_unblock_reason_records_comment(kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="needs-review")
+        kb.block_task(conn, tid, reason="waiting on review")
+    finally:
+        conn.close()
+
+    out = run_slash(f"unblock --reason 'review approved' {tid}")
+
+    assert f"Unblocked {tid}" in out
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, tid)
+        comments = kb.list_comments(conn, tid)
+    finally:
+        conn.close()
+    assert task.status == "ready"
+    assert [c.body for c in comments] == ["UNBLOCK: review approved"]
+
+
 def test_cli_block_bulk_via_ids_flag(kanban_home):
     conn = kb.connect()
     try:
