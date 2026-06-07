@@ -2974,3 +2974,60 @@ uv run --extra dev pytest tests/gateway/test_telegram_text_batching.py -q -rs
 ```
 
 Result: `6 passed`.
+
+## 2026-06-07 — Yuanbao resourceId media-cache absorption
+
+Upstream commit reviewed and absorbed:
+
+- `f247686c4250a3b6929beeff9e67bed7217953f1` — cache resolved Yuanbao media
+  resources by `resourceId`.
+
+Local result:
+
+- Absorbed as `c6d92a4b5`.
+- `MediaResolveMiddleware` now maintains a bounded in-memory
+  `resourceId -> (local_path, mime, timestamp)` cache with a 24-hour TTL and
+  256-entry cap.
+- Cache hits verify that the local file still exists before reuse, so swept
+  cache directories fall back to a fresh download instead of returning stale
+  paths.
+- Placeholder media, observed-media backfill, and quoted-media resolution now
+  all pass the resource id into the download/cache layer.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/test_yuanbao_pipeline.py -q -rs -k "download_cache_reuses_existing_resource_id"
+```
+
+Result before code change: failed with
+`TypeError: MediaResolveMiddleware._download_and_cache() got an unexpected keyword argument 'resource_id'`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/test_yuanbao_pipeline.py -q -rs -k "download_cache_reuses_existing_resource_id"
+```
+
+Result: `1 passed, 94 deselected`.
+
+```bash
+uv run --extra dev pytest tests/test_yuanbao_pipeline.py tests/test_yuanbao_integration.py tests/test_yuanbao_proto.py -q -rs
+```
+
+Result: `167 passed`.
+
+```bash
+uv run --extra dev ruff check gateway/platforms/yuanbao.py tests/test_yuanbao_pipeline.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile gateway/platforms/yuanbao.py tests/test_yuanbao_pipeline.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- gateway/platforms/yuanbao.py tests/test_yuanbao_pipeline.py`
+produced no output before the code commit.
