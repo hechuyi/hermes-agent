@@ -4453,6 +4453,60 @@ class TestVacuum:
         db.vacuum()
 
 
+class TestOptimizeFts:
+    def test_optimize_returns_index_count(self, db):
+        """A fresh DB has both FTS indexes; optimize merges both."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message(session_id="s1", role="user", content="hello world")
+        assert db.optimize_fts() == 2
+
+    def test_optimize_preserves_search_and_snippet(self, db):
+        """Optimize is layout-only: MATCH results and snippets are unchanged."""
+        db.create_session(session_id="s1", source="cli")
+        for i in range(50):
+            db.append_message(
+                session_id="s1",
+                role="user",
+                content=f"needle alpha bravo charlie message {i}",
+            )
+
+        before = db.search_messages("needle")
+        optimized = db.optimize_fts()
+        after = db.search_messages("needle")
+
+        assert optimized == 2
+        assert len(after) == len(before)
+        assert len(after) > 0
+        assert all(row.get("snippet") for row in after)
+        assert [r["id"] for r in after] == [r["id"] for r in before]
+        assert [r["snippet"] for r in after] == [r["snippet"] for r in before]
+
+    def test_optimize_skips_missing_trigram_table(self, db):
+        """Absent trigram FTS is skipped without downgrading success."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message(session_id="s1", role="user", content="hello")
+        with db._lock:
+            for trigger in (
+                "messages_fts_trigram_insert",
+                "messages_fts_trigram_delete",
+                "messages_fts_trigram_update",
+            ):
+                db._conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            db._conn.execute("DROP TABLE IF EXISTS messages_fts_trigram")
+
+        assert db._fts_table_exists("messages_fts_trigram") is False
+        assert db._fts_table_exists("messages_fts") is True
+        assert db.optimize_fts() == 1
+
+    def test_optimize_idempotent(self, db):
+        """Running optimize repeatedly is safe and preserves search."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message(session_id="s1", role="user", content="repeat me")
+        assert db.optimize_fts() == 2
+        assert db.optimize_fts() == 2
+        assert len(db.search_messages("repeat")) == 1
+
+
 class TestAutoMaintenance:
     def _make_old_ended(self, db, sid: str, days_old: int = 100):
         """Create a session that is ended and was started `days_old` days ago."""

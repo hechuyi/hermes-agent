@@ -4355,7 +4355,42 @@ class SessionDB:
 
     # ── Space reclamation ──
 
-    def vacuum(self) -> None:
+    # FTS5 virtual tables whose b-tree segments we merge on optimize. The
+    # trigram index may be absent in older stores or disabled environments, so
+    # optimize probes each table before issuing the FTS5 special command.
+    _FTS_TABLES = ("messages_fts", "messages_fts_trigram")
+
+    def _fts_table_exists(self, name: str) -> bool:
+        """Return true when an FTS5 virtual table is queryable in this DB."""
+        try:
+            self._conn.execute(f"SELECT 1 FROM {name} LIMIT 0")
+            return True
+        except sqlite3.OperationalError:
+            return False
+
+    def optimize_fts(self) -> int:
+        """Merge fragmented FTS5 b-tree segments without changing content.
+
+        FTS5's special ``optimize`` command rewrites each virtual table's
+        internal segments into a compact layout. This is a maintenance-only
+        operation: search results and ``snippet()`` output are unchanged.
+
+        Returns the number of FTS indexes that accepted the optimize command.
+        Missing optional indexes are skipped.
+        """
+        optimized = 0
+        with self._lock:
+            for table in self._FTS_TABLES:
+                if not self._fts_table_exists(table):
+                    continue
+                try:
+                    self._conn.execute(f"INSERT INTO {table}({table}) VALUES('optimize')")
+                    optimized += 1
+                except sqlite3.OperationalError as exc:
+                    logger.warning("FTS optimize failed for %s: %s", table, exc)
+        return optimized
+
+    def vacuum(self) -> int:
         """Run VACUUM to reclaim disk space after large deletes.
 
         SQLite does not shrink the database file when rows are deleted —
@@ -4368,7 +4403,17 @@ class SessionDB:
         exclusive lock, so callers must ensure no other writers are
         active. Safe to call at startup before the gateway/CLI starts
         serving traffic.
+
+        FTS5 segments are merged before VACUUM so pages freed by the merge can
+        be returned to the OS in the same pass.
+
+        Returns the number of FTS indexes optimized before VACUUM.
         """
+        optimized = 0
+        try:
+            optimized = self.optimize_fts()
+        except Exception as exc:
+            logger.warning("FTS optimize before VACUUM failed: %s", exc)
         # VACUUM cannot be executed inside a transaction.
         with self._lock:
             # Best-effort WAL checkpoint first, then VACUUM.
@@ -4377,6 +4422,7 @@ class SessionDB:
             except Exception:
                 pass
             self._conn.execute("VACUUM")
+        return optimized
 
     def maybe_auto_prune_and_vacuum(
         self,
