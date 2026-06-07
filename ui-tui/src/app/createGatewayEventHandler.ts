@@ -17,7 +17,7 @@ import type { Msg, SubagentProgress, SubagentStatus } from '../types.js'
 
 import { applyDelegationStatus, getDelegationState } from './delegationStore.js'
 import type { GatewayEventHandlerContext } from './interfaces.js'
-import { patchOverlayState } from './overlayStore.js'
+import { getOverlayState, patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
 
@@ -122,6 +122,52 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
   // Refresh delegation caps at most every 5s so the status bar HUD can
   // render a /warning close to the configured cap without spamming the RPC.
   let lastDelegationFetchAt = 0
+
+  let fullConfigPromise: null | Promise<ConfigFullResponse | null> = null
+
+  const getFullConfigOnce = (): Promise<ConfigFullResponse | null> => {
+    fullConfigPromise ??= rpc<ConfigFullResponse>('config.get', { key: 'full' }).catch(() => null)
+
+    return fullConfigPromise
+  }
+
+  let agentsNudgeEnabled = true
+  let agentsNudgeConfigFetched = false
+  let agentsNudgedThisTurn = false
+
+  const ensureAgentsNudgeConfig = () => {
+    if (agentsNudgeConfigFetched) {
+      return
+    }
+
+    agentsNudgeConfigFetched = true
+    getFullConfigOnce().then(cfg => {
+      if (cfg?.config?.display?.tui_agents_nudge === false) {
+        agentsNudgeEnabled = false
+      }
+    })
+  }
+
+  const maybeNudgeAgents = () => {
+    ensureAgentsNudgeConfig()
+
+    if (!agentsNudgeEnabled || agentsNudgedThisTurn) {
+      return
+    }
+
+    if (getOverlayState().agents) {
+      return
+    }
+
+    agentsNudgedThisTurn = true
+    turnController.pushActivity('subagents working · /agents to watch live', 'info')
+  }
+
+  const resetAgentsNudgeTurnState = () => {
+    agentsNudgedThisTurn = false
+  }
+
+  ensureAgentsNudgeConfig()
 
   const refreshDelegationStatus = (force = false) => {
     const now = Date.now()
@@ -245,7 +291,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
     // `hermes --tui` muscle memory and addresses the audit's "session
     // unrecoverable after disconnection" gap.  Default off so existing
     // users aren't surprised.
-    rpc<ConfigFullResponse>('config.get', { key: 'full' })
+    getFullConfigOnce()
       .then(cfg => {
         if (!cfg?.config?.display?.tui_auto_resume_recent) {
           patchUiState({ status: 'forging session…' })
@@ -332,6 +378,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       }
 
       case 'message.start':
+        resetAgentsNudgeTurnState()
         turnController.startMessage()
 
         return
@@ -618,6 +665,8 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         // Preserve completed state if a later event races in before this one.
         turnController.upsertSubagent(ev.payload, c => (isTerminalStatus(c.status) ? {} : { status: 'queued' }))
 
+        maybeNudgeAgents()
+
         // Prime the status-bar HUD: fetch caps (once every 5s) so we can
         // warn as depth/concurrency approaches the configured ceiling.
         if (getDelegationState().maxSpawnDepth === null) {
@@ -630,6 +679,8 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
       case 'subagent.start':
         turnController.upsertSubagent(ev.payload, c => (isTerminalStatus(c.status) ? {} : { status: 'running' }))
+
+        maybeNudgeAgents()
 
         return
       case 'subagent.thinking': {

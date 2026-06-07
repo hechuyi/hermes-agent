@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createGatewayEventHandler } from '../app/createGatewayEventHandler.js'
-import { getOverlayState, resetOverlayState } from '../app/overlayStore.js'
+import { getOverlayState, patchOverlayState, resetOverlayState } from '../app/overlayStore.js'
 import { turnController } from '../app/turnController.js'
 import { getTurnState, resetTurnState } from '../app/turnStore.js'
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
@@ -895,6 +895,106 @@ describe('createGatewayEventHandler', () => {
     } as any)
 
     expect(getTurnState().subagents.find(s => s.id === 'sa-weird')?.status).toBe('completed')
+  })
+
+  it('nudges toward /agents on the first spawn_requested of a turn', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    onEvent({
+      payload: { goal: 'child a', subagent_id: 'sa-a', task_index: 0 },
+      type: 'subagent.spawn_requested'
+    } as any)
+
+    const hints = getTurnState().activity.filter(a => a.text.includes('/agents'))
+    expect(hints).toHaveLength(1)
+    expect(hints[0]).toMatchObject({ tone: 'info' })
+  })
+
+  it('nudges toward /agents on subagent.start', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    onEvent({
+      payload: { goal: 'child a', subagent_id: 'sa-a', task_index: 0 },
+      type: 'subagent.start'
+    } as any)
+
+    expect(getTurnState().activity.filter(a => a.text.includes('/agents'))).toHaveLength(1)
+  })
+
+  it('nudges at most once per turn and resets on the next message.start', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    onEvent({
+      payload: { goal: 'child a', subagent_id: 'sa-a', task_index: 0 },
+      type: 'subagent.start'
+    } as any)
+    onEvent({
+      payload: { goal: 'child b', subagent_id: 'sa-b', task_index: 1 },
+      type: 'subagent.start'
+    } as any)
+    expect(getTurnState().activity.filter(a => a.text.includes('/agents'))).toHaveLength(1)
+
+    onEvent({ payload: {}, type: 'message.start' } as any)
+    onEvent({
+      payload: { goal: 'child c', subagent_id: 'sa-c', task_index: 0 },
+      type: 'subagent.start'
+    } as any)
+    expect(getTurnState().activity.filter(a => a.text.includes('/agents'))).toHaveLength(1)
+  })
+
+  it('does not nudge when the /agents overlay is already open', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    patchOverlayState({ agents: true })
+
+    onEvent({
+      payload: { goal: 'child a', subagent_id: 'sa-a', task_index: 0 },
+      type: 'subagent.start'
+    } as any)
+
+    expect(getTurnState().activity.filter(a => a.text.includes('/agents'))).toHaveLength(0)
+  })
+
+  it('nudges if the /agents overlay is closed mid-turn while delegation continues', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    patchOverlayState({ agents: true })
+    onEvent({
+      payload: { goal: 'child a', subagent_id: 'sa-a', task_index: 0 },
+      type: 'subagent.start'
+    } as any)
+    expect(getTurnState().activity.filter(a => a.text.includes('/agents'))).toHaveLength(0)
+
+    patchOverlayState({ agents: false })
+    onEvent({
+      payload: { goal: 'child b', subagent_id: 'sa-b', task_index: 1 },
+      type: 'subagent.start'
+    } as any)
+    expect(getTurnState().activity.filter(a => a.text.includes('/agents'))).toHaveLength(1)
+  })
+
+  it('does not nudge when display.tui_agents_nudge is false', async () => {
+    const appended: Msg[] = []
+    const ctx = buildCtx(appended)
+    ctx.gateway.rpc = vi.fn(async (method: string) =>
+      method === 'config.get' ? { config: { display: { tui_agents_nudge: false } } } : null
+    )
+    const onEvent = createGatewayEventHandler(ctx)
+
+    await Promise.resolve()
+    await Promise.resolve()
+
+    onEvent({
+      payload: { goal: 'child a', subagent_id: 'sa-a', task_index: 0 },
+      type: 'subagent.start'
+    } as any)
+
+    expect(getTurnState().activity.filter(a => a.text.includes('/agents'))).toHaveLength(0)
   })
 
   it('drops stale reasoning/tool/todos events after ctrl-c until the next message starts', () => {

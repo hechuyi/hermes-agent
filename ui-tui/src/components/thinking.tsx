@@ -1073,6 +1073,7 @@ export const ToolTrail = memo(function ToolTrail({
             const branch: TreeBranch = index === groups.length - 1 ? 'last' : 'mid'
             const childRails = nextTreeRails(rails, branch)
             const hasInlineSubagents = inlineDelegateKey === group.key
+            const isDelegateGroup = group.label.startsWith('Delegate Task')
 
             return (
               <Box flexDirection="column" key={group.key}>
@@ -1083,6 +1084,11 @@ export const ToolTrail = memo(function ToolTrail({
                     <>
                       <Text color={t.color.accent}>● </Text>
                       {toolLabel(group)}
+                      {isDelegateGroup ? (
+                        <Text color={t.color.statusFg} dim>
+                          {'  (/agents to monitor)'}
+                        </Text>
+                      ) : null}
                     </>
                   }
                   rails={rails}

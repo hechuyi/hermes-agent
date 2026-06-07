@@ -52,6 +52,18 @@ logger = logging.getLogger(__name__)
 _MAX_TOOL_WORKERS = 8
 
 
+def _delegate_spinner_label(function_args: dict) -> str:
+    tasks_arg = function_args.get("tasks")
+    if tasks_arg and isinstance(tasks_arg, list):
+        return f"🔀 delegating {len(tasks_arg)} tasks · (/agents to monitor)"
+
+    goal_preview = (function_args.get("goal") or "")[:30]
+    if goal_preview:
+        return f"🔀 {goal_preview} · (/agents to monitor)"
+
+    return "🔀 delegating · (/agents to monitor)"
+
+
 def _ra():
     """Lazy reference to ``run_agent`` so patches like ``run_agent._set_interrupt`` work."""
     import run_agent
@@ -650,12 +662,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             if agent._should_emit_quiet_tool_messages():
                 agent._vprint(f"  {_get_cute_tool_message_impl('clarify', function_args, tool_duration, result=function_result)}")
         elif function_name == "delegate_task":
-            tasks_arg = function_args.get("tasks")
-            if tasks_arg and isinstance(tasks_arg, list):
-                spinner_label = f"🔀 delegating {len(tasks_arg)} tasks"
-            else:
-                goal_preview = (function_args.get("goal") or "")[:30]
-                spinner_label = f"🔀 {goal_preview}" if goal_preview else "🔀 delegating"
+            spinner_label = _delegate_spinner_label(function_args)
             spinner = None
             if agent._should_emit_quiet_tool_messages() and agent._should_start_quiet_spinner():
                 face = random.choice(KawaiiSpinner.get_waiting_faces())
