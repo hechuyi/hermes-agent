@@ -2195,3 +2195,16 @@ def test_dashboard_failed_card_highlight_class_exists():
     assert "hermes-kanban-card--failed" in js
     assert "hermes-kanban-card--failed" in css
     assert "failedIds" in js
+
+
+def test_dashboard_task_drawer_respects_mobile_safe_areas():
+    """Mobile task drawer must stay clear of fixed chrome and browser safe areas."""
+    repo_root = Path(__file__).resolve().parents[2]
+    css = (repo_root / "plugins" / "kanban" / "dashboard" / "dist" / "style.css").read_text()
+
+    assert ".hermes-kanban-drawer" in css
+    assert "height: 100dvh" in css
+    assert "max-height: 100dvh" in css
+    assert "@media (max-width: 1023px)" in css
+    assert "padding-top: calc(3.5rem + env(safe-area-inset-top))" in css
+    assert "env(safe-area-inset-bottom)" in css
