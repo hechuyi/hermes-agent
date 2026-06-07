@@ -773,9 +773,10 @@ These must not be merged mechanically:
   semantics. This was later absorbed as local commits `20bacb8ac` and
   `42d80036b`, limited to context-compressor prompt and resumed-handoff
   normalization.
-- `a30480bd2`, `db2ce9e7d`, `e38b0b55d`: compression lock/preflight
-  behavior. Keep separate from the handoff/prefix batch because these touch
-  session compression locking, rough-token preflight, and state compatibility.
+- Compression lock/preflight behavior (`a30480bd2`, `db2ce9e7d`,
+  `e38b0b55d`, and `9dbc3722`) was kept separate from the handoff/prefix
+  batch, then later absorbed as local commits `e5ef45177` and `b775a46bb`
+  with documentation commits `45d7a1521` and `3c0808366`.
 
 ### Low priority or out of current production scope
 
@@ -792,19 +793,17 @@ being accepted.
 The next pass should stay narrow: one behavior domain, one targeted test set,
 and no broad `origin/main` merge. Recommended order:
 
-1. `a30480bd2`, `db2ce9e7d`, `e38b0b55d`: compression lock/preflight behavior
-   should be reviewed as its own conversation-compression batch.
-2. Additional session/state behavior should exclude the already handled
+1. Additional session/state behavior should exclude the already handled
    no-FTS5 group (`069e183e2`), FTS optimize pair, and model-switch
    persistence work.
-3. Any additional media/delivery outcome commits beyond the already absorbed
+2. Any additional media/delivery outcome commits beyond the already absorbed
    Windows path, extension allowlist, and current-turn tool-result scan pieces
    need a separate gateway ledger attribution review.
 
 The Docker reuse/orphan-reaper group, tool-search base/scoping group,
-Nous JWT-only decision group, session/state group, compression lock/preflight
-group, and MEDIA extraction group should remain separate batches because each
-changes a runtime contract rather than just a local implementation detail.
+Nous JWT-only decision group, session/state group, and MEDIA extraction group
+should remain separate batches because each changes a runtime contract rather
+than just a local implementation detail.
 
 ## Verification
 
@@ -1909,9 +1908,9 @@ Local result:
 - Did not absorb `/compress here`, `hermes_cli/partial_compress.py`, CLI
   slash-command routing, gateway routing, or boundary-aware compression feature
   work from the same upstream area.
-- The local test suite does not contain the upstream `large-rough-growth`
-  test shape targeted by `9dbc3722`; that upstream commit was reviewed and is
-  not directly applicable here.
+- The `large-rough-growth` test shape targeted by `9dbc3722` was later added
+  and absorbed with the preflight rough-estimate deferral batch in local commit
+  `b775a46bb`.
 
 Red test before implementation:
 
