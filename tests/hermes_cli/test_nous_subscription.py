@@ -213,6 +213,36 @@ def test_get_nous_subscription_features_does_not_treat_quoted_false_as_gateway_o
     assert features.web.current_provider == "exa"
 
 
+def test_get_nous_subscription_features_marks_video_gen_as_managed(monkeypatch):
+    monkeypatch.setattr("tools.tool_backend_helpers.managed_nous_tools_enabled", lambda: True)
+    monkeypatch.setattr(ns, "get_env_value", lambda name: "")
+    monkeypatch.setattr(
+        ns,
+        "get_nous_portal_account_info",
+        lambda: _account(logged_in=True, paid=True),
+    )
+    monkeypatch.setattr(ns, "_toolset_enabled", lambda config, key: key == "video_gen")
+    monkeypatch.setattr(ns, "_has_agent_browser", lambda: False)
+    monkeypatch.setattr(ns, "resolve_openai_audio_api_key", lambda: "")
+    monkeypatch.setattr(ns, "has_direct_modal_credentials", lambda: False)
+    monkeypatch.setattr(ns, "fal_key_is_configured", lambda: False)
+    monkeypatch.setattr(
+        ns,
+        "is_managed_tool_gateway_ready",
+        lambda vendor: vendor == "fal-queue",
+    )
+
+    features = ns.get_nous_subscription_features(
+        {"video_gen": {"provider": "fal", "use_gateway": True}}
+    )
+
+    assert features.video_gen.available is True
+    assert features.video_gen.active is True
+    assert features.video_gen.managed_by_nous is True
+    assert features.video_gen.direct_override is False
+    assert features.video_gen.current_provider == "Nous Subscription"
+
+
 def test_get_gateway_eligible_tools_ignores_quoted_false_opt_in(monkeypatch):
     monkeypatch.setattr(ns, "managed_nous_tools_enabled", lambda: True)
     monkeypatch.setattr(

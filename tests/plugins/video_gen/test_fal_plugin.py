@@ -85,18 +85,36 @@ def test_fal_list_models_advertises_both_modalities():
 
 def test_fal_unavailable_without_key(monkeypatch):
     from plugins.video_gen.fal import FALVideoGenProvider
+    from plugins.video_gen import fal as fal_plugin
 
     monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.setattr(fal_plugin, "_resolve_managed_fal_video_gateway", lambda: None)
     assert FALVideoGenProvider().is_available() is False
 
 
 def test_fal_generate_requires_fal_key(monkeypatch):
     from plugins.video_gen.fal import FALVideoGenProvider
+    from plugins.video_gen import fal as fal_plugin
 
     monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.setattr(fal_plugin, "_resolve_managed_fal_video_gateway", lambda: None)
     result = FALVideoGenProvider().generate("a happy dog")
     assert result["success"] is False
     assert result["error_type"] == "auth_required"
+
+
+def test_fal_available_via_gateway(monkeypatch):
+    from plugins.video_gen.fal import FALVideoGenProvider
+    from plugins.video_gen import fal as fal_plugin
+
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.setattr(
+        fal_plugin,
+        "_resolve_managed_fal_video_gateway",
+        lambda: object(),
+    )
+
+    assert FALVideoGenProvider().is_available() is True
 
 
 class TestFamilyRouting:
@@ -104,25 +122,35 @@ class TestFamilyRouting:
 
     @pytest.fixture
     def with_fake_fal(self, monkeypatch):
-        """Stub fal_client.subscribe to capture which endpoint we hit."""
+        """Stub fal_client.submit to capture which endpoint we hit."""
         import sys
         import types
 
         captured = {"endpoint": None, "arguments": None}
 
+        class FakeHandle:
+            def get(self):
+                return {"video": {"url": "https://fake/out.mp4"}}
+
         fake = types.ModuleType("fal_client")
-        def _subscribe(endpoint, arguments=None, with_logs=False):
+
+        def _submit(endpoint, arguments=None, headers=None):
             captured["endpoint"] = endpoint
             captured["arguments"] = arguments
-            return {"video": {"url": "https://fake/out.mp4"}}
-        fake.subscribe = _subscribe  # type: ignore
+            captured["headers"] = headers
+            return FakeHandle()
+
+        fake.submit = _submit  # type: ignore
         monkeypatch.setitem(sys.modules, "fal_client", fake)
 
         # Reset the lazy global so it picks up our stub
         from plugins.video_gen import fal as fal_plugin
         fal_plugin._fal_client = None
+        fal_plugin._managed_fal_video_client = None
+        fal_plugin._managed_fal_video_client_config = None
 
         monkeypatch.setenv("FAL_KEY", "test")
+        monkeypatch.setattr(fal_plugin, "_resolve_managed_fal_video_gateway", lambda: None)
         return captured
 
     def test_text_to_video_routes_to_text_endpoint(self, with_fake_fal):
@@ -229,7 +257,7 @@ class TestPayloadBuilder:
             seed=42,
         )
         assert p["prompt"] == "x"
-        assert p["duration"] == "8"  # FAL queue API uses strings
+        assert p["duration"] == "8s"  # veo3.1 uses "Ns" format per FAL API
         assert p["aspect_ratio"] == "16:9"
         assert p["resolution"] == "720p"
         assert p["generate_audio"] is True
@@ -312,3 +340,31 @@ class TestPayloadBuilder:
         )
         # Only prompt — no payload bloat for fields we can't verify
         assert p == {"prompt": "a horse galloping"}
+
+    def test_veo31_allows_4k_resolution(self):
+        from plugins.video_gen.fal import FAL_FAMILIES, _build_payload
+
+        meta = FAL_FAMILIES["veo3.1"]
+        p = _build_payload(
+            meta,
+            prompt="x",
+            image_url=None,
+            duration=4,
+            aspect_ratio="16:9",
+            resolution="4k",
+            negative_prompt=None,
+            audio=None,
+            seed=None,
+        )
+
+        assert p["duration"] == "4s"
+        assert p["resolution"] == "4k"
+
+
+def test_happy_horse_uses_alibaba_namespace():
+    from plugins.video_gen.fal import FAL_FAMILIES
+
+    hh = FAL_FAMILIES["happy-horse"]
+
+    assert hh["text_endpoint"] == "alibaba/happy-horse/text-to-video"
+    assert hh["image_endpoint"] == "alibaba/happy-horse/image-to-video"

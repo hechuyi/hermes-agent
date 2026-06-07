@@ -3485,9 +3485,8 @@ Remaining upstream groups reviewed and left out of blind absorption:
   guard.
 - Video generation managed Nous gateway (`d04b3c19`, `b6294ea9`,
   `a4c18f65`, `3183b2e2`, `e46e4bcf`, `0563ab06` and related commits):
-  eligible directionally, but must be absorbed as a focused stack rather than a
-  blind cherry-pick, preserving plugin-owned provider behavior and avoiding
-  availability scans that refresh Nous tokens.
+  absorbed later as a focused stack, preserving plugin-owned provider behavior
+  and avoiding availability scans that refresh Nous tokens.
 - State FTS optimize (`38695254`, `904c0b47`): absorbed later as a focused
   maintenance change. The no-FTS5 degradation commits remain separate because
   they alter failure/degraded-state semantics.
@@ -5023,6 +5022,81 @@ Result: `39 passed`.
 ```bash
 uv run --extra dev ruff check gateway/run.py tests/gateway/test_platform_reconnect.py
 uv run --extra dev python -m py_compile gateway/run.py tests/gateway/test_platform_reconnect.py
+git diff --check
+```
+
+Result: all three commands exited `0`.
+
+## 2026-06-08 — FAL video managed gateway absorption
+
+The video-generation managed Nous gateway stack was manually absorbed in this
+batch:
+
+- `d04b3c193e130cc5b78fed8457bfa22e3b396d39`
+- `b6294ea9f197325496a326c35316293095eb3768`
+- `a4c18f65d45dbaa80a9f86241fd63ed4c55efce4`
+- `3183b2e28cd45d6bd77a9edd15b1e61a2dc5755f`
+- `e46e4bcf470a893f672353c5a53c787a1f3759e1`
+- `0563ab0652218d62e09905893f78ac603d92b6d1`
+
+The local port routes `plugins/video_gen/fal` through the managed `fal-queue`
+gateway when direct `FAL_KEY` credentials are absent or
+`video_gen.use_gateway` is enabled. Direct FAL mode remains available and still
+takes precedence unless the user explicitly selects the gateway. The video FAL
+plugin now uses the same `submit()` plus handle pattern as image generation,
+adds a per-module managed client cache, surfaces managed-gateway 4xx rejections
+as actionable `ValueError`s, and keeps the plugin-owned model-family catalog
+rather than importing unrelated model catalog churn.
+
+The tools UX now exposes a Video Generation "Nous Subscription" provider row,
+preserves `video_gen.provider = fal` with `use_gateway = true` across configure
+and reconfigure flows, and reports managed video generation in Nous feature
+state and setup summary. The port also absorbs the plugin-local endpoint fixes:
+Happy Horse uses the `alibaba/` namespace, Veo 3.1 accepts `4k`, and Veo 3.1
+duration payloads use the required `Ns` suffix while success responses parse
+that suffix back to an integer duration.
+
+This batch is limited to FAL video generation and Hermes tools/setup UX. It
+does not change gateway event ledgers, media extraction/delivery outcome
+contracts, provider routing for chat models, model catalogs, Nous legacy
+authentication, dashboard public-bind policy, or current local `5.5` channel
+availability.
+
+Red evidence before implementation:
+
+```bash
+uv run --extra dev pytest tests/plugins/video_gen/test_fal_plugin.py tests/tools/test_managed_media_gateways.py tests/tools/test_video_generation_tool_surface_matrix.py -q -rs
+```
+
+Result before code changes: `12 failed, 29 passed, 1 warning, 7 errors`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_tools_config.py -q -rs -k "visible_video_gen or configure_video_gen_nous or reconfigure_video_gen_nous"
+```
+
+Result before code changes: `3 failed, 84 deselected`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_nous_subscription.py -q -rs -k "video_gen_as_managed"
+uv run --extra dev pytest tests/hermes_cli/test_setup_model_provider.py -q -rs -k "video_gen_managed_by_nous"
+```
+
+Results before code changes: each command failed on the missing video
+generation managed feature path.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/plugins/video_gen/test_fal_plugin.py tests/tools/test_managed_media_gateways.py tests/tools/test_video_generation_tool_surface_matrix.py tests/hermes_cli/test_nous_subscription.py tests/hermes_cli/test_tools_config.py tests/hermes_cli/test_setup_model_provider.py tests/hermes_cli/test_status_model_provider.py tests/agent/test_prompt_builder.py -q -rs
+```
+
+Result: `298 passed, 1 skipped, 1 warning` (`discord.player` imports
+deprecated `audioop` under Python 3.11; the skip is the existing APFS
+case-insensitive `CLAUDE.md`/`claude.md` alias guard).
+
+```bash
+uv run --extra dev ruff check hermes_cli/nous_subscription.py hermes_cli/setup.py hermes_cli/tools_config.py plugins/video_gen/fal/__init__.py tests/agent/test_prompt_builder.py tests/hermes_cli/test_nous_subscription.py tests/hermes_cli/test_setup_model_provider.py tests/hermes_cli/test_status_model_provider.py tests/hermes_cli/test_tools_config.py tests/plugins/video_gen/test_fal_plugin.py tests/tools/test_managed_media_gateways.py tests/tools/test_video_generation_tool_surface_matrix.py
+uv run --extra dev python -m py_compile hermes_cli/nous_subscription.py hermes_cli/setup.py hermes_cli/tools_config.py plugins/video_gen/fal/__init__.py tests/agent/test_prompt_builder.py tests/hermes_cli/test_nous_subscription.py tests/hermes_cli/test_setup_model_provider.py tests/hermes_cli/test_status_model_provider.py tests/hermes_cli/test_tools_config.py tests/plugins/video_gen/test_fal_plugin.py tests/tools/test_managed_media_gateways.py tests/tools/test_video_generation_tool_surface_matrix.py
 git diff --check
 ```
 

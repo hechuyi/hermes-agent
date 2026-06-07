@@ -612,6 +612,27 @@ def test_visible_providers_include_nous_subscription_when_logged_in(monkeypatch)
     assert providers[0]["name"].startswith("Nous Subscription")
 
 
+def test_visible_video_gen_providers_include_nous_subscription(monkeypatch):
+    config = {"model": {"provider": "nous"}}
+
+    monkeypatch.setattr(
+        "hermes_cli.nous_subscription.get_nous_portal_account_info",
+        lambda: NousPortalAccountInfo(
+            logged_in=True,
+            source="jwt",
+            fresh=False,
+            paid_service_access=True,
+        ),
+    )
+    monkeypatch.setattr("hermes_cli.tools_config._plugin_video_gen_providers", lambda: [])
+
+    providers = _visible_providers(TOOL_CATEGORIES["video_gen"], config)
+
+    assert providers[0]["name"].startswith("Nous Subscription")
+    assert providers[0]["managed_nous_feature"] == "video_gen"
+    assert providers[0]["video_gen_plugin_name"] == "fal"
+
+
 def test_visible_providers_force_fresh_shows_nous_subscription_after_upgrade(monkeypatch):
     calls = []
 
@@ -812,6 +833,74 @@ def test_first_install_nous_auto_configures_video_gen(monkeypatch):
     assert config["video_gen"]["provider"] == "fal"
     assert config["video_gen"]["use_gateway"] is True
     assert "video_gen" not in configured
+
+
+def test_configure_video_gen_nous_subscription_sets_gateway(monkeypatch):
+    config = {"model": {"provider": "nous"}}
+    provider = {
+        "name": "Nous Subscription",
+        "managed_nous_feature": "video_gen",
+        "requires_nous_auth": True,
+        "env_vars": [],
+        "video_gen_plugin_name": "fal",
+    }
+
+    monkeypatch.setattr(
+        "hermes_cli.tools_config.get_nous_subscription_features",
+        lambda config, *, force_fresh=False: SimpleNamespace(
+            nous_auth_present=True,
+            account_info=NousPortalAccountInfo(
+                logged_in=True,
+                source="jwt",
+                fresh=False,
+                paid_service_access=True,
+            ),
+            features={},
+        ),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.tools_config._configure_videogen_model_for_plugin",
+        lambda plugin_name, config: None,
+    )
+
+    _configure_provider(provider, config)
+
+    assert config["video_gen"]["provider"] == "fal"
+    assert config["video_gen"]["use_gateway"] is True
+
+
+def test_reconfigure_video_gen_nous_subscription_sets_gateway(monkeypatch):
+    config = {"video_gen": {"provider": "fal", "use_gateway": False}}
+    provider = {
+        "name": "Nous Subscription",
+        "managed_nous_feature": "video_gen",
+        "requires_nous_auth": True,
+        "env_vars": [],
+        "video_gen_plugin_name": "fal",
+    }
+
+    monkeypatch.setattr(
+        "hermes_cli.tools_config.get_nous_subscription_features",
+        lambda config, *, force_fresh=False: SimpleNamespace(
+            nous_auth_present=True,
+            account_info=NousPortalAccountInfo(
+                logged_in=True,
+                source="jwt",
+                fresh=False,
+                paid_service_access=True,
+            ),
+            features={},
+        ),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.tools_config._configure_videogen_model_for_plugin",
+        lambda plugin_name, config: None,
+    )
+
+    _reconfigure_provider(provider, config)
+
+    assert config["video_gen"]["provider"] == "fal"
+    assert config["video_gen"]["use_gateway"] is True
 
 # ── Platform / toolset consistency ────────────────────────────────────────────
 
