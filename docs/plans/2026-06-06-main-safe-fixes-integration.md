@@ -535,6 +535,40 @@ the patch only replaces an external video destination in quickstart
 documentation, which is out of scope under the workspace's advertising and
 external-link injection discipline.
 
+### Configuration and security documentation batch
+
+The configuration/security documentation batch was absorbed in local commit
+`58f90d92d`:
+
+- `90f0f32eae0e94323377db0b4dd28a54292c6c2a`
+- `2410e1139547abcd5a6705d2a5f3297633f454ff`
+- `c692000a57df41c953967f37eb34ed9b593f233c`
+- `62e81b2d9b30f2a4c882f57732b5e213b6250c42`
+- `2520c9ad68af3b1760f5646936fdc86d741b6f74`
+- `c0b17b3c0cb15fa92bd348162e6bc58d6d6336cd`
+- `b922e3ff93c457e6079aea8637ffdc7a15dc15b8`
+- `ee0a9bf7c702d6369d03a9d55b4c3e93f52b748a`
+- `a2d3cff53feb060eec3115fe3fec1e5c81bca8c3`
+- `aef04b2b537fbd37b465a4dccc45096af5e73229`
+- `3625dbb8442c357b1995e9fa750498dd697ba38b`
+- `119390a2a1eeb47a9b59d29e4158cfd31ae63e1f`
+- `175885218e82f99fb3cb58335640b7d4f4b7c2f8`
+- `eff4626747ae8a32bbda192883121c6c62ca18fb`
+- `549a69a925a799001cab63a4244b8e486c8c2ab4`
+- `2159d2a72964865d047b1b46f6347be1e2a74e9f`
+- `860cf28dabbaf93459a778a835edbc3663e381c5`
+
+This batch adds Docker network-egress isolation documentation and aligns
+documentation for xAI OAuth manual paste, Windows WSL shortcuts, Reminders
+alarm timing, Weixin allowed users, prompt precedence, update flags, secret
+redaction defaults, `MESSAGING_CWD` deprecation, fallback provider examples,
+curator provenance, credential-pool usage-limit rotation, and compression
+threshold wording. The only Python change is a docstring correction in
+`agent/redact.py`; Nix/config changes are option/example descriptions. It does
+not change runtime behavior, gateway event ledgers, media extraction, delivery
+outcomes, provider routing, model catalogs, Nous legacy authentication, or the
+fork's `5.5` customizations.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -1135,6 +1169,30 @@ uv run --extra dev python -m py_compile plugins/browser/browserbase/provider.py 
 ```
 
 Result: exit `0`.
+
+`git diff --check` and `git diff --cached --check` produced no output.
+
+Configuration and security documentation batch verification:
+
+```bash
+uv run --extra dev ruff check agent/redact.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile agent/redact.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --cached | rg -n "^\\+.*(discord|youtube|youtu\\.be|invite|邀请码|群|福利|备用网址|telegram|t\\.me|join)" -i
+```
+
+Result: only platform/domain examples in network-egress and migration-setting
+documentation matched; no external video, invite, or promotional destination
+was added.
 
 `git diff --check` and `git diff --cached --check` produced no output.
 
