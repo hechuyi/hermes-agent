@@ -744,8 +744,10 @@ These must not be merged mechanically:
 - `100536134` / `db96fc60d`: topic recovery/session identity changes.
 - `655090b3d` / `6a2e3c2d2` / `fd09b2c55`: startup risk warnings and adapter
   access-policy changes, including default-deny semantics.
-- `08c0b2241` / `781604ce4` / `51d165a8e`: media extraction and tool-result
-  scan semantics, adjacent to gateway ledger event attribution.
+- `08c0b2241` / `781604ce4` and the remaining non-Windows-path portions of
+  `51d165a8e`: media extraction and tool-result scan semantics, adjacent to
+  gateway ledger event attribution. The isolated Windows absolute path regex
+  slice from `51d165a8e` was absorbed separately on 2026-06-07.
 - `45bc65abb`: delivery outcome semantics for silence narration filtering.
 - `0bfe19ba1` / `44f3e5186`: nested gateway platform config handling.
 - `2b16b756a`: post-interrupt model recovery and fallback status behavior.
@@ -781,8 +783,9 @@ being accepted.
 The next pass should stay narrow: one behavior domain, one targeted test set,
 and no broad `origin/main` merge. Recommended order:
 
-1. `08c0b2241`, `781604ce4`, `51d165a8e`: media extraction and tool-result
-   scan semantics need a separate gateway ledger attribution review.
+1. `08c0b2241`, `781604ce4`, and the remaining non-Windows-path portions of
+   `51d165a8e`: media extraction and tool-result scan semantics need a
+   separate gateway ledger attribution review.
 2. `5ad2b4c6d`, `97ecfa0fc`, `4fa20f9a8`, `a7421dc7d`, `38695254f`,
    `904c0b479`, `794519c6a`: session/state/SQLite/FTS work should be reviewed
    as a state-schema and migration batch.
@@ -2465,4 +2468,70 @@ uv run --extra dev python -m py_compile gateway/platforms/matrix.py tests/gatewa
 Result: exit `0`.
 
 `git diff --check -- gateway/platforms/matrix.py tests/gateway/test_matrix_exec_approval.py`
+produced no output before the code commit.
+
+## 2026-06-07 — Windows absolute media paths
+
+Upstream commits reviewed:
+
+- `51d165a8e71ca84112708af4a9add7a71e4ee424` — support Windows absolute
+  paths in `MEDIA:` tag regexes and bare `extract_local_files` extraction.
+- `1b955450e31734bd0398f4d80d995dcee6d1ab28` — use a raw docstring in the
+  `_TOOL_MEDIA_RE` regression test.
+- `20d073fd0b1f21ae6baaff954961d56a7f64973a` — replace the old
+  Windows-path-negative bare-path test with positive drive-letter coverage.
+
+Local result:
+
+- Absorbed manually as `cf2dd9231`.
+- `BasePlatformAdapter.extract_media()` now accepts Windows drive-letter
+  absolute paths (`C:\...`, `D:/...`) in explicit `MEDIA:` tags while still
+  ignoring Windows-style relative paths without a drive letter.
+- `BasePlatformAdapter.extract_local_files()` now accepts Windows drive-letter
+  absolute paths with either slash direction in directory separators.
+- Both local `_TOOL_MEDIA_RE` scanners in `gateway/run.py` now recognise
+  Windows drive-letter absolute paths when recovering media tags from
+  tool/function messages.
+- This is only the isolated Windows path regex slice. The larger media
+  extraction/tool-result attribution group remains deferred for a separate
+  gateway-ledger and delivery-outcome review.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_platform_base.py tests/gateway/test_extract_local_files.py tests/gateway/test_run_tool_media_re.py -q -rs -k "windows or drive_letter or relative_windows or run_tool_media"
+```
+
+Result before the code change: `12 failed, 15 passed, 154 deselected`. The
+failures covered Windows `MEDIA:` tags, bare Windows local files, and the two
+actual `_TOOL_MEDIA_RE` patterns extracted from `gateway/run.py`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_platform_base.py tests/gateway/test_extract_local_files.py tests/gateway/test_run_tool_media_re.py -q -rs -k "windows or drive_letter or relative_windows or run_tool_media"
+```
+
+Result: `27 passed, 154 deselected`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_platform_base.py tests/gateway/test_extract_local_files.py tests/gateway/test_run_tool_media_re.py -q -rs
+```
+
+Result: `179 passed, 2 skipped`; both skips are the existing optional
+`aiohttp_socks` dependency in `tests/gateway/test_platform_base.py`.
+
+```bash
+uv run --extra dev ruff check gateway/platforms/base.py gateway/run.py tests/gateway/test_platform_base.py tests/gateway/test_extract_local_files.py tests/gateway/test_run_tool_media_re.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile gateway/platforms/base.py gateway/run.py tests/gateway/test_platform_base.py tests/gateway/test_extract_local_files.py tests/gateway/test_run_tool_media_re.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- gateway/platforms/base.py gateway/run.py tests/gateway/test_platform_base.py tests/gateway/test_extract_local_files.py tests/gateway/test_run_tool_media_re.py`
 produced no output before the code commit.
