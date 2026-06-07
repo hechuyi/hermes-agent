@@ -4332,6 +4332,80 @@ Result: failed in pre-existing `packages/hermes-ink/src/utils/execFileNoThrow.ts
 typing errors (`readonly` stdio tuple and resulting `never` child-process
 type). The failure does not point at files touched by this absorption.
 
+## 2026-06-07 — Kanban attachments absorption
+
+Upstream commit reviewed and selectively absorbed:
+
+- `b47cb1bbf27926454854834c0ca381c39628ab9d` — Kanban task file
+  attachments.
+
+Local result:
+
+- Absorbed as `698fd78b7`.
+- Added a `task_attachments` table plus DB accessors for add/list/get/delete,
+  per-board attachment roots, per-task attachment directories, and worker
+  context rendering of attached files' absolute paths.
+- Added dashboard upload/list/download/delete REST routes and drawer UI
+  controls. Multipart support is declared in both the `web` extra and the
+  lazy dashboard dependency set.
+- The forked port adds hardening beyond upstream: attachment rows can only
+  store paths under the owning task's attachment directory; download and
+  delete re-check the same containment; upload treats symlinks as occupied
+  names and uses exclusive file creation; task hard-delete and archived-task
+  deletion remove attachment rows and contained blobs.
+- Dashboard attachment routes are covered by plugin-auth tests. The upload
+  tests cover traversal filenames, collision suffixing, broken symlink names,
+  unknown tasks, and tampered DB paths that point outside the owning task
+  directory.
+- `_default_spawn` now exports `HERMES_KANBAN_ATTACHMENTS_ROOT` alongside the
+  DB and workspaces roots, so spawned workers resolve attachment paths against
+  the dispatcher's board.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/plugins/test_kanban_attachments.py tests/plugins/test_kanban_dashboard_plugin.py -q -rs
+```
+
+Result: `114 passed, 1 warning` (`discord.player` importing deprecated
+`audioop`).
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_web_server.py::TestPluginAPIAuth -q -rs
+```
+
+Result: `8 passed`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_kanban_core_functionality.py -q -rs -k "build_worker_context or default_spawn or archive or gc or delete_task"
+```
+
+Result: `26 passed, 143 deselected`.
+
+```bash
+uv run --extra dev pytest tests/test_packaging_metadata.py -q -rs -k "web or multipart or starlette"
+```
+
+Result: `2 passed, 4 deselected`.
+
+```bash
+uv run --extra dev ruff check hermes_cli/kanban_db.py plugins/kanban/dashboard/plugin_api.py tests/plugins/test_kanban_attachments.py tests/hermes_cli/test_kanban_core_functionality.py tests/hermes_cli/test_web_server.py tools/lazy_deps.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile hermes_cli/kanban_db.py plugins/kanban/dashboard/plugin_api.py tests/plugins/test_kanban_attachments.py tests/hermes_cli/test_kanban_core_functionality.py tests/hermes_cli/test_web_server.py tools/lazy_deps.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --cached --check
+```
+
+Result: exit `0`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work
@@ -4360,10 +4434,6 @@ Deferred:
   skill-surface concern as the Grok series.
 - `4de8009ce424ff85d79e7cca63dd1aaede44a9fd` — adds `NVIDIA/skills` as a
   trusted skills hub tap, expanding default trust/supply-chain policy.
-- `b47cb1bbf27926454854834c0ca381c39628ab9d` — Kanban file attachments. This
-  adds upload/download/delete surfaces and worker-visible file paths; it needs
-  a dedicated path-containment, auth, retention, and remote-worker mount review
-  before being safe for this fork.
 - `7b0915037c110ca10ff4da952bae2d0d786868ac` — deletes low-value
   model-catalog mirror tests. The current usable channel set is locally
   `5.5`-only, but that is not a reason to weaken catalog guard coverage during
