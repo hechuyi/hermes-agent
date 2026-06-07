@@ -1609,6 +1609,21 @@ class SessionDB:
             )
         self._execute_write(_do)
 
+    def update_session_model(self, session_id: str, model: str) -> None:
+        """Store the latest explicit model selected for a session.
+
+        ``update_token_counts`` deliberately only backfills an empty model
+        column. A user-initiated /model switch is a stronger signal and must
+        overwrite the stored model so session metadata reflects the active
+        runtime.
+        """
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET model = ? WHERE id = ?",
+                (model, session_id),
+            )
+        self._execute_write(_do)
+
     def update_token_counts(
         self,
         session_id: str,

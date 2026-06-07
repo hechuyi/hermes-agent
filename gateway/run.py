@@ -2628,6 +2628,22 @@ class GatewayRunner:
             require_conversation_identity=True,
         )
 
+    def _persist_session_model_switch(self, source: SessionSource, model: str) -> None:
+        """Persist an explicit per-session model switch into state.db metadata."""
+        session_db = getattr(self, "_session_db", None)
+        if session_db is None:
+            return
+        session_store = getattr(self, "session_store", None)
+        if session_store is None:
+            return
+        try:
+            session_entry = session_store.get_or_create_session(source)
+            session_id = getattr(session_entry, "session_id", None)
+            if session_id:
+                session_db.update_session_model(session_id, model)
+        except Exception as exc:
+            logger.debug("Failed to persist model switch to DB: %s", exc)
+
     def _telegram_topic_mode_enabled(self, source: SessionSource) -> bool:
         """Return whether Telegram DM topic mode is active for this chat."""
         if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
@@ -10895,6 +10911,8 @@ class GatewayRunner:
                             except Exception as exc:
                                 logger.warning("Picker model switch failed for cached agent: %s", exc)
 
+                        _self._persist_session_model_switch(source, result.new_model)
+
                         # Store model note + session override
                         if not hasattr(_self, "_pending_model_notes"):
                             _self._pending_model_notes = {}
@@ -11031,6 +11049,8 @@ class GatewayRunner:
                 )
             except Exception as exc:
                 logger.warning("In-place model switch failed for cached agent: %s", exc)
+
+        self._persist_session_model_switch(source, result.new_model)
 
         # Store a note to prepend to the next user message so the model
         # knows about the switch (avoids system messages mid-history).

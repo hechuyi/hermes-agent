@@ -13,6 +13,7 @@ the proper ``model: {default: ..., provider: ...}`` form.
 
 import yaml
 import pytest
+from types import SimpleNamespace
 
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent, MessageType
@@ -76,6 +77,30 @@ def _setup_isolated_home(tmp_path, monkeypatch, model_yaml_value):
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: hermes_home)
     monkeypatch.setattr("hermes_cli.config.get_hermes_home", lambda: hermes_home)
     return cfg_path
+
+
+@pytest.mark.asyncio
+async def test_model_session_switch_persists_session_model_to_db(tmp_path, monkeypatch):
+    _setup_isolated_home(
+        tmp_path,
+        monkeypatch,
+        {"default": "old-model", "provider": "openrouter"},
+    )
+    runner = _make_runner()
+    persisted = []
+    runner.session_store = SimpleNamespace(
+        get_or_create_session=lambda source: SimpleNamespace(session_id="sess-1")
+    )
+    runner._session_db = SimpleNamespace(
+        update_session_model=lambda session_id, model: persisted.append(
+            (session_id, model)
+        )
+    )
+
+    result = await runner._handle_model_command(_make_event("/model gpt-5.5"))
+
+    assert result is not None
+    assert persisted == [("sess-1", "gpt-5.5")]
 
 
 @pytest.mark.asyncio

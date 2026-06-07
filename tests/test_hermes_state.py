@@ -129,6 +129,30 @@ class TestSessionLifecycle:
         session = db.get_session("s1")
         assert session["model"] == "anthropic/claude-opus-4.6"
 
+    def test_update_session_model_overwrites_existing(self, db):
+        db.create_session(
+            session_id="s1",
+            source="telegram",
+            model="xiaomi/mimo-v2.5-pro",
+        )
+        db.update_token_counts(
+            "s1",
+            input_tokens=10,
+            output_tokens=5,
+            model="xiaomi/mimo-v2.5-pro",
+        )
+
+        db.update_session_model("s1", "xiaomi/mimo-v2.5")
+        assert db.get_session("s1")["model"] == "xiaomi/mimo-v2.5"
+
+        db.update_token_counts(
+            "s1",
+            input_tokens=10,
+            output_tokens=5,
+            model="xiaomi/mimo-v2.5-pro",
+        )
+        assert db.get_session("s1")["model"] == "xiaomi/mimo-v2.5"
+
     def test_parent_session(self, db):
         db.create_session(session_id="parent", source="cli")
         db.create_session(session_id="child", source="cli", parent_session_id="parent")
