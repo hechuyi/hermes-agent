@@ -2365,3 +2365,42 @@ Result: exit `0`.
 
 `git diff --check -- agent/codex_responses_adapter.py agent/transports/codex_app_server_session.py tests/agent/test_codex_responses_adapter.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Broad import-prune batch deferred
+
+Upstream commits reviewed:
+
+- `66827f8947f08686b31b3952e768772423cefbcf` — mechanical unused-import /
+  duplicate-import prune across 644 files.
+- `e371bf5d6826cb929587f1fb1d00a4618ea4a56c` — restores re-exported names
+  pruned from `run_agent.py` and `tools/web_tools.py`.
+- `00b8204cf4109ed6ae481ecdfc2dbf99c9a8303e` — restores side-effect imports
+  in `tests/tools/test_kanban_tools.py` and `tests/tools/test_command_guards.py`.
+- `f61fd59b62655f6ee41e372af58e6ef640b85454` — documents why the restored
+  `run_agent.py` re-exports intentionally keep `F401` suppressions.
+
+Local result:
+
+- Recorded as `DEFER_CONFLICT`; no code was changed.
+- The initial prune touches 644 files, including protected live-gateway paths
+  such as `gateway/run.py`, `gateway/platforms/telegram.py`, and many gateway
+  tests, plus core entrypoints like `run_agent.py`.
+- The immediate follow-up fixes prove that a mechanical import cleanup can
+  remove runtime/test anchors that are invisible to ruff's in-module usage
+  analysis (`mock.patch` targets, `from run_agent import ...` compatibility,
+  `_ra().X` indirection, and registry side-effect imports).
+- This batch should not be retried mechanically during the live-gateway
+  integration pass. If cleanup is desired later, it needs a dedicated lint
+  pass with import-contract tests and explicit preservation of re-export and
+  side-effect-import surfaces.
+
+Verification:
+
+```bash
+git show --stat --oneline --find-renames --find-copies 66827f8947f08686b31b3952e768772423cefbcf
+git show --stat --oneline --find-renames --find-copies e371bf5d6826cb929587f1fb1d00a4618ea4a56c
+git show --stat --oneline --find-renames --find-copies 00b8204cf4109ed6ae481ecdfc2dbf99c9a8303e
+git show --stat --oneline --find-renames --find-copies f61fd59b62655f6ee41e372af58e6ef640b85454
+```
+
+Confirmed the broad prune scope and the paired restore/documentation commits.
