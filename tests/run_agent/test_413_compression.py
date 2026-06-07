@@ -577,6 +577,68 @@ class TestPreflightCompression:
         mock_compress.assert_not_called()
         assert result["completed"] is True
 
+    def test_preflight_seeds_display_tokens_when_compression_aborts(self, agent):
+        """Display should reflect fresh preflight size when compression no-ops."""
+        agent.compression_enabled = True
+        agent.context_compressor.context_length = 200_000
+        agent.context_compressor.threshold_tokens = 130_000
+        agent.context_compressor.last_prompt_tokens = 74_400
+
+        big_history = []
+        for i in range(20):
+            big_history.append({"role": "user", "content": f"Message {i} padded text"})
+            big_history.append({"role": "assistant", "content": f"Response {i} padded text"})
+
+        ok_resp = _mock_response(content="After preflight", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [ok_resp]
+
+        with (
+            patch("agent.conversation_loop.estimate_request_tokens_rough", return_value=144_669),
+            patch.object(
+                agent,
+                "_compress_context",
+                side_effect=lambda msgs, *a, **k: (msgs, agent._cached_system_prompt),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello", conversation_history=big_history)
+
+        assert result["completed"] is True
+        assert agent.context_compressor.last_prompt_tokens == 144_669
+
+    def test_preflight_seed_only_revises_display_tokens_upward(self, agent):
+        """A larger tracked value must not be clobbered by a smaller estimate."""
+        agent.compression_enabled = True
+        agent.context_compressor.context_length = 200_000
+        agent.context_compressor.threshold_tokens = 130_000
+        agent.context_compressor.last_prompt_tokens = 160_000
+
+        big_history = []
+        for i in range(20):
+            big_history.append({"role": "user", "content": f"Message {i} padded text"})
+            big_history.append({"role": "assistant", "content": f"Response {i} padded text"})
+
+        ok_resp = _mock_response(content="After preflight", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [ok_resp]
+
+        with (
+            patch("agent.conversation_loop.estimate_request_tokens_rough", return_value=144_669),
+            patch.object(
+                agent,
+                "_compress_context",
+                side_effect=lambda msgs, *a, **k: (msgs, agent._cached_system_prompt),
+            ),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello", conversation_history=big_history)
+
+        assert result["completed"] is True
+        assert agent.context_compressor.last_prompt_tokens == 160_000
+
 
 class TestToolResultPreflightCompression:
     """Compression should trigger when tool results push context past the threshold."""

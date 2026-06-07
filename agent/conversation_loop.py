@@ -647,7 +647,20 @@ def run_conversation(
             tools=agent.tools or None,
         )
 
-        if agent.context_compressor.should_compress(_preflight_tokens):
+        _should_preflight_compress = agent.context_compressor.should_compress(
+            _preflight_tokens
+        )
+
+        if _should_preflight_compress and _preflight_tokens > (
+            agent.context_compressor.last_prompt_tokens or 0
+        ):
+            # The CLI/ACP context display reads last_prompt_tokens, which
+            # otherwise updates only from successful provider usage. Seed it
+            # with the fresh preflight estimate so a failed/no-op compression
+            # does not leave the display stuck at an older, smaller value.
+            agent.context_compressor.last_prompt_tokens = _preflight_tokens
+
+        if _should_preflight_compress:
             logger.info(
                 "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
                 f"{_preflight_tokens:,}",
