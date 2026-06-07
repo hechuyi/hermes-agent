@@ -15,6 +15,10 @@ event path, internal gateway event ledger, gateway preflight, service launch
 semantics, access-control default-deny behavior, or media/delivery outcome
 contract remains deferred for a later manual port.
 
+References below to local `5.5` availability are runtime/channel evidence from
+the operator environment at review time. They are not a Hermes model-catalog
+policy and must not be used to justify hard-coding or deleting catalog entries.
+
 The protected local paths for this pass were:
 
 - `gateway/gateway_event_ledger.py`
@@ -760,6 +764,44 @@ being denied; `HERMES_WRITE_SAFE_ROOT` applying to the resolved absolute target;
 resolution failure not invoking shell file operations; and V4A multi-file patch
 headers being individually resolved and rejected as an atomic batch if any
 target fails safety.
+
+### 2026-06-08 protected remainder rescan
+
+A second read-only rescan of the remaining `git cherry -v HEAD origin/main`
+positives found that every upstream `+` commit has an explicit disposition in
+this document. The remaining work is therefore not an unclassified merge queue;
+it is a set of intentionally protected contract decisions plus patch-id noise
+from manual local ports.
+
+The progressive tool-disclosure group remains deferred. This fork already
+scopes ordinary tool definitions through the session's enabled/disabled
+toolsets, and subagents inherit a narrowed toolset view, but it does not yet
+have upstream's `tool_search` bridge module, bridge dispatch path, live harness,
+or transcript-redaction harness. Absorbing the follow-up scoping fix without the
+feature base would be empty, while absorbing the feature base without a fork
+design review would expand MCP/plugin discovery and dispatch visibility. A
+future port must first define the bridge catalog as session-scoped, pass
+toolset scope through dispatch, fail closed on out-of-scope bridged calls, and
+cover restricted gateway, subagent, plugin, MCP allowlist/no-MCP, approval, and
+hook visibility tests.
+
+The remaining gateway/media items also stay deferred. The already absorbed
+slices cover Windows MEDIA paths, extension allowlisting, current-turn
+tool-result scan, diagnosable MEDIA rejection, Yuanbao resource caching, nested
+platform config hooks, transient reconnect retry, and self-targeted
+planned-stop markers. The remaining `45bc65abb` silence-narration filter
+changes delivery outcome semantics by returning success for a non-delivery, and
+`100536134` / `db96fc60d` move topic recovery into session/compression identity
+paths. Those are not narrow cleanups; they need a separate review of gateway
+ledger attribution, delivery result contracts, compression-child session
+binding, busy-session guards, and pending-queue keys.
+
+Adapter-owned access-policy commits remain a hard conflict with this fork's
+default-deny gateway boundary: adapters may add platform-local checks, but the
+gateway-level authorization guard remains the final guard. Model-catalog churn
+remains a separate catalog-policy decision; the operator's current `5.5`
+channel availability is context for local testing only, not a reason to encode
+catalog restrictions.
 
 ## Deferred commits
 
@@ -3503,9 +3545,9 @@ Remaining upstream groups reviewed and left out of blind absorption:
   legacy mode, mint/cache/retry behavior, and proxy fallback.
 - Model catalog changes (`f2d88c82`, `bc736ff5`, `5e7c2ffa`): split. Raw
   GitHub manifest fallback is already equivalent locally, but upstream model
-  list swaps remain deferred as unrelated catalog churn. The current usable
-  channel set is locally `5.5`-only, but that is runtime availability rather
-  than a Hermes catalog policy.
+  list swaps remain deferred as unrelated catalog churn. The operator's
+  currently usable `5.5` channel is runtime availability evidence only, not a
+  Hermes catalog policy.
 - Progressive tool disclosure / tool-search (`369075dc`, `7427b9d5`,
   `17097761`, `18c9e891`, `a87f0a82`): deferred for design review. This group
   changes MCP/plugin tool discovery and dispatch scoping and touches the Hermes
@@ -5163,10 +5205,10 @@ Deferred:
 - `4de8009ce424ff85d79e7cca63dd1aaede44a9fd` — adds `NVIDIA/skills` as a
   trusted skills hub tap, expanding default trust/supply-chain policy.
 - `7b0915037c110ca10ff4da952bae2d0d786868ac` — deletes low-value
-  model-catalog mirror tests. The current usable channel set is locally
-  `5.5`-only, but that is not a reason to weaken catalog guard coverage during
-  upstream reconciliation; catalog test deletion should wait for an explicit
-  catalog-policy review.
+  model-catalog mirror tests. The operator's currently usable `5.5` channel is
+  runtime availability evidence only, and not a reason to weaken catalog guard
+  coverage during upstream reconciliation; catalog test deletion should wait
+  for an explicit catalog-policy review.
 - `e8076c1ebe659c58284396d88f802537ffc2ccb8` and
   `234ac009376daba225525195afca96be8a82634c` — dashboard insecure public-bind
   WebSocket peer relaxation. Even though `234ac009` preserves Host/Origin
@@ -5176,7 +5218,7 @@ Deferred:
 - `93e6a05efc615bed00e6f4d5737d5ada5f54b020` — model-picker provider grouping.
   The grouping itself is display-oriented, but it touches model catalog/picker
   behavior and Telegram picker callbacks. Record-only until provider grouping
-  is reviewed with callback authorization, current channel availability, and
+  is reviewed with callback authorization, runtime channel availability, and
   the fork's canonical provider set.
 
 Record-only:
