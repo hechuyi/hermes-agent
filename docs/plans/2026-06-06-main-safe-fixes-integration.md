@@ -3343,3 +3343,75 @@ Validation required if these are later absorbed:
   plus a temp-`HERMES_HOME` CLI smoke for `hermes sessions optimize`.
 - Kanban: `tests/hermes_cli/test_kanban*.py`, dashboard/plugin worker-run
   tests, and run-agent iteration-exhaustion expectations.
+
+## 2026-06-07 — State FTS optimize absorption
+
+Upstream commits reviewed and absorbed:
+
+- `38695254f851844bb16f75767aa5e47c6ea32da1` — merge FTS5 segments on
+  `VACUUM` and add `hermes sessions optimize`.
+- `904c0b479b60649f9f92cd8a3988da625e8ca1d8` — have `vacuum()` return the FTS
+  index count for CLI reporting.
+
+Local result:
+
+- Absorbed as `5859c84c0`.
+- `SessionDB.optimize_fts()` now issues SQLite FTS5 `optimize` commands for
+  `messages_fts` and `messages_fts_trigram`, skipping absent indexes.
+- `SessionDB.vacuum()` now runs FTS optimize before `VACUUM` and returns the
+  number of optimized FTS indexes.
+- `hermes sessions optimize` is available as an on-demand maintenance command
+  with before/after size reporting.
+- This absorption is limited to maintenance/compaction semantics and does not
+  absorb no-FTS5 degradation behavior.
+
+Red tests before implementation:
+
+```bash
+uv run --extra dev pytest tests/test_hermes_state.py -q -rs -k "OptimizeFts"
+```
+
+Result before code change: `4 failed, 267 deselected`, all failing because
+`SessionDB` lacked `optimize_fts()` / `_fts_table_exists()`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_sessions_optimize.py -q -rs
+```
+
+Result before CLI change: `1 failed`; argparse rejected `sessions optimize` as
+an invalid choice.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/test_hermes_state.py -q -rs -k "OptimizeFts"
+```
+
+Result: `4 passed, 267 deselected`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_sessions_optimize.py -q -rs
+```
+
+Result: `1 passed`.
+
+```bash
+uv run --extra dev pytest tests/test_hermes_state.py tests/hermes_cli/test_sessions_optimize.py -q -rs
+```
+
+Result: `272 passed`.
+
+```bash
+uv run --extra dev ruff check hermes_state.py hermes_cli/main.py tests/test_hermes_state.py tests/hermes_cli/test_sessions_optimize.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile hermes_state.py hermes_cli/main.py tests/test_hermes_state.py tests/hermes_cli/test_sessions_optimize.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- hermes_state.py hermes_cli/main.py tests/test_hermes_state.py tests/hermes_cli/test_sessions_optimize.py`
+produced no output before the code commit.
