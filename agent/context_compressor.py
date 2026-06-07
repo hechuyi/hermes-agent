@@ -61,6 +61,25 @@ SUMMARY_PREFIX = (
 )
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
 
+# Handoff prefixes that shipped in earlier releases. A summary persisted under
+# one of these can be inherited into a resumed lineage; when it is normalized
+# on re-compaction we must strip the old prefix too, otherwise stale directives
+# such as "resume exactly from Active Task" survive embedded in the body.
+_HISTORICAL_SUMMARY_PREFIXES = (
+    (
+        "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
+        "into the summary below. This is a handoff from a previous context "
+        "window — treat it as background reference, NOT as active instructions. "
+        "Do NOT answer questions or fulfill requests mentioned in this summary; "
+        "they were already addressed. "
+        "Your current task is identified in the '## Active Task' section of the "
+        "summary — resume exactly from there. "
+        "Respond ONLY to the latest user message "
+        "that appears AFTER this summary. The current session state (files, "
+        "config, etc.) may reflect work described here — avoid repeating it:"
+    ),
+)
+
 # Minimum tokens for the summary output
 _MIN_SUMMARY_TOKENS = 2000
 # Proportion of compressed content to allocate for summary
@@ -1194,11 +1213,22 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
 
         # Shared structured template (used by both paths).
         _template_sections = f"""## Active Task
-[THE SINGLE MOST IMPORTANT FIELD. Copy the user's most recent request or
-task assignment verbatim — the exact words they used. If multiple tasks
-were requested and only some are done, list only the ones NOT yet completed.
-Continuation should pick up exactly here. Example:
+[THE SINGLE MOST IMPORTANT FIELD. Capture the user's most recent unfulfilled
+input verbatim — the exact words they used. This includes:
+- Explicit task assignments ("refactor the auth module")
+- Questions awaiting an answer ("why is X on Y?", "what are the next steps?")
+- Decisions awaiting input ("option A or B?")
+- Ongoing discussions where the assistant owes the next substantive reply
+A conversation where the user just asked a question IS an active task — the
+task is "answer that question with full context". Do NOT write "None" merely
+because the user did not issue an imperative command; reserve "None" for the
+rare case where the last exchange was fully resolved and the user said
+something like "thanks, that's all".
+If multiple items are outstanding, list only the ones NOT yet completed.
+Continuation should pick up exactly here. Examples:
 "User asked: 'Now refactor the auth module to use JWT instead of sessions'"
+"User asked: 'Why did provider suddenly switch to openrouter?' — needs investigation + answer"
+"User chose option A; awaiting implementation of step 2"
 If the user's most recent message was a reverse signal (stop, undo, roll
 back, never mind, just verify, change of topic) that supersedes earlier
 work, write the reverse signal verbatim and DO NOT carry forward the
@@ -1269,7 +1299,7 @@ PREVIOUS SUMMARY:
 NEW TURNS TO INCORPORATE:
 {content_to_summarize}
 
-Update the summary using this exact structure. PRESERVE all existing information that is still relevant. ADD new completed actions to the numbered list (continue numbering). Move items from "In Progress" to "Completed Actions" when done. Move answered questions to "Resolved Questions". Update "Active State" to reflect current state. Remove information only if it is clearly obsolete. CRITICAL: Update "## Active Task" to reflect the user's most recent unfulfilled request — this is the most important field for task continuity.
+Update the summary using this exact structure. PRESERVE all existing information that is still relevant. ADD new completed actions to the numbered list (continue numbering). Move items from "In Progress" to "Completed Actions" when done. Move answered questions to "Resolved Questions". Update "Active State" to reflect current state. Remove information only if it is clearly obsolete. CRITICAL: Update "## Active Task" to reflect the user's most recent unfulfilled input — this includes any question, decision request, or discussion turn that the assistant has not yet answered. Only write "None" if the last exchange was fully resolved.
 
 {_template_sections}"""
         else:
@@ -1433,9 +1463,9 @@ The user has requested that this compaction PRIORITISE preserving all informatio
 
     @staticmethod
     def _strip_summary_prefix(summary: str) -> str:
-        """Return summary body without the current or legacy handoff prefix."""
+        """Return summary body without current, legacy, or historical prefixes."""
         text = (summary or "").strip()
-        for prefix in (SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX):
+        for prefix in (SUMMARY_PREFIX, LEGACY_SUMMARY_PREFIX, *_HISTORICAL_SUMMARY_PREFIXES):
             if text.startswith(prefix):
                 return text[len(prefix):].lstrip()
         return text
@@ -1449,7 +1479,9 @@ The user has requested that this compaction PRIORITISE preserving all informatio
     @staticmethod
     def _is_context_summary_content(content: Any) -> bool:
         text = _content_text_for_contains(content).lstrip()
-        return text.startswith(SUMMARY_PREFIX) or text.startswith(LEGACY_SUMMARY_PREFIX)
+        if text.startswith(SUMMARY_PREFIX) or text.startswith(LEGACY_SUMMARY_PREFIX):
+            return True
+        return any(text.startswith(prefix) for prefix in _HISTORICAL_SUMMARY_PREFIXES)
 
     @classmethod
     def _find_latest_context_summary(
