@@ -433,6 +433,35 @@ gateway event ledgers, media extraction, delivery outcomes, provider routing,
 model catalogs, Nous legacy authentication, or the fork's `5.5`
 customizations.
 
+### TUI clipboard and CLI usability batch
+
+The following low-risk interactive usability fixes were manually absorbed as
+focused local commits:
+
+- `64998fa93e2bd52ee191701ea50c0febcc8e3dc6` and
+  `16882cfded90b8c41ff18000c56a84d7f17628b7` in local commit
+  `92411c011`.
+- `edfdc776649cd50637d8aa3a35b584c4458416ef` and
+  `04de307d62277998ee8e52dfa4da59b539917721` in local commit
+  `3e88f6de6`.
+- `f32b66c758ef16d96bedcdce62ed6a397e741103` in local commit
+  `3352444a6`.
+
+PowerShell clipboard writes from the TUI now pass UTF-8 text through a
+base64-encoded command argument instead of PowerShell's stdin decoding path,
+preserving CJK and emoji text on Windows/WSL. A bare number submitted
+immediately after bare `/resume` now selects that displayed session index as a
+one-shot prompt instead of being sent to the agent as chat, and inline `/steer`
+or `/model` submissions now invalidate the prompt after clearing the input
+buffer so submitted text does not visually linger. `hermes plugins list` now
+supports filtered, plain, and JSON output, plus better keyboard paging in the
+interactive plugin picker.
+
+This batch is limited to interactive CLI/TUI usability and plugin-list
+presentation. It does not change gateway event ledgers, media extraction,
+delivery outcomes, provider routing, model catalogs, Nous legacy
+authentication, or the fork's `5.5` customizations.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -906,6 +935,54 @@ Result: failed on pre-existing TypeScript errors in
 this batch.
 
 `git diff --check` produced no output.
+
+TUI clipboard UTF-8 batch verification:
+
+```bash
+cd ui-tui && npm test -- --run src/__tests__/clipboard.test.ts
+```
+
+Result: `1 passed`, `19 passed`.
+
+```bash
+cd ui-tui && npx eslint src/lib/clipboard.ts src/__tests__/clipboard.test.ts
+```
+
+Result: exit `0`.
+
+`git diff --check` and `git diff --cached --check` produced no output.
+
+CLI resume/repaint batch verification:
+
+```bash
+uv run --extra dev pytest tests/cli/test_cli_resume_command.py tests/cli/test_steer_inline_repaint_34569.py -q -rs
+```
+
+Result: `13 passed`.
+
+```bash
+uv run --extra dev ruff check cli.py tests/cli/test_cli_resume_command.py tests/cli/test_steer_inline_repaint_34569.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` and `git diff --cached --check` produced no output.
+
+Plugins list usability batch verification:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_plugins_cmd_list.py tests/hermes_cli/test_plugins_cmd.py -q -rs
+```
+
+Result: `75 passed, 1 warning`.
+
+```bash
+uv run --extra dev ruff check hermes_cli/main.py hermes_cli/plugins_cmd.py tests/hermes_cli/test_plugins_cmd_list.py
+```
+
+Result: `All checks passed!`.
+
+`git diff --check` and `git diff --cached --check` produced no output.
 
 Manual service `WorkingDirectory` port verification:
 
