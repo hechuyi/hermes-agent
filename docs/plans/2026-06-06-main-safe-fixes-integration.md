@@ -462,6 +462,29 @@ presentation. It does not change gateway event ledgers, media extraction,
 delivery outcomes, provider routing, model catalogs, Nous legacy
 authentication, or the fork's `5.5` customizations.
 
+### UI diagnostics and Gmail casing batch
+
+Four independent low-risk upstream fixes were manually absorbed in local commit
+`1d0b4146e`:
+
+- `28bb7e0a8e8d9218d593eea6c8b5941d225814a6`
+- `2fc2280e63964ad96419f1d532a308eb034d42db`
+- `bb79bcde6103c564dacb2d796fe8fe8b775f1b18`
+- `8bd00607dc53fabd96e95917b77c9a13d6ead6ba`
+
+The web Tailwind theme bridge now exports `--theme-font-sans` and
+`--theme-font-mono` through Tailwind's `--font-*` variables. Short-terminal
+clarify panels now reserve space for choices before question text so selectable
+options are not clipped. `hermes doctor` now detects source-tree drift between
+`pyproject.toml` and `hermes_cli.__version__`. The Google Workspace Gmail
+helper now normalizes fetched Gmail header names case-insensitively while
+emitting conventional MIME header casing for sent/replied messages.
+
+This batch is limited to UI presentation, diagnostics, and Google Workspace
+skill helper behavior. It does not change gateway event ledgers, media
+extraction, delivery outcomes, provider routing, model catalogs, Nous legacy
+authentication, or the fork's `5.5` customizations.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -981,6 +1004,48 @@ uv run --extra dev ruff check hermes_cli/main.py hermes_cli/plugins_cmd.py tests
 ```
 
 Result: `All checks passed!`.
+
+`git diff --check` and `git diff --cached --check` produced no output.
+
+UI diagnostics and Gmail casing batch verification:
+
+```bash
+uv run --extra dev pytest tests/skills/test_google_workspace_api.py -q -rs
+```
+
+Result: `16 passed`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_doctor.py -q -rs
+```
+
+Result: `59 passed, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/cli/test_cli_approval_ui.py -q -rs
+```
+
+Result: `11 passed`.
+
+```bash
+uv run --extra dev ruff check cli.py hermes_cli/doctor.py skills/productivity/google-workspace/scripts/google_api.py tests/skills/test_google_workspace_api.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile cli.py hermes_cli/doctor.py skills/productivity/google-workspace/scripts/google_api.py
+```
+
+Result: exit `0`.
+
+```bash
+cd web && npm run build
+```
+
+Result: failed before build because local `web/node_modules` is absent and
+`tsc` was not found; this is an environment/dependency availability failure,
+not a TypeScript or CSS compilation result.
 
 `git diff --check` and `git diff --cached --check` produced no output.
 
