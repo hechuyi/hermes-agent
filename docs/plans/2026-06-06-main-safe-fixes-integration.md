@@ -3737,3 +3737,60 @@ Result: exit `0`.
 
 `git diff --check -- tools/vision_tools.py tools/browser_tool.py tests/tools/test_browser_console.py tests/tools/test_vision_native_fast_path.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Boundary-aware `/compress here` absorption
+
+Upstream commit reviewed and absorbed:
+
+- `bcc83010006c7059ee4d0be63fe74afc74867625` — add `/compress here [N]`
+  boundary-aware manual compression.
+
+Local result:
+
+- Absorbed as `44103c9`.
+- Added `hermes_cli.partial_compress` helpers for parsing `here [N]`,
+  splitting conversation history at a user-selected boundary, and preserving
+  role alternation at the compressed/uncompressed boundary.
+- CLI and gateway `/compress` handling now support `here [N]` / `--keep N` by
+  compressing the older head while re-appending the most recent exchanges
+  verbatim.
+- Existing `/compress` and `/compress <focus>` behavior remains covered by the
+  prior manual-compress/focus tests.
+
+Red test before absorption:
+
+```bash
+uv run --extra dev pytest tests/cli/test_partial_compress.py tests/cli/test_compress_here.py -q -rs
+```
+
+Result before code change: pytest error, `tests/cli/test_partial_compress.py`
+did not exist.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/cli/test_partial_compress.py tests/cli/test_compress_here.py -q -rs
+```
+
+Result: `24 passed`.
+
+```bash
+uv run --extra dev pytest tests/cli/test_manual_compress.py tests/cli/test_compress_focus.py tests/gateway/test_compress_command.py tests/gateway/test_compress_focus.py tests/gateway/test_compress_plugin_engine.py -q -rs
+```
+
+Result: `20 passed`.
+
+```bash
+uv run --extra dev ruff check cli.py gateway/run.py hermes_cli/commands.py hermes_cli/partial_compress.py tests/cli/test_partial_compress.py tests/cli/test_compress_here.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile cli.py gateway/run.py hermes_cli/commands.py hermes_cli/partial_compress.py tests/cli/test_partial_compress.py tests/cli/test_compress_here.py
+```
+
+Result: exit `0`; Python reported the existing `cli.py:11083` `return` in
+`finally` SyntaxWarning.
+
+`git diff --cached --check` produced no output before the code commit.
