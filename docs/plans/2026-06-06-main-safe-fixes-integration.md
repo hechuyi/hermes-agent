@@ -2608,3 +2608,59 @@ Required shape before absorption:
   safe restore.
 - Add tests for restored, healthy-noop, empty-snapshot-noop, unreadable-live,
   unreadable-snapshot, missing-snapshot-material, and copy-failure outcomes.
+
+## 2026-06-07 — MEDIA extension allowlist absorption
+
+Upstream commit reviewed and partially absorbed:
+
+- `781604ce4c826ec06b69a0bde703ab935308893d` — unify MEDIA extraction
+  extension set and avoid silently stripping unsupported `MEDIA:` tags.
+
+Local result:
+
+- Absorbed as `f23aadd5f` with adaptation for this branch's existing Windows
+  absolute path support in `MEDIA:` tags and bare local-file detection.
+- Added shared `MEDIA_DELIVERY_EXTS` and `MEDIA_TAG_CLEANUP_RE` in
+  `gateway/platforms/base.py`.
+- Switched `extract_media`, `extract_local_files`, non-streaming body cleanup,
+  and streaming display cleanup to the shared extension-anchored regex.
+- Added extra protection beyond upstream: quoted unknown-extension tags such as
+  `MEDIA:'/tmp/data.weirdext'` are not extracted and are not stripped from the
+  cleaned body.
+- Did not absorb the upstream `gateway/run.py` post-stream scan-order change
+  or release author-map changes in this commit; those remain separate review
+  items.
+
+Red tests before implementation:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_platform_base.py tests/gateway/test_stream_consumer.py -q -rs -k "media_tag_extracts_document_data_and_web_extensions or unknown_extension_media_path_is_not_stripped"
+```
+
+Result before code change: `2 failed, 211 deselected`. Failures proved that
+`.md` `MEDIA:` tags were not extracted and unknown-extension `MEDIA:` tags were
+stripped from streaming display text.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_platform_base.py tests/gateway/test_extract_local_files.py tests/gateway/test_run_tool_media_re.py tests/gateway/test_stream_consumer.py -q -rs
+```
+
+Result: `278 passed, 2 skipped`; both skips are the existing optional
+`aiohttp_socks` dependency in `tests/gateway/test_platform_base.py`.
+
+```bash
+uv run --extra dev ruff check gateway/platforms/base.py gateway/stream_consumer.py tests/gateway/test_platform_base.py tests/gateway/test_stream_consumer.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile gateway/platforms/base.py gateway/stream_consumer.py tests/gateway/test_platform_base.py tests/gateway/test_stream_consumer.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- gateway/platforms/base.py gateway/stream_consumer.py tests/gateway/test_platform_base.py tests/gateway/test_stream_consumer.py`
+produced no output before the code commit.
