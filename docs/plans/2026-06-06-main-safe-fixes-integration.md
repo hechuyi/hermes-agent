@@ -591,6 +591,21 @@ snapshot timing. It does not change gateway event ledgers, media extraction,
 delivery outcomes, provider routing, model catalogs, Nous legacy
 authentication, or the fork's `5.5` customizations.
 
+### CLI process-title batch
+
+`84ee80eb5d94838dd5b2c3c74a0fbe53dfb48c28`
+(`feat: set process title to 'hermes' in ps/top/htop`) was manually absorbed in
+local commit `588342a5e20a340f6eab57ddd673d937993c49d9`.
+
+The local port sets the process title to `hermes` at CLI startup on a
+best-effort basis. It prefers the optional `setproctitle` package and falls
+back to platform libc calls for Linux and macOS, while swallowing failures so
+missing optional dependencies or unsupported libc calls cannot affect command
+startup. This is a cosmetic observability change only; it does not change
+gateway event ledgers, media extraction, delivery outcomes, provider routing,
+model catalogs, Nous legacy authentication, or the fork's `5.5`
+customizations.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -1245,6 +1260,28 @@ uv run --extra dev python -m py_compile hermes_cli/banner.py hermes_cli/main.py 
 Result: exit `0`.
 
 `git diff --check` and `git diff --cached --check` produced no output.
+
+CLI process-title batch verification:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_process_title.py -q -rs
+```
+
+Result: `3 passed`.
+
+```bash
+uv run --extra dev ruff check hermes_cli/main.py tests/hermes_cli/test_process_title.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile hermes_cli/main.py tests/hermes_cli/test_process_title.py
+```
+
+Result: exit `0`.
+
+`git diff --check` produced no output.
 
 Manual service `WorkingDirectory` port verification:
 
