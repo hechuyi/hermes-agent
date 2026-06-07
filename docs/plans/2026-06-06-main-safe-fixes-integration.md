@@ -3925,3 +3925,72 @@ git diff --check -- web/src/pages/ChatPage.tsx tests/web/test_chat_page_gated_au
 ```
 
 Result: exit `0`.
+
+## 2026-06-07 — Kanban DB migration and retry guard absorption
+
+Upstream commits reviewed and absorbed:
+
+- `c70dca3a8856a6e6b5cc40f07deeac4703f22a5f` — rebuild legacy Kanban
+  SQLite tables whose primary keys were created as `TEXT` into the current
+  `INTEGER PRIMARY KEY AUTOINCREMENT` schema on open.
+- `6ab71d3bb4cca36712b6895fd1bcc38fd3b9be4f` — prevent blocked tasks from
+  entering an infinite retry loop after worker iteration-budget exhaustion.
+- `8e5a6854c3bf081c46df2600775f14bbbde9cc2d` — align `recompute_ready()` with
+  the circuit breaker's configured `failure_limit` and per-task `max_retries`.
+
+Local result:
+
+- Absorbed as `d0a794b`.
+- Legacy `task_events`, `task_comments`, `task_runs`, and
+  `kanban_notify_subs` schemas are rebuilt in place when their primary-key or
+  cursor columns still use pre-AUTOINCREMENT text forms. Data and indexes are
+  preserved.
+- `recompute_ready()` no longer promotes tasks whose `consecutive_failures`
+  has reached the effective breaker limit. It preserves the failure counter for
+  below-limit recovery and honors per-task `max_retries` before dispatcher
+  `failure_limit`.
+
+Red tests before production changes:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_kanban_db_init.py -q -rs
+```
+
+Result after applying only the upstream tests: `4 failed, 1 passed`. Failures
+showed legacy `TEXT` primary keys and text `last_event_id` values surviving
+`connect()`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_blocked_sticky.py -q -rs -k "retry or failure_limit or iteration or recompute_ready or exhausted"
+```
+
+Result after applying only the upstream tests: `4 failed, 8 passed, 199
+deselected`. Failures showed `recompute_ready()` promoting tripped breaker
+tasks, resetting below-limit failure counters, and lacking a `failure_limit`
+argument.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_kanban_db_init.py tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_blocked_sticky.py -q -rs
+```
+
+Result: `216 passed`.
+
+```bash
+uv run --extra dev ruff check hermes_cli/kanban_db.py tests/hermes_cli/test_kanban_db_init.py tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_blocked_sticky.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile hermes_cli/kanban_db.py tests/hermes_cli/test_kanban_db_init.py tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_blocked_sticky.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --check -- hermes_cli/kanban_db.py tests/hermes_cli/test_kanban_db_init.py tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_blocked_sticky.py
+```
+
+Result: exit `0`.
