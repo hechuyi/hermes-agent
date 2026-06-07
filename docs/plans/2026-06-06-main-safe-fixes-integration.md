@@ -622,6 +622,40 @@ This is limited to agent tool-executor bookkeeping. It does not change gateway
 event ledgers, media extraction, delivery outcomes, provider routing, model
 catalogs, Nous legacy authentication, or the fork's `5.5` customizations.
 
+### CI required-check gate batch
+
+`6bc309baf2063a9b04d463f21e3d20dc6fc3c043` and
+`5cd0673217d4f83832186a16bc9a449d23d1e58f` were absorbed in local commit
+`403c0a7b3`.
+
+The port removes PR `paths` filters from the contributor-attribution and
+supply-chain workflows so required checks always report a status. The actual
+work remains internally path-gated: attribution only runs when relevant Python
+or workflow files changed, supply-chain scanning only runs for scanner-relevant
+paths, and dependency-bound checks only run when `pyproject.toml` changed. The
+supply-chain gate jobs use `always()` plus negative output checks so a failed
+or skipped `changes` job cannot leave a required check pending.
+
+This batch is limited to GitHub Actions metadata. It does not change runtime
+behavior, gateway event ledgers, media extraction, delivery outcomes, provider
+routing, model catalogs, Nous legacy authentication, or the fork's `5.5`
+customizations.
+
+### Equivalent local coverage
+
+`38c4f8c3717518e81bc64765ab80f3192f6a113a`
+(`test(gateway): update system-unit cwd assertion to HERMES_HOME anchor`) is
+covered by the manual service `WorkingDirectory` port recorded above. The
+current test already asserts `WorkingDirectory=/home/alice/.hermes` and rejects
+the stale checkout-root value.
+
+`182739fcda011a33065db01e31d0d6d2d70cd4c8`
+(`test(interrupt): assert no leaked tid instead of no-op block`) is covered by
+the current interrupt regression test, which asserts the worker tid is not left
+in `_interrupted_threads` after concurrent cleanup. The local assertion is more
+tolerant of unrelated concurrent test state than the upstream whole-set-empty
+assertion while preserving the leak check.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -1337,6 +1371,43 @@ uv run --extra dev python -m py_compile agent/tool_executor.py tests/run_agent/t
 Result: exit `0`.
 
 `git diff --check` produced no output.
+
+CI required-check gate batch verification:
+
+```bash
+uv run --extra dev python - <<'PY'
+from pathlib import Path
+import yaml
+
+paths = [
+    Path('.github/workflows/contributor-check.yml'),
+    Path('.github/workflows/supply-chain-audit.yml'),
+]
+for path in paths:
+    data = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+    assert 'on' in data and 'pull_request' in data['on'], path
+    assert 'paths' not in data['on']['pull_request'], path
+
+supply = yaml.load(paths[1].read_text(), Loader=yaml.BaseLoader)
+jobs = supply['jobs']
+expected = {
+    ('scan', 'if'): "needs.changes.outputs.scan == 'true'",
+    ('scan-gate', 'if'): "always() && needs.changes.outputs.scan != 'true'",
+    ('dep-bounds', 'if'): "needs.changes.outputs.deps == 'true'",
+    ('dep-bounds-gate', 'if'): "always() && needs.changes.outputs.deps != 'true'",
+}
+for (job, key), value in expected.items():
+    assert jobs[job][key] == value, (job, jobs[job][key])
+print('workflow checks ok')
+PY
+```
+
+Result: `workflow checks ok`.
+
+`git diff --cached --check` produced no output before the CI commit.
+
+`actionlint` was not installed in the local environment, so no actionlint run
+was performed for this batch.
 
 Manual service `WorkingDirectory` port verification:
 
