@@ -2664,3 +2664,60 @@ Result: exit `0`.
 
 `git diff --check -- gateway/platforms/base.py gateway/stream_consumer.py tests/gateway/test_platform_base.py tests/gateway/test_stream_consumer.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Tool-result MEDIA scan scope absorption
+
+Upstream commit reviewed and absorbed:
+
+- `08c0b22417a80874032cae4a6d9e43d77d55f89a` — scan tool-result `MEDIA:`
+  tags only from the current turn, while keeping compression-safe path dedup.
+
+Local result:
+
+- Absorbed as `aa7252306`.
+- Added production helper `_tool_result_messages_for_media_scan()` in
+  `gateway/run.py`.
+- The normal path slices returned agent messages at `len(agent_history)`, so
+  stale tool media from earlier turns cannot be reattached to later text-only
+  replies when replayable-history path reconstruction misses the old path.
+- If mid-run compression shrinks the returned message list below the original
+  history length, the helper falls back to scanning the returned list and relies
+  on `_history_media_paths`, preserving the prior #160 compression-safe path.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_media_extraction.py -q -rs -k "StaleToolMediaLeak"
+```
+
+Result before code change: collection failed because the production helper did
+not exist yet.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_media_extraction.py -q -rs
+```
+
+Result: `7 passed`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_media_extraction.py tests/gateway/test_run_tool_media_re.py -q -rs
+```
+
+Result: `25 passed`.
+
+```bash
+uv run --extra dev ruff check gateway/run.py tests/gateway/test_media_extraction.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile gateway/run.py tests/gateway/test_media_extraction.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- gateway/run.py tests/gateway/test_media_extraction.py`
+produced no output before the code commit.
