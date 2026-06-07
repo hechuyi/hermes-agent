@@ -1,6 +1,41 @@
 from types import SimpleNamespace
 
-from agent.codex_responses_adapter import _normalize_codex_response
+import pytest
+
+from agent.codex_responses_adapter import (
+    _format_responses_error,
+    _normalize_codex_response,
+)
+
+
+def test_format_responses_error_prefixes_code_and_message():
+    error = {"code": "rate_limit_exceeded", "message": "Slow down"}
+
+    assert _format_responses_error(error, "failed") == "rate_limit_exceeded: Slow down"
+
+
+def test_format_responses_error_handles_attribute_payload_without_message():
+    error = SimpleNamespace(code="internal_error", message="")
+
+    assert _format_responses_error(error, "failed") == "internal_error"
+
+
+def test_normalize_codex_response_failed_status_preserves_error_code():
+    response = SimpleNamespace(
+        status="failed",
+        error={"code": "rate_limit_exceeded", "message": "Slow down"},
+        output=[
+            SimpleNamespace(
+                type="message",
+                role="assistant",
+                status="incomplete",
+                content=[],
+            )
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="rate_limit_exceeded: Slow down"):
+        _normalize_codex_response(response)
 
 
 def test_normalize_codex_response_drops_transient_rs_tmp_reasoning_items():
