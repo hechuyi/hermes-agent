@@ -1579,7 +1579,7 @@ BROWSER_TOOL_SCHEMAS = [
     },
     {
         "name": "browser_vision",
-        "description": "Take a screenshot of the current page and analyze it with vision AI. Use this when you need to visually understand what's on the page - especially useful for CAPTCHAs, visual verification challenges, complex layouts, or when the text snapshot doesn't capture important visual information. Returns both the AI analysis and a screenshot_path that you can share with the user by including MEDIA:<screenshot_path> in your response. Requires browser_navigate to be called first.",
+        "description": "Take a screenshot of the current page so you can inspect it visually. Use this when you need to understand what the page looks like - especially for CAPTCHAs, visual verification challenges, complex layouts, or cases where the text snapshot misses important visual information. When your active model has native vision, the screenshot is attached to your context directly and you inspect it on the next turn; otherwise Hermes falls back to an auxiliary vision model and returns a text analysis. Includes a screenshot_path that you can share with the user by including MEDIA:<screenshot_path> in your response. Requires browser_navigate to be called first.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -3058,15 +3058,17 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
 
 def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> str:
     """
-    Take a screenshot of the current page and analyze it with vision AI.
+    Take a screenshot of the current page for visual inspection.
 
-    This tool captures what's visually displayed in the browser and sends it
-    to Gemini for analysis. Useful for understanding visual content that the
-    text-based snapshot may not capture (CAPTCHAs, verification challenges,
-    images, complex layouts, etc.).
+    This tool captures what's visually displayed in the browser. When the
+    active model supports native vision, the screenshot is attached directly
+    to the conversation so the model can inspect it on the next turn.
+    Otherwise Hermes falls back to the auxiliary vision model. Useful for
+    understanding visual content that the text-based snapshot may not capture
+    (CAPTCHAs, verification challenges, images, complex layouts, etc.).
 
-    The screenshot is saved persistently and its file path is returned alongside
-    the analysis, so it can be shared with users via MEDIA:<path> in the response.
+    The screenshot is saved persistently and its file path is returned so it
+    can be shared with users via MEDIA:<path> in the response.
 
     Args:
         question: What you want to know about the page visually
@@ -3074,7 +3076,8 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         task_id: Task identifier for session isolation
 
     Returns:
-        JSON string with vision analysis results and screenshot_path
+        Either a JSON string with vision analysis results and screenshot_path,
+        or a multimodal tool-result envelope with the screenshot and metadata.
     """
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_vision
@@ -3198,6 +3201,56 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         _screenshot_bytes = screenshot_path.read_bytes()
         _screenshot_b64 = base64.b64encode(_screenshot_bytes).decode("ascii")
         data_url = f"data:image/png;base64,{_screenshot_b64}"
+
+        # Fast path: when the active main model supports native vision AND the
+        # provider supports image content inside tool results, short-circuit
+        # the auxiliary LLM and return the image bytes as a multimodal
+        # tool-result envelope. The user can force native vision with the
+        # supports_vision override. The main model sees the pixels directly on its
+        # next turn — no aux call, no information loss, no extra latency.
+        try:
+            from agent.auxiliary_client import _read_main_model, _read_main_provider
+            from agent.image_routing import decide_image_input_mode, _lookup_supports_vision
+            from hermes_cli.config import load_config
+            from tools.vision_tools import (
+                _build_native_vision_tool_result,
+                _supports_media_in_tool_results,
+            )
+
+            _provider = _read_main_provider()
+            _model = _read_main_model()
+            _cfg = load_config()
+            _mode = decide_image_input_mode(_provider, _model, _cfg)
+            _supports_vision = _lookup_supports_vision(_provider, _model, _cfg) is True
+            if _mode == "native" and (
+                _supports_media_in_tool_results(_provider, _model)
+                or _supports_vision
+            ):
+                native_result = _build_native_vision_tool_result(
+                    image_url=str(screenshot_path),
+                    question=question,
+                    image_data_url=data_url,
+                    image_size_bytes=len(_screenshot_bytes),
+                )
+                native_result.setdefault("meta", {})
+                native_result["meta"]["screenshot_path"] = str(screenshot_path)
+                if _lp_fallback_warning:
+                    native_result["meta"]["fallback_warning"] = _lp_fallback_warning
+                if annotate and result.get("data", {}).get("annotations"):
+                    native_result["meta"]["annotations"] = result["data"]["annotations"]
+                text_parts = native_result.get("content") or []
+                if text_parts and isinstance(text_parts[0], dict) and text_parts[0].get("type") == "text":
+                    text_parts[0]["text"] = (
+                        str(text_parts[0].get("text", ""))
+                        + f"\n\nScreenshot path: {screenshot_path}"
+                    )
+                native_result["text_summary"] = (
+                    str(native_result.get("text_summary") or "")
+                    + f" Screenshot path: {screenshot_path}"
+                ).strip()
+                return native_result
+        except Exception:
+            pass
 
         vision_prompt = (
             f"You are analyzing a screenshot of a web browser.\n\n"
