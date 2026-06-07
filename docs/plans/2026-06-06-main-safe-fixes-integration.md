@@ -2721,3 +2721,64 @@ Result: exit `0`.
 
 `git diff --check -- gateway/run.py tests/gateway/test_media_extraction.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Nested platform config hook absorption
+
+Upstream commits reviewed and absorbed:
+
+- `0bfe19ba179e21849a8b74eee066d388b41d2e72` — merge nested
+  `gateway.platforms` configuration into gateway runtime config.
+- `44f3e5186502167e68b6073b4f7bdfae7bfb4fbe` — run adapter
+  `apply_yaml_config_fn` hooks for nested-only platform blocks.
+- `6d2727ef1ce1c431e8c6119a8fd10867991c7004` — bridge explicit Discord
+  `allow_from` configuration to `DISCORD_ALLOWED_USERS`.
+
+Local result:
+
+- Absorbed together as `fa6a3c9d6`.
+- `gateway/config.py` now merges `gateway.platforms` first and top-level
+  `platforms` second, so top-level platform config retains precedence.
+- Adapter YAML hooks now fall back to `gateway.platforms.<name>` and
+  `platforms.<name>` when no top-level `<name>:` block exists.
+- Discord's YAML hook now maps both `discord.allow_from` and nested
+  `extra.allow_from` to `DISCORD_ALLOWED_USERS`, preserving env-var
+  precedence.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_config.py -q -rs -k "discord_allow_from or gateway_platform_extra_allow_from or nested_gateway_platforms or top_level_platforms_override_nested"
+```
+
+Result before code change: `3 failed, 1 passed, 50 deselected`. Failures proved
+that top-level `discord.allow_from` did not seed `DISCORD_ALLOWED_USERS`, and
+that `gateway.platforms.*` blocks were not loaded into runtime platform config.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_config.py -q -rs -k "discord_allow_from or gateway_platform_extra_allow_from or nested_gateway_platforms or top_level_platforms_override_nested"
+```
+
+Result: `4 passed, 50 deselected`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_config.py tests/gateway/test_platform_registry.py -q -rs -k "LoadGatewayConfig or ApplyYamlConfigFnDispatch or PluginPlatformSharedKeyBridge"
+```
+
+Result: `36 passed, 68 deselected`.
+
+```bash
+uv run --extra dev ruff check gateway/config.py plugins/platforms/discord/adapter.py tests/gateway/test_config.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile gateway/config.py plugins/platforms/discord/adapter.py tests/gateway/test_config.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- gateway/config.py plugins/platforms/discord/adapter.py tests/gateway/test_config.py`
+produced no output before the code commit.
