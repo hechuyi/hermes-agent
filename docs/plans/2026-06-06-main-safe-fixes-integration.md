@@ -2153,3 +2153,31 @@ Result: exit `0`.
 
 `git diff --check -- gateway/platforms/telegram.py tests/gateway/test_telegram_text_batching.py`
 produced no output before the code commit.
+
+## 2026-06-07 — NVIDIA skills tap add/revert pair
+
+Upstream commits reviewed:
+
+- `9992e32db37a020d1830a29f01a39625ecd369df` — adds NVIDIA/skills as a
+  trusted skills hub tap.
+- `bfecfabd0f16b59cd532f82d7e6078e8e4d00116` — reverts that trusted tap.
+
+Local result:
+
+- Recorded as `RECORD_ONLY_DROP`; no code or documentation was changed.
+- The two upstream commits are an add/revert pair over the same skills-hub,
+  guard-test, website catalog, and docs paths. Absorbing the first without the
+  second would reintroduce a tap upstream later removed, while applying both is
+  a net no-op for this fork.
+- This keeps the current skills trust surface unchanged and avoids adding an
+  external skills tap during the live-gateway/hermes-tools integration pass.
+
+Verification:
+
+```bash
+git show --stat --oneline --find-renames --find-copies 9992e32db37a020d1830a29f01a39625ecd369df
+git show --stat --oneline --find-renames --find-copies bfecfabd0f16b59cd532f82d7e6078e8e4d00116
+```
+
+Confirmed both commits touch the same eight files with opposite add/remove
+changes.
