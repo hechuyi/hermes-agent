@@ -2876,3 +2876,39 @@ python -m py_compile tools/tool_backend_helpers.py tests/tools/test_tool_backend
 ```
 
 Result: exit `0`.
+
+## 2026-06-07 — PipeWire PortAudio fallback equivalence
+
+Upstream commit reviewed and found already present/equivalent:
+
+- `c834624f7de8136b0010f0771ee7a89dc5e92942` — honor
+  `PIPEWIRE_REMOTE` in PortAudio fallback checks.
+
+Local result:
+
+- No code change needed. `tools/voice_mode.py` already computes
+  `has_forwarded_audio` from `PULSE_SERVER` or `PIPEWIRE_REMOTE` and uses it
+  for Docker/container checks, empty PortAudio device lists, and PortAudio
+  query failures.
+- Tests already cover Docker with `PIPEWIRE_REMOTE`, empty PortAudio devices,
+  and PortAudio query failure.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_voice_mode.py -q -rs -k "pipewire_remote or docker_with_pipewire"
+```
+
+Result: `3 passed, 64 deselected`.
+
+```bash
+uv run --extra dev ruff check tools/voice_mode.py tests/tools/test_voice_mode.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile tools/voice_mode.py tests/tools/test_voice_mode.py
+```
+
+Result: exit `0`.
