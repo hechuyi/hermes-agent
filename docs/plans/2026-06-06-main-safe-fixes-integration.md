@@ -676,6 +676,26 @@ change Feishu or messaging-platform delivery, gateway event ledgers, media
 extraction, provider routing, model catalogs, Nous legacy authentication, or the
 fork's `5.5` customizations.
 
+### Embedder environment-hint batch
+
+The environment-hint portion of
+`e4b9532c1827e3c51ca03e6e35512d2cade4d905`
+(`feat: embedder environment-hint hook for the system prompt`) was manually
+absorbed in local commit `c336949f2`.
+
+The local port adds `agent.environment_hint` to `DEFAULT_CONFIG` and appends a
+non-empty hint to the existing environment-hints block. `HERMES_ENVIRONMENT_HINT`
+overrides the config value, allowing managed embedders or sandbox wrappers to
+describe runtime mount/proxy/credential context without editing the identity
+slot. The default is empty, so existing prompts are unchanged unless the env var
+or config key is explicitly set.
+
+The security env-strip portion in that upstream commit was already covered by
+the earlier configuration and security documentation batch; this entry records
+only the environment-hint hook. It does not change gateway event ledgers, media
+extraction, delivery outcomes, provider routing, model catalogs, Nous legacy
+authentication, or the fork's `5.5` customizations.
+
 ### Equivalent local coverage
 
 `38c4f8c3717518e81bc64765ab80f3192f6a113a`
@@ -1517,6 +1537,46 @@ Result: `All checks passed!`.
 
 ```bash
 uv run --extra dev python -m py_compile gateway/platforms/api_server.py tests/gateway/test_session_api.py
+```
+
+Result: exit `0`.
+
+`git diff --check` produced no output.
+
+Embedder environment-hint batch verification:
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/agent/test_prompt_builder.py -q -rs -k "environment_hint"
+```
+
+Result before the code change: `3 failed, 7 passed, 118 deselected`; env-var,
+env-over-config, and config fallback cases were absent from
+`build_environment_hints()`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/agent/test_prompt_builder.py -q -rs -k "environment_hint"
+```
+
+Result: `10 passed, 118 deselected`.
+
+```bash
+uv run --extra dev pytest tests/agent/test_prompt_builder.py tests/hermes_cli/test_config.py -q -rs
+```
+
+Result: `214 passed, 1 skipped`.
+
+```bash
+uv run --extra dev ruff check agent/prompt_builder.py hermes_cli/config.py tests/agent/test_prompt_builder.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile agent/prompt_builder.py hermes_cli/config.py tests/agent/test_prompt_builder.py
 ```
 
 Result: exit `0`.
