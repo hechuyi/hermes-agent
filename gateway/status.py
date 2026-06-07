@@ -816,12 +816,12 @@ def _consume_pid_marker_for_self(
 
     our_pid = os.getpid()
     our_start_time = _get_process_start_time(our_pid)
-    matches = (
-        target_pid == our_pid
-        and target_start_time is not None
-        and our_start_time is not None
-        and target_start_time == our_start_time
-    )
+    if target_pid != our_pid:
+        matches = False
+    elif target_start_time is not None and our_start_time is not None:
+        matches = target_start_time == our_start_time
+    else:
+        matches = True
 
     try:
         path.unlink(missing_ok=True)
@@ -912,6 +912,51 @@ def consume_planned_stop_marker_for_self() -> bool:
         start_time_field="target_start_time",
         ttl_s=_PLANNED_STOP_MARKER_TTL_S,
     )
+
+
+def planned_stop_marker_targets_self() -> bool:
+    """Return True only when a live planned-stop marker names this process.
+
+    This is a non-destructive watcher probe. Matching markers are left for the
+    shutdown handler to consume; stale or malformed markers are removed because
+    they cannot validly target any running gateway.
+    """
+    path = _get_planned_stop_marker_path()
+    record = _read_json_file(path)
+    if not record:
+        if path.exists():
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return False
+
+    try:
+        target_pid = int(record["target_pid"])
+        target_start_time = record.get("target_start_time")
+        written_at = record.get("written_at") or ""
+    except (KeyError, TypeError, ValueError):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+    if _marker_is_stale(written_at, _PLANNED_STOP_MARKER_TTL_S):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+    our_pid = os.getpid()
+    if target_pid != our_pid:
+        return False
+
+    our_start_time = _get_process_start_time(our_pid)
+    if target_start_time is not None and our_start_time is not None:
+        return target_start_time == our_start_time
+    return True
 
 
 def clear_planned_stop_marker() -> None:

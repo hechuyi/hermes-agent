@@ -19196,7 +19196,10 @@ def _run_planned_stop_watcher(
         poll_interval: seconds between marker checks. 0.5s gives a
             responsive shutdown without burning CPU.
     """
-    from gateway.status import _get_planned_stop_marker_path
+    from gateway.status import (
+        _get_planned_stop_marker_path,
+        planned_stop_marker_targets_self,
+    )
     marker_path = _get_planned_stop_marker_path()
     while not stop_event.is_set():
         try:
@@ -19205,6 +19208,9 @@ def _run_planned_stop_watcher(
                 and not getattr(runner, "_draining", False)
                 and getattr(runner, "_running", False)
             ):
+                if not planned_stop_marker_targets_self():
+                    stop_event.wait(poll_interval)
+                    continue
                 # Drive the same path as a real signal handler.
                 # Pass signal=None — the handler tolerates that and consumes
                 # the marker via consume_planned_stop_marker_for_self,

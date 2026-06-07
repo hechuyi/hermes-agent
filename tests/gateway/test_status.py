@@ -707,6 +707,21 @@ class TestTakeoverMarker:
 
         assert result is False
 
+    def test_consume_returns_true_when_start_time_unavailable(self, tmp_path, monkeypatch):
+        """Windows/macOS fallback: takeover consume matches self by PID if start_time is unavailable."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)
+
+        ok = status.write_takeover_marker(target_pid=os.getpid())
+        assert ok is True
+        payload = json.loads((tmp_path / ".gateway-takeover.json").read_text())
+        assert payload["target_start_time"] is None
+
+        result = status.consume_takeover_marker_for_self()
+
+        assert result is True
+        assert not (tmp_path / ".gateway-takeover.json").exists()
+
     def test_consume_returns_false_when_marker_missing(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
@@ -898,6 +913,47 @@ class TestPlannedStopMarker:
         ok = status.write_planned_stop_marker(target_pid=12345)
 
         assert ok is False
+
+    def test_consume_returns_true_when_start_time_unavailable(self, tmp_path, monkeypatch):
+        """A legitimate planned stop is recognized when start_time cannot be read."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)
+
+        ok = status.write_planned_stop_marker(target_pid=os.getpid())
+        assert ok is True
+        payload = json.loads((tmp_path / ".gateway-planned-stop.json").read_text())
+        assert payload["target_start_time"] is None
+
+        result = status.consume_planned_stop_marker_for_self()
+
+        assert result is True
+        assert not (tmp_path / ".gateway-planned-stop.json").exists()
+
+    def test_consume_still_rejects_foreign_pid_when_start_time_unavailable(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)
+
+        ok = status.write_planned_stop_marker(target_pid=os.getpid() + 9999)
+        assert ok is True
+
+        result = status.consume_planned_stop_marker_for_self()
+
+        assert result is False
+
+    def test_consume_still_rejects_start_time_mismatch_when_both_known(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 100)
+        status.write_planned_stop_marker(target_pid=os.getpid())
+
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 9999)
+
+        result = status.consume_planned_stop_marker_for_self()
+
+        assert result is False
 
 
 class TestReadProcessCmdlinePsFallback:

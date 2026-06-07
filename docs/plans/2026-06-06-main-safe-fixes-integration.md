@@ -755,7 +755,6 @@ These must not be merged mechanically:
 - `45bc65abb`: delivery outcome semantics for silence narration filtering.
 - `0bfe19ba1` / `44f3e5186`: nested gateway platform config handling.
 - `45465b0d5`: reconnect/pause policy for transient network and DNS failures.
-- `7379f1755`: planned-stop/takeover marker behavior.
 
 ### Tooling and runtime commits requiring separate batches
 
@@ -4931,6 +4930,62 @@ git diff --check
 ```
 
 Result: exit `0`.
+
+## 2026-06-08 — Planned-stop marker self-target absorption
+
+`7379f175567bd0f1d833eec3a3599d0665b2a491`
+(`fix(gateway): only fire planned-stop watcher for self-targeting markers + fix
+Windows consume`) was manually absorbed in this batch.
+
+The local port keeps the fork's existing planned-stop shutdown path intact but
+adds an explicit non-destructive watcher probe before `_run_planned_stop_watcher`
+fires the shutdown handler. The watcher now ignores foreign PID markers, leaves
+them for the owning process, removes stale or malformed markers, and only lets a
+self-targeting live marker drive shutdown. Marker consumption also matches by
+PID when either side cannot report process start time, while preserving the
+stronger start-time comparison whenever both values are known.
+
+This batch is limited to planned-stop/takeover marker targeting and cross-
+platform consume behavior. It does not change gateway event ledgers, media
+extraction, delivery outcomes, provider routing, model catalogs, Nous legacy
+authentication, reconnect/pause policy, or current local `5.5` channel
+availability.
+
+Verification recorded during the absorption pass:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_planned_stop_watcher.py -q -rs
+```
+
+Result: `11 passed`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_status.py -q -rs
+```
+
+Result: `54 passed`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_restart_resume_pending.py tests/gateway/test_planned_stop_watcher.py tests/gateway/test_status.py -q -rs
+```
+
+Result: `135 passed`.
+
+```bash
+uv run --extra dev ruff check gateway/status.py gateway/run.py tests/gateway/test_planned_stop_watcher.py tests/gateway/test_status.py
+uv run --extra dev python -m py_compile gateway/status.py gateway/run.py tests/gateway/test_planned_stop_watcher.py tests/gateway/test_status.py
+git diff --check
+```
+
+Result: all three commands exited `0`.
+
+An additional local macOS service smoke run of
+`tests/hermes_cli/test_gateway_service.py`,
+`tests/hermes_cli/test_gateway_windows.py`, and
+`tests/hermes_cli/test_gateway_service_paths.py` was not used as a planned-stop
+gate because `tests/hermes_cli/test_gateway_service.py` hit the environment's
+existing user-systemd preflight failure class. The Windows/path subsets were
+not implicated by the planned-stop marker changes.
 
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 

@@ -12,6 +12,8 @@ See issue #33778 for the original Windows session-loss bug report.
 """
 
 import asyncio
+import json
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -20,6 +22,18 @@ from unittest.mock import MagicMock
 import pytest
 
 from gateway.run import _run_planned_stop_watcher
+from gateway import status as status_mod
+
+
+def _write_self_marker(marker, *, stale: bool = False):
+    written_at = "2000-01-01T00:00:00+00:00" if stale else status_mod._utc_now_iso()
+    record = {
+        "target_pid": os.getpid(),
+        "target_start_time": status_mod._get_process_start_time(os.getpid()),
+        "stopper_pid": os.getpid(),
+        "written_at": written_at,
+    }
+    marker.write_text(json.dumps(record), encoding="utf-8")
 
 
 class _FakeRunner:
@@ -43,11 +57,10 @@ def _make_loop_capturing_calls():
 
 
 def test_watcher_fires_shutdown_when_marker_appears(tmp_path, monkeypatch):
-    """When the marker file exists, the watcher must call the shutdown handler."""
+    """When a marker targeting this process exists, fire the shutdown handler."""
     marker = tmp_path / ".gateway-planned-stop.json"
 
     # Patch the marker-path resolver so the watcher polls our temp location.
-    from gateway import status as status_mod
     monkeypatch.setattr(status_mod, "_get_planned_stop_marker_path", lambda: marker)
 
     runner = _FakeRunner(running=True, draining=False)
@@ -55,8 +68,8 @@ def test_watcher_fires_shutdown_when_marker_appears(tmp_path, monkeypatch):
     shutdown_handler = MagicMock(name="shutdown_signal_handler")
     stop_event = threading.Event()
 
-    # Drop the marker before the thread starts.
-    marker.write_text('{"target_pid": 1234}', encoding="utf-8")
+    # Drop a self-targeting marker before the thread starts.
+    _write_self_marker(marker)
 
     watcher = threading.Thread(
         target=_run_planned_stop_watcher,
@@ -116,9 +129,8 @@ def test_watcher_skips_when_runner_already_draining(tmp_path, monkeypatch):
     so the watcher backs off once any shutdown is in flight.
     """
     marker = tmp_path / ".gateway-planned-stop.json"
-    marker.write_text('{"target_pid": 1234}', encoding="utf-8")
+    _write_self_marker(marker)
 
-    from gateway import status as status_mod
     monkeypatch.setattr(status_mod, "_get_planned_stop_marker_path", lambda: marker)
 
     # Already draining — watcher should be a no-op.
@@ -206,9 +218,8 @@ def test_watcher_fires_only_once_when_marker_persists(tmp_path, monkeypatch):
     times before the gateway actually shuts down.
     """
     marker = tmp_path / ".gateway-planned-stop.json"
-    marker.write_text('{"target_pid": 1234}', encoding="utf-8")
+    _write_self_marker(marker)
 
-    from gateway import status as status_mod
     monkeypatch.setattr(status_mod, "_get_planned_stop_marker_path", lambda: marker)
 
     runner = _FakeRunner(running=True, draining=False)
@@ -265,3 +276,84 @@ def test_watcher_tolerates_marker_path_resolution_errors(tmp_path, monkeypatch, 
     assert not watcher.is_alive(), "Watcher should still honour stop_event after errors"
     # No shutdown fired because the marker never reported existence.
     assert loop._captured == []
+
+
+def test_watcher_does_not_fire_for_foreign_pid_marker(tmp_path, monkeypatch):
+    """A marker naming a different process must not trigger our shutdown."""
+    marker = tmp_path / ".gateway-planned-stop.json"
+    record = {
+        "target_pid": os.getpid() + 1,
+        "target_start_time": -1,
+        "stopper_pid": os.getpid() + 1,
+        "written_at": status_mod._utc_now_iso(),
+    }
+    marker.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setattr(status_mod, "_get_planned_stop_marker_path", lambda: marker)
+
+    runner = _FakeRunner(running=True, draining=False)
+    loop = _make_loop_capturing_calls()
+    shutdown_handler = MagicMock(name="shutdown_signal_handler")
+    stop_event = threading.Event()
+
+    watcher = threading.Thread(
+        target=_run_planned_stop_watcher,
+        args=(stop_event, runner, loop, shutdown_handler),
+        kwargs={"poll_interval": 0.05},
+        daemon=True,
+    )
+    watcher.start()
+    time.sleep(0.3)
+    stop_event.set()
+    watcher.join(timeout=2.0)
+
+    assert not watcher.is_alive()
+    assert loop._captured == []
+    shutdown_handler.assert_not_called()
+    assert marker.exists()
+
+
+def test_watcher_cleans_up_stale_marker_and_keeps_running(tmp_path, monkeypatch):
+    """A marker older than the TTL is unlinked and never fires shutdown."""
+    marker = tmp_path / ".gateway-planned-stop.json"
+    _write_self_marker(marker, stale=True)
+    monkeypatch.setattr(status_mod, "_get_planned_stop_marker_path", lambda: marker)
+
+    runner = _FakeRunner(running=True, draining=False)
+    loop = _make_loop_capturing_calls()
+    shutdown_handler = MagicMock(name="shutdown_signal_handler")
+    stop_event = threading.Event()
+
+    watcher = threading.Thread(
+        target=_run_planned_stop_watcher,
+        args=(stop_event, runner, loop, shutdown_handler),
+        kwargs={"poll_interval": 0.05},
+        daemon=True,
+    )
+    watcher.start()
+    time.sleep(0.3)
+    stop_event.set()
+    watcher.join(timeout=2.0)
+
+    assert not watcher.is_alive()
+    assert loop._captured == []
+    shutdown_handler.assert_not_called()
+    assert not marker.exists()
+
+
+def test_planned_stop_marker_targets_self_probe_is_non_destructive(tmp_path, monkeypatch):
+    marker = tmp_path / ".gateway-planned-stop.json"
+    _write_self_marker(marker)
+    monkeypatch.setattr(status_mod, "_get_planned_stop_marker_path", lambda: marker)
+
+    assert status_mod.planned_stop_marker_targets_self() is True
+    assert marker.exists()
+    assert status_mod.planned_stop_marker_targets_self() is True
+
+
+def test_planned_stop_marker_targets_self_drops_malformed(tmp_path, monkeypatch):
+    marker = tmp_path / ".gateway-planned-stop.json"
+    marker.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr(status_mod, "_get_planned_stop_marker_path", lambda: marker)
+
+    assert status_mod.planned_stop_marker_targets_self() is False
+    assert not marker.exists()
