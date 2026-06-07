@@ -641,6 +641,23 @@ behavior, gateway event ledgers, media extraction, delivery outcomes, provider
 routing, model catalogs, Nous legacy authentication, or the fork's `5.5`
 customizations.
 
+### OpenCode Go MiMo max-tokens batch
+
+`8cf6b3da9d157bfced382cf139a9613eff90c006`
+(`fix(opencode-go): cap mimo-v2.5-pro max_tokens at 131072`) was manually
+absorbed in local commit `9e7056ee7`.
+
+The local port adds a `ProviderProfile.get_max_tokens(model)` hook and uses it
+in the chat-completions transport when no explicit or ephemeral output-token
+limit was requested. `OpenCodeGoProfile` overrides the hook only for
+`mimo-v2.5-pro`, returning `131072`; other OpenCode Go models continue to omit
+a default `max_tokens` because the profile has no static default. Explicit user
+`max_tokens` still wins.
+
+This batch does not add, remove, or rename any model catalog entries, and it
+does not touch the fork's `5.5` customizations, gateway event ledgers, media
+extraction, delivery outcomes, or Nous legacy authentication.
+
 ### Equivalent local coverage
 
 `38c4f8c3717518e81bc64765ab80f3192f6a113a`
@@ -1408,6 +1425,46 @@ Result: `workflow checks ok`.
 
 `actionlint` was not installed in the local environment, so no actionlint run
 was performed for this batch.
+
+OpenCode Go MiMo max-tokens batch verification:
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/plugins/model_providers/test_opencode_go_profile.py -q -rs -k "ModelMaxTokens or mimo_v25_pro_default_max_tokens_reaches_transport or explicit_max_tokens_overrides_mimo_cap or other_opencode_go_models_do_not_gain_default_max_tokens"
+```
+
+Result before the code change: `9 failed, 2 passed, 21 deselected, 1 warning`;
+the failures showed missing `get_max_tokens` on `OpenCodeGoProfile` and no
+transport-level `max_tokens` for `mimo-v2.5-pro`.
+
+Post-fix focused verification:
+
+```bash
+uv run --extra dev pytest tests/plugins/model_providers/test_opencode_go_profile.py -q -rs -k "ModelMaxTokens or mimo_v25_pro_default_max_tokens_reaches_transport or explicit_max_tokens_overrides_mimo_cap or other_opencode_go_models_do_not_gain_default_max_tokens"
+```
+
+Result: `11 passed, 21 deselected, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/agent/transports/test_chat_completions.py tests/providers/test_provider_profiles.py tests/plugins/model_providers/test_opencode_go_profile.py -q -rs
+```
+
+Result: `144 passed, 1 warning`.
+
+```bash
+uv run --extra dev ruff check providers/base.py agent/transports/chat_completions.py plugins/model-providers/opencode-zen/__init__.py tests/plugins/model_providers/test_opencode_go_profile.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile providers/base.py agent/transports/chat_completions.py plugins/model-providers/opencode-zen/__init__.py tests/plugins/model_providers/test_opencode_go_profile.py
+```
+
+Result: exit `0`.
+
+`git diff --check` produced no output.
 
 Manual service `WorkingDirectory` port verification:
 
