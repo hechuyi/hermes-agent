@@ -765,12 +765,10 @@ These must not be merged mechanically:
 - `41ff6e593`, `7e958dafc`, `4e4984a`, `95cf8f984`, `a22c25000`: Nous
   JWT-only behavior. Defer until there is an explicit decision to remove this
   fork's retained legacy Nous session-key inference paths.
-- `5ad2b4c6d`, `97ecfa0fc`, `4fa20f9a8`, `a7421dc7d`: remaining
-  session/state/SQLite behavior. The FTS optimize pair (`38695254f`,
-  `904c0b479`) and mid-session model persistence (`794519c6a`, with its
-  follow-up) were later absorbed separately with focused tests. Keep any
-  no-FTS5 degradation behavior separate because it changes failure/degraded
-  state semantics.
+- `5ad2b4c6d`, `97ecfa0fc`, `4fa20f9a8`, `a7421dc7d`: no-FTS5
+  session/state behavior. This was later absorbed as local commit
+  `069e183e2`, with explicit degraded-capability semantics rather than
+  upstream's silent empty-search degradation.
 - `a30480bd2`, `db2ce9e7d`, `e38b0b55d`, `020601d41`, `56b8dccf2`,
   `42bbd221e`: compression/resume behavior. Port as a conversation-compression
   batch, not together with gateway runtime changes.
@@ -793,10 +791,9 @@ and no broad `origin/main` merge. Recommended order:
 1. `a30480bd2`, `db2ce9e7d`, `e38b0b55d`, `020601d41`, `56b8dccf2`,
    `42bbd221e`: compression/resume behavior should be reviewed as a
    conversation-compression batch.
-2. Remaining `5ad2b4c6d`, `97ecfa0fc`, `4fa20f9a8`, `a7421dc7d`
-   session/state behavior should be reviewed as a state-schema and migration
-   batch, excluding already absorbed FTS optimize and model-switch persistence
-   work.
+2. Additional session/state behavior should exclude the already handled
+   no-FTS5 group (`069e183e2`), FTS optimize pair, and model-switch
+   persistence work.
 3. Any additional media/delivery outcome commits beyond the already absorbed
    Windows path, extension allowlist, and current-turn tool-result scan pieces
    need a separate gateway ledger attribution review.
@@ -3373,8 +3370,8 @@ Local result:
   number of optimized FTS indexes.
 - `hermes sessions optimize` is available as an on-demand maintenance command
   with before/after size reporting.
-- This absorption is limited to maintenance/compaction semantics and does not
-  absorb no-FTS5 degradation behavior.
+- This absorption is limited to maintenance/compaction semantics. The no-FTS5
+  behavior was handled separately in local commit `069e183e2`.
 
 Red tests before implementation:
 
@@ -3426,6 +3423,76 @@ Result: exit `0`.
 
 `git diff --check -- hermes_state.py hermes_cli/main.py tests/test_hermes_state.py tests/hermes_cli/test_sessions_optimize.py`
 produced no output before the code commit.
+
+## 2026-06-07 — State no-FTS5 degraded capability absorption
+
+Upstream commits reviewed and selectively absorbed:
+
+- `5ad2b4c6dab78e6e5522c8fc02bcbb89a555f47e` — degrade when SQLite lacks
+  FTS5.
+- `97ecfa0fc487322aa7d0dc38be323eb34fd070ef` — extend no-FTS5 handling to
+  the CJK trigram index.
+- `4fa20f9a8bd9b2133cde56cf99516e38195ef4bd` — make the uv-managed install
+  path probe/reinstall for FTS5-capable Python.
+- `a7421dc7d2f0659a016092db6fc154526c8734b3` — improve no-FTS5 warning
+  guidance.
+
+Local result:
+
+- Absorbed as `069e183e2`.
+- The runtime port intentionally differs from upstream's silent empty-search
+  degradation. When SQLite lacks FTS5, `SessionDB` still initializes and normal
+  session read/write paths remain available, but `session_search` is recorded
+  as an explicit degraded capability with reason
+  `sqlite_fts5_unavailable`.
+- The degraded state is exposed through `get_degraded_capabilities()` and
+  persisted in `state_meta` under
+  `hermes_degraded_capability:session_search`.
+- Real search calls now raise `SessionDBCapabilityError` with stable
+  `capability`, `reason`, and `stage` fields instead of returning an ambiguous
+  empty result. Empty search input still returns an empty list.
+- The installer now probes the uv-managed Python for SQLite FTS5, attempts
+  `uv python install --reinstall` when the resolved interpreter lacks FTS5,
+  and warns that `session_search` will be marked degraded if no FTS5-capable
+  interpreter can be obtained.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/test_hermes_state.py -q -rs -k "fts or FTS or search_messages or Search or CJK or optimize or vacuum or schema_version_13 or no_fts5 or degraded_capability"
+```
+
+Result: `63 passed, 209 deselected`.
+
+```bash
+uv run --extra dev pytest tests/test_install_sh_fts5_probe.py tests/test_install_sh_setup_wizard_tty_probe.py tests/test_install_sh_pythonpath_sanitization.py -q -rs
+```
+
+Result: `9 passed`.
+
+```bash
+bash -n scripts/install.sh
+```
+
+Result: exit `0`.
+
+```bash
+uv run --extra dev ruff check hermes_state.py tests/test_hermes_state.py tests/test_install_sh_fts5_probe.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile hermes_state.py tests/test_hermes_state.py tests/test_install_sh_fts5_probe.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --cached --check
+```
+
+Result: exit `0`.
 
 ## 2026-06-07 — Small upstream fixes already equivalent locally
 
