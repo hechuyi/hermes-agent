@@ -1767,6 +1767,8 @@ Upstream commits reviewed:
   summary generation fails.
 - `6dc068ef044a6c73712369242a45005890d952b1` — broaden deterministic
   compression fallback coverage.
+- `042c1d6bb0543c543ed1a81f009aab4569b0405d` — cover fallback dropped-turn
+  handoff.
 
 Local result:
 
@@ -1782,7 +1784,11 @@ Local result:
   broader compression feature work was absorbed in this code node.
 - The local redaction contract intentionally preserves a short token prefix
   and suffix for diagnosability, so fallback tests assert that complete secret
-  values are absent and the masked form is present.
+  values are absent and the masked or redacted form is present.
+- Absorbed the dropped-turn handoff follow-up in `e8ec5050a`; fallback
+  summaries now include a bounded `## Last Dropped Turns` section so the local
+  handoff preserves the last few compacted user/assistant/tool turns without
+  copying the protected tail request.
 
 Red test before implementation:
 
@@ -1827,3 +1833,49 @@ Result: exit `0`.
 
 `git diff --check -- agent/context_compressor.py tests/agent/test_context_compressor.py`
 produced no output.
+
+Dropped-turn follow-up verification:
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/agent/test_context_compressor.py -q -rs -k "summary_failure_fallback_supports_object_tool_calls_and_path_mentions or summary_failure_fallback_preserves_last_dropped_turns_without_tail"
+```
+
+Result before the code change: `2 failed, 86 deselected`; the fallback lacked
+`## Last Dropped Turns`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/agent/test_context_compressor.py -q -rs -k "summary_failure_fallback"
+```
+
+Result: `5 passed, 83 deselected`.
+
+```bash
+uv run --extra dev pytest tests/agent/test_context_compressor.py -q -rs
+```
+
+Result: `88 passed, 1 warning` (`discord.player` `audioop` deprecation).
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_413_compression.py tests/run_agent/test_compression_boundary.py tests/run_agent/test_compression_boundary_hook.py tests/run_agent/test_compression_persistence.py tests/run_agent/test_compression_trigger_excludes_reasoning.py -q -rs
+```
+
+Result: `34 passed, 1 warning` (`discord.player` `audioop` deprecation).
+
+```bash
+uv run --extra dev ruff check agent/context_compressor.py tests/agent/test_context_compressor.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile agent/context_compressor.py tests/agent/test_context_compressor.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- agent/context_compressor.py tests/agent/test_context_compressor.py`
+produced no output for the follow-up patch.
