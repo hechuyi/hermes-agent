@@ -817,6 +817,19 @@ def build_environment_hints() -> str:
 
     if is_wsl():
         hints.append(WSL_ENVIRONMENT_HINT)
+
+    extra = (os.getenv("HERMES_ENVIRONMENT_HINT") or "").strip()
+    if not extra:
+        try:
+            from hermes_cli.config import load_config
+
+            extra = str(
+                (load_config().get("agent", {}) or {}).get("environment_hint", "")
+            ).strip()
+        except Exception as exc:
+            logger.debug("Could not read agent.environment_hint: %s", exc)
+    if extra:
+        hints.append(extra)
     return "\n\n".join(hints)
 
 

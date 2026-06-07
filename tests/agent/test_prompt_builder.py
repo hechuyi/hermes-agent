@@ -948,6 +948,73 @@ class TestEnvironmentHints:
                 f"info is suppressed in the system prompt"
             )
 
+    def test_environment_hint_from_env_var_is_appended(self, monkeypatch):
+        """HERMES_ENVIRONMENT_HINT lets an embedder describe the runtime env."""
+        import agent.prompt_builder as _pb
+
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        monkeypatch.setenv(
+            "HERMES_ENVIRONMENT_HINT",
+            "Running inside a managed sandbox with project mounts.",
+        )
+        _pb._clear_backend_probe_cache()
+
+        result = _pb.build_environment_hints()
+
+        assert "Running inside a managed sandbox with project mounts." in result
+        assert result.index("Host:") < result.index("managed sandbox")
+
+    def test_environment_hint_env_var_overrides_config(self, monkeypatch):
+        """Env var wins over config.yaml agent.environment_hint."""
+        import agent.prompt_builder as _pb
+
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        monkeypatch.setenv("HERMES_ENVIRONMENT_HINT", "ENV-WINS")
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"agent": {"environment_hint": "CONFIG-VALUE"}},
+        )
+        _pb._clear_backend_probe_cache()
+
+        result = _pb.build_environment_hints()
+
+        assert "ENV-WINS" in result
+        assert "CONFIG-VALUE" not in result
+
+    def test_environment_hint_falls_back_to_config(self, monkeypatch):
+        """With no env var, config.yaml agent.environment_hint is used."""
+        import agent.prompt_builder as _pb
+
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        monkeypatch.delenv("HERMES_ENVIRONMENT_HINT", raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"agent": {"environment_hint": "CONFIG-VALUE"}},
+        )
+        _pb._clear_backend_probe_cache()
+
+        result = _pb.build_environment_hints()
+
+        assert "CONFIG-VALUE" in result
+
+    def test_environment_hint_empty_by_default(self, monkeypatch):
+        """No hint configured anywhere leaves the factual host block intact."""
+        import agent.prompt_builder as _pb
+
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        monkeypatch.delenv("HERMES_ENVIRONMENT_HINT", raising=False)
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"agent": {}})
+        _pb._clear_backend_probe_cache()
+
+        result = _pb.build_environment_hints()
+
+        assert "Host:" in result
+        assert "CONFIG-VALUE" not in result
+
 
 # =========================================================================
 # Conditional skill activation
@@ -1192,6 +1259,5 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
 
 
