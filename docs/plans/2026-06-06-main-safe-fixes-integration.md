@@ -3329,11 +3329,11 @@ Remaining upstream groups reviewed and left out of blind absorption:
   maintenance change. The no-FTS5 degradation commits remain separate because
   they alter failure/degraded-state semantics.
 - Kanban SQLite/activity/config groups: split. `40217aa1` and `ae6817f7` are
-  already equivalent/absorbed; `3b6347af` and `69b74c15` remain partial/defer
-  because config/default-assignee pieces exist but CLI dispatch/per-profile
-  caps and swarm skill behavior are not fully wired; heartbeat, SQLite
-  migration, retry/circuit-breaker, attachments, termination API, and
-  iteration-exhaustion behavior remain separate review items.
+  already equivalent/absorbed; `3b6347af` and `69b74c15` were later absorbed
+  as local commit `edacc5b9f`, with this fork's live-concurrency `max_spawn`
+  semantics preserved. Heartbeat, SQLite migration, retry/circuit-breaker,
+  attachments, termination API, and iteration-exhaustion behavior remain
+  separate review items unless individually recorded below.
 
 Validation required if these are later absorbed:
 
@@ -4532,6 +4532,78 @@ Result: exit `0`.
 
 ```bash
 git diff --cached --check
+```
+
+Result: exit `0`.
+
+## 2026-06-07 — Kanban dispatch config absorption
+
+Upstream commits reviewed and selectively absorbed:
+
+- `3b6347af158e125b118068ac4af55b8d4ceb6247` — default-assignee fallback
+  and per-profile dispatcher concurrency cap.
+- `69b74c15a324fcac460b5a143e5662036dae6387` — CLI dispatch config
+  passthrough and `kanban_swarm.py` skill replacement.
+
+Local result:
+
+- Absorbed as `edacc5b9f`.
+- `dispatch_once()` now accepts `default_assignee` and
+  `max_in_progress_per_profile`. Unassigned ready tasks can be auto-assigned
+  to the configured default profile; real runs persist the assignment and emit
+  an `assigned` event with `source=kanban.default_assignee`, while dry-runs
+  report the would-be assignment without mutating the DB.
+- Per-profile caps count existing `running` tasks and in-tick spawns by
+  assignee. Deferred tasks land in `skipped_per_profile_capped` as
+  `(task_id, assignee, current_running_count)`, which is treated as a
+  capacity/busy signal rather than an operator-actionable routing failure.
+- The forked port applies the same per-profile cap to review dispatch as well
+  as ready dispatch, because this fork has a review-column dispatcher sharing
+  the same worker pool.
+- CLI dispatch, dashboard dispatch nudge, and the gateway-embedded dispatcher
+  now pass through `max_in_progress`, `default_assignee`, and
+  `max_in_progress_per_profile`; CLI `--max` remains the explicit override for
+  config `kanban.max_spawn`.
+- The implementation preserves this fork's established `max_spawn` contract:
+  `max_spawn` is a live concurrency cap, not a per-tick spawn budget.
+- `kanban_swarm.py` now uses the bundled `humanizer` skill instead of the
+  missing `avoid-ai-writing` skill.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_core_functionality.py tests/hermes_cli/test_kanban_cli_dispatch_passthrough.py -q -rs -k "dispatch or max_spawn or max_in_progress or default_assignee or per_profile_cap or review or heartbeat or stale or iteration"
+```
+
+Result: `82 passed, 301 deselected`.
+
+```bash
+uv run --extra dev pytest tests/plugins/test_kanban_dashboard_plugin.py -q -rs -k "dispatch or orchestration or terminate or attachment"
+```
+
+Result: `4 passed, 92 deselected`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_kanban_db.py tests/plugins/test_kanban_dashboard_plugin.py tests/hermes_cli/test_kanban_cli_dispatch_passthrough.py -q -rs
+```
+
+Result: `310 passed, 1 warning` (`discord.player` importing deprecated
+`audioop`).
+
+```bash
+uv run --extra dev ruff check hermes_cli/kanban_db.py hermes_cli/kanban.py hermes_cli/config.py hermes_cli/kanban_swarm.py gateway/run.py plugins/kanban/dashboard/plugin_api.py tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_cli_dispatch_passthrough.py tests/plugins/test_kanban_dashboard_plugin.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile hermes_cli/kanban_db.py hermes_cli/kanban.py hermes_cli/config.py hermes_cli/kanban_swarm.py gateway/run.py plugins/kanban/dashboard/plugin_api.py tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_cli_dispatch_passthrough.py tests/plugins/test_kanban_dashboard_plugin.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --check -- hermes_cli/kanban_db.py hermes_cli/kanban.py hermes_cli/config.py hermes_cli/kanban_swarm.py gateway/run.py plugins/kanban/dashboard/plugin_api.py tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_cli_dispatch_passthrough.py tests/plugins/test_kanban_dashboard_plugin.py
 ```
 
 Result: exit `0`.
