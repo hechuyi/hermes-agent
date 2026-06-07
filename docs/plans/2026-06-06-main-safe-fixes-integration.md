@@ -2842,3 +2842,37 @@ Result: exit `0`.
 
 `git diff --check -- gateway/platforms/base.py tests/gateway/test_platform_base.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Modal credential HOME permission guard
+
+Upstream commit reviewed and found already present/equivalent:
+
+- `44df52005a1b59ae2c8439c4e68e7696851b7035` — guard `Path.home()` in
+  `has_direct_modal_credentials()` against `PermissionError` / `OSError`.
+
+Local result:
+
+- No code change needed. `tools/tool_backend_helpers.py` already catches
+  `PermissionError` and `OSError` around `(Path.home() / ".modal.toml").exists()`.
+- Tests already cover permission-denied home with and without
+  `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_tool_backend_helpers.py -q -rs -k "HasDirectModalCredentials"
+```
+
+Result: `8 passed, 43 deselected`.
+
+```bash
+uv run --extra dev ruff check tools/tool_backend_helpers.py tests/tools/test_tool_backend_helpers.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile tools/tool_backend_helpers.py tests/tools/test_tool_backend_helpers.py
+```
+
+Result: exit `0`.
