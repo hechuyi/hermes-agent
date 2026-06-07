@@ -172,6 +172,80 @@ class TestFetchFailure:
         assert result == manifest
 
 
+class TestFallbackChain:
+    """Manifest fetches fall through to a raw GitHub copy when the docs host fails."""
+
+    PRIMARY = "https://hermes-agent.nousresearch.com/docs/api/model-catalog.json"
+    FALLBACK = (
+        "https://raw.githubusercontent.com/NousResearch/hermes-agent"
+        "/main/website/static/api/model-catalog.json"
+    )
+
+    def test_uses_primary_when_it_succeeds(self, isolated_home):
+        from hermes_cli import model_catalog
+        calls: list[str] = []
+
+        def fake_fetch(url, timeout):
+            calls.append(url)
+            return _valid_manifest()
+
+        with patch.object(model_catalog, "_fetch_manifest", side_effect=fake_fetch):
+            result = model_catalog._fetch_manifest_with_fallback(self.PRIMARY, 5.0)
+
+        assert result is not None
+        assert calls == [self.PRIMARY]
+
+    def test_falls_through_to_raw_github_on_primary_failure(self, isolated_home):
+        from hermes_cli import model_catalog
+        calls: list[str] = []
+
+        def fake_fetch(url, timeout):
+            calls.append(url)
+            if url == self.PRIMARY:
+                return None
+            return _valid_manifest()
+
+        with patch.object(model_catalog, "_fetch_manifest", side_effect=fake_fetch):
+            result = model_catalog._fetch_manifest_with_fallback(self.PRIMARY, 5.0)
+
+        assert result is not None
+        assert calls == [self.PRIMARY, self.FALLBACK]
+
+    def test_returns_none_when_all_urls_fail(self, isolated_home):
+        from hermes_cli import model_catalog
+
+        with patch.object(model_catalog, "_fetch_manifest", return_value=None) as fetch:
+            result = model_catalog._fetch_manifest_with_fallback(self.PRIMARY, 5.0)
+
+        assert result is None
+        assert fetch.call_count == 1 + len(model_catalog.DEFAULT_CATALOG_FALLBACK_URLS)
+
+    def test_dedupes_when_primary_equals_fallback(self, isolated_home):
+        from hermes_cli import model_catalog
+
+        with patch.object(model_catalog, "_fetch_manifest", return_value=None) as fetch:
+            model_catalog._fetch_manifest_with_fallback(self.FALLBACK, 5.0)
+
+        assert fetch.call_count == 1
+
+    def test_get_catalog_uses_fallback_chain(self, isolated_home):
+        from hermes_cli import model_catalog
+        manifest = _valid_manifest()
+        calls: list[str] = []
+
+        def fake_fetch(url, timeout):
+            calls.append(url)
+            if url == self.PRIMARY:
+                return None
+            return manifest
+
+        with patch.object(model_catalog, "_fetch_manifest", side_effect=fake_fetch):
+            result = model_catalog.get_catalog(force_refresh=True)
+
+        assert result == manifest
+        assert self.FALLBACK in calls
+
+
 class TestCuratedAccessors:
     def test_openrouter_returns_tuples(self, isolated_home):
         from hermes_cli import model_catalog
