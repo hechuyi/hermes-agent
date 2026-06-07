@@ -729,6 +729,38 @@ is desired, first define the ordering contract between live tracking cwd
 resolution and file-safety checks, then add regression tests for both
 workspace-relative writes and sensitive absolute/system paths.
 
+### 2026-06-08 file-tools cwd contract audit
+
+`96643b4a52b118477b07c838e30eb8ae7372062c` remains deferred after a second
+read-only review. The upstream direction is valuable: relative write and patch
+targets should be resolved once to a single absolute target and that same target
+should flow through safety checks, lock/staleness checks, execution, and result
+reporting. The unsafe part is importing upstream's ordering without first
+pinning this fork's stricter file-safety contract.
+
+The required local contract is:
+
+- run cwd-independent lexical rejection first, including NUL-like invalid
+  paths, V4A header traversal, and obvious device/system literal paths;
+- resolve every accepted relative target against live tracking cwd, or a
+  verified absolute `TERMINAL_CWD`, producing one canonical absolute target;
+- run file-safety, safe-root, Hermes control-plane, and symlink-sensitive checks
+  against that canonical absolute target while retaining lexical absolute/system
+  prefix guards as a defense-in-depth layer;
+- pass the same canonical absolute target into `write_file` / `patch_replace`
+  execution and return it as `resolved_path` / `files_modified`;
+- fail closed on unknown cwd state or failed resolution instead of falling back
+  to executing the raw relative path.
+
+Minimum tests for a future manual port should cover: live-cwd relative writes
+landing in the workspace instead of a process-cwd decoy; patch replace using
+the same resolved absolute target as safety; relative names that resolve to
+Hermes control-plane files such as `auth.json`, `config.yaml`, or token stores
+being denied; `HERMES_WRITE_SAFE_ROOT` applying to the resolved absolute target;
+resolution failure not invoking shell file operations; and V4A multi-file patch
+headers being individually resolved and rejected as an atomic batch if any
+target fails safety.
+
 ## Deferred commits
 
 The remaining `origin/main` commits are not rejected globally; they are deferred
