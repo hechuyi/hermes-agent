@@ -1758,3 +1758,72 @@ uv run --extra dev pytest tests/scripts/test_release_acp_registry.py -q -rs
 Result: `3 passed`.
 
 `git diff --check -- scripts/release.py` produced no output.
+
+## 2026-06-07 — deterministic compression fallback summary
+
+Upstream commits reviewed:
+
+- `e785c0ad70c4b510888e64303bd3e6b946e2d33c` — preserve context when
+  summary generation fails.
+- `6dc068ef044a6c73712369242a45005890d952b1` — broaden deterministic
+  compression fallback coverage.
+
+Local result:
+
+- Absorbed the deterministic fallback summary behavior in `c146b4333`.
+- Summary-generation failures under the default
+  `compression.abort_on_summary_failure=false` path now insert a bounded,
+  locally generated handoff with active task, recoverable assistant/tool
+  actions, path mentions, blockers, redacted secret context, and failure
+  reason.
+- Kept this scoped to `agent/context_compressor.py` and
+  `tests/agent/test_context_compressor.py`; no `/compress here`
+  implementation, CLI slash-command routing, gateway state migration, or
+  broader compression feature work was absorbed in this code node.
+- The local redaction contract intentionally preserves a short token prefix
+  and suffix for diagnosability, so fallback tests assert that complete secret
+  values are absent and the masked form is present.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/agent/test_context_compressor.py -q -rs -k "summary_failure_fallback_preserves_recoverable_context or summary_failure_fallback_preserves_paths_and_redacts_secret_context or summary_failure_fallback_supports_object_tool_calls_and_path_mentions or summary_failure_fallback_is_bounded"
+```
+
+Result before the code change: `4 failed, 83 deselected`; all failures were
+because the fallback still emitted the old content-free static marker.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/agent/test_context_compressor.py -q -rs -k "summary_failure_fallback_preserves_recoverable_context or summary_failure_fallback_preserves_paths_and_redacts_secret_context or summary_failure_fallback_supports_object_tool_calls_and_path_mentions or summary_failure_fallback_is_bounded"
+```
+
+Result: `4 passed, 83 deselected`.
+
+```bash
+uv run --extra dev pytest tests/agent/test_context_compressor.py -q -rs
+```
+
+Result: `87 passed, 1 warning` (`discord.player` `audioop` deprecation).
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_413_compression.py tests/run_agent/test_compression_boundary.py tests/run_agent/test_compression_boundary_hook.py tests/run_agent/test_compression_persistence.py tests/run_agent/test_compression_trigger_excludes_reasoning.py -q -rs
+```
+
+Result: `34 passed, 1 warning` (`discord.player` `audioop` deprecation).
+
+```bash
+uv run --extra dev ruff check agent/context_compressor.py tests/agent/test_context_compressor.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile agent/context_compressor.py tests/agent/test_context_compressor.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- agent/context_compressor.py tests/agent/test_context_compressor.py`
+produced no output.
