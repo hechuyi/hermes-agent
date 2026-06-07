@@ -3573,6 +3573,66 @@ Result: exit `0`.
 
 `git diff --cached --check` produced no output before the code commit.
 
+## 2026-06-07 — WhatsApp/Weixin text batching absorption
+
+Upstream commits reviewed and absorbed:
+
+- `b0ce47daacc3602a71c41b72f99417b56eec6b70` — batch rapid WhatsApp and
+  Weixin text bursts before dispatching them to the agent.
+- `cddb7283d96133f7422ba979f1625b0b0473a186` — use `config.extra`
+  settings for WhatsApp/Weixin text batching instead of environment-only
+  configuration.
+
+Local result:
+
+- Absorbed as `2553c07`.
+- WhatsApp and Weixin now debounce rapid text-only bursts per session and
+  concatenate them into one `MessageEvent` before invoking the agent.
+- The final `config.extra` configuration form from `cddb7283d9` was used:
+  `text_batch_delay_seconds` and `text_batch_split_delay_seconds` live under
+  each platform's `extra` map. Invalid, negative, NaN, or infinite values fall
+  back to defaults.
+- The Weixin conflict was resolved by preserving local intake access-policy
+  checks before batching: text events are enqueued only after DM/group policy
+  gates and content/message-id deduplication have accepted the event; non-text
+  events still dispatch directly with `handle_message`.
+- The shared text-batching regression helper tests were updated only to restore
+  the real adapter constructor contract for `object.__new__` test doubles:
+  Telegram now sets `platform = Platform.TELEGRAM`, and Telegram/Feishu helpers
+  inject `GatewayConfig()` for session isolation.
+
+Verification before commit:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_text_batching.py -q -rs
+```
+
+Result: `23 passed, 2 warnings`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_whatsapp_text_batching.py tests/gateway/test_weixin.py -q -rs -k "TextDebounce or text_batch or duplicate_content"
+```
+
+Result: `11 passed, 53 deselected`.
+
+```bash
+uv run --extra dev ruff check gateway/platforms/weixin.py gateway/platforms/whatsapp.py tests/gateway/test_weixin.py tests/gateway/test_whatsapp_text_batching.py tests/gateway/test_text_batching.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile gateway/platforms/weixin.py gateway/platforms/whatsapp.py tests/gateway/test_weixin.py tests/gateway/test_whatsapp_text_batching.py tests/gateway/test_text_batching.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --check -- gateway/platforms/weixin.py gateway/platforms/whatsapp.py tests/gateway/test_weixin.py tests/gateway/test_whatsapp_text_batching.py tests/gateway/test_text_batching.py website/docs/user-guide/messaging/weixin.md website/docs/user-guide/messaging/whatsapp.md
+```
+
+Result: exit `0`.
+
 ## 2026-06-07 — Native vision fast-path equivalence
 
 Upstream commits reviewed for the vision half of the native-image routing
