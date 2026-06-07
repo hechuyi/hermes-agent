@@ -754,7 +754,6 @@ These must not be merged mechanically:
   reviewed against gateway ledger event attribution.
 - `45bc65abb`: delivery outcome semantics for silence narration filtering.
 - `0bfe19ba1` / `44f3e5186`: nested gateway platform config handling.
-- `45465b0d5`: reconnect/pause policy for transient network and DNS failures.
 
 ### Tooling and runtime commits requiring separate batches
 
@@ -4986,6 +4985,48 @@ An additional local macOS service smoke run of
 gate because `tests/hermes_cli/test_gateway_service.py` hit the environment's
 existing user-systemd preflight failure class. The Windows/path subsets were
 not implicated by the planned-stop marker changes.
+
+## 2026-06-08 — Transient reconnect auto-pause absorption
+
+`45465b0d5d8c7b2db7df6d9e466589cdef9136c0`
+(`fix(gateway): never auto-pause platforms on transient network/DNS failures`)
+was manually absorbed in this batch.
+
+The local port removes the reconnect watcher's automatic pause threshold from
+both retryable reconnect-failure branches: adapter-reported retryable fatal
+errors and raised reconnect exceptions. Retryable failures now stay in the
+failed-platform queue, increment attempts, and schedule another finite
+`next_retry` at the exponential-backoff cap instead of setting
+`next_retry = inf` and requiring manual `/platform resume`. Manual
+`/platform pause` and `/platform resume` behavior remains intact for operator
+control.
+
+This batch is limited to transient reconnect policy. It does not change gateway
+event ledgers, media extraction, delivery outcomes, provider routing, model
+catalogs, Nous legacy authentication, planned-stop marker behavior, or current
+local `5.5` channel availability.
+
+Verification recorded during the absorption pass:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_platform_reconnect.py -q -rs
+```
+
+Result: `30 passed`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_platform_reconnect.py tests/gateway/test_runner_startup_failures.py -q -rs
+```
+
+Result: `39 passed`.
+
+```bash
+uv run --extra dev ruff check gateway/run.py tests/gateway/test_platform_reconnect.py
+uv run --extra dev python -m py_compile gateway/run.py tests/gateway/test_platform_reconnect.py
+git diff --check
+```
+
+Result: all three commands exited `0`.
 
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 

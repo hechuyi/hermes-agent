@@ -294,19 +294,21 @@ class TestPlatformReconnectWatcher:
         assert runner._failed_platforms[Platform.TELEGRAM]["attempts"] == 2
 
     @pytest.mark.asyncio
-    async def test_reconnect_pauses_after_circuit_breaker_threshold(self):
-        """After enough consecutive retryable failures, the watcher should
-        *pause* the platform (keep it in the queue but stop hammering it),
-        not drop it. The user resumes via /platform resume.
+    async def test_reconnect_never_auto_pauses_retryable_failures(self):
+        """Retryable failures must keep retrying without manual resume.
+
+        Transient network/DNS outages may last longer than the old circuit
+        breaker threshold. Auto-pausing them leaves the platform dead after
+        connectivity returns.
         """
         runner = _make_runner()
 
         platform_config = PlatformConfig(enabled=True, token="test")
-        # 9 prior attempts — the next failure will be the 10th and should
-        # trip the circuit breaker.
+        # Far past the old circuit-breaker threshold: retryable failures still
+        # must not be paused automatically.
         runner._failed_platforms[Platform.TELEGRAM] = {
             "config": platform_config,
-            "attempts": 9,
+            "attempts": 25,
             "next_retry": time.monotonic() - 1,
         }
 
@@ -332,12 +334,58 @@ class TestPlatformReconnectWatcher:
 
             await run_one_iteration()
 
-        # Platform stays in queue — paused, not dropped
+        # Platform stays in queue and keeps retrying — paused only means
+        # explicit operator pause.
         assert Platform.TELEGRAM in runner._failed_platforms
         info = runner._failed_platforms[Platform.TELEGRAM]
-        assert info["paused"] is True
-        assert info["attempts"] == 10
-        assert "pause_reason" in info
+        assert info.get("paused") is not True
+        assert "pause_reason" not in info
+        assert info["attempts"] == 26
+        assert info["next_retry"] != float("inf")
+        assert info["next_retry"] > time.monotonic()
+
+    @pytest.mark.asyncio
+    async def test_reconnect_exception_never_auto_pauses_retryable_failures(self):
+        """Raised reconnect errors should also stay queued for retry."""
+        runner = _make_runner()
+
+        platform_config = PlatformConfig(enabled=True, token="test")
+        runner._failed_platforms[Platform.TELEGRAM] = {
+            "config": platform_config,
+            "attempts": 25,
+            "next_retry": time.monotonic() - 1,
+        }
+
+        real_sleep = asyncio.sleep
+
+        with patch.object(
+            runner,
+            "_create_adapter",
+            side_effect=TimeoutError("telegram connect timed out"),
+        ):
+            async def run_one_iteration():
+                runner._running = True
+                call_count = 0
+
+                async def fake_sleep(n):
+                    nonlocal call_count
+                    call_count += 1
+                    if call_count > 1:
+                        runner._running = False
+                    await real_sleep(0)
+
+                with patch("asyncio.sleep", side_effect=fake_sleep):
+                    await runner._platform_reconnect_watcher()
+
+            await run_one_iteration()
+
+        assert Platform.TELEGRAM in runner._failed_platforms
+        info = runner._failed_platforms[Platform.TELEGRAM]
+        assert info.get("paused") is not True
+        assert "pause_reason" not in info
+        assert info["attempts"] == 26
+        assert info["next_retry"] != float("inf")
+        assert info["next_retry"] > time.monotonic()
 
     @pytest.mark.asyncio
     async def test_reconnect_skips_paused_platforms(self):
@@ -713,4 +761,3 @@ class TestPlatformSlashCommand:
         runner = _make_runner()
         out = await runner._handle_platform_command(self._make_event("/platform"))
         assert "Gateway platforms" in out
-

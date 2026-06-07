@@ -3215,18 +3215,19 @@ class GatewayRunner:
             pass
 
     # ------------------------------------------------------------------
-    # Per-platform circuit breaker (pause/resume) — used by the reconnect
-    # watcher when a retryable failure recurs past a threshold, and by the
-    # /platform pause|resume slash command for manual control.
+    # Per-platform pause/resume control. The reconnect watcher never
+    # auto-pauses retryable failures: transient network/DNS outages keep
+    # retrying at the backoff cap so recovered platforms self-heal.
     # ------------------------------------------------------------------
     def _pause_failed_platform(self, platform, *, reason: str = "") -> None:
         """Mark a queued platform as paused — keep it in ``_failed_platforms``
         but stop the reconnect watcher from hammering it.
 
-        Used by the circuit breaker after ``_PAUSE_AFTER_FAILURES`` consecutive
-        retryable failures, and by ``/platform pause <name>`` for manual
-        intervention.  Paused platforms are surfaced in ``/platform list``
-        and resumed with ``/platform resume <name>``.
+        Used by ``/platform pause <name>`` for manual intervention. Paused
+        platforms are surfaced in ``/platform list`` and resumed with
+        ``/platform resume <name>``. Retryable reconnect failures are not
+        auto-paused; they keep retrying at the backoff cap so transient
+        outages do not require manual recovery.
         """
         info = getattr(self, "_failed_platforms", {}).get(platform)
         if info is None:
@@ -3234,7 +3235,7 @@ class GatewayRunner:
         if info.get("paused"):
             return
         info["paused"] = True
-        info["pause_reason"] = reason or "auto-paused after repeated failures"
+        info["pause_reason"] = reason or "paused"
         # Push next_retry far enough out that even if "paused" is missed
         # by a stale code path, the watcher won't fire on it.
         info["next_retry"] = float("inf")
@@ -3248,7 +3249,7 @@ class GatewayRunner:
         except Exception:
             pass
         logger.warning(
-            "%s paused after %d consecutive failures (%s) — "
+            "%s paused with %d recorded failures (%s) — "
             "fix the underlying issue then run `/platform resume %s` "
             "to retry, or `hermes gateway restart` to restart the gateway.",
             platform.value, info.get("attempts", 0),
@@ -6294,15 +6295,14 @@ class GatewayRunner:
         """Background task that periodically retries connecting failed platforms.
 
         Uses exponential backoff: 30s → 60s → 120s → 240s → 300s (cap).
-        Retryable failures keep retrying at the backoff cap indefinitely
-        — but if a platform fails ``_PAUSE_AFTER_FAILURES`` times in a row
-        without ever succeeding, it is *paused*: kept in the retry queue
-        but no longer hammered.  The user surfaces it with ``/platform list``
-        and resumes it with ``/platform resume <name>``.  Non-retryable
+        Retryable failures (network/DNS blips) keep retrying at the backoff cap
+        indefinitely and self-heal once connectivity returns. Non-retryable
         failures (bad auth, etc.) still drop out of the queue immediately.
+        Manual ``/platform pause`` and ``/platform resume`` remain available
+        for operator control, but the watcher does not auto-pause retryable
+        failures.
         """
         _BACKOFF_CAP = 300  # 5 minutes max between retries
-        _PAUSE_AFTER_FAILURES = 10  # circuit-breaker threshold
 
         await asyncio.sleep(10)  # initial delay — let startup finish
         while self._running:
@@ -6396,14 +6396,6 @@ class GatewayRunner:
                             "Reconnect %s failed, next retry in %ds",
                             platform.value, backoff,
                         )
-                        if attempt >= _PAUSE_AFTER_FAILURES:
-                            self._pause_failed_platform(
-                                platform,
-                                reason=(
-                                    adapter.fatal_error_message
-                                    or "failed to reconnect"
-                                ),
-                            )
                 except Exception as e:
                     self._update_platform_runtime_status(
                         platform.value,
@@ -6418,8 +6410,6 @@ class GatewayRunner:
                         "Reconnect %s error: %s, next retry in %ds",
                         platform.value, e, backoff,
                     )
-                    if attempt >= _PAUSE_AFTER_FAILURES:
-                        self._pause_failed_platform(platform, reason=str(e))
 
             # Check every 10 seconds for platforms that need reconnection
             for _ in range(10):
