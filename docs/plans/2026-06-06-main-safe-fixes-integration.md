@@ -4268,6 +4268,70 @@ git diff --check -- utils.py plugins/memory/honcho/__init__.py plugins/memory/ho
 
 Result: exit `0`.
 
+## 2026-06-07 — `/agents` nudge UX absorption
+
+Upstream commits reviewed and absorbed:
+
+- `5a72e82fd8175597a82d4599ae35d20b1fb8fc89` — nudge toward the TUI
+  `/agents` dashboard when delegation starts.
+- `9d2571c86a7dae2bb526ca22233fe5309c23d53d` — surface the same hint while
+  `delegate_task` is still in flight in TUI and classic CLI.
+
+Local result:
+
+- Absorbed as `cb862abaf`.
+- Added `display.tui_agents_nudge` with default `true`.
+- TUI delegation events now add a one-time per-turn activity hint pointing at
+  `/agents`, suppressed while the `/agents` overlay is already open and reset
+  on the next `message.start`.
+- TUI tool trail delegate groups and classic CLI delegate spinners now include
+  an in-flight `/agents` monitor hint.
+- This is limited to display/UX. It does not change subagent execution,
+  approval, model catalog, gateway authorization, or provider routing.
+
+Verification:
+
+```bash
+cd ui-tui && npm run test -- src/__tests__/createGatewayEventHandler.test.ts
+```
+
+Result: `49 passed`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_delegate.py tests/agent/test_subagent_progress.py tests/agent/test_delegate_spinner_label.py -q -rs
+```
+
+Result: `158 passed, 1 warning` (`discord.player` importing deprecated
+`audioop`).
+
+```bash
+uv run --extra dev ruff check agent/tool_executor.py hermes_cli/config.py tests/agent/test_delegate_spinner_label.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile agent/tool_executor.py hermes_cli/config.py tests/agent/test_delegate_spinner_label.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --check -- agent/tool_executor.py hermes_cli/config.py tests/agent/test_delegate_spinner_label.py ui-tui/src/__tests__/createGatewayEventHandler.test.ts ui-tui/src/app/createGatewayEventHandler.ts ui-tui/src/components/thinking.tsx ui-tui/src/gatewayTypes.ts
+```
+
+Result: exit `0`.
+
+Attempted verification:
+
+```bash
+cd ui-tui && npm run type-check
+```
+
+Result: failed in pre-existing `packages/hermes-ink/src/utils/execFileNoThrow.ts`
+typing errors (`readonly` stdio tuple and resulting `never` child-process
+type). The failure does not point at files touched by this absorption.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work
@@ -4305,11 +4369,6 @@ Deferred:
   `5.5`-only, but that is not a reason to weaken catalog guard coverage during
   upstream reconciliation; catalog test deletion should wait for an explicit
   catalog-policy review.
-- `5a72e82fd8175597a82d4599ae35d20b1fb8fc89` and
-  `9d2571c86a7dae2bb526ca22233fe5309c23d53d` — `/agents` dashboard nudge UX
-  changes in TUI/CLI delegation flows. Useful upstream UX, but nonessential to
-  the fork's current live-gateway/tool absorption and touches config plus
-  TUI/CLI event surfaces.
 - `e8076c1ebe659c58284396d88f802537ffc2ccb8` and
   `234ac009376daba225525195afca96be8a82634c` — dashboard insecure public-bind
   WebSocket peer relaxation. Even though `234ac009` preserves Host/Origin
