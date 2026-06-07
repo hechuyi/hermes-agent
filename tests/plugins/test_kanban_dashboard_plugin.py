@@ -593,6 +593,35 @@ def test_dispatch_dry_run(client):
     assert isinstance(body, dict)
 
 
+def test_dispatch_nudge_passes_config_caps_and_default_assignee(client, monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "max_in_progress": 3,
+                "default_assignee": "default",
+                "max_in_progress_per_profile": 2,
+            }
+        },
+    )
+
+    captured = {}
+
+    def fake_dispatch_once(conn, **kwargs):
+        captured.update(kwargs)
+        return kb.DispatchResult()
+
+    monkeypatch.setattr(kb, "dispatch_once", fake_dispatch_once)
+
+    r = client.post("/api/plugins/kanban/dispatch?dry_run=true&max=4")
+
+    assert r.status_code == 200, r.text
+    assert captured["max_spawn"] == 4
+    assert captured["max_in_progress"] == 3
+    assert captured["default_assignee"] == "default"
+    assert captured["max_in_progress_per_profile"] == 2
+
+
 # ---------------------------------------------------------------------------
 # Triage column (new v1 status)
 # ---------------------------------------------------------------------------

@@ -1278,6 +1278,60 @@ def test_dispatch_skips_unassigned(kanban_home):
     assert not res.spawned
 
 
+def test_dispatch_default_assignee_assigns_and_spawns(
+    kanban_home, all_assignees_spawnable
+):
+    spawned: list[str] = []
+
+    def fake_spawn(task, workspace):
+        spawned.append(task.id)
+        return 123
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="floater")
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=fake_spawn,
+            default_assignee="alice",
+        )
+
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.assignee == "alice"
+        events = kb.list_events(conn, t)
+
+    assert res.auto_assigned_default == [t]
+    assert t not in res.skipped_unassigned
+    assert spawned == [t]
+    assert res.spawned[0][1] == "alice"
+    assigned = [event for event in events if event.kind == "assigned"]
+    assert assigned
+    assert assigned[-1].payload == {
+        "assignee": "alice",
+        "source": "kanban.default_assignee",
+    }
+
+
+def test_dispatch_default_assignee_dry_run_reports_without_mutating(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="floater")
+        res = kb.dispatch_once(
+            conn,
+            dry_run=True,
+            default_assignee="alice",
+        )
+        task = kb.get_task(conn, t)
+        assert task is not None
+        events = kb.list_events(conn, t)
+
+    assert res.auto_assigned_default == [t]
+    assert res.spawned == [(t, "alice", "")]
+    assert task.assignee is None
+    assert not [event for event in events if event.kind == "assigned"]
+
+
 def test_dispatch_skips_nonspawnable_into_separate_bucket(kanban_home, monkeypatch):
     """Tasks whose assignee fails profile_exists() must NOT land in
     ``skipped_unassigned`` (which is operator-actionable) — they go in
@@ -2983,6 +3037,61 @@ def test_dispatch_max_in_progress_none_is_unlimited(kanban_home, all_assignees_s
 
     assert len(spawns) == 4, f"expected 4 spawns (unlimited), got {len(spawns)}"
 
+
+def test_dispatch_per_profile_cap_balances_dry_run(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect() as conn:
+        alpha_ids = [
+            kb.create_task(conn, title=f"alpha-{idx}", assignee="alpha")
+            for idx in range(3)
+        ]
+        beta_ids = [
+            kb.create_task(conn, title=f"beta-{idx}", assignee="beta")
+            for idx in range(2)
+        ]
+        res = kb.dispatch_once(
+            conn,
+            dry_run=True,
+            max_in_progress_per_profile=1,
+        )
+
+    spawned = {(task_id, assignee) for task_id, assignee, _ in res.spawned}
+    assert (alpha_ids[0], "alpha") in spawned
+    assert (beta_ids[0], "beta") in spawned
+    assert {item[0] for item in res.skipped_per_profile_capped} == {
+        alpha_ids[1],
+        alpha_ids[2],
+        beta_ids[1],
+    }
+    assert all(item[2] == 1 for item in res.skipped_per_profile_capped)
+
+
+def test_dispatch_per_profile_cap_counts_existing_running(
+    kanban_home, all_assignees_spawnable
+):
+    spawned: list[tuple[str, str]] = []
+
+    def fake_spawn(task, workspace):
+        spawned.append((task.id, task.assignee or ""))
+        return 123
+
+    with kb.connect() as conn:
+        running_alpha = kb.create_task(conn, title="running-alpha", assignee="alpha")
+        kb.claim_task(conn, running_alpha)
+        ready_alpha = kb.create_task(conn, title="ready-alpha", assignee="alpha")
+        ready_beta = kb.create_task(conn, title="ready-beta", assignee="beta")
+
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=fake_spawn,
+            max_in_progress_per_profile=1,
+        )
+
+    assert (ready_beta, "beta") in spawned
+    assert (ready_alpha, "alpha", 1) in res.skipped_per_profile_capped
+    assert all(task_id != ready_alpha for task_id, _assignee in spawned)
+
 # Review column dispatch
 # ---------------------------------------------------------------------------
 
@@ -3085,6 +3194,27 @@ def test_dispatch_review_counts_toward_max_spawn(
     # Only 2 should spawn (ready tasks get priority in the loop)
     assert len(res.spawned) == 2
     assert len(spawns) == 2
+
+
+def test_dispatch_review_respects_per_profile_cap(
+    kanban_home, all_assignees_spawnable,
+):
+    with kb.connect() as conn:
+        running_alpha = kb.create_task(conn, title="running", assignee="alpha")
+        kb.claim_task(conn, running_alpha)
+        review_alpha = kb.create_task(conn, title="review-alpha", assignee="alpha")
+        review_beta = kb.create_task(conn, title="review-beta", assignee="beta")
+        _set_task_status(conn, review_alpha, "review")
+        _set_task_status(conn, review_beta, "review")
+
+        res = kb.dispatch_once(
+            conn,
+            dry_run=True,
+            max_in_progress_per_profile=1,
+        )
+
+    assert (review_alpha, "alpha", 1) in res.skipped_per_profile_capped
+    assert (review_beta, "beta", "") in res.spawned
 
 
 def test_dispatch_review_spawns_when_ready_empty(

@@ -4723,6 +4723,8 @@ class DispatchResult:
     skipped_unassigned: list[str] = field(default_factory=list)
     """Ready task ids skipped because they have no assignee at all.
     Operator-actionable — usually a misfiled task waiting for routing."""
+    auto_assigned_default: list[str] = field(default_factory=list)
+    """Task ids that had ``kanban.default_assignee`` applied this tick."""
     skipped_nonspawnable: list[str] = field(default_factory=list)
     """Ready task ids skipped because their assignee names a control-plane
     lane (a Claude Code terminal like ``orion-cc``) rather than a Hermes
@@ -4730,6 +4732,12 @@ class DispatchResult:
     operator-actionable failure. Tracked separately so health telemetry
     can distinguish "real stuck" (nothing spawned but spawnable work
     available) from "correctly idle" (nothing spawnable in the queue)."""
+    skipped_per_profile_capped: list[tuple[str, str, int]] = field(default_factory=list)
+    """Tasks deferred because their assignee is already at the per-profile cap.
+
+    Entries are ``(task_id, assignee, current_running_count)``. This is a
+    capacity/busy signal, not an operator-actionable routing failure.
+    """
     crashed: list[str] = field(default_factory=list)
     """Task ids reclaimed because their worker PID disappeared."""
     auto_blocked: list[str] = field(default_factory=list)
@@ -5776,6 +5784,8 @@ def dispatch_once(
     failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
     stale_timeout_seconds: int = 0,
     board: Optional[str] = None,
+    default_assignee: Optional[str] = None,
+    max_in_progress_per_profile: Optional[int] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -5861,12 +5871,78 @@ def dispatch_once(
         if max_spawn is None or max_spawn > remaining:
             max_spawn = remaining
     spawned = 0
+
+    try:
+        from hermes_cli.profiles import profile_exists
+    except Exception:
+        profile_exists = None  # type: ignore[assignment]
+
+    default_assignee = (default_assignee or "").strip() or None
+    if default_assignee and profile_exists is not None:
+        try:
+            if not profile_exists(default_assignee):
+                default_assignee = None
+        except Exception:
+            pass
+
+    per_profile_cap = None
+    try:
+        if max_in_progress_per_profile is not None:
+            parsed_cap = int(max_in_progress_per_profile)
+            if parsed_cap > 0:
+                per_profile_cap = parsed_cap
+    except (TypeError, ValueError):
+        per_profile_cap = None
+
+    per_profile_running: dict[str, int] = {}
+    if per_profile_cap is not None:
+        for profile_row in conn.execute(
+            "SELECT assignee, COUNT(*) AS n FROM tasks "
+            "WHERE status = 'running' AND assignee IS NOT NULL "
+            "GROUP BY assignee"
+        ):
+            per_profile_running[profile_row["assignee"]] = int(profile_row["n"])
+
+    def _at_profile_cap(task_id: str, assignee: str) -> bool:
+        if per_profile_cap is None:
+            return False
+        current = per_profile_running.get(assignee, 0)
+        if current >= per_profile_cap:
+            result.skipped_per_profile_capped.append((task_id, assignee, current))
+            return True
+        return False
+
+    def _record_profile_spawn(assignee: Optional[str]) -> None:
+        if per_profile_cap is not None and assignee:
+            per_profile_running[assignee] = per_profile_running.get(assignee, 0) + 1
+
     for row in ready_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
-        if not row["assignee"]:
-            result.skipped_unassigned.append(row["id"])
-            continue
+        row_assignee = row["assignee"]
+        if not row_assignee:
+            if default_assignee:
+                row_assignee = default_assignee
+                result.auto_assigned_default.append(row["id"])
+                if not dry_run:
+                    with write_txn(conn):
+                        conn.execute(
+                            "UPDATE tasks SET assignee = ? WHERE id = ? "
+                            "AND (assignee IS NULL OR assignee = '')",
+                            (row_assignee, row["id"]),
+                        )
+                        _append_event(
+                            conn,
+                            row["id"],
+                            "assigned",
+                            {
+                                "assignee": row_assignee,
+                                "source": "kanban.default_assignee",
+                            },
+                        )
+            else:
+                result.skipped_unassigned.append(row["id"])
+                continue
         # Skip ready tasks whose assignee is not a real Hermes profile.
         # `_default_spawn` invokes ``hermes -p <assignee>`` which fails
         # with "Profile 'X' does not exist" when the assignee names a
@@ -5877,11 +5953,7 @@ def dispatch_once(
         # subprocess would crash on startup, get reaped as a zombie,
         # the task would loop back to ``ready`` on next tick, and we'd
         # burn CPU forever (#kanban-dispatcher-crash-loop 2026-05-05).
-        try:
-            from hermes_cli.profiles import profile_exists  # local import: avoids cycle
-        except Exception:
-            profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row["assignee"]):
+        if profile_exists is not None and not profile_exists(row_assignee):
             # Bucket separately from skipped_unassigned: the operator
             # cannot fix this by assigning a profile (the assignee IS the
             # intended owner — a terminal lane). Health telemetry uses
@@ -5889,6 +5961,8 @@ def dispatch_once(
             # multi-lane setups where the ready queue is steadily full
             # of human-pulled work.
             result.skipped_nonspawnable.append(row["id"])
+            continue
+        if _at_profile_cap(row["id"], row_assignee):
             continue
         # Respawn guard: refuse to re-spawn when useful work is already
         # in-flight/recent, or when the last failure is a deterministic
@@ -5912,7 +5986,8 @@ def dispatch_once(
                     )
             continue
         if dry_run:
-            result.spawned.append((row["id"], row["assignee"], ""))
+            result.spawned.append((row["id"], row_assignee, ""))
+            _record_profile_spawn(row_assignee)
             continue
         claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
@@ -5955,6 +6030,7 @@ def dispatch_once(
             # complete_task).
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
+            _record_profile_spawn(claimed.assignee)
         except Exception as exc:
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),
@@ -5980,18 +6056,18 @@ def dispatch_once(
     for row in review_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
-        if not row["assignee"]:
+        row_assignee = row["assignee"]
+        if not row_assignee:
             result.skipped_unassigned.append(row["id"])
             continue
-        try:
-            from hermes_cli.profiles import profile_exists
-        except Exception:
-            profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row["assignee"]):
+        if profile_exists is not None and not profile_exists(row_assignee):
             result.skipped_nonspawnable.append(row["id"])
             continue
+        if _at_profile_cap(row["id"], row_assignee):
+            continue
         if dry_run:
-            result.spawned.append((row["id"], row["assignee"], ""))
+            result.spawned.append((row["id"], row_assignee, ""))
+            _record_profile_spawn(row_assignee)
             continue
         claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
@@ -6030,6 +6106,7 @@ def dispatch_once(
                 _set_worker_pid(conn, claimed.id, int(pid))
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
+            _record_profile_spawn(claimed.assignee)
         except Exception as exc:
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),

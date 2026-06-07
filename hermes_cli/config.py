@@ -1776,6 +1776,10 @@ DEFAULT_CONFIG = {
         # assignee to any installed profile. When unset, falls back to the
         # default profile. A task never ends up with assignee=None.
         "default_assignee": "",
+        # Per-profile dispatcher concurrency cap. When set to a positive int,
+        # no single assignee can have more than N running workers, even when
+        # the board-wide max_spawn / max_in_progress caps still have room.
+        "max_in_progress_per_profile": None,
         # When true, the kanban dispatcher auto-runs the decomposer on
         # tasks that land in Triage (every dispatcher tick). When false,
         # decomposition is manual via `hermes kanban decompose <id>` or

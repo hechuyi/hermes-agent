@@ -5833,8 +5833,25 @@ class GatewayRunner:
         interval = float(kanban_cfg.get("dispatch_interval_seconds", 60) or 60)
         interval = max(interval, 1.0)  # sanity floor — tighter than this is a footgun
 
+        def _coerce_positive_int(value, key: str):
+            if value is None:
+                return None
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                logger.warning("kanban dispatcher: invalid %s=%r; ignoring", key, value)
+                return None
+            if parsed < 1:
+                logger.warning(
+                    "kanban dispatcher: %s=%r is below 1; ignoring",
+                    key,
+                    value,
+                )
+                return None
+            return parsed
+
         # Read max_spawn config to limit concurrent kanban tasks
-        max_spawn = kanban_cfg.get("max_spawn", None)
+        max_spawn = _coerce_positive_int(kanban_cfg.get("max_spawn"), "kanban.max_spawn")
         if max_spawn is not None:
             logger.info(f"kanban dispatcher: max_spawn={max_spawn}")
 
@@ -5842,26 +5859,26 @@ class GatewayRunner:
         # (local LLMs, resource-constrained hosts) don't pile up and time
         # out. When set, the dispatcher skips spawning when the board
         # already has this many tasks in 'running' status.
-        raw_max_in_progress = kanban_cfg.get("max_in_progress", None)
-        max_in_progress = None
-        if raw_max_in_progress is not None:
-            try:
-                max_in_progress = int(raw_max_in_progress)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "kanban dispatcher: invalid kanban.max_in_progress=%r; ignoring",
-                    raw_max_in_progress,
-                )
-                max_in_progress = None
-            else:
-                if max_in_progress < 1:
-                    logger.warning(
-                        "kanban dispatcher: kanban.max_in_progress=%r is below 1; ignoring",
-                        raw_max_in_progress,
-                    )
-                    max_in_progress = None
-                else:
-                    logger.info(f"kanban dispatcher: max_in_progress={max_in_progress}")
+        max_in_progress = _coerce_positive_int(
+            kanban_cfg.get("max_in_progress"),
+            "kanban.max_in_progress",
+        )
+        if max_in_progress is not None:
+            logger.info(f"kanban dispatcher: max_in_progress={max_in_progress}")
+
+        default_assignee = (kanban_cfg.get("default_assignee") or "").strip() or None
+        if default_assignee:
+            logger.info("kanban dispatcher: default_assignee=%r", default_assignee)
+
+        max_in_progress_per_profile = _coerce_positive_int(
+            kanban_cfg.get("max_in_progress_per_profile"),
+            "kanban.max_in_progress_per_profile",
+        )
+        if max_in_progress_per_profile is not None:
+            logger.info(
+                "kanban dispatcher: max_in_progress_per_profile=%d",
+                max_in_progress_per_profile,
+            )
 
         raw_failure_limit = kanban_cfg.get("failure_limit", _kb.DEFAULT_FAILURE_LIMIT)
         try:
@@ -5984,6 +6001,8 @@ class GatewayRunner:
                     max_in_progress=max_in_progress,
                     failure_limit=failure_limit,
                     stale_timeout_seconds=stale_timeout_seconds,
+                    default_assignee=default_assignee,
+                    max_in_progress_per_profile=max_in_progress_per_profile,
                 )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
@@ -6189,6 +6208,7 @@ class GatewayRunner:
                     await asyncio.to_thread(_auto_decompose_tick)
                 results = await asyncio.to_thread(_tick_once)
                 any_spawned = False
+                any_capacity_deferred = False
                 for slug, res in (results or []):
                     if res is not None and getattr(res, "spawned", None):
                         any_spawned = True
@@ -6205,9 +6225,13 @@ class GatewayRunner:
                             res.promoted,
                             len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
                         )
+                    if res is not None and getattr(
+                        res, "skipped_per_profile_capped", None
+                    ):
+                        any_capacity_deferred = True
                 # Health telemetry (aggregate across boards)
                 ready_pending = await asyncio.to_thread(_ready_nonempty)
-                if ready_pending and not any_spawned:
+                if ready_pending and not any_spawned and not any_capacity_deferred:
                     bad_ticks += 1
                 else:
                     bad_ticks = 0
