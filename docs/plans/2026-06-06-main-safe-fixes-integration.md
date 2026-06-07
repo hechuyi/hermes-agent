@@ -2088,3 +2088,68 @@ Website build status:
 - `npm ci` continued for more than 20 minutes and had to be killed; partial
   `website/node_modules` output was removed before commit.
 - Therefore Docusaurus build was not completed for this doc-only node.
+
+## 2026-06-07 — Telegram DM topic text-batch key recovery
+
+Upstream commit reviewed:
+
+- `5407d25599e55ba5d4c5d12f9dca793cfb6220a6` — recovers Telegram DM topic
+  lane identity before computing the text-batching key.
+
+Local result:
+
+- Absorbed as `2bd41729b`.
+- Added a small pre-key normalization step in `TelegramAdapter._text_batch_key`
+  that calls the runner's existing `_recover_telegram_topic_thread_id()` hook
+  when available, updates `event.source.thread_id` to the recovered lane, and
+  keys the pending text batch by that recovered source.
+- Updated the object-created Telegram batching fixture so it includes the
+  session-isolation config and platform fields required by the current fork.
+- Added a focused regression test proving that a stale DM topic thread id does
+  not create a pending batch under the stale key and that the dispatched event
+  carries the recovered thread id.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_telegram_text_batching.py -q -rs -k dm_topic_batching_recovers_thread_before_keying
+```
+
+Result before the code change: `1 failed, 5 deselected`; the pending batch was
+keyed as `agent:main:telegram:dm:12345:1` instead of the recovered
+`agent:main:telegram:dm:12345:222`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_telegram_text_batching.py -q -rs -k dm_topic_batching_recovers_thread_before_keying
+```
+
+Result: `1 passed, 5 deselected`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_telegram_text_batching.py -q -rs
+```
+
+Result: `6 passed`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_telegram_topic_mode.py tests/gateway/test_telegram_text_batching.py -q -rs
+```
+
+Result: `49 passed`.
+
+```bash
+uv run --extra dev ruff check gateway/platforms/telegram.py tests/gateway/test_telegram_text_batching.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile gateway/platforms/telegram.py tests/gateway/test_telegram_text_batching.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- gateway/platforms/telegram.py tests/gateway/test_telegram_text_batching.py`
+produced no output before the code commit.
