@@ -754,7 +754,6 @@ These must not be merged mechanically:
   reviewed against gateway ledger event attribution.
 - `45bc65abb`: delivery outcome semantics for silence narration filtering.
 - `0bfe19ba1` / `44f3e5186`: nested gateway platform config handling.
-- `2b16b756a`: post-interrupt model recovery and fallback status behavior.
 - `45465b0d5`: reconnect/pause policy for transient network and DNS failures.
 - `7379f1755`: planned-stop/takeover marker behavior.
 
@@ -2708,8 +2707,8 @@ Result: both commands exited `0`.
 
 ## 2026-06-08 — Right-only upstream disposition audit
 
-After the cron restore absorption above, the remaining `git cherry` positives
-were audited mechanically against this integration record.
+After the cron restore absorption above, the then-remaining `git cherry`
+positives were audited mechanically against this integration record.
 
 Command shape:
 
@@ -2731,6 +2730,57 @@ Result:
   policy, Nous JWT-only auth, progressive tool-search/tool disclosure, adapter
   access-policy weakening, Docker lifecycle semantics, model catalog churn,
   trusted external skill taps, and broad dead-code/import pruning.
+
+## 2026-06-08 — Post-interrupt empty-model recovery absorption
+
+Upstream commit reviewed and absorbed with fork-local adaptation:
+
+- `2b16b756a78ef011afd6bcdeec977fd8bc974c17` — recover model on a
+  post-interrupt gateway turn and gate fallback status output.
+
+Local result:
+
+- Added a per-session last-known-good model cache in `GatewayRunner` so a
+  transient empty config/runtime read after an interrupt does not construct an
+  agent with `model=""`.
+- Kept the provider catalog fallback behavior unchanged and did not add or
+  rename model catalog entries. Tests use `gpt-5.5` only as an existing model
+  string.
+- Added `_has_pending_fallback()` on `AIAgent` and gated "trying fallback..."
+  status lines so they are only emitted when a fallback chain actually remains
+  available.
+- Added a fork-local session-boundary adaptation: `/new`, auto-reset, and
+  compression-exhaustion reset clear the session's last-known-good model along
+  with `/model` overrides, so a cleared session does not resurrect a previous
+  session-scoped model. Other sessions and the process-wide fallback slot are
+  left untouched.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_empty_model_recovery.py tests/test_empty_model_fallback.py tests/gateway/test_session_model_override_routing.py tests/gateway/test_session_model_reset.py tests/gateway/test_telegram_noise_filter.py tests/run_agent/test_provider_fallback.py tests/run_agent/test_primary_runtime_restore.py -q -rs
+```
+
+Result: `86 passed`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_agent_cache.py tests/gateway/test_run_progress_interrupt.py tests/gateway/test_session_model_reset.py -q -rs
+```
+
+Result: `69 passed`.
+
+```bash
+uv run --extra dev ruff check gateway/run.py run_agent.py agent/conversation_loop.py tests/gateway/test_empty_model_recovery.py tests/gateway/test_session_model_reset.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile gateway/run.py run_agent.py agent/conversation_loop.py tests/gateway/test_empty_model_recovery.py tests/gateway/test_session_model_reset.py
+git diff --check
+```
+
+Result: both commands exited `0`.
 
 ## 2026-06-07 — MEDIA extension allowlist absorption
 

@@ -38,6 +38,7 @@ def _make_runner():
     runner.hooks = SimpleNamespace(emit=AsyncMock(), loaded_hooks=False)
     runner._session_model_overrides = {}
     runner._session_reasoning_overrides = {}
+    runner._last_resolved_model = {}
     runner._pending_model_notes = {}
     runner._background_tasks = set()
 
@@ -82,12 +83,14 @@ async def test_new_command_clears_session_model_override():
     }
     runner._session_reasoning_overrides[session_key] = {"enabled": True, "effort": "high"}
     runner._pending_model_notes[session_key] = "[Note: switched to gpt-4o.]"
+    runner._last_resolved_model[session_key] = "gpt-4o"
 
     await runner._handle_reset_command(_make_event("/new"))
 
     assert session_key not in runner._session_model_overrides
     assert session_key not in runner._session_reasoning_overrides
     assert session_key not in runner._pending_model_notes
+    assert session_key not in runner._last_resolved_model
 
 
 @pytest.mark.asyncio
@@ -130,6 +133,9 @@ async def test_new_command_only_clears_own_session():
     runner._session_reasoning_overrides[other_key] = {"enabled": True, "effort": "low"}
     runner._pending_model_notes[session_key] = "[Note: switched to gpt-4o.]"
     runner._pending_model_notes[other_key] = "[Note: switched to claude-sonnet-4-6.]"
+    runner._last_resolved_model[session_key] = "gpt-4o"
+    runner._last_resolved_model[other_key] = "claude-sonnet-4-6"
+    runner._last_resolved_model["*"] = "gpt-5.5"
 
     await runner._handle_reset_command(_make_event("/new"))
 
@@ -139,3 +145,6 @@ async def test_new_command_only_clears_own_session():
     assert other_key in runner._session_reasoning_overrides
     assert session_key not in runner._pending_model_notes
     assert other_key in runner._pending_model_notes
+    assert session_key not in runner._last_resolved_model
+    assert runner._last_resolved_model[other_key] == "claude-sonnet-4-6"
+    assert runner._last_resolved_model["*"] == "gpt-5.5"

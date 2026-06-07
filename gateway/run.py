@@ -2173,6 +2173,10 @@ class GatewayRunner:
         self._running_agents: Dict[str, Any] = {}
         self._running_agents_ts: Dict[str, float] = {}  # start timestamp per session
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
+        # Last successfully resolved non-empty model, keyed by session. Recovery
+        # turns can briefly see an empty config/runtime read after an interrupt;
+        # reuse this instead of constructing an agent with model="".
+        self._last_resolved_model: Dict[str, str] = {}
         # Overflow buffer for explicit /queue commands.  The adapter-level
         # _pending_messages dict is a single slot per session (designed for
         # "next-turn" follow-ups where repeated sends collapse into one
@@ -2907,6 +2911,22 @@ class GatewayRunner:
             except Exception:
                 pass
 
+        last_good_models = getattr(self, "_last_resolved_model", None)
+        if last_good_models is not None:
+            if model:
+                if resolved_session_key:
+                    last_good_models[resolved_session_key] = model
+                last_good_models["*"] = model
+            else:
+                recovered = last_good_models.get(resolved_session_key or "") or last_good_models.get("*")
+                if recovered:
+                    logger.warning(
+                        "Empty model resolved for session=%s; recovering last-known-good model %s",
+                        resolved_session_key or "",
+                        recovered,
+                    )
+                    model = recovered
+
         return model, runtime_kwargs
 
     def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
@@ -3380,6 +3400,17 @@ class GatewayRunner:
             self._session_reasoning_overrides.pop(session_key, None)
         else:
             self._session_reasoning_overrides[session_key] = dict(reasoning_config)
+
+    def _clear_session_model_override(self, session_key: str) -> None:
+        """Clear model state that must not survive a session boundary."""
+        if not session_key:
+            return
+        if not hasattr(self, "_session_model_overrides"):
+            self._session_model_overrides = {}
+        self._session_model_overrides.pop(session_key, None)
+        last_good_models = getattr(self, "_last_resolved_model", None)
+        if isinstance(last_good_models, dict):
+            last_good_models.pop(session_key, None)
 
     @staticmethod
     def _load_service_tier() -> str | None:
@@ -8771,7 +8802,7 @@ class GatewayRunner:
             # session-scoped transient state so the fresh session does not
             # inherit the previous conversation's model/reasoning overrides
             # or a queued "/model switched" note.
-            self._session_model_overrides.pop(session_key, None)
+            self._clear_session_model_override(session_key)
             self._set_session_reasoning_override(session_key, None)
             if hasattr(self, "_pending_model_notes"):
                 self._pending_model_notes.pop(session_key, None)
@@ -9562,7 +9593,7 @@ class GatewayRunner:
                 )
                 self.session_store.reset_session(session_key)
                 self._evict_cached_agent(session_key)
-                self._session_model_overrides.pop(session_key, None)
+                self._clear_session_model_override(session_key)
                 self._set_session_reasoning_override(session_key, None)
                 if hasattr(self, "_pending_model_notes"):
                     self._pending_model_notes.pop(session_key, None)
@@ -9995,7 +10026,7 @@ class GatewayRunner:
 
         # Clear any session-scoped model/reasoning overrides so the next agent
         # picks up configured defaults instead of previous session switches.
-        self._session_model_overrides.pop(session_key, None)
+        self._clear_session_model_override(session_key)
         self._set_session_reasoning_override(session_key, None)
         if hasattr(self, "_pending_model_notes"):
             self._pending_model_notes.pop(session_key, None)

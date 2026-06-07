@@ -3791,6 +3791,12 @@ class AIAgent:
         from agent.chat_completion_helpers import try_activate_fallback
         return try_activate_fallback(self, reason)
 
+    def _has_pending_fallback(self) -> bool:
+        """Return True when a fallback provider remains available."""
+        chain = getattr(self, "_fallback_chain", None) or []
+        index = getattr(self, "_fallback_index", 0)
+        return index < len(chain)
+
     # ── Per-turn primary restoration ─────────────────────────────────────
 
     def _restore_primary_runtime(self) -> bool:
