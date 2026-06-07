@@ -747,10 +747,11 @@ These must not be merged mechanically:
 - `100536134` / `db96fc60d`: topic recovery/session identity changes.
 - `655090b3d` / `6a2e3c2d2` / `fd09b2c55`: startup risk warnings and adapter
   access-policy changes, including default-deny semantics.
-- `08c0b2241` / `781604ce4` and the remaining non-Windows-path portions of
-  `51d165a8e`: media extraction and tool-result scan semantics, adjacent to
-  gateway ledger event attribution. The isolated Windows absolute path regex
-  slice from `51d165a8e` was absorbed separately on 2026-06-07.
+- Media extraction and tool-result scan semantics were split after this
+  initial deferral. The Windows path regex slice, extension allowlist, and
+  current-turn tool-result scan were absorbed separately on 2026-06-07. Any
+  further media/delivery outcome changes remain protected and must still be
+  reviewed against gateway ledger event attribution.
 - `45bc65abb`: delivery outcome semantics for silence narration filtering.
 - `0bfe19ba1` / `44f3e5186`: nested gateway platform config handling.
 - `2b16b756a`: post-interrupt model recovery and fallback status behavior.
@@ -764,9 +765,12 @@ These must not be merged mechanically:
 - `41ff6e593`, `7e958dafc`, `4e4984a`, `95cf8f984`, `a22c25000`: Nous
   JWT-only behavior. Defer until there is an explicit decision to remove this
   fork's retained legacy Nous session-key inference paths.
-- `5ad2b4c6d`, `97ecfa0fc`, `4fa20f9a8`, `a7421dc7d`, `38695254f`,
-  `904c0b479`, `794519c6a`: session/state/SQLite/FTS work. Valuable, but should
-  be tested against the current session database and migration contracts.
+- `5ad2b4c6d`, `97ecfa0fc`, `4fa20f9a8`, `a7421dc7d`: remaining
+  session/state/SQLite behavior. The FTS optimize pair (`38695254f`,
+  `904c0b479`) and mid-session model persistence (`794519c6a`, with its
+  follow-up) were later absorbed separately with focused tests. Keep any
+  no-FTS5 degradation behavior separate because it changes failure/degraded
+  state semantics.
 - `a30480bd2`, `db2ce9e7d`, `e38b0b55d`, `020601d41`, `56b8dccf2`,
   `42bbd221e`: compression/resume behavior. Port as a conversation-compression
   batch, not together with gateway runtime changes.
@@ -786,15 +790,16 @@ being accepted.
 The next pass should stay narrow: one behavior domain, one targeted test set,
 and no broad `origin/main` merge. Recommended order:
 
-1. `08c0b2241`, `781604ce4`, and the remaining non-Windows-path portions of
-   `51d165a8e`: media extraction and tool-result scan semantics need a
-   separate gateway ledger attribution review.
-2. `5ad2b4c6d`, `97ecfa0fc`, `4fa20f9a8`, `a7421dc7d`, `38695254f`,
-   `904c0b479`, `794519c6a`: session/state/SQLite/FTS work should be reviewed
-   as a state-schema and migration batch.
-3. `a30480bd2`, `db2ce9e7d`, `e38b0b55d`, `020601d41`, `56b8dccf2`,
+1. `a30480bd2`, `db2ce9e7d`, `e38b0b55d`, `020601d41`, `56b8dccf2`,
    `42bbd221e`: compression/resume behavior should be reviewed as a
    conversation-compression batch.
+2. Remaining `5ad2b4c6d`, `97ecfa0fc`, `4fa20f9a8`, `a7421dc7d`
+   session/state behavior should be reviewed as a state-schema and migration
+   batch, excluding already absorbed FTS optimize and model-switch persistence
+   work.
+3. Any additional media/delivery outcome commits beyond the already absorbed
+   Windows path, extension allowlist, and current-turn tool-result scan pieces
+   need a separate gateway ledger attribution review.
 
 The Docker reuse/orphan-reaper group, tool-search base/scoping group,
 Nous JWT-only decision group, session/state group, compression/resume group,
@@ -3320,9 +3325,9 @@ Remaining upstream groups reviewed and left out of blind absorption:
   eligible directionally, but must be absorbed as a focused stack rather than a
   blind cherry-pick, preserving plugin-owned provider behavior and avoiding
   availability scans that refresh Nous tokens.
-- State FTS optimize (`38695254`, `904c0b47`): safe candidate for later
-  focused absorption. Keep separate from no-FTS5 degradation commits because
-  those alter failure/degradation semantics.
+- State FTS optimize (`38695254`, `904c0b47`): absorbed later as a focused
+  maintenance change. The no-FTS5 degradation commits remain separate because
+  they alter failure/degraded-state semantics.
 - Kanban SQLite/activity/config groups: split. `40217aa1` and `ae6817f7` are
   already equivalent/absorbed; `3b6347af` and `69b74c15` remain partial/defer
   because config/default-assignee pieces exist but CLI dispatch/per-profile
@@ -3344,8 +3349,9 @@ Validation required if these are later absorbed:
   toolset/subagent/gateway sessions, and plugin visibility/approval checks.
 - Video generation: FAL plugin tests, managed media gateway tests, video
   surface matrix, tools config, and Nous subscription/setup tests.
-- State FTS optimize: `tests/test_hermes_state.py` vacuum/FTS optimize subset
-  plus a temp-`HERMES_HOME` CLI smoke for `hermes sessions optimize`.
+- Remaining state/schema behavior: focused `tests/test_hermes_state.py`
+  subsets plus any CLI smoke tied to the specific state migration or command
+  being absorbed.
 - Kanban: `tests/hermes_cli/test_kanban*.py`, dashboard/plugin worker-run
   tests, and run-agent iteration-exhaustion expectations.
 
@@ -4192,6 +4198,76 @@ git diff --check -- plugins/kanban/dashboard/plugin_api.py tests/plugins/test_ka
 
 Result: exit `0`.
 
+## 2026-06-07 — Honcho self-hosted hardening absorption
+
+Upstream commit reviewed and selectively absorbed:
+
+- `827ce602dbed199f665f3975b61303aace2963ea` — Honcho self-hosted hardening.
+
+Local result:
+
+- Absorbed as `67acb04c4`.
+- `HonchoClientConfig` consumers now strip a trailing `/vN` API-version path
+  from self-hosted `baseUrl` before SDK initialization while preserving
+  non-version paths such as `/api`.
+- `hermes honcho setup` local mode keeps the root `apiKey` for cloud/hybrid
+  use and stores an explicitly entered local JWT/bearer token under the active
+  host block instead of copying the cloud key into local auth.
+- Provider config saves for Honcho, Mem0, Hindsight, and Supermemory now use
+  `atomic_json_write(..., mode=0o600)` so files containing API keys are written
+  atomically with owner-only permissions.
+- Gateway agent-cache busting now includes `memory.provider` and reads Honcho
+  identity-mapping config only when the active memory provider is Honcho.
+- `hermes memory setup <provider>` routes directly to the named provider setup.
+- The upstream underscore host-key migration (`hermes.<profile>` to
+  `hermes_<profile>`) and related docs/tests were intentionally not absorbed.
+  This fork keeps the existing host-key naming contract until a separate
+  migration review exists.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/honcho_plugin/test_client.py tests/honcho_plugin/test_cli.py -q -rs -k "BaseUrlNormalization or local_setup_stores_jwt"
+```
+
+Result: `3 passed, 108 deselected`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_atomic_json_write.py tests/test_honcho_client_config.py tests/plugins/memory/test_mem0_v2.py tests/plugins/memory/test_supermemory_provider.py tests/plugins/memory/test_hindsight_provider.py -q -rs -k "owner_only_permissions or explicit_mode"
+```
+
+Result: `5 passed, 165 deselected`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_agent_cache.py tests/hermes_cli/test_memory_setup_provider_arg.py -q -rs -k "memory_provider or honcho_config or memory_setup_provider"
+```
+
+Result: `4 passed, 61 deselected`.
+
+```bash
+uv run --extra dev pytest tests/honcho_plugin/test_client.py tests/honcho_plugin/test_cli.py tests/gateway/test_agent_cache.py tests/honcho_plugin/test_pin_peer_name.py tests/test_honcho_client_config.py tests/plugins/memory/test_mem0_v2.py tests/plugins/memory/test_supermemory_provider.py tests/plugins/memory/test_hindsight_provider.py tests/hermes_cli/test_memory_setup_provider_arg.py -q -rs
+```
+
+Result: `374 passed`.
+
+```bash
+uv run --extra dev ruff check utils.py plugins/memory/honcho/__init__.py plugins/memory/honcho/client.py plugins/memory/honcho/cli.py plugins/memory/mem0/__init__.py plugins/memory/hindsight/__init__.py plugins/memory/supermemory/__init__.py gateway/run.py hermes_cli/main.py hermes_cli/memory_setup.py tests/honcho_plugin/test_client.py tests/honcho_plugin/test_cli.py tests/gateway/test_agent_cache.py tests/honcho_plugin/test_pin_peer_name.py tests/hermes_cli/test_atomic_json_write.py tests/hermes_cli/test_memory_setup_provider_arg.py tests/test_honcho_client_config.py tests/plugins/memory/test_mem0_v2.py tests/plugins/memory/test_supermemory_provider.py tests/plugins/memory/test_hindsight_provider.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile utils.py plugins/memory/honcho/__init__.py plugins/memory/honcho/client.py plugins/memory/honcho/cli.py plugins/memory/mem0/__init__.py plugins/memory/hindsight/__init__.py plugins/memory/supermemory/__init__.py gateway/run.py hermes_cli/main.py hermes_cli/memory_setup.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --check -- utils.py plugins/memory/honcho/__init__.py plugins/memory/honcho/client.py plugins/memory/honcho/cli.py plugins/memory/mem0/__init__.py plugins/memory/hindsight/__init__.py plugins/memory/supermemory/__init__.py gateway/run.py hermes_cli/main.py hermes_cli/memory_setup.py tests/honcho_plugin/test_client.py tests/honcho_plugin/test_cli.py tests/gateway/test_agent_cache.py tests/honcho_plugin/test_pin_peer_name.py tests/hermes_cli/test_atomic_json_write.py tests/hermes_cli/test_memory_setup_provider_arg.py tests/test_honcho_client_config.py tests/plugins/memory/test_mem0_v2.py tests/plugins/memory/test_supermemory_provider.py tests/plugins/memory/test_hindsight_provider.py
+```
+
+Result: exit `0`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work
@@ -4245,15 +4321,6 @@ Deferred:
   behavior and Telegram picker callbacks. Record-only until provider grouping
   is reviewed with callback authorization, current channel availability, and
   the fork's canonical provider set.
-
-Deferred for selective future port:
-
-- `827ce602dbed199f665f3975b61303aace2963ea` — Honcho self-hosted hardening.
-  The upstream changes are valuable, especially base URL normalization, local
-  bearer/JWT support, owner-only provider config writes, and provider-scoped
-  cache busting. The patch does not cleanly apply on this fork and spans 25
-  files, including docs and plugin tests. It should be ported selectively as a
-  dedicated memory-provider hardening change instead of broad-cherry-picked.
 
 Record-only:
 
