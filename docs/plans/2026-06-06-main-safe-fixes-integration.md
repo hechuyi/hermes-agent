@@ -3415,3 +3415,99 @@ Result: exit `0`.
 
 `git diff --check -- hermes_state.py hermes_cli/main.py tests/test_hermes_state.py tests/hermes_cli/test_sessions_optimize.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Small upstream fixes already equivalent locally
+
+Upstream commits reviewed and found already present/equivalent:
+
+- `edfdc776649cd50637d8aa3a35b584c4458416ef` — bare numeric input after
+  `/resume` selects from the recent-session list.
+- `4fd8521e44e920fbf545b408ea8727423436cad4` — isolate
+  `completion_queue` in the TUI gateway poller requeue test.
+- `54aa4db1de76a7c4bb02c8a7f7411727384b8fea` — remove Hermes-managed
+  `node`/`npm`/`npx` symlinks during uninstall.
+- `04de307d62277998ee8e52dfa4da59b539917721` — repaint the input area after
+  inline `/steer` and `/model` submits.
+- `897f9533ed511345d0a729af507abdb2308cfbcb` — keep CLI context display in
+  sync with the preflight token estimate.
+- `2062a84000a666c449b9fb7768a4b4e4718e2c88` — omit `max_tokens` by default
+  for OpenAI-compatible auxiliary calls, keeping it only for Anthropic
+  Messages-wire endpoints where it is required.
+
+Local result:
+
+- No code change was required. The current fork already contains the relevant
+  CLI/TUI/uninstall/compression/auxiliary implementations and regression
+  tests.
+- `2062a840` does not alter the controlled model catalog; its tests exercise
+  wire-format behavior only, including the fork's `gpt-5.5` runtime path.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/cli/test_cli_resume_command.py -q -rs -k PendingResumeNumberedSelection
+```
+
+Result: `7 passed, 5 deselected`.
+
+```bash
+uv run --extra dev pytest tests/test_tui_gateway_server.py -q -rs -k notification_poller_requeues_when_busy
+```
+
+Result: `1 passed, 185 deselected`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_uninstall_node_symlinks.py -q -rs
+```
+
+Result: `6 passed`.
+
+```bash
+uv run --extra dev pytest tests/cli/test_steer_inline_repaint_34569.py -q -rs
+```
+
+Result: `1 passed`.
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_413_compression.py -q -rs -k "preflight_seeds_display_tokens or preflight_seed_only_revises_upward"
+```
+
+Result: `1 passed, 17 deselected, 1 warning` (`discord.player` imports
+deprecated `audioop` under Python 3.11).
+
+```bash
+uv run --extra dev pytest tests/agent/test_auxiliary_client.py tests/agent/test_unsupported_temperature_retry.py -q -rs -k "BuildCallKwargsMaxTokens or unsupported_temperature"
+```
+
+Result: `27 passed, 183 deselected, 1 warning` (`discord.player` imports
+deprecated `audioop` under Python 3.11).
+
+## 2026-06-07 — Messaging and cron safety equivalences
+
+Upstream commits reviewed and classified:
+
+- `9405cdc8dd0347fee65b554e3aba0d2eab7a7b7f` — ntfy echo-loop prevention by
+  tagging outgoing messages: already equivalent locally.
+- `8055d0f09246555d9a7d9b95295def612e500c70` — ntfy echo-tag regression
+  coverage and standalone send tagging: already equivalent locally.
+- `91b174038c7e2bf6cde056da05f8f90673e8c87a` — bounded Feishu
+  `_chat_locks`: already equivalent directionally, but the fork keeps the
+  safer local implementation from `3cef0b1df`, which avoids evicting a held
+  chat lock and thereby preserves Feishu per-chat serialization under P0
+  load.
+- `d473e7c9385e04c975b32d2d2cde3a02ba7d4f47` — exclude cron `jobs.json`
+  registry from disk-cleanup classification: already equivalent locally.
+- `3845d86b9330d8952fc1e9534d438f62ad1d53e5` — restore `jobs.json` emptied
+  by update config migration: deferred. This is backup/recovery code, and the
+  upstream shape needs typed result states/reason codes before absorption so
+  missing restore material, unknown counts, copy failures, and safety-net
+  exceptions cannot collapse into a healthy no-op.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_feishu.py::TestChatLockEviction tests/gateway/test_ntfy_plugin.py tests/plugins/test_disk_cleanup_plugin.py::TestGuessCategory -q -rs
+```
+
+Result: `96 passed, 6 warnings` (Feishu/Lark and ntfy test-environment
+deprecation/runtime warnings only).
