@@ -2912,3 +2912,40 @@ python -m py_compile tools/voice_mode.py tests/tools/test_voice_mode.py
 ```
 
 Result: exit `0`.
+
+## 2026-06-07 — xAI OAuth 403 bad-credentials equivalence
+
+Upstream commit reviewed and found already present/equivalent:
+
+- `f6a2ba62611dd92c659df683060174d14425913a` — treat xAI OAuth
+  `403 unauthenticated:bad-credentials` as an auth error and refresh
+  `xai-oauth` credentials.
+
+Local result:
+
+- No code change needed. `agent/auxiliary_client.py` already detects xAI
+  403 bad-credentials as auth failure, maps `api.x.ai` to `xai-oauth`, and
+  refreshes `xai-oauth` via pool credentials before falling back to the
+  singleton resolver.
+- `tests/agent/test_auxiliary_client_xai_oauth_recovery.py` already covers
+  auth-error detection, recoverable provider mapping, and refresh fallback.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/agent/test_auxiliary_client_xai_oauth_recovery.py -q -rs
+```
+
+Result: `8 passed`.
+
+```bash
+uv run --extra dev ruff check agent/auxiliary_client.py tests/agent/test_auxiliary_client_xai_oauth_recovery.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile agent/auxiliary_client.py tests/agent/test_auxiliary_client_xai_oauth_recovery.py
+```
+
+Result: exit `0`.
