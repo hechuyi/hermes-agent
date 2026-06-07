@@ -510,6 +510,31 @@ watchdog timing, and tests. It does not change gateway event ledgers, media
 extraction, delivery outcomes, provider routing, model catalogs, Nous legacy
 authentication, or the fork's `5.5` customizations.
 
+### Low-risk documentation cleanup batch
+
+The following documentation and docstring-only fixes were absorbed in local
+commit `395056250`:
+
+- `ae9dfa510e668552a804811d18017d1ad71ce157`
+- `0673638560a43b1affce9ceecdc60c2758aae7c0`
+- `6891e05e78b67beac3ef4f2f5acbdbd24f4e9e7b`
+- `d86710528a0245e2638a801f46551dad35230d9b`
+- `03bdeaa87697dbfc12d3733aa904a2b3a85b4653`
+- `053969fd533a2aea9fe402cb441b531164003f6d`
+- `3f0d44af8ae380996057b620afeae258af830634`
+
+This batch fixes wording, dead documentation links, GitHub organization links,
+session image base paths, SimpleX download URL shape, invalid `hermes config
+get` examples, and Browserbase timeout units in docs/docstrings. It does not
+change runtime behavior, gateway event ledgers, media extraction, delivery
+outcomes, provider routing, model catalogs, Nous legacy authentication, or the
+fork's `5.5` customizations.
+
+`988cf1743be74e939241e9cbbb7695bda0fcc606` was intentionally not absorbed:
+the patch only replaces an external video destination in quickstart
+documentation, which is out of scope under the workspace's advertising and
+external-link injection discipline.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -1094,6 +1119,22 @@ uv run --extra dev ruff check agent/chat_completion_helpers.py cli.py hermes_cli
 ```
 
 Result: `All checks passed!`.
+
+`git diff --check` and `git diff --cached --check` produced no output.
+
+Low-risk documentation cleanup batch verification:
+
+```bash
+uv run --extra dev ruff check plugins/browser/browserbase/provider.py tools/browser_tool.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile plugins/browser/browserbase/provider.py tools/browser_tool.py
+```
+
+Result: exit `0`.
 
 `git diff --check` and `git diff --cached --check` produced no output.
 
