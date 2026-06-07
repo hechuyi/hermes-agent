@@ -2299,3 +2299,69 @@ Result: exit `0`.
 
 `git diff --check -- agent/prompt_builder.py skills/devops/kanban-worker/SKILL.md tests/tools/test_kanban_tools.py scripts/release.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Codex Responses failed-error code formatting
+
+Upstream commit reviewed:
+
+- `a4d8f0f62a7e91650f542baf477779188f658917` — mixed commit containing
+  Codex Responses failed-error formatting plus universal task-completion
+  prompt guidance and a local Python toolchain probe.
+
+Local result:
+
+- Partially absorbed as `7f16fb722`.
+- Absorbed only the Codex failed-error formatting slice: both
+  `_normalize_codex_response()` and the Codex app-server session now use a
+  shared `_format_responses_error()` helper so structured `response.error.code`
+  is preserved in user-visible failures such as
+  `rate_limit_exceeded: Slow down`.
+- Did not absorb the universal task-completion guidance, `agent.*` config
+  toggles, `tools/env_probe.py`, or prompt-build env-probe injection from the
+  same upstream commit in this node. That portion changes global system-prompt
+  shape and local environment probing behavior, so it remains for a separate
+  review rather than being bundled with this narrow error-reporting fix.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/agent/test_codex_responses_adapter.py -q -rs -k "format_responses_error or failed_status_preserves_error_code"
+```
+
+Result before the code change: collection failed with
+`ImportError: cannot import name '_format_responses_error'`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/agent/test_codex_responses_adapter.py -q -rs -k "format_responses_error or failed_status_preserves_error_code"
+```
+
+Result: `3 passed, 2 deselected`.
+
+```bash
+uv run --extra dev pytest tests/agent/test_codex_responses_adapter.py -q -rs
+```
+
+Result: `5 passed`.
+
+```bash
+uv run --extra dev pytest tests/agent/transports/test_codex_app_server_session.py tests/agent/transports/test_codex_app_server_runtime.py -q -rs
+```
+
+Result: `84 passed`.
+
+```bash
+uv run --extra dev ruff check agent/codex_responses_adapter.py agent/transports/codex_app_server_session.py tests/agent/test_codex_responses_adapter.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile agent/codex_responses_adapter.py agent/transports/codex_app_server_session.py tests/agent/test_codex_responses_adapter.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- agent/codex_responses_adapter.py agent/transports/codex_app_server_session.py tests/agent/test_codex_responses_adapter.py`
+produced no output before the code commit.
