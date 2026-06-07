@@ -1879,3 +1879,71 @@ Result: exit `0`.
 
 `git diff --check -- agent/context_compressor.py tests/agent/test_context_compressor.py`
 produced no output for the follow-up patch.
+
+## 2026-06-07 — preflight display-token synchronization
+
+Upstream commits reviewed:
+
+- `897f9533ed511345d0a729af507abdb2308cfbcb` — mixed commit containing
+  `/compress here` feature work plus the narrower fix that keeps CLI context
+  display in sync with the fresh preflight token estimate.
+- `9dbc3722aeb3fba31adfa181c4b05049d8c997bf` — test-only fix for an upstream
+  `large-rough-growth` preflight test that used an exhausted two-element
+  `side_effect` list.
+
+Local result:
+
+- Absorbed only the display-token synchronization slice from `897f9533` in
+  `684082c03`.
+- Did not absorb `/compress here`, `hermes_cli/partial_compress.py`, CLI
+  slash-command routing, gateway routing, or boundary-aware compression feature
+  work from the same upstream area.
+- The local test suite does not contain the upstream `large-rough-growth`
+  test shape targeted by `9dbc3722`; that upstream commit was reviewed and is
+  not directly applicable here.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_413_compression.py -q -rs -k "preflight_seeds_display_tokens_when_compression_aborts or preflight_seed_only_revises_display_tokens_upward"
+```
+
+Result before the code change: `1 failed, 1 passed, 16 deselected`; the stale
+display value remained `74_400` instead of being revised to the fresh preflight
+estimate `144_669`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_413_compression.py -q -rs -k "preflight_seeds_display_tokens_when_compression_aborts or preflight_seed_only_revises_display_tokens_upward"
+```
+
+Result: `2 passed, 16 deselected, 1 warning` (`discord.player` `audioop`
+deprecation).
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_413_compression.py -q -rs
+```
+
+Result: `18 passed, 1 warning` (`discord.player` `audioop` deprecation).
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_compression_boundary.py tests/run_agent/test_compression_boundary_hook.py tests/run_agent/test_compression_persistence.py tests/run_agent/test_compression_trigger_excludes_reasoning.py -q -rs
+```
+
+Result: `18 passed, 1 warning` (`discord.player` `audioop` deprecation).
+
+```bash
+uv run --extra dev ruff check agent/conversation_loop.py tests/run_agent/test_413_compression.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile agent/conversation_loop.py tests/run_agent/test_413_compression.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- agent/conversation_loop.py tests/run_agent/test_413_compression.py`
+produced no output.
