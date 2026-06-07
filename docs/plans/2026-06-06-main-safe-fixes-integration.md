@@ -3241,3 +3241,44 @@ Result: exit `0`.
 
 `git diff --check -- scripts/release.py` produced no output before the metadata
 commit.
+
+## 2026-06-07 — OpenCodeGo Mimo max_tokens equivalence
+
+Upstream commit reviewed and found already present/equivalent:
+
+- `8cf6b3da9d157bfced382cf139a9613eff90c006` — cap OpenCodeGo
+  `mimo-v2.5-pro` `max_tokens` at `131072`.
+
+Local result:
+
+- No code change needed. `ProviderProfile.get_max_tokens(model)` already
+  exists, `ChatCompletionsTransport` already calls it before applying the
+  profile default cap, and `OpenCodeGoProfile` already maps normalized
+  `mimo-v2.5-pro` to `131_072`.
+- Existing tests cover prefixed and unprefixed model names, transport
+  propagation, explicit user max-token precedence, and unaffected OpenCodeGo
+  models.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/plugins/model_providers/test_opencode_go_profile.py tests/agent/transports/test_chat_completions.py tests/providers/test_provider_profiles.py -q -rs -k "opencode or max_tokens or default_max_tokens"
+```
+
+Result: `40 passed, 104 deselected, 1 warning` (`discord.player` imports
+deprecated `audioop` under Python 3.11).
+
+```bash
+uv run --extra dev ruff check providers/base.py plugins/model-providers/opencode-zen/__init__.py agent/transports/chat_completions.py tests/plugins/model_providers/test_opencode_go_profile.py tests/agent/transports/test_chat_completions.py tests/providers/test_provider_profiles.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile providers/base.py plugins/model-providers/opencode-zen/__init__.py agent/transports/chat_completions.py tests/plugins/model_providers/test_opencode_go_profile.py tests/agent/transports/test_chat_completions.py tests/providers/test_provider_profiles.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- providers/base.py plugins/model-providers/opencode-zen/__init__.py agent/transports/chat_completions.py tests/plugins/model_providers/test_opencode_go_profile.py tests/agent/transports/test_chat_completions.py tests/providers/test_provider_profiles.py`
+produced no output.
