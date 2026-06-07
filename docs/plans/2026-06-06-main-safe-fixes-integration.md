@@ -3617,3 +3617,57 @@ python -m py_compile tools/vision_tools.py tools/browser_tool.py tests/tools/tes
 ```
 
 Result: exit `0`.
+
+## 2026-06-07 — Nous gateway media defaults absorption
+
+Upstream commit reviewed and absorbed with fork-local adaptation:
+
+- `aa32edcac5ee3c3359f2bf8ba2aa372f40787975` — write config for
+  `image_gen` and `video_gen` in `apply_nous_managed_defaults`.
+
+Local result:
+
+- Absorbed as `1999784`.
+- `apply_nous_managed_defaults()` now writes `image_gen.use_gateway: true`
+  instead of only returning `image_gen` in the changed set.
+- `video_gen` is now included in managed gateway eligibility, direct FAL-key
+  detection, gateway opt-in detection, `apply_gateway_defaults()`, and Nous
+  managed defaults.
+- `video_gen` defaults write `provider: fal` plus `use_gateway: true`, while
+  preserving existing `video_gen` keys such as a selected model.
+- Direct FAL credentials still take precedence; with a configured FAL key,
+  `image_gen`/`video_gen` are not rewritten.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_nous_subscription.py -q -rs -k "gateway_eligible_tools_ignores_quoted_false_opt_in or apply_nous_managed_defaults"
+```
+
+Result before code change: `4 failed, 1 passed, 8 deselected`; failures
+showed missing `video_gen` eligibility, missing `image_gen` config writes, and
+missing `video_gen` config writes.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_nous_subscription.py tests/hermes_cli/test_tools_config.py -q -rs -k "gateway_eligible_tools_ignores_quoted_false_opt_in or apply_nous_managed_defaults or first_install_nous_auto_configures"
+```
+
+Result: `7 passed, 90 deselected, 1 warning` (`discord.player` imports
+deprecated `audioop` under Python 3.11).
+
+```bash
+uv run --extra dev ruff check hermes_cli/nous_subscription.py tests/hermes_cli/test_nous_subscription.py tests/hermes_cli/test_tools_config.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile hermes_cli/nous_subscription.py tests/hermes_cli/test_nous_subscription.py tests/hermes_cli/test_tools_config.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- hermes_cli/nous_subscription.py tests/hermes_cli/test_nous_subscription.py tests/hermes_cli/test_tools_config.py`
+produced no output before the code commit.
