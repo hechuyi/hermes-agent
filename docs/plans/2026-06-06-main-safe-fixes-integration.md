@@ -4127,3 +4127,62 @@ git diff --check -- run_agent.py tools/kanban_tools.py agent/conversation_loop.p
 ```
 
 Result: exit `0`.
+
+## 2026-06-07 — Kanban run terminate endpoint absorption
+
+Upstream commit reviewed and absorbed:
+
+- `9d4fda9952019fa7026232b76296d9277720457a` — add
+  `POST /runs/{run_id}/terminate` for Kanban dashboard worker runs.
+
+Local result:
+
+- Absorbed as `a151b8f`.
+- Added a dashboard plugin endpoint that resolves `run_id -> task_id` and
+  delegates to existing `kanban_db.reclaim_task()` semantics, preserving the
+  established SIGTERM/SIGKILL escalation, event logging, and run bookkeeping.
+- This does not introduce a separate process-kill implementation. It is scoped
+  to the existing dashboard plugin API surface, which is mounted under the
+  dashboard auth middleware in the real web server.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/plugins/test_kanban_worker_runs.py -q -rs -k terminate
+```
+
+Result after applying only the upstream tests: `4 failed, 1 passed, 11
+deselected`; the new POST route returned the generic 404 because the endpoint
+was absent.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/plugins/test_kanban_worker_runs.py -q -rs -k terminate
+```
+
+Result: `5 passed, 11 deselected`.
+
+```bash
+uv run --extra dev pytest tests/plugins/test_kanban_worker_runs.py -q -rs
+```
+
+Result: `16 passed`.
+
+```bash
+uv run --extra dev ruff check plugins/kanban/dashboard/plugin_api.py tests/plugins/test_kanban_worker_runs.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile plugins/kanban/dashboard/plugin_api.py tests/plugins/test_kanban_worker_runs.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --check -- plugins/kanban/dashboard/plugin_api.py tests/plugins/test_kanban_worker_runs.py
+```
+
+Result: exit `0`.
