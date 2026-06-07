@@ -3031,3 +3031,82 @@ Result: exit `0`.
 
 `git diff --check -- gateway/platforms/yuanbao.py tests/test_yuanbao_pipeline.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Mistral STT/TTS restoration absorption
+
+Upstream commit reviewed and absorbed:
+
+- `3a2c03061ce912ff7421286c8197f844b63bbefb` — restore Mistral/Voxtral STT
+  and TTS now that `mistralai==2.4.8` is available and the `2.4.6` advisory is
+  version-scoped.
+
+Local result:
+
+- Absorbed as `0554b6edf`.
+- Restored the `mistral` optional extra with exact pin `mistralai==2.4.8`, and
+  restored `tts.mistral` / `stt.mistral` lazy-dependency entries.
+- Preserved the lazy-install blast-radius rule: `mistral` remains out of
+  `[project.optional-dependencies].all`.
+- Restored explicit STT provider selection and auto-detect ordering as
+  `local > groq > openai > mistral > xai`, without passive auto-detect
+  lazy-installing the SDK.
+- Restored TTS dispatch to `_generate_mistral_tts()` and kept the security
+  advisory for the compromised `mistralai==2.4.6` release.
+- Updated plugin parity harnesses so Mistral is treated as a built-in provider,
+  not as a quarantine error.
+- Corrected stale xAI STT dotenv tests that expected a fake HTTP request to
+  receive `Bearer REDACTED`; the HTTP layer must receive the dummy test bearer
+  value to authenticate, while logs/errors remain the redaction boundary.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/test_project_metadata.py tests/tools/test_transcription_dotenv_fallback.py tests/tools/test_transcription_tools.py tests/tools/test_tts_mistral.py -q -rs -k "lazy_installable_extras_excluded_from_all or explicit_mistral_sees_dotenv or TestGetProviderMistral or auto_detect_mistral_preferred_over_xai or dispatcher_routes_to_mistral or dispatcher_returns_error_when_sdk_not_installed"
+```
+
+Result before code change: `5 failed, 7 passed, 116 deselected`. Failures were
+the expected Mistral quarantine short-circuit paths in STT provider selection
+and TTS dispatch.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/test_project_metadata.py tests/tools/test_transcription_dotenv_fallback.py tests/tools/test_transcription_tools.py tests/tools/test_tts_mistral.py -q -rs -k "lazy_installable_extras_excluded_from_all or explicit_mistral_sees_dotenv or TestGetProviderMistral or auto_detect_mistral_preferred_over_xai or dispatcher_routes_to_mistral or dispatcher_returns_error_when_sdk_not_installed"
+```
+
+Result: `12 passed, 116 deselected`.
+
+```bash
+uv run --extra dev pytest tests/test_project_metadata.py tests/tools/test_lazy_deps.py tests/tools/test_transcription_dotenv_fallback.py tests/tools/test_transcription_tools.py tests/tools/test_tts_mistral.py -q -rs
+```
+
+Result: `189 passed`.
+
+```bash
+uv lock --check
+```
+
+Result: `Resolved 216 packages`.
+
+```bash
+python tests/plugins/tts/check_parity_vs_main.py
+python tests/plugins/transcription/check_parity_vs_main.py
+```
+
+Result: both exited `0`; TTS reported `PARITY OK across 9 scenarios`, and STT
+reported `PARITY OK across 13 scenarios`.
+
+```bash
+uv run --extra dev ruff check hermes_cli/security_advisories.py hermes_cli/tools_config.py hermes_cli/web_server.py tools/lazy_deps.py tools/transcription_tools.py tools/tts_tool.py tests/test_project_metadata.py tests/tools/test_transcription_dotenv_fallback.py tests/tools/test_transcription_tools.py tests/tools/test_tts_mistral.py tests/plugins/tts/check_parity_vs_main.py tests/plugins/transcription/check_parity_vs_main.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile hermes_cli/security_advisories.py hermes_cli/tools_config.py hermes_cli/web_server.py tools/lazy_deps.py tools/transcription_tools.py tools/tts_tool.py tests/test_project_metadata.py tests/tools/test_transcription_dotenv_fallback.py tests/tools/test_transcription_tools.py tests/tools/test_tts_mistral.py tests/plugins/tts/check_parity_vs_main.py tests/plugins/transcription/check_parity_vs_main.py
+```
+
+Result: exit `0`.
+
+`git diff HEAD --check -- hermes_cli/security_advisories.py hermes_cli/tools_config.py hermes_cli/web_server.py pyproject.toml uv.lock tools/lazy_deps.py tools/transcription_tools.py tools/tts_tool.py tests/test_project_metadata.py tests/tools/test_transcription_dotenv_fallback.py tests/tools/test_transcription_tools.py tests/tools/test_tts_mistral.py tests/plugins/tts/check_parity_vs_main.py tests/plugins/transcription/check_parity_vs_main.py`
+produced no output before the code commit.
