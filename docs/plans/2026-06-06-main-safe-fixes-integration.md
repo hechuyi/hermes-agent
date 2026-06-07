@@ -1947,3 +1947,77 @@ Result: exit `0`.
 
 `git diff --check -- agent/conversation_loop.py tests/run_agent/test_413_compression.py`
 produced no output.
+
+## 2026-06-07 — session model switch DB persistence
+
+Upstream commits reviewed:
+
+- `794519c6ad4918b5c7a5475f8ddd0052be9a54e5` — persist mid-session
+  `/model` switches into `state.db` so dashboard/session metadata reflects the
+  current model rather than the first token-count backfill.
+- `e1945ff697ab300a09a8ac8ad081397e17994116` — follow-up test and defensive
+  `getattr(self, "_session_db", None)` handling for object-created gateway
+  test runners.
+
+Local result:
+
+- Absorbed as `1b401b7ac` with a local helper
+  `GatewayRunner._persist_session_model_switch()` shared by the interactive
+  picker and direct text `/model` command paths.
+- Added `SessionDB.update_session_model()` as an explicit overwrite API. This
+  preserves the existing `update_token_counts()` first-writer-wins model
+  backfill contract while making user-initiated model switches authoritative.
+- Added focused state and gateway regression tests.
+- Absorbed the `lengr@users.noreply.github.com` release author mapping from
+  the same upstream area.
+
+Red tests before implementation:
+
+```bash
+uv run --extra dev pytest tests/test_hermes_state.py -q -rs -k update_session_model_overwrites_existing
+```
+
+Result before the code change: `1 failed, 266 deselected`;
+`SessionDB.update_session_model` did not exist.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_model_command_flat_string_config.py -q -rs -k model_session_switch_persists_session_model_to_db
+```
+
+Result before the gateway change: `1 failed, 3 deselected`; the direct
+`/model` command did not call `update_session_model`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/test_hermes_state.py -q -rs -k update_session_model_overwrites_existing
+```
+
+Result: `1 passed, 266 deselected`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_model_command_flat_string_config.py -q -rs -k model_session_switch_persists_session_model_to_db
+```
+
+Result: `1 passed, 3 deselected`.
+
+```bash
+uv run --extra dev pytest tests/test_hermes_state.py tests/gateway/test_model_command_flat_string_config.py tests/gateway/test_model_switch_persistence.py -q -rs
+```
+
+Result: `280 passed`.
+
+```bash
+uv run --extra dev ruff check hermes_state.py gateway/run.py tests/test_hermes_state.py tests/gateway/test_model_command_flat_string_config.py scripts/release.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile hermes_state.py gateway/run.py tests/test_hermes_state.py tests/gateway/test_model_command_flat_string_config.py scripts/release.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- hermes_state.py gateway/run.py tests/test_hermes_state.py tests/gateway/test_model_command_flat_string_config.py scripts/release.py`
+produced no output.
