@@ -3854,3 +3854,74 @@ Result: exit `0`; Python reported the existing `cli.py:11083` `return` in
 `finally` SyntaxWarning.
 
 `git diff --cached --check` produced no output before the code commit.
+
+## 2026-06-07 — Dashboard gated chat absorption
+
+Upstream commit reviewed and absorbed:
+
+- `1596bb287ea41a72b9807422115548a5247a0b58` — allow the dashboard Chat tab
+  to initialize in gated/OAuth mode when no loopback session token is injected.
+
+Local result:
+
+- Absorbed as `b5febb1`.
+- `ChatPage` no longer treats a missing `window.__HERMES_SESSION_TOKEN__` as
+  an error when `window.__HERMES_AUTH_REQUIRED__` is set. In that gated mode
+  the frontend proceeds to `buildWsAuthParam()`, which mints a single-use
+  WebSocket ticket through the existing authenticated cookie path.
+- The change is frontend-only and does not relax server-side WebSocket auth,
+  default-deny policy, bind-address restrictions, model selection, Nous auth,
+  or gateway lifecycle behavior.
+- Added a narrow static regression test for the two early frontend gates that
+  previously blocked the Chat tab before the WS ticket path could run.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/web/test_chat_page_gated_auth.py -q -rs
+```
+
+Result before code change: `2 failed`. The failures showed the missing
+`__HERMES_AUTH_REQUIRED__` check in both the banner initializer and the terminal
+initialization early-return block.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/web/test_chat_page_gated_auth.py -q -rs
+```
+
+Result: `2 passed`.
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_dashboard_auth_ws_auth.py -q -rs
+```
+
+Result: `21 passed, 1 warning`.
+
+```bash
+npm run build
+```
+
+Result: exit `0`; Vite reported its existing large-chunk warning.
+
+```bash
+npm exec -- eslint src/pages/ChatPage.tsx
+```
+
+Result: exit `0` with one pre-existing `react-hooks/exhaustive-deps` warning on
+the `resumeParam` channel memo.
+
+```bash
+npm run lint
+```
+
+Result: failed on pre-existing unrelated React lint errors in files outside
+this change, including `web/src/App.tsx`, switcher components, i18n modules, and
+several page components. No error was reported for this change.
+
+```bash
+git diff --check -- web/src/pages/ChatPage.tsx tests/web/test_chat_page_gated_auth.py
+```
+
+Result: exit `0`.
