@@ -658,6 +658,24 @@ This batch does not add, remove, or rename any model catalog entries, and it
 does not touch the fork's `5.5` customizations, gateway event ledgers, media
 extraction, delivery outcomes, or Nous legacy authentication.
 
+### API server run-completed transcript batch
+
+`1cb850b674796a53d6b3b669967b04a07e89a237`
+(`fix(api_server): emit per-turn transcript on run.completed`) was manually
+absorbed in local commit `61961bd12`.
+
+The local port adds an additive `messages` field to session-chat SSE
+`run.completed` events. The field contains this turn's assistant and tool
+messages in the same client-safe shape used by the session message API, so a
+client that missed intermediate assistant text during a tool-interleaved stream
+can reconcile without another `/messages` request. Existing clients that ignore
+the field continue to see the same event sequence and completion payload.
+
+This batch is limited to the API-server session streaming surface. It does not
+change Feishu or messaging-platform delivery, gateway event ledgers, media
+extraction, provider routing, model catalogs, Nous legacy authentication, or the
+fork's `5.5` customizations.
+
 ### Equivalent local coverage
 
 `38c4f8c3717518e81bc64765ab80f3192f6a113a`
@@ -1460,6 +1478,45 @@ Result: `All checks passed!`.
 
 ```bash
 uv run --extra dev python -m py_compile providers/base.py agent/transports/chat_completions.py plugins/model-providers/opencode-zen/__init__.py tests/plugins/model_providers/test_opencode_go_profile.py
+```
+
+Result: exit `0`.
+
+`git diff --check` produced no output.
+
+API server run-completed transcript batch verification:
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_session_api.py::test_session_chat_stream_run_completed_carries_turn_transcript -q -rs
+```
+
+Result before the code change: `1 failed`; `run.completed` had no `messages`
+field.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_session_api.py::test_session_chat_stream_run_completed_carries_turn_transcript -q -rs
+```
+
+Result: `1 passed`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_session_api.py -q -rs
+```
+
+Result: `10 passed`.
+
+```bash
+uv run --extra dev ruff check gateway/platforms/api_server.py tests/gateway/test_session_api.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile gateway/platforms/api_server.py tests/gateway/test_session_api.py
 ```
 
 Result: exit `0`.
