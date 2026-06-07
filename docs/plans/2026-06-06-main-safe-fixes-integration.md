@@ -2782,3 +2782,63 @@ Result: exit `0`.
 
 `git diff --check -- gateway/config.py plugins/platforms/discord/adapter.py tests/gateway/test_config.py`
 produced no output before the code commit.
+
+## 2026-06-07 — MEDIA rejection diagnosability absorption
+
+Upstream commit reviewed and absorbed:
+
+- `e28a668b40d3888fb69a624ef5fcb4dd59c9e5ff` — diagnosable `MEDIA:`
+  rejections, canonical cache roots, and null-path guards.
+
+Local result:
+
+- Absorbed as `b63f37f11`, preserving this branch's existing MEDIA extension
+  allowlist and Windows-path support.
+- `MEDIA_DELIVERY_SAFE_ROOTS` now explicitly includes canonical
+  `cache/{images,audio,videos,documents,screenshots}` roots alongside legacy
+  `*_cache` roots even when `get_hermes_dir()` resolves a cache variable to a
+  legacy directory.
+- Rejected `MEDIA:` and bare local file paths are logged with a sanitized,
+  single-line path, making operator diagnosis possible without allowing
+  model-emitted paths to forge log lines.
+- `validate_media_delivery_path()` and `extract_media()` tolerate crafted
+  `~\x00...` paths and continue processing the rest of the attachment batch.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_platform_base.py -q -rs -k "MediaDeliveryDiagnosability"
+```
+
+Result before code change: collection failed because `_log_safe_path` did not
+exist yet.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_platform_base.py -q -rs -k "MediaDeliveryDiagnosability"
+```
+
+Result: `5 passed, 117 deselected`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_platform_base.py tests/gateway/test_extract_local_files.py tests/gateway/test_tts_media_routing.py -q -rs
+```
+
+Result: `175 passed, 2 skipped`; both skips are the existing optional
+`aiohttp_socks` dependency in `tests/gateway/test_platform_base.py`.
+
+```bash
+uv run --extra dev ruff check gateway/platforms/base.py tests/gateway/test_platform_base.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile gateway/platforms/base.py tests/gateway/test_platform_base.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- gateway/platforms/base.py tests/gateway/test_platform_base.py`
+produced no output before the code commit.
