@@ -1892,6 +1892,20 @@ class TestPluginAPIAuth:
         resp = self.client.delete("/api/plugins/kanban/tasks/t_fake")
         assert resp.status_code == 401
 
+    def test_kanban_attachment_routes_require_auth(self):
+        """Attachment upload/download/delete routes stay behind plugin auth."""
+        upload = self.client.post(
+            "/api/plugins/kanban/tasks/t_fake/attachments",
+            files={"file": ("x.txt", b"x", "text/plain")},
+        )
+        assert upload.status_code == 401
+
+        download = self.client.get("/api/plugins/kanban/attachments/1")
+        assert download.status_code == 401
+
+        delete = self.client.delete("/api/plugins/kanban/attachments/1")
+        assert delete.status_code == 401
+
     def test_non_kanban_plugin_route_requires_auth(self):
         """Auth must be plugin-agnostic, not kanban-specific.
 
@@ -2450,4 +2464,3 @@ class TestDashboardPluginStaticAssetAllowlist:
         # 403 traversal-blocked OR 404 (depending on URL decode order)
         # — never 200.
         assert resp.status_code in (403, 404)
-

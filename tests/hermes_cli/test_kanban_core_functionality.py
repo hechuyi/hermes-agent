@@ -2780,6 +2780,33 @@ def test_default_spawn_auto_loads_kanban_worker_skill(kanban_home, monkeypatch):
     assert env.get("HERMES_PROFILE") == "some-profile"
 
 
+def test_default_spawn_exports_attachments_root(kanban_home, monkeypatch):
+    captured = {}
+
+    class FakeProc:
+        def __init__(self):
+            self.pid = 99999
+
+    def fake_popen(cmd, **kwargs):
+        captured["env"] = kwargs.get("env", {})
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="attachments root", assignee="some-profile")
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        assert kb._default_spawn(task, str(workspace)) == 99999
+    finally:
+        conn.close()
+
+    assert captured["env"].get("HERMES_KANBAN_ATTACHMENTS_ROOT") == str(
+        kb.attachments_root()
+    )
+
+
 def test_default_spawn_raises_terminal_timeout_to_task_runtime(kanban_home, monkeypatch):
     """A task runtime cap should raise the worker's terminal default.
 
