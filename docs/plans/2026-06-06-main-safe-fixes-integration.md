@@ -303,9 +303,10 @@ keeps mandatory `max_tokens`. Managed gateway availability checks now use a
 cached-token peek path and avoid synchronous Nous OAuth refresh, while actual
 gateway request/client paths still use the refresh-aware token reader.
 
-This batch does not modify curated model catalogs or the fork's `5.5`
-customizations. Nous JWT-only behavior remains deferred separately because this
-fork still intentionally retains legacy Nous session-key inference paths.
+This batch does not modify curated model catalogs or current local `5.5`
+channel availability. Nous JWT-only behavior remains deferred separately
+because this fork still intentionally retains legacy Nous session-key inference
+paths.
 
 ### xAI schema sanitizer batch
 
@@ -323,7 +324,7 @@ paths, and model switches therefore keep the original schema constraints.
 
 This batch does not change the sanitizer contract, provider routing, model
 catalogs, gateway event ledgers, media extraction, delivery outcomes, or the
-fork's `5.5` customizations.
+current local `5.5` channel availability.
 
 ### Agent summary strict-schema batch
 
@@ -342,7 +343,7 @@ reasoning bookkeeping for local state.
 This batch is limited to agent summary request sanitation. It does not change
 gateway event ledgers, media extraction, delivery outcomes, compression
 semantics, provider routing, model catalogs, Nous legacy authentication, or the
-fork's `5.5` customizations.
+current local `5.5` channel availability.
 
 ### Web plugin discovery batch
 
@@ -358,8 +359,8 @@ errors when a configured plugin-backed provider is available.
 
 This batch is limited to web tool dispatch registration. It does not change
 provider implementation behavior, gateway event ledgers, media extraction,
-delivery outcomes, model catalogs, Nous legacy authentication, or the fork's
-`5.5` customizations.
+delivery outcomes, model catalogs, Nous legacy authentication, or current local
+`5.5` channel availability.
 
 ### Tool executor interrupt cleanup batch
 
@@ -376,8 +377,8 @@ stale interrupt marker from poisoning the next tool scheduled on the same
 
 This batch is limited to agent tool executor cleanup. It does not change tool
 approval semantics, gateway event ledgers, media extraction, delivery outcomes,
-model catalogs, Nous legacy authentication, or the fork's `5.5`
-customizations.
+model catalogs, Nous legacy authentication, or current local `5.5` channel
+availability.
 
 ### Voice PipeWire audio-probe batch
 
@@ -394,8 +395,8 @@ but PortAudio cannot enumerate devices inside the container.
 
 This batch is limited to CLI voice environment detection. It does not change
 gateway voice-message handling, media extraction, delivery outcomes, provider
-routing, model catalogs, Nous legacy authentication, or the fork's `5.5`
-customizations.
+routing, model catalogs, Nous legacy authentication, or current local `5.5`
+channel availability.
 
 ### CLI MCP startup batch
 
@@ -412,7 +413,8 @@ without allowing slow or dead MCP servers to block interactive startup.
 
 This batch is limited to CLI startup and tool snapshot timing. It does not
 change gateway event ledgers, media extraction, delivery outcomes, Nous
-authentication behavior, model catalogs, or the fork's `5.5` customizations.
+authentication behavior, model catalogs, or current local `5.5` channel
+availability.
 
 ### Ghostty Ctrl+J newline batch
 
@@ -430,8 +432,8 @@ detection and treats bare LF as newline only in the preserved environments.
 
 This batch is limited to interactive input compatibility. It does not change
 gateway event ledgers, media extraction, delivery outcomes, provider routing,
-model catalogs, Nous legacy authentication, or the fork's `5.5`
-customizations.
+model catalogs, Nous legacy authentication, or current local `5.5` channel
+availability.
 
 ### TUI clipboard and CLI usability batch
 
@@ -460,7 +462,7 @@ interactive plugin picker.
 This batch is limited to interactive CLI/TUI usability and plugin-list
 presentation. It does not change gateway event ledgers, media extraction,
 delivery outcomes, provider routing, model catalogs, Nous legacy
-authentication, or the fork's `5.5` customizations.
+authentication, or current local `5.5` channel availability.
 
 ### UI diagnostics and Gmail casing batch
 
@@ -483,7 +485,7 @@ emitting conventional MIME header casing for sent/replied messages.
 This batch is limited to UI presentation, diagnostics, and Google Workspace
 skill helper behavior. It does not change gateway event ledgers, media
 extraction, delivery outcomes, provider routing, model catalogs, Nous legacy
-authentication, or the fork's `5.5` customizations.
+authentication, or current local `5.5` channel availability.
 
 ### Browser runtime and TUI gateway test-isolation batch
 
@@ -508,7 +510,7 @@ macOS fallback launch guidance and no-browser environments.
 This batch is limited to browser tool runtime configuration, Codex streaming
 watchdog timing, and tests. It does not change gateway event ledgers, media
 extraction, delivery outcomes, provider routing, model catalogs, Nous legacy
-authentication, or the fork's `5.5` customizations.
+authentication, or current local `5.5` channel availability.
 
 ### Low-risk documentation cleanup batch
 
@@ -528,7 +530,7 @@ session image base paths, SimpleX download URL shape, invalid `hermes config
 get` examples, and Browserbase timeout units in docs/docstrings. It does not
 change runtime behavior, gateway event ledgers, media extraction, delivery
 outcomes, provider routing, model catalogs, Nous legacy authentication, or the
-fork's `5.5` customizations.
+current local `5.5` channel availability.
 
 `988cf1743be74e939241e9cbbb7695bda0fcc606` was intentionally not absorbed:
 the patch only replaces an external video destination in quickstart
@@ -567,7 +569,7 @@ threshold wording. The only Python change is a docstring correction in
 `agent/redact.py`; Nix/config changes are option/example descriptions. It does
 not change runtime behavior, gateway event ledgers, media extraction, delivery
 outcomes, provider routing, model catalogs, Nous legacy authentication, or the
-fork's `5.5` customizations.
+current local `5.5` channel availability.
 
 ### CLI prompt-size and TUI MCP startup batch
 
@@ -589,7 +591,7 @@ build so fast-starting MCP servers can still land in the initial tool snapshot.
 This batch is limited to CLI diagnostics and TUI gateway MCP startup/tool
 snapshot timing. It does not change gateway event ledgers, media extraction,
 delivery outcomes, provider routing, model catalogs, Nous legacy
-authentication, or the fork's `5.5` customizations.
+authentication, or current local `5.5` channel availability.
 
 ### CLI process-title batch
 
@@ -603,8 +605,8 @@ back to platform libc calls for Linux and macOS, while swallowing failures so
 missing optional dependencies or unsupported libc calls cannot affect command
 startup. This is a cosmetic observability change only; it does not change
 gateway event ledgers, media extraction, delivery outcomes, provider routing,
-model catalogs, Nous legacy authentication, or the fork's `5.5`
-customizations.
+model catalogs, Nous legacy authentication, or current local `5.5` channel
+availability.
 
 ### Concurrent checkpoint guardrail batch
 
@@ -620,7 +622,8 @@ block evaluation and only when `block_result is None`.
 
 This is limited to agent tool-executor bookkeeping. It does not change gateway
 event ledgers, media extraction, delivery outcomes, provider routing, model
-catalogs, Nous legacy authentication, or the fork's `5.5` customizations.
+catalogs, Nous legacy authentication, or current local `5.5` channel
+availability.
 
 ### CI required-check gate batch
 
@@ -638,8 +641,8 @@ or skipped `changes` job cannot leave a required check pending.
 
 This batch is limited to GitHub Actions metadata. It does not change runtime
 behavior, gateway event ledgers, media extraction, delivery outcomes, provider
-routing, model catalogs, Nous legacy authentication, or the fork's `5.5`
-customizations.
+routing, model catalogs, Nous legacy authentication, or current local `5.5`
+channel availability.
 
 ### OpenCode Go MiMo max-tokens batch
 
@@ -655,8 +658,8 @@ a default `max_tokens` because the profile has no static default. Explicit user
 `max_tokens` still wins.
 
 This batch does not add, remove, or rename any model catalog entries, and it
-does not touch the fork's `5.5` customizations, gateway event ledgers, media
-extraction, delivery outcomes, or Nous legacy authentication.
+does not touch current local `5.5` channel availability, gateway event ledgers,
+media extraction, delivery outcomes, or Nous legacy authentication.
 
 ### API server run-completed transcript batch
 
@@ -674,7 +677,7 @@ the field continue to see the same event sequence and completion payload.
 This batch is limited to the API-server session streaming surface. It does not
 change Feishu or messaging-platform delivery, gateway event ledgers, media
 extraction, provider routing, model catalogs, Nous legacy authentication, or the
-fork's `5.5` customizations.
+current local `5.5` channel availability.
 
 ### Embedder environment-hint batch
 
@@ -694,7 +697,7 @@ The security env-strip portion in that upstream commit was already covered by
 the earlier configuration and security documentation batch; this entry records
 only the environment-hint hook. It does not change gateway event ledgers, media
 extraction, delivery outcomes, provider routing, model catalogs, Nous legacy
-authentication, or the fork's `5.5` customizations.
+authentication, or current local `5.5` channel availability.
 
 ### Equivalent local coverage
 
@@ -3156,12 +3159,13 @@ Local result:
   isolated fixes because existing-registration and light-mode tests both cover
   the behavior.
 - Remaining upstream commits in the same reviewed region that touch protected
-  surfaces stay deferred: `5e7c2ffa` model catalog changes conflict with the
-  `5.5`-only constraint; `41ff6e593` disables Nous legacy auth; `fd09b2c55`
-  changes gateway default-deny/access-control semantics; Docker lifecycle docs
-  around `3c6e70ae` need to stay aligned with this fork's Docker reuse/orphan
-  contract; `d04b3c193` / related video-generation commits touch managed
-  gateway behavior and remain separate-review items.
+  surfaces stay deferred: `5e7c2ffa` changes model catalog contents and should
+  be reviewed as explicit catalog churn, not justified by the current local
+  `5.5`-only channel availability; `41ff6e593` disables Nous legacy auth;
+  `fd09b2c55` changes gateway default-deny/access-control semantics; Docker
+  lifecycle docs around `3c6e70ae` need to stay aligned with this fork's Docker
+  reuse/orphan contract; `d04b3c193` / related video-generation commits touch
+  managed gateway behavior and remain separate-review items.
 
 Verification:
 
@@ -3299,8 +3303,9 @@ Remaining upstream groups reviewed and left out of blind absorption:
   legacy mode, mint/cache/retry behavior, and proxy fallback.
 - Model catalog changes (`f2d88c82`, `bc736ff5`, `5e7c2ffa`): split. Raw
   GitHub manifest fallback is already equivalent locally, but upstream model
-  list swaps remain deferred because the fork constraint is to keep the
-  controlled `5.5` model catalog and not add random catalog churn.
+  list swaps remain deferred as unrelated catalog churn. The current usable
+  channel set is locally `5.5`-only, but that is runtime availability rather
+  than a Hermes catalog policy.
 - Progressive tool disclosure / tool-search (`369075dc`, `7427b9d5`,
   `17097761`, `18c9e891`, `a87f0a82`): deferred for design review. This group
   changes MCP/plugin tool discovery and dispatch scoping and touches the Hermes
@@ -3440,7 +3445,7 @@ Local result:
   CLI/TUI/uninstall/compression/auxiliary implementations and regression
   tests.
 - `2062a840` does not alter the controlled model catalog; its tests exercise
-  wire-format behavior only, including the fork's `gpt-5.5` runtime path.
+  wire-format behavior only, including the local `gpt-5.5` runtime path.
 
 Verification:
 
@@ -4220,9 +4225,10 @@ Deferred:
   a dedicated path-containment, auth, retention, and remote-worker mount review
   before being safe for this fork.
 - `7b0915037c110ca10ff4da952bae2d0d786868ac` — deletes low-value
-  model-catalog mirror tests. The fork's model catalog is intentionally
-  constrained around `5.5`, so catalog guard tests are more valuable here than
-  upstream's cleanup.
+  model-catalog mirror tests. The current usable channel set is locally
+  `5.5`-only, but that is not a reason to weaken catalog guard coverage during
+  upstream reconciliation; catalog test deletion should wait for an explicit
+  catalog-policy review.
 - `5a72e82fd8175597a82d4599ae35d20b1fb8fc89` and
   `9d2571c86a7dae2bb526ca22233fe5309c23d53d` — `/agents` dashboard nudge UX
   changes in TUI/CLI delegation flows. Useful upstream UX, but nonessential to
@@ -4236,9 +4242,9 @@ Deferred:
   public-bind decision.
 - `93e6a05efc615bed00e6f4d5737d5ada5f54b020` — model-picker provider grouping.
   The grouping itself is display-oriented, but it touches model catalog/picker
-  behavior and Telegram picker callbacks near the fork's `5.5` model catalog
-  constraint. Record-only until provider grouping is reviewed with callback
-  authorization and the fork's canonical provider set.
+  behavior and Telegram picker callbacks. Record-only until provider grouping
+  is reviewed with callback authorization, current channel availability, and
+  the fork's canonical provider set.
 
 Deferred for selective future port:
 
