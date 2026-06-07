@@ -4694,6 +4694,79 @@ git diff --check
 
 Result: exit `0`.
 
+## 2026-06-07 — Preflight rough-estimate deferral absorption
+
+Upstream commits reviewed and manually absorbed:
+
+- `e38b0b55d` — avoid repeated preflight compaction caused by noisy
+  schema-heavy rough estimates after a compressed request has already fit
+  according to real provider usage.
+- `9dbc3722` — make the large-rough-growth regression test resilient to the
+  number of rough-estimate calls.
+
+Local result:
+
+- Absorbed as `b775a46bb`.
+- `ContextCompressor` now tracks the latest real provider prompt usage
+  separately from rough post-compression estimates:
+  `last_real_prompt_tokens`, `last_compression_rough_tokens`,
+  `last_rough_tokens_when_real_prompt_fit`, and
+  `awaiting_real_usage_after_compression`.
+- After compression, Hermes stores the post-compression rough estimate as
+  diagnostic state and sets `last_prompt_tokens = -1` until a real provider
+  usage report arrives. This prevents schema-heavy rough estimates from being
+  treated as if they were provider-reported prompt tokens.
+- Preflight compression now asks
+  `should_defer_preflight_to_real_usage(rough_tokens)` before
+  `should_compress()`. If the last real provider prompt fit under threshold and
+  the rough estimate has only grown modestly, Hermes skips the preflight
+  compaction for that turn.
+- Large rough growth still triggers preflight compression, preserving the
+  safety path for genuinely expanding conversations.
+- Post-tool compression treats `last_prompt_tokens == -1` as "no real usage
+  yet" instead of falling back to the rough estimator immediately after a
+  compression.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/agent/test_context_compressor.py tests/run_agent/test_413_compression.py -q -k "UpdateFromResponse or PreflightDeferral or compress_context_emits or preflight_defers or rough_growth" -rs
+```
+
+Result: `8 passed, 103 deselected, 1 warning` (`discord.player` importing
+deprecated `audioop`).
+
+```bash
+uv run --extra dev pytest tests/agent/test_context_compressor.py tests/run_agent/test_413_compression.py -q -rs
+```
+
+Result: `111 passed, 1 warning` (`discord.player` importing deprecated
+`audioop`).
+
+```bash
+uv run --extra dev pytest tests/agent/test_system_prompt_restore.py tests/test_cli_manual_compress.py -q -rs
+```
+
+Result: `11 passed`.
+
+```bash
+uv run --extra dev ruff check agent/context_compressor.py agent/context_engine.py agent/conversation_compression.py agent/conversation_loop.py tests/agent/test_context_compressor.py tests/run_agent/test_413_compression.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run python -m py_compile agent/context_compressor.py agent/context_engine.py agent/conversation_compression.py agent/conversation_loop.py tests/agent/test_context_compressor.py tests/run_agent/test_413_compression.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --check
+```
+
+Result: exit `0`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work
