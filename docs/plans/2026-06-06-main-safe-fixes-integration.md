@@ -485,6 +485,31 @@ skill helper behavior. It does not change gateway event ledgers, media
 extraction, delivery outcomes, provider routing, model catalogs, Nous legacy
 authentication, or the fork's `5.5` customizations.
 
+### Browser runtime and TUI gateway test-isolation batch
+
+The browser/Codex runtime and TUI gateway test-isolation batch was manually
+absorbed in local commit `ce4f6d805`:
+
+- `a0fc3df878e5d99125d3bbcbaeda6a4966e192c1`
+- `73d73f1f0d38ac856bc114b16c659830acdc2f6e`
+- `300140e006bd1e356db69772b5ba35914b9d4008`
+- `4fd8521e44e920fbf545b408ea8727423436cad4`
+
+Camofox page navigation can now optionally rewrite loopback page URLs to a
+Docker host alias while leaving the Camofox control URL unchanged. The Codex
+no-byte TTFB watchdog default is relaxed from 12 seconds to 120 seconds so
+subscription-backed requests are not killed during normal admission or prompt
+prefill. TUI gateway tests now avoid module reload teardown and isolate the
+process completion queue; the port also restores the JSON-RPC method registry
+from a snapshot during teardown so tests that monkeypatch `_methods` do not
+pollute later modules. A browser-manage test assertion was made portable across
+macOS fallback launch guidance and no-browser environments.
+
+This batch is limited to browser tool runtime configuration, Codex streaming
+watchdog timing, and tests. It does not change gateway event ledgers, media
+extraction, delivery outcomes, provider routing, model catalogs, Nous legacy
+authentication, or the fork's `5.5` customizations.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -1046,6 +1071,29 @@ cd web && npm run build
 Result: failed before build because local `web/node_modules` is absent and
 `tsc` was not found; this is an environment/dependency availability failure,
 not a TypeScript or CSS compilation result.
+
+`git diff --check` and `git diff --cached --check` produced no output.
+
+Browser runtime and TUI gateway test-isolation batch verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_browser_camofox.py tests/agent/test_codex_ttfb_watchdog.py -q -rs
+```
+
+Result: `37 passed, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/tui_gateway/test_goal_command.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_review_summary_callback.py tests/test_tui_gateway_server.py -q -rs
+```
+
+Result after restoring `_methods` from a fixture snapshot and making the
+browser-manage launch hint assertion platform-aware: `252 passed, 17 warnings`.
+
+```bash
+uv run --extra dev ruff check agent/chat_completion_helpers.py cli.py hermes_cli/config.py tools/browser_camofox.py tests/agent/test_codex_ttfb_watchdog.py tests/tools/test_browser_camofox.py tests/tui_gateway/test_goal_command.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_review_summary_callback.py tests/test_tui_gateway_server.py
+```
+
+Result: `All checks passed!`.
 
 `git diff --check` and `git diff --cached --check` produced no output.
 
