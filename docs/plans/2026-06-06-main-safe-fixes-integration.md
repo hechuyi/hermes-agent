@@ -1641,3 +1641,66 @@ uv run --extra dev ruff check agent/tool_executor.py tools/thread_context.py too
 Result: `All checks passed!`.
 
 `git diff --check` produced no output after the implementation batches.
+
+## 2026-06-07 — model catalog fallback chain
+
+Upstream commits reviewed:
+
+- `f2d88c820c841e9b2192e0158747ae9190745a23` — mixed change: add a
+  fallback fetch chain for `model-catalog.json`, and swap curated StepFun model
+  IDs in the in-repo/provider manifest lists.
+- `bc736ff5437bf73c9a762bd06a771408dbce711c` — test-only follow-up using
+  exact URL equality in fallback tests.
+
+Local result:
+
+- Absorbed the fallback fetch chain narrowly in `e1b621d88`, adding
+  `DEFAULT_CATALOG_FALLBACK_URLS`, `_fetch_manifest_with_fallback()`, and
+  routing `get_catalog()` through that helper.
+- Absorbed the exact URL equality test semantics from `bc736ff543`.
+- Did not absorb the curated model-list swap from `f2d88c820`; this fork's
+  model catalog/provider choices are protected separately, and the local diff
+  intentionally leaves `hermes_cli/models.py` and
+  `website/static/api/model-catalog.json` untouched.
+- Per-provider override URLs still use direct fetch semantics and do not
+  implicitly fall through to the default public catalog fallback chain.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_model_catalog.py -q -rs
+```
+
+Result before the code change: `5 failed, 23 passed`; the new fallback tests
+failed because `_fetch_manifest_with_fallback()` did not exist and
+`get_catalog()` still fetched only the primary URL.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_model_catalog.py -q -rs
+```
+
+Result: `28 passed`.
+
+```bash
+uv run --extra dev ruff check hermes_cli/model_catalog.py tests/hermes_cli/test_model_catalog.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile hermes_cli/model_catalog.py tests/hermes_cli/test_model_catalog.py
+```
+
+Result: exit `0`.
+
+Diff audit:
+
+```bash
+git diff -- hermes_cli/model_catalog.py tests/hermes_cli/test_model_catalog.py hermes_cli/models.py website/static/api/model-catalog.json
+```
+
+Result: diff included only `hermes_cli/model_catalog.py` and
+`tests/hermes_cli/test_model_catalog.py`; there were no local changes to
+`hermes_cli/models.py` or `website/static/api/model-catalog.json`.
