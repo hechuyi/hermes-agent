@@ -569,6 +569,28 @@ not change runtime behavior, gateway event ledgers, media extraction, delivery
 outcomes, provider routing, model catalogs, Nous legacy authentication, or the
 fork's `5.5` customizations.
 
+### CLI prompt-size and TUI MCP startup batch
+
+The prompt-size diagnostic and TUI MCP startup batch was absorbed in local
+commit `b43f34f42`:
+
+- `61268ff7a9be93673361e433cbf2e775798a13ae`
+- `cbf851ae1d7251708eed16013f49e47e665d2c0f`
+
+`hermes prompt-size` now reports the fixed prompt budget for a fresh session,
+including the assembled system prompt, skills index, memory/profile blocks,
+prompt tiers, and tool schema JSON. It runs offline without an API call. TUI
+gateway startup now launches MCP discovery in a background daemon thread when
+MCP servers are configured, emits `gateway.ready` without waiting for slow or
+dead servers, and briefly joins the discovery thread before the first agent
+build so fast-starting MCP servers can still land in the initial tool snapshot.
+`/reload-mcp` also rebuilds the cached agent tool snapshot after rediscovery.
+
+This batch is limited to CLI diagnostics and TUI gateway MCP startup/tool
+snapshot timing. It does not change gateway event ledgers, media extraction,
+delivery outcomes, provider routing, model catalogs, Nous legacy
+authentication, or the fork's `5.5` customizations.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -1193,6 +1215,34 @@ git diff --cached | rg -n "^\\+.*(discord|youtube|youtu\\.be|invite|邀请码|�
 Result: only platform/domain examples in network-egress and migration-setting
 documentation matched; no external video, invite, or promotional destination
 was added.
+
+`git diff --check` and `git diff --cached --check` produced no output.
+
+CLI prompt-size and TUI MCP startup batch verification:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_prompt_size.py tests/tui_gateway/test_wait_for_mcp_discovery.py -q -rs
+```
+
+Result: `11 passed, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/tui_gateway/test_goal_command.py tests/tui_gateway/test_protocol.py tests/tui_gateway/test_review_summary_callback.py tests/test_tui_gateway_server.py -q -rs
+```
+
+Result: `252 passed, 17 warnings`.
+
+```bash
+uv run --extra dev ruff check hermes_cli/banner.py hermes_cli/main.py hermes_cli/prompt_size.py tests/hermes_cli/test_prompt_size.py tests/tui_gateway/test_wait_for_mcp_discovery.py tui_gateway/entry.py tui_gateway/server.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile hermes_cli/banner.py hermes_cli/main.py hermes_cli/prompt_size.py tui_gateway/entry.py tui_gateway/server.py
+```
+
+Result: exit `0`.
 
 `git diff --check` and `git diff --cached --check` produced no output.
 
