@@ -3282,3 +3282,64 @@ Result: exit `0`.
 
 `git diff --check -- providers/base.py plugins/model-providers/opencode-zen/__init__.py agent/transports/chat_completions.py tests/plugins/model_providers/test_opencode_go_profile.py tests/agent/transports/test_chat_completions.py tests/providers/test_provider_profiles.py`
 produced no output.
+
+## 2026-06-07 — Protected upstream groups classified for later review
+
+Remaining upstream groups reviewed and left out of blind absorption:
+
+- Dashboard OAuth/public allowlist (`a618789db`, adjacent dashboard bind /
+  websocket changes): deferred as a protected access-control conflict. Upstream
+  makes `/api/status` and related public API paths bypass dashboard OAuth; this
+  fork keeps OAuth-gated `/api/status` behavior and separate public-prefix
+  logic. Any absorption needs explicit threat review of status exposure,
+  websocket auth, host-header behavior, and Docker dashboard auth.
+- Nous JWT-only auth (`41ff6e59`, `7e958daf`, `4e4984a1`, `95cf8f98`,
+  `a22c2500`): deferred because upstream removes or weakens legacy session-key
+  fallback, while this fork explicitly preserves Nous legacy auth, forced
+  legacy mode, mint/cache/retry behavior, and proxy fallback.
+- Model catalog changes (`f2d88c82`, `bc736ff5`, `5e7c2ffa`): split. Raw
+  GitHub manifest fallback is already equivalent locally, but upstream model
+  list swaps remain deferred because the fork constraint is to keep the
+  controlled `5.5` model catalog and not add random catalog churn.
+- Progressive tool disclosure / tool-search (`369075dc`, `7427b9d5`,
+  `17097761`, `18c9e891`, `a87f0a82`): deferred for design review. This group
+  changes MCP/plugin tool discovery and dispatch scoping and touches the Hermes
+  tools/live-gateway/access-control surface; upstream also needed a follow-up
+  leak fix.
+- Adapter-owned gateway access policy (`fd09b2c55`, `6a2e3c2d`): deferred as a
+  default-deny conflict. Upstream trusts adapters that claim to enforce their
+  own policy; this fork keeps gateway-level `_is_user_authorized` as the final
+  guard.
+- Video generation managed Nous gateway (`d04b3c19`, `b6294ea9`,
+  `a4c18f65`, `3183b2e2`, `e46e4bcf`, `0563ab06` and related commits):
+  eligible directionally, but must be absorbed as a focused stack rather than a
+  blind cherry-pick, preserving plugin-owned provider behavior and avoiding
+  availability scans that refresh Nous tokens.
+- State FTS optimize (`38695254`, `904c0b47`): safe candidate for later
+  focused absorption. Keep separate from no-FTS5 degradation commits because
+  those alter failure/degradation semantics.
+- Kanban SQLite/activity/config groups: split. `40217aa1` and `ae6817f7` are
+  already equivalent/absorbed; `3b6347af` and `69b74c15` remain partial/defer
+  because config/default-assignee pieces exist but CLI dispatch/per-profile
+  caps and swarm skill behavior are not fully wired; heartbeat, SQLite
+  migration, retry/circuit-breaker, attachments, termination API, and
+  iteration-exhaustion behavior remain separate review items.
+
+Validation required if these are later absorbed:
+
+- Dashboard/access-control: dashboard auth middleware/status tests, host-header
+  and websocket auth tests, Docker dashboard auth tests, and explicit approval
+  of any newly public status/config paths.
+- Nous auth: `tests/hermes_cli/test_auth_nous_provider.py`, Nous proxy tests,
+  runtime provider tests, and legacy inference-auth expectations in
+  `tests/run_agent/test_run_agent.py`.
+- Model catalog: `tests/hermes_cli/test_model_catalog.py` plus explicit review
+  of every changed model id.
+- Tool-search: tool-search tests, run-agent dispatch assertions, restricted
+  toolset/subagent/gateway sessions, and plugin visibility/approval checks.
+- Video generation: FAL plugin tests, managed media gateway tests, video
+  surface matrix, tools config, and Nous subscription/setup tests.
+- State FTS optimize: `tests/test_hermes_state.py` vacuum/FTS optimize subset
+  plus a temp-`HERMES_HOME` CLI smoke for `hermes sessions optimize`.
+- Kanban: `tests/hermes_cli/test_kanban*.py`, dashboard/plugin worker-run
+  tests, and run-agent iteration-exhaustion expectations.
