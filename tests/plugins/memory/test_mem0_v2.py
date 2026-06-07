@@ -4,9 +4,23 @@ Salvaged from PRs #5301 (qaqcvc) and #5117 (vvvanguards).
 """
 
 import json
+import os
+import stat
+
 import pytest
 
 from plugins.memory.mem0 import Mem0MemoryProvider
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits not enforced on Windows")
+def test_save_config_sets_owner_only_permissions(tmp_path):
+    provider = Mem0MemoryProvider()
+
+    provider.save_config({"api_key": "m0-test-key"}, str(tmp_path))
+
+    config_file = tmp_path / "mem0.json"
+    assert config_file.exists()
+    assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
 
 
 class FakeClientV2:

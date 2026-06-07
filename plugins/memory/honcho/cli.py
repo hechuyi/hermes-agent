@@ -13,6 +13,7 @@ from pathlib import Path
 from hermes_constants import get_hermes_home
 from plugins.memory.honcho.client import resolve_active_host, resolve_config_path, HOST
 from hermes_cli.config import cfg_get
+from utils import atomic_json_write
 
 
 def clone_honcho_for_profile(profile_name: str) -> bool:
@@ -275,10 +276,7 @@ def _read_config() -> dict:
 def _write_config(cfg: dict, path: Path | None = None) -> None:
     path = path or _local_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(cfg, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    atomic_json_write(path, cfg, mode=0o600)
 
 
 def _resolve_api_key(cfg: dict) -> str:
@@ -469,14 +467,23 @@ def cmd_setup(args) -> None:
             cfg["baseUrl"] = new_url
 
         # For local no-auth, the SDK must not send an API key.
-        # We keep the key in config (for cloud switching later) but
-        # the client should skip auth when baseUrl is local.
-        current_key = cfg.get("apiKey", "")
-        if current_key:
+        # We keep the root key in config (for cloud switching later), while
+        # host.apiKey is reserved for an explicitly configured local bearer/JWT.
+        current_root_key = cfg.get("apiKey", "")
+        current_host_key = hermes_host.get("apiKey", "")
+        if current_root_key:
             print(f"\n  API key present in config (kept for cloud/hybrid use).")
-            print("  Local connections will skip auth automatically.")
+            print("  Local connections will skip root auth automatically.")
         else:
             print("\n  No API key set. Local no-auth ready.")
+        if current_host_key:
+            print("  Local bearer/JWT already configured for this host.")
+        new_local_key = _prompt(
+            "Local JWT / bearer token (blank to skip / keep current)",
+            secret=True,
+        )
+        if new_local_key:
+            hermes_host["apiKey"] = new_local_key
     else:
         # --- Cloud: set default base URL, require API key ---
         cfg.pop("baseUrl", None)  # cloud uses SDK default

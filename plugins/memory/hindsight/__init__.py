@@ -44,6 +44,7 @@ from agent.memory_provider import MemoryProvider
 from hermes_constants import get_hermes_home
 from tools.registry import tool_error
 from hermes_cli.config import cfg_get
+from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
@@ -633,7 +634,7 @@ class HindsightMemoryProvider(MemoryProvider):
             except Exception:
                 pass
         existing.update(values)
-        config_path.write_text(json.dumps(existing, indent=2))
+        atomic_json_write(config_path, existing, mode=0o600)
 
     def post_setup(self, hermes_home: str, config: dict) -> None:
         """Custom setup wizard — installs only the deps needed for the selected mode."""

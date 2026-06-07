@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -123,6 +124,14 @@ class TestAtomicJsonWrite:
 
         result = json.loads(target.read_text(encoding="utf-8"))
         assert result == {"value": "custom-value"}
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits not enforced on Windows")
+    def test_explicit_mode_sets_owner_only_permissions(self, tmp_path):
+        target = tmp_path / "secret.json"
+
+        atomic_json_write(target, {"api_key": "secret"}, mode=0o600)
+
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
     def test_unicode_content(self, tmp_path):
         target = tmp_path / "unicode.json"

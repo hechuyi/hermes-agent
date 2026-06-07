@@ -334,6 +334,28 @@ class TestSetupWizardDeploymentShape:
         assert "userPeerAliases" not in host
         assert "runtimePeerPrefix" not in host
 
+    def test_local_setup_stores_jwt_in_host_block(self, monkeypatch, tmp_path):
+        answers = [
+            "local",                  # deployment
+            "http://localhost:8000",  # base URL
+            "local-jwt-token",        # local JWT / bearer token
+            "eri",                    # peer name
+            "hermetika",              # ai peer
+            "hermes",                 # workspace
+            "single",                 # deployment shape
+        ]
+        initial_cfg = {"apiKey": "cloud-key", "hosts": {"hermes": {}}}
+
+        host = self._run_setup(
+            monkeypatch,
+            tmp_path,
+            answers=answers,
+            initial_cfg=initial_cfg,
+        )
+
+        assert host["apiKey"] == "local-jwt-token"
+        assert initial_cfg["apiKey"] == "cloud-key"
+
     def test_multi_shape_leaves_pin_false_and_accepts_prefix(self, monkeypatch, tmp_path):
         answers = [
             "cloud",           # deployment

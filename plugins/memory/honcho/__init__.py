@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 from agent.memory_manager import sanitize_context
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
+from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +259,7 @@ class HonchoMemoryProvider(MemoryProvider):
             except Exception:
                 pass
         existing.update(values)
-        config_path.write_text(json.dumps(existing, indent=2))
+        atomic_json_write(config_path, existing, mode=0o600)
 
     def get_config_schema(self):
         return [

@@ -287,6 +287,74 @@ class TestExtractCacheBustingConfig:
 
         assert out["tools.registry_generation"] == 12345
 
+    def test_reads_memory_provider(self):
+        from gateway.run import GatewayRunner
+
+        out = GatewayRunner._extract_cache_busting_config(
+            {"memory": {"provider": "honcho"}}
+        )
+
+        assert out["memory.provider"] == "honcho"
+
+    def test_skips_honcho_config_read_when_provider_is_not_honcho(self, monkeypatch):
+        from gateway.run import GatewayRunner
+        from plugins.memory.honcho.client import HonchoClientConfig
+
+        calls = []
+
+        def _unexpected(cls, *args, **kwargs):
+            calls.append((args, kwargs))
+            raise AssertionError("Honcho config should not be read for non-Honcho providers")
+
+        monkeypatch.setattr(
+            HonchoClientConfig,
+            "from_global_config",
+            classmethod(_unexpected),
+        )
+
+        out = GatewayRunner._extract_cache_busting_config(
+            {"memory": {"provider": "mem0"}}
+        )
+
+        assert calls == []
+        assert out["honcho.peer_name"] is None
+        assert out["honcho.user_peer_aliases"] is None
+
+    def test_reads_honcho_config_when_provider_is_honcho(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from gateway.run import GatewayRunner
+        from plugins.memory.honcho.client import HonchoClientConfig
+
+        calls = []
+
+        def _fake(cls, *args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(
+                peer_name="eri",
+                ai_peer="hermetika",
+                pin_peer_name=True,
+                runtime_peer_prefix="tg_",
+                user_peer_aliases={"86701400": "eri"},
+            )
+
+        monkeypatch.setattr(
+            HonchoClientConfig,
+            "from_global_config",
+            classmethod(_fake),
+        )
+
+        out = GatewayRunner._extract_cache_busting_config(
+            {"memory": {"provider": "honcho"}}
+        )
+
+        assert len(calls) == 1
+        assert out["honcho.peer_name"] == "eri"
+        assert out["honcho.ai_peer"] == "hermetika"
+        assert out["honcho.pin_peer_name"] is True
+        assert out["honcho.runtime_peer_prefix"] == "tg_"
+        assert out["honcho.user_peer_aliases"] == [("86701400", "eri")]
+
     def test_full_round_trip_busts_cache_on_real_edit(self):
         """End-to-end: simulate a config edit on main and verify the
         extracted cache_keys change produces a new signature."""

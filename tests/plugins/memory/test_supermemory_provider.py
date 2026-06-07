@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 import threading
 
 import pytest
@@ -90,6 +92,15 @@ def test_load_and_save_config_round_trip(tmp_path):
     assert cfg["container_tag"] == "demo-tag"
     assert cfg["auto_capture"] is False
     assert cfg["auto_recall"] is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits not enforced on Windows")
+def test_save_config_sets_owner_only_permissions(tmp_path):
+    _save_supermemory_config({"api_key": "sm-test-key"}, str(tmp_path))
+
+    config_file = tmp_path / "supermemory.json"
+    assert config_file.exists()
+    assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
 
 
 def test_clean_text_for_capture_strips_injected_context():

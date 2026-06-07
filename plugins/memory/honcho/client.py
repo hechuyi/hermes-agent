@@ -17,6 +17,7 @@ import json
 import os
 import logging
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -796,6 +797,7 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
         resolved_timeout = _DEFAULT_HTTP_TIMEOUT
 
     if resolved_base_url:
+        resolved_base_url = re.sub(r"/v\d+$", "", resolved_base_url.strip().rstrip("/"))
         logger.info("Initializing Honcho client (base_url: %s, workspace: %s)", resolved_base_url, config.workspace_id)
     else:
         logger.info("Initializing Honcho client (host: %s, workspace: %s)", config.host, config.workspace_id)

@@ -15792,7 +15792,43 @@ class GatewayRunner:
         ("compression", "target_ratio"),
         ("compression", "protect_last_n"),
         ("agent", "disabled_toolsets"),
+        ("memory", "provider"),
     )
+
+    _HONCHO_CACHE_BUSTING_KEYS: tuple[str, ...] = (
+        "honcho.peer_name",
+        "honcho.ai_peer",
+        "honcho.pin_peer_name",
+        "honcho.runtime_peer_prefix",
+        "honcho.user_peer_aliases",
+    )
+
+    @classmethod
+    def _empty_honcho_cache_busting_config(cls) -> dict[str, Any]:
+        return {key: None for key in cls._HONCHO_CACHE_BUSTING_KEYS}
+
+    @classmethod
+    def _extract_honcho_cache_busting_config(cls) -> dict[str, Any]:
+        # Honcho identity-mapping keys live in honcho.json, not user_config.
+        # HonchoSessionManager freezes the resolved peer_name / ai_peer /
+        # pin / aliases / prefix at construction; without busting here,
+        # mid-flight honcho.json edits go unread until the next unrelated
+        # cache eviction.
+        try:
+            from plugins.memory.honcho.client import HonchoClientConfig
+
+            hcfg = HonchoClientConfig.from_global_config()
+            aliases = hcfg.user_peer_aliases or {}
+            return {
+                "honcho.peer_name": hcfg.peer_name,
+                "honcho.ai_peer": hcfg.ai_peer,
+                "honcho.pin_peer_name": bool(hcfg.pin_peer_name),
+                "honcho.runtime_peer_prefix": hcfg.runtime_peer_prefix or "",
+                "honcho.user_peer_aliases": sorted(aliases.items()) if isinstance(aliases, dict) else [],
+            }
+        except Exception:
+            logger.debug("Failed to extract Honcho cache-busting config", exc_info=True)
+            return cls._empty_honcho_cache_busting_config()
 
     @classmethod
     def _extract_cache_busting_config(cls, user_config: dict | None) -> dict:
@@ -15823,27 +15859,11 @@ class GatewayRunner:
         except Exception:
             out["tools.registry_generation"] = None
 
-        # Honcho identity-mapping keys live in honcho.json, not user_config.
-        # HonchoSessionManager freezes the resolved peer_name / ai_peer /
-        # pin / aliases / prefix at construction; without busting here,
-        # mid-flight honcho.json edits go unread until the next unrelated
-        # cache eviction.
-        try:
-            from plugins.memory.honcho.client import HonchoClientConfig
-
-            hcfg = HonchoClientConfig.from_global_config()
-            out["honcho.peer_name"] = hcfg.peer_name
-            out["honcho.ai_peer"] = hcfg.ai_peer
-            out["honcho.pin_peer_name"] = bool(hcfg.pin_peer_name)
-            out["honcho.runtime_peer_prefix"] = hcfg.runtime_peer_prefix or ""
-            aliases = hcfg.user_peer_aliases or {}
-            out["honcho.user_peer_aliases"] = sorted(aliases.items()) if isinstance(aliases, dict) else []
-        except Exception:
-            out["honcho.peer_name"] = None
-            out["honcho.ai_peer"] = None
-            out["honcho.pin_peer_name"] = None
-            out["honcho.runtime_peer_prefix"] = None
-            out["honcho.user_peer_aliases"] = None
+        provider = str(cfg_get(cfg, "memory", "provider", default="") or "").strip().lower()
+        if provider == "honcho":
+            out.update(cls._extract_honcho_cache_busting_config())
+        else:
+            out.update(cls._empty_honcho_cache_busting_config())
 
         return out
 

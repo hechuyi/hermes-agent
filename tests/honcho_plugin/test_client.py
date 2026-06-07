@@ -3,6 +3,8 @@
 import importlib.util
 import json
 import os
+import sys
+import types
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -891,3 +893,41 @@ class TestDialecticDepthParsing:
         }))
         config = HonchoClientConfig.from_global_config(config_path=config_file)
         assert config.dialectic_depth_levels == ["low", "high"]
+
+
+class TestGetHonchoClientBaseUrlNormalization:
+    def teardown_method(self):
+        reset_honcho_client()
+
+    def _install_fake_honcho(self, monkeypatch):
+        module = types.ModuleType("honcho")
+        fake_honcho = MagicMock(name="Honcho")
+        module.Honcho = fake_honcho
+        monkeypatch.setitem(sys.modules, "honcho", module)
+        return fake_honcho
+
+    def test_base_url_trailing_version_segment_is_stripped(self, monkeypatch):
+        fake_honcho = self._install_fake_honcho(monkeypatch)
+        cfg = HonchoClientConfig(
+            api_key="key",
+            base_url="https://honcho.lab.internal/v3/",
+            workspace_id="hermes",
+            environment="production",
+        )
+
+        get_honcho_client(cfg)
+
+        assert fake_honcho.call_args.kwargs["base_url"] == "https://honcho.lab.internal"
+
+    def test_base_url_without_version_segment_is_unchanged(self, monkeypatch):
+        fake_honcho = self._install_fake_honcho(monkeypatch)
+        cfg = HonchoClientConfig(
+            api_key="key",
+            base_url="https://honcho.lab.internal/api",
+            workspace_id="hermes",
+            environment="production",
+        )
+
+        get_honcho_client(cfg)
+
+        assert fake_honcho.call_args.kwargs["base_url"] == "https://honcho.lab.internal/api"
