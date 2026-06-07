@@ -2242,3 +2242,60 @@ Result: exit `0`.
 
 `git diff --check -- hermes_cli/kanban.py tests/hermes_cli/test_kanban_core_functionality.py scripts/release.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Kanban worker clarify avoidance
+
+Upstream commit reviewed:
+
+- `40217aa1946b26c5a08f466324b1bcd8f18bccc7` — tells Kanban workers not to
+  call `clarify`; they should comment context and block the task instead.
+
+Local result:
+
+- Absorbed as `18a2ef956`.
+- Added the clarify-avoidance guidance to both surfaces every Kanban worker is
+  expected to see: the auto-injected `KANBAN_GUIDANCE` block and the bundled
+  `skills/devops/kanban-worker/SKILL.md` skill.
+- Added tests covering both surfaces so the guidance does not silently drop out
+  of either channel.
+- Added the upstream co-author mapping
+  `17778+kweiner@users.noreply.github.com`.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/tools/test_kanban_tools.py -q -rs -k "routes_questions_to_block_not_clarify"
+```
+
+Result before the text changes: `2 failed, 81 deselected`; neither
+`KANBAN_GUIDANCE` nor the bundled worker skill contained the explicit
+`Do not call clarify` instruction.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_kanban_tools.py -q -rs -k "routes_questions_to_block_not_clarify or kanban_guidance_prompt_size_bounded or kanban_tools_injected_for_worker"
+```
+
+Result: `3 passed, 80 deselected`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_kanban_tools.py -q -rs
+```
+
+Result: `83 passed, 1 warning` (`discord.player` `audioop` deprecation).
+
+```bash
+uv run --extra dev ruff check agent/prompt_builder.py tests/tools/test_kanban_tools.py scripts/release.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile agent/prompt_builder.py tests/tools/test_kanban_tools.py scripts/release.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- agent/prompt_builder.py skills/devops/kanban-worker/SKILL.md tests/tools/test_kanban_tools.py scripts/release.py`
+produced no output before the code commit.
