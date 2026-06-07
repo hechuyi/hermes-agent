@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -1160,6 +1161,22 @@ def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):
     assert 1_500 < len(KANBAN_GUIDANCE) < 4_096, (
         f"KANBAN_GUIDANCE is {len(KANBAN_GUIDANCE)} chars — too short (missing?) or too long"
     )
+
+
+def test_kanban_guidance_routes_questions_to_block_not_clarify():
+    from agent.prompt_builder import KANBAN_GUIDANCE
+
+    assert "Do not call `clarify`" in KANBAN_GUIDANCE
+    assert "kanban_comment" in KANBAN_GUIDANCE
+    assert "kanban_block(reason=...)" in KANBAN_GUIDANCE
+
+
+def test_kanban_worker_skill_routes_questions_to_block_not_clarify():
+    skill = Path("skills/devops/kanban-worker/SKILL.md").read_text()
+
+    assert "Do not call `clarify`" in skill
+    assert "kanban_comment" in skill
+    assert "kanban_block(reason=...)" in skill
 
 
 # ---------------------------------------------------------------------------
