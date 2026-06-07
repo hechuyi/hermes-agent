@@ -4186,3 +4186,71 @@ git diff --check -- plugins/kanban/dashboard/plugin_api.py tests/plugins/test_ka
 ```
 
 Result: exit `0`.
+
+## 2026-06-07 — Remaining upstream candidates deferred or record-only
+
+The following upstream commits were reviewed after the Kanban absorption work
+and are not absorbed in this pass. These are intentionally recorded so the
+remaining `git cherry` positives have an explicit disposition instead of
+staying as untracked ambiguity.
+
+Deferred:
+
+- `dc235e93cbfe1354cd2924c9da13791543ee3cc7` — broad dead-code removal
+  across ACP, Weixin, Nous/model, file operations, skills, and related tests.
+  It has low fork value and high regression-localization cost.
+- `ddaf2f671226a97aea9d5cb32ae011186ce0f457` — PEP8 spacing cleanup that
+  only follows the deferred dead-code removal.
+- `10cd4138cc66788f82908392a0c02c9ddb7cd723`,
+  `99ddba94edee4c5a4a6a8ee2ca7c5c8b77582b4a`, and
+  `d6f2bdabda4b4c91df2f6ea0fe1dab4ba1f75a3b` — optional xAI Grok Build CLI
+  skill and generated docs/catalog entries. This expands an external agent CLI
+  surface and is outside the fork's current live-gateway/tooling objective.
+- `1bba5f27ab0cfec9868b3f363a73809a3da4fc53`,
+  `632a7088a32a9dd79649469b62d792c5d0e2ab3a`,
+  `0dba60f73b392a9bd63b071aa769078cc5dee84c`,
+  `78d7fa1b5c0771eaebeea8c91c999482f5aef11c`, and
+  `75cd420b3ba1b83185020c6d4506d7cc53b12e2b` — optional Antigravity CLI
+  skill plus generated catalog/sidebar moves. Same external autonomous-agent
+  skill-surface concern as the Grok series.
+- `4de8009ce424ff85d79e7cca63dd1aaede44a9fd` — adds `NVIDIA/skills` as a
+  trusted skills hub tap, expanding default trust/supply-chain policy.
+- `b47cb1bbf27926454854834c0ca381c39628ab9d` — Kanban file attachments. This
+  adds upload/download/delete surfaces and worker-visible file paths; it needs
+  a dedicated path-containment, auth, retention, and remote-worker mount review
+  before being safe for this fork.
+- `7b0915037c110ca10ff4da952bae2d0d786868ac` — deletes low-value
+  model-catalog mirror tests. The fork's model catalog is intentionally
+  constrained around `5.5`, so catalog guard tests are more valuable here than
+  upstream's cleanup.
+- `5a72e82fd8175597a82d4599ae35d20b1fb8fc89` and
+  `9d2571c86a7dae2bb526ca22233fe5309c23d53d` — `/agents` dashboard nudge UX
+  changes in TUI/CLI delegation flows. Useful upstream UX, but nonessential to
+  the fork's current live-gateway/tool absorption and touches config plus
+  TUI/CLI event surfaces.
+- `e8076c1ebe659c58284396d88f802537ffc2ccb8` and
+  `234ac009376daba225525195afca96be8a82634c` — dashboard insecure public-bind
+  WebSocket peer relaxation. Even though `234ac009` preserves Host/Origin
+  guards, this changes explicit non-loopback `--insecure` policy and should not
+  be folded into the default-deny/access-control fork without a separate
+  public-bind decision.
+- `93e6a05efc615bed00e6f4d5737d5ada5f54b020` — model-picker provider grouping.
+  The grouping itself is display-oriented, but it touches model catalog/picker
+  behavior and Telegram picker callbacks near the fork's `5.5` model catalog
+  constraint. Record-only until provider grouping is reviewed with callback
+  authorization and the fork's canonical provider set.
+
+Deferred for selective future port:
+
+- `827ce602dbed199f665f3975b61303aace2963ea` — Honcho self-hosted hardening.
+  The upstream changes are valuable, especially base URL normalization, local
+  bearer/JWT support, owner-only provider config writes, and provider-scoped
+  cache busting. The patch does not cleanly apply on this fork and spans 25
+  files, including docs and plugin tests. It should be ported selectively as a
+  dedicated memory-provider hardening change instead of broad-cherry-picked.
+
+Record-only:
+
+- `b6ed3913d241b456d16f6b2d5a5d75a60c80aa51` — skills.sh grouping metadata.
+  The grouping parser is mostly neutral, but it is coupled to the trusted tap
+  expansion above and has no current fork requirement by itself.
