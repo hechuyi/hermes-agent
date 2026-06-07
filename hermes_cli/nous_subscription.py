@@ -559,7 +559,21 @@ def apply_nous_managed_defaults(
         changed.add("browser")
 
     if "image_gen" in selected_toolsets and not fal_key_is_configured():
+        image_cfg = config.get("image_gen")
+        if not isinstance(image_cfg, dict):
+            image_cfg = {}
+            config["image_gen"] = image_cfg
+        image_cfg["use_gateway"] = True
         changed.add("image_gen")
+
+    if "video_gen" in selected_toolsets and not fal_key_is_configured():
+        video_cfg = config.get("video_gen")
+        if not isinstance(video_cfg, dict):
+            video_cfg = {}
+            config["video_gen"] = video_cfg
+        video_cfg["provider"] = "fal"
+        video_cfg["use_gateway"] = True
+        changed.add("video_gen")
 
     return changed
 
@@ -571,6 +585,7 @@ def apply_nous_managed_defaults(
 _GATEWAY_TOOL_LABELS = {
     "web": "Web search & extract (Firecrawl)",
     "image_gen": "Image generation (FAL)",
+    "video_gen": "Video generation (FAL)",
     "tts": "Text-to-speech (OpenAI TTS)",
     "browser": "Browser automation (Browser Use)",
 }
@@ -578,6 +593,7 @@ _GATEWAY_TOOL_LABELS = {
 
 def _get_gateway_direct_credentials() -> Dict[str, bool]:
     """Return a dict of tool_key -> has_direct_credentials."""
+    fal_direct = fal_key_is_configured()
     return {
         "web": bool(
             get_env_value("FIRECRAWL_API_KEY")
@@ -586,7 +602,8 @@ def _get_gateway_direct_credentials() -> Dict[str, bool]:
             or get_env_value("TAVILY_API_KEY")
             or get_env_value("EXA_API_KEY")
         ),
-        "image_gen": fal_key_is_configured(),
+        "image_gen": fal_direct,
+        "video_gen": fal_direct,
         "tts": bool(
             resolve_openai_audio_api_key()
             or get_env_value("ELEVENLABS_API_KEY")
@@ -601,11 +618,12 @@ def _get_gateway_direct_credentials() -> Dict[str, bool]:
 _GATEWAY_DIRECT_LABELS = {
     "web": "Firecrawl/Exa/Parallel/Tavily key",
     "image_gen": "FAL key",
+    "video_gen": "FAL key",
     "tts": "OpenAI/ElevenLabs key",
     "browser": "Browser Use/Browserbase key",
 }
 
-_ALL_GATEWAY_KEYS = ("web", "image_gen", "tts", "browser")
+_ALL_GATEWAY_KEYS = ("web", "image_gen", "video_gen", "tts", "browser")
 
 
 def get_gateway_eligible_tools(
@@ -646,6 +664,7 @@ def get_gateway_eligible_tools(
     opted_in = {
         "web": _uses_gateway(config.get("web")),
         "image_gen": _uses_gateway(config.get("image_gen")),
+        "video_gen": _uses_gateway(config.get("video_gen")),
         "tts": _uses_gateway(config.get("tts")),
         "browser": _uses_gateway(config.get("browser")),
     }
@@ -713,6 +732,15 @@ def apply_gateway_defaults(
             config["image_gen"] = image_cfg
         image_cfg["use_gateway"] = True
         changed.add("image_gen")
+
+    if "video_gen" in tool_keys:
+        video_cfg = config.get("video_gen")
+        if not isinstance(video_cfg, dict):
+            video_cfg = {}
+            config["video_gen"] = video_cfg
+        video_cfg["provider"] = "fal"
+        video_cfg["use_gateway"] = True
+        changed.add("video_gen")
 
     return changed
 

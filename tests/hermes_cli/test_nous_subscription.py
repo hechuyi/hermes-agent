@@ -218,7 +218,13 @@ def test_get_gateway_eligible_tools_ignores_quoted_false_opt_in(monkeypatch):
     monkeypatch.setattr(
         ns,
         "_get_gateway_direct_credentials",
-        lambda: {"web": True, "image_gen": False, "tts": False, "browser": False},
+        lambda: {
+            "web": True,
+            "image_gen": False,
+            "video_gen": False,
+            "tts": False,
+            "browser": False,
+        },
     )
 
     unconfigured, has_direct, already_managed = ns.get_gateway_eligible_tools(
@@ -230,4 +236,88 @@ def test_get_gateway_eligible_tools_ignores_quoted_false_opt_in(monkeypatch):
 
     assert "web" in has_direct
     assert "web" not in already_managed
-    assert set(unconfigured) == {"image_gen", "tts", "browser"}
+    assert set(unconfigured) == {"image_gen", "video_gen", "tts", "browser"}
+
+
+def test_apply_nous_managed_defaults_writes_image_gen_config(monkeypatch):
+    monkeypatch.setattr(ns, "managed_nous_tools_enabled", lambda **kw: True)
+    monkeypatch.setattr(ns, "fal_key_is_configured", lambda: False)
+    monkeypatch.setattr(
+        ns,
+        "get_nous_portal_account_info",
+        lambda **kw: _account(logged_in=True, paid=True),
+    )
+
+    config = {"model": {"provider": "nous"}}
+    changed = ns.apply_nous_managed_defaults(
+        config,
+        enabled_toolsets=["image_gen"],
+    )
+
+    assert "image_gen" in changed
+    assert config["image_gen"]["use_gateway"] is True
+
+
+def test_apply_nous_managed_defaults_writes_video_gen_config(monkeypatch):
+    monkeypatch.setattr(ns, "managed_nous_tools_enabled", lambda **kw: True)
+    monkeypatch.setattr(ns, "fal_key_is_configured", lambda: False)
+    monkeypatch.setattr(
+        ns,
+        "get_nous_portal_account_info",
+        lambda **kw: _account(logged_in=True, paid=True),
+    )
+
+    config = {"model": {"provider": "nous"}}
+    changed = ns.apply_nous_managed_defaults(
+        config,
+        enabled_toolsets=["video_gen"],
+    )
+
+    assert "video_gen" in changed
+    assert config["video_gen"]["provider"] == "fal"
+    assert config["video_gen"]["use_gateway"] is True
+
+
+def test_apply_nous_managed_defaults_skips_fal_tools_when_key_present(monkeypatch):
+    monkeypatch.setattr(ns, "managed_nous_tools_enabled", lambda **kw: True)
+    monkeypatch.setattr(ns, "fal_key_is_configured", lambda: True)
+    monkeypatch.setattr(
+        ns,
+        "get_nous_portal_account_info",
+        lambda **kw: _account(logged_in=True, paid=True),
+    )
+
+    config = {"model": {"provider": "nous"}}
+    changed = ns.apply_nous_managed_defaults(
+        config,
+        enabled_toolsets=["image_gen", "video_gen"],
+    )
+
+    assert "image_gen" not in changed
+    assert "video_gen" not in changed
+    assert "image_gen" not in config
+    assert "video_gen" not in config
+
+
+def test_apply_nous_managed_defaults_preserves_existing_video_gen_section(monkeypatch):
+    monkeypatch.setattr(ns, "managed_nous_tools_enabled", lambda **kw: True)
+    monkeypatch.setattr(ns, "fal_key_is_configured", lambda: False)
+    monkeypatch.setattr(
+        ns,
+        "get_nous_portal_account_info",
+        lambda **kw: _account(logged_in=True, paid=True),
+    )
+
+    config = {
+        "model": {"provider": "nous"},
+        "video_gen": {"model": "veo3.1"},
+    }
+    changed = ns.apply_nous_managed_defaults(
+        config,
+        enabled_toolsets=["video_gen"],
+    )
+
+    assert "video_gen" in changed
+    assert config["video_gen"]["provider"] == "fal"
+    assert config["video_gen"]["use_gateway"] is True
+    assert config["video_gen"]["model"] == "veo3.1"
