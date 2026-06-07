@@ -58,3 +58,57 @@ class TestMatrixExecApprovalReactions:
         mock_resolve.assert_called_once_with("sess-1", "once")
         assert "$target" not in adapter._approval_prompts_by_event
         assert "sess-1" not in adapter._approval_prompt_by_session
+
+    @pytest.mark.asyncio
+    async def test_reaction_denies_when_allowlist_empty_and_allow_all_unset(self, monkeypatch):
+        monkeypatch.delenv("MATRIX_ALLOWED_USERS", raising=False)
+        monkeypatch.delenv("GATEWAY_ALLOW_ALL_USERS", raising=False)
+        from gateway.platforms.matrix import MatrixAdapter, _MatrixApprovalPrompt
+
+        adapter = MatrixAdapter(PlatformConfig(enabled=True, token="tok", extra={"homeserver": "https://matrix.example.org"}))
+        adapter._user_id = "@bot:example.org"
+        adapter._approval_prompts_by_event["$target"] = _MatrixApprovalPrompt(
+            session_key="sess-1", chat_id="!room:example.org", message_id="$target"
+        )
+        adapter._approval_prompt_by_session["sess-1"] = "$target"
+
+        event = types.SimpleNamespace(
+            sender="@stranger:example.org",
+            event_id="$react-empty-allowlist",
+            room_id="!room:example.org",
+            content={"m.relates_to": {"event_id": "$target", "key": "✅"}},
+        )
+
+        with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
+            await adapter._on_reaction(event)
+
+        mock_resolve.assert_not_called()
+        assert adapter._approval_prompts_by_event["$target"].resolved is False
+        assert adapter._approval_prompt_by_session["sess-1"] == "$target"
+
+    @pytest.mark.asyncio
+    async def test_reaction_allows_empty_allowlist_when_allow_all_set(self, monkeypatch):
+        monkeypatch.delenv("MATRIX_ALLOWED_USERS", raising=False)
+        monkeypatch.setenv("GATEWAY_ALLOW_ALL_USERS", "true")
+        from gateway.platforms.matrix import MatrixAdapter, _MatrixApprovalPrompt
+
+        adapter = MatrixAdapter(PlatformConfig(enabled=True, token="tok", extra={"homeserver": "https://matrix.example.org"}))
+        adapter._user_id = "@bot:example.org"
+        adapter._approval_prompts_by_event["$target"] = _MatrixApprovalPrompt(
+            session_key="sess-1", chat_id="!room:example.org", message_id="$target"
+        )
+        adapter._approval_prompt_by_session["sess-1"] = "$target"
+
+        event = types.SimpleNamespace(
+            sender="@anyone:example.org",
+            event_id="$react-allow-all",
+            room_id="!room:example.org",
+            content={"m.relates_to": {"event_id": "$target", "key": "✅"}},
+        )
+
+        with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
+            await adapter._on_reaction(event)
+
+        mock_resolve.assert_called_once_with("sess-1", "once")
+        assert "$target" not in adapter._approval_prompts_by_event
+        assert "sess-1" not in adapter._approval_prompt_by_session
