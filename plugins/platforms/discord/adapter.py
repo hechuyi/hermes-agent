@@ -6122,9 +6122,9 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     ``gateway/config.py::load_gateway_config()`` before this migration.
 
     The DiscordAdapter reads its runtime configuration via ``os.getenv()``
-    throughout the connect / handle code paths (``DISCORD_REQUIRE_MENTION``,
-    ``DISCORD_FREE_RESPONSE_CHANNELS``, ``DISCORD_AUTO_THREAD``,
-    ``DISCORD_REACTIONS``, ``DISCORD_IGNORED_CHANNELS``,
+    throughout the connect / handle code paths (``DISCORD_ALLOWED_USERS``,
+    ``DISCORD_REQUIRE_MENTION``, ``DISCORD_FREE_RESPONSE_CHANNELS``,
+    ``DISCORD_AUTO_THREAD``, ``DISCORD_REACTIONS``, ``DISCORD_IGNORED_CHANNELS``,
     ``DISCORD_ALLOWED_CHANNELS``, ``DISCORD_NO_THREAD_CHANNELS``,
     ``DISCORD_HISTORY_BACKFILL``, ``DISCORD_HISTORY_BACKFILL_LIMIT``,
     ``DISCORD_ALLOW_MENTION_*``, ``DISCORD_REPLY_TO_MODE``,
@@ -6142,6 +6142,15 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         os.environ["DISCORD_REQUIRE_MENTION"] = str(discord_cfg["require_mention"]).lower()
     if "thread_require_mention" in discord_cfg and not os.getenv("DISCORD_THREAD_REQUIRE_MENTION"):
         os.environ["DISCORD_THREAD_REQUIRE_MENTION"] = str(discord_cfg["thread_require_mention"]).lower()
+    discord_extra = discord_cfg.get("extra") if isinstance(discord_cfg.get("extra"), dict) else {}
+    allowed_users_cfg = (
+        discord_cfg["allow_from"] if "allow_from" in discord_cfg
+        else discord_extra.get("allow_from")
+    )
+    if allowed_users_cfg is not None and not os.getenv("DISCORD_ALLOWED_USERS"):
+        if isinstance(allowed_users_cfg, list):
+            allowed_users_cfg = ",".join(str(v) for v in allowed_users_cfg)
+        os.environ["DISCORD_ALLOWED_USERS"] = str(allowed_users_cfg)
     frc = discord_cfg.get("free_response_channels")
     if frc is not None and not os.getenv("DISCORD_FREE_RESPONSE_CHANNELS"):
         if isinstance(frc, list):
@@ -6193,10 +6202,9 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
                 os.environ[env_key] = str(allow_mentions_cfg[yaml_key]).lower()
     # reply_to_mode: top-level preferred, falls back to extra.reply_to_mode.
     # YAML 1.1 parses bare 'off' as boolean False — coerce to string "off".
-    _discord_extra = discord_cfg.get("extra") if isinstance(discord_cfg.get("extra"), dict) else {}
     _discord_rtm = (
         discord_cfg["reply_to_mode"] if "reply_to_mode" in discord_cfg
-        else _discord_extra.get("reply_to_mode")
+        else discord_extra.get("reply_to_mode")
     )
     if _discord_rtm is not None and not os.getenv("DISCORD_REPLY_TO_MODE"):
         _rtm_str = "off" if _discord_rtm is False else str(_discord_rtm).lower()

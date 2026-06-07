@@ -791,6 +791,7 @@ def load_gateway_config() -> GatewayConfig:
         if config_yaml_path.exists():
             with open(config_yaml_path, encoding="utf-8") as f:
                 yaml_cfg = yaml.safe_load(f) or {}
+            gateway_cfg = yaml_cfg.get("gateway")
 
             # Map config.yaml keys → GatewayConfig.from_dict() schema.
             # Each key overwrites whatever gateway.json may have set.
@@ -835,7 +836,7 @@ def load_gateway_config() -> GatewayConfig:
             if not isinstance(streaming_cfg, dict):
                 # Fall back to nested gateway.streaming written by
                 # ``hermes config set gateway.streaming.*``
-                streaming_cfg = yaml_cfg.get("gateway", {}).get("streaming")
+                streaming_cfg = gateway_cfg.get("streaming") if isinstance(gateway_cfg, dict) else None
             if isinstance(streaming_cfg, dict):
                 gw_data["streaming"] = streaming_cfg
 
@@ -851,15 +852,21 @@ def load_gateway_config() -> GatewayConfig:
                     "pair",
                 )
 
-            # Merge platforms section from config.yaml into gw_data so that
-            # nested keys like platforms.webhook.extra.routes are loaded.
+            # Merge platform config into gw_data so runtime-only settings under
+            # ``gateway.platforms`` are loaded the same way as top-level
+            # ``platforms``. Merge nested first so top-level config keeps
+            # precedence, matching the existing gateway.streaming fallback.
+            gateway_platforms = gateway_cfg.get("platforms") if isinstance(gateway_cfg, dict) else None
             yaml_platforms = yaml_cfg.get("platforms")
             platforms_data = gw_data.setdefault("platforms", {})
             if not isinstance(platforms_data, dict):
                 platforms_data = {}
                 gw_data["platforms"] = platforms_data
-            if isinstance(yaml_platforms, dict):
-                for plat_name, plat_block in yaml_platforms.items():
+
+            def _merge_platform_map(source_platforms: Any) -> None:
+                if not isinstance(source_platforms, dict):
+                    return
+                for plat_name, plat_block in source_platforms.items():
                     if not isinstance(plat_block, dict):
                         continue
                     existing = platforms_data.get(plat_name, {})
@@ -873,6 +880,10 @@ def load_gateway_config() -> GatewayConfig:
                     if merged_extra:
                         merged["extra"] = merged_extra
                     platforms_data[plat_name] = merged
+
+            _merge_platform_map(gateway_platforms)
+            _merge_platform_map(yaml_platforms)
+            if platforms_data:
                 gw_data["platforms"] = platforms_data
             # Iterate built-in platforms plus any registered plugin platforms
             # so plugin authors get the same shared-key bridging (#24836).
@@ -978,6 +989,16 @@ def load_gateway_config() -> GatewayConfig:
                     if entry.apply_yaml_config_fn is None:
                         continue
                     platform_cfg = yaml_cfg.get(entry.name)
+                    # Fall back to the platform's block under ``platforms`` /
+                    # ``gateway.platforms`` so adapter hooks still run when the
+                    # user configured the platform only under nested paths.
+                    if not isinstance(platform_cfg, dict):
+                        for _src in (gateway_platforms, yaml_platforms):
+                            if isinstance(_src, dict):
+                                _candidate = _src.get(entry.name)
+                                if isinstance(_candidate, dict):
+                                    platform_cfg = _candidate
+                                    break
                     if not isinstance(platform_cfg, dict):
                         continue
                     try:
