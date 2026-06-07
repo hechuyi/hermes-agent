@@ -1704,3 +1704,57 @@ git diff -- hermes_cli/model_catalog.py tests/hermes_cli/test_model_catalog.py h
 Result: diff included only `hermes_cli/model_catalog.py` and
 `tests/hermes_cli/test_model_catalog.py`; there were no local changes to
 `hermes_cli/models.py` or `website/static/api/model-catalog.json`.
+
+## 2026-06-07 — release AUTHOR_MAP attribution entries
+
+Upstream commits reviewed:
+
+- `71ae98b792b72bfbf2b60f01f9edda6d97b75f56`
+- `8d5728165093ec4fda8faaaf4d99ab9dbc40ef2e`
+- `c1485d52e3ec9fa9a5ce9fcee2adea93d78624b5`
+- `0384398c65644c48aa1ed3484ecc5a56075a4851`
+- `58e1b04665155ac4d312f075945620db11993df7`
+- `5641ae646997e61a7c88a5f66491f301ed876fa9`
+- `30a0d5bc9e0cb43e9230704c4c650b545e6a548a`
+- `0dc0c5ea6be051f33d287a02f274b913cbc7cb00`
+- `bb5082571671739afe336c1e7998ceeb55df3627`
+- `17103a1f118022a2836cedd89eb3d6a7af4f79ea`
+- `e5765e61fa68b7fa6aebd01ef1a2a79c7af80f82`
+- `4d7ea3fd36e0aa810088664143f1a40137b252bd`
+- `c9e31a8e4b186e937d575cdad2520b56369e20cf`
+
+Local result:
+
+- Absorbed the AUTHOR_MAP-only release attribution additions in `7f9552b3b`.
+- Kept the patch scoped to `scripts/release.py`; no runtime Hermes, model,
+  gateway, Docker, auth, tool, or platform behavior changed.
+
+Verification:
+
+```bash
+uv run --extra dev python - <<'PY'
+...
+PY
+```
+
+Result: `checked 23 AUTHOR_MAP entries`.
+
+```bash
+uv run --extra dev python -m py_compile scripts/release.py
+```
+
+Result: exit `0`.
+
+```bash
+uv run --extra dev ruff check scripts/release.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev pytest tests/scripts/test_release_acp_registry.py -q -rs
+```
+
+Result: `3 passed`.
+
+`git diff --check -- scripts/release.py` produced no output.
