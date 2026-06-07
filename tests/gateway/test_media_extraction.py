@@ -10,6 +10,8 @@ times per reply. (Regression test for #160)
 import pytest
 import re
 
+from gateway.run import _tool_result_messages_for_media_scan
+
 
 def extract_media_tags_fixed(result_messages, history_len):
     """
@@ -62,6 +64,25 @@ def extract_media_tags_broken(result_messages):
                 if "[[audio_as_voice]]" in content:
                     has_voice_directive = True
     
+    return media_tags, has_voice_directive
+
+
+def extract_media_tags_production(result_messages, history_len, history_media_paths):
+    """Mirror the production scan boundary and path-dedup contract."""
+    media_tags = []
+    has_voice_directive = False
+
+    for msg in _tool_result_messages_for_media_scan(result_messages, history_len):
+        if msg.get("role") == "tool" or msg.get("role") == "function":
+            content = msg.get("content", "")
+            if "MEDIA:" in content:
+                for match in re.finditer(r'MEDIA:(\S+)', content):
+                    path = match.group(1).strip().rstrip('",}')
+                    if path and path not in history_media_paths:
+                        media_tags.append(f"MEDIA:{path}")
+                if "[[audio_as_voice]]" in content:
+                    has_voice_directive = True
+
     return media_tags, has_voice_directive
 
 
@@ -178,6 +199,76 @@ class TestMediaExtraction:
         seen = set()
         unique = [t for t in tags if t not in seen and not seen.add(t)]
         assert len(unique) == 2  # After dedup: same.ogg and different.ogg
+
+
+class TestStaleToolMediaLeak:
+    """Regression tests for stale tool media leaking from earlier turns."""
+
+    def test_stale_execute_code_media_not_attached_to_text_only_reply(self):
+        history = [
+            {"role": "user", "content": "Make a cover image"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "1", "function": {"name": "execute_code"}}]},
+            {"role": "tool", "tool_call_id": "1",
+             "content": "Generating cover...\nMEDIA:/tmp/seosmi_cover.png\nDone."},
+            {"role": "assistant", "content": "Here is your cover."},
+        ]
+        new_messages = [
+            {"role": "user", "content": "What skill version am I on?"},
+            {"role": "assistant", "content": "You're on v0.15.1."},
+        ]
+        all_messages = history + new_messages
+
+        tags, voice = extract_media_tags_production(
+            all_messages,
+            len(history),
+            history_media_paths=set(),
+        )
+
+        assert tags == []
+        assert voice is False
+
+        broken_tags, _ = extract_media_tags_broken(all_messages)
+        assert any("seosmi_cover.png" in tag for tag in broken_tags)
+
+    def test_current_turn_media_still_attached(self):
+        history = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        new_messages = [
+            {"role": "user", "content": "Make me a cover image"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "9", "function": {"name": "execute_code"}}]},
+            {"role": "tool", "tool_call_id": "9",
+             "content": "MEDIA:/tmp/fresh_cover.png"},
+            {"role": "assistant", "content": "Here it is."},
+        ]
+
+        tags, _ = extract_media_tags_production(
+            history + new_messages,
+            len(history),
+            history_media_paths=set(),
+        )
+
+        assert len(tags) == 1
+        assert "fresh_cover.png" in tags[0]
+
+    def test_compression_shrink_falls_back_to_path_dedup(self):
+        compressed_messages = [
+            {"role": "user", "content": "summary so far..."},
+            {"role": "tool", "tool_call_id": "7",
+             "content": "MEDIA:/tmp/old_from_history.png"},
+            {"role": "assistant", "content": "ok"},
+        ]
+
+        tags, _ = extract_media_tags_production(
+            compressed_messages,
+            history_len=12,
+            history_media_paths={"/tmp/old_from_history.png"},
+        )
+
+        assert tags == []
 
 
 if __name__ == "__main__":

@@ -137,6 +137,25 @@ _GATEWAY_SECRET_PATTERNS = (
     re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._\-]{20,}\b"),
 )
 
+
+def _tool_result_messages_for_media_scan(result_messages: Any, history_len: int) -> list:
+    """Return messages whose tool MEDIA tags may belong to the current turn.
+
+    In the normal gateway path, run_conversation receives agent_history as
+    conversation_history and returns history + this turn. Slicing at
+    ``history_len`` prevents stale tool MEDIA tags from prior turns from being
+    reattached to later text-only replies. If mid-run compression shrank or
+    rewrote the message list below the original history length, fall back to
+    scanning the returned list and let path-based dedup handle known history
+    paths.
+    """
+    if not isinstance(result_messages, list):
+        return []
+    if history_len and len(result_messages) >= history_len:
+        return result_messages[history_len:]
+    return result_messages
+
+
 def _gateway_platform_value(platform: Any) -> str:
     """Return a normalized gateway platform value for enums or raw strings."""
     return str(getattr(platform, "value", platform) or "").strip().lower()
@@ -18067,13 +18086,18 @@ class GatewayRunner:
             # append any that aren't already present in the final response, so the
             # adapter's extract_media() can find and deliver the files exactly once.
             #
-            # Uses path-based deduplication against _history_media_paths (collected
-            # before run_conversation) instead of index slicing. This is safe even
-            # when context compression shrinks the message list. (Fixes #160)
+            # Scope the scan to this turn's new tool results. Path-based
+            # deduplication against _history_media_paths is retained as a
+            # secondary guard and as the fallback when mid-run compression
+            # shrinks the returned message list below the original history
+            # length. (Fixes #160 and #34608)
             if "MEDIA:" not in final_response:
                 media_tags = []
                 has_voice_directive = False
-                for msg in result.get("messages", []):
+                for msg in _tool_result_messages_for_media_scan(
+                    result.get("messages", []),
+                    len(agent_history),
+                ):
                     if msg.get("role") in {"tool", "function"}:
                         content = msg.get("content", "")
                         if "MEDIA:" in content:
