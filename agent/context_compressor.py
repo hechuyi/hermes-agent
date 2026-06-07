@@ -74,6 +74,39 @@ _IMAGE_TOKEN_ESTIMATE = 1600
 # for tail-cut decisions.
 _IMAGE_CHAR_EQUIVALENT = _IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
+_FALLBACK_SUMMARY_MAX_CHARS = 8_000
+_PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\)[^\s`'\")\]}<>]+")
+
+
+def _dedupe_append(items: list[str], value: str, *, limit: int) -> None:
+    value = value.strip()
+    if value and value not in items and len(items) < limit:
+        items.append(value)
+
+
+def _extract_tool_call_name_and_args(tool_call: Any) -> tuple[str, str]:
+    """Return a best-effort ``(name, arguments)`` pair for dict/object tool calls."""
+    if isinstance(tool_call, dict):
+        fn = tool_call.get("function") or {}
+        return str(fn.get("name") or "unknown"), str(fn.get("arguments") or "")
+
+    fn = getattr(tool_call, "function", None)
+    if fn is None:
+        return "unknown", ""
+    return str(getattr(fn, "name", None) or "unknown"), str(
+        getattr(fn, "arguments", None) or ""
+    )
+
+
+def _extract_tool_call_id(tool_call: Any) -> str:
+    if isinstance(tool_call, dict):
+        return str(tool_call.get("id") or tool_call.get("call_id") or "")
+    return str(getattr(tool_call, "id", "") or getattr(tool_call, "call_id", "") or "")
+
+
+def _collect_path_mentions(text: str, relevant_files: list[str], *, limit: int = 12) -> None:
+    for match in _PATH_MENTION_RE.findall(text):
+        _dedupe_append(relevant_files, match.rstrip(".,:;"), limit=limit)
 
 
 def _content_length_for_budget(raw_content: Any) -> int:
@@ -884,6 +917,164 @@ class ContextCompressor(ContextEngine):
 
         return "\n\n".join(parts)
 
+    def _build_static_fallback_summary(
+        self,
+        turns_to_summarize: List[Dict[str, Any]],
+        reason: str | None = None,
+    ) -> str:
+        """Build a deterministic handoff when the LLM summarizer is unavailable."""
+        user_asks: list[str] = []
+        assistant_actions: list[str] = []
+        tool_actions: list[str] = []
+        relevant_files: list[str] = []
+        blockers: list[str] = []
+        call_id_to_tool: dict[str, tuple[str, str]] = {}
+
+        def _collect_paths_from_jsonish(obj: Any) -> None:
+            if isinstance(obj, dict):
+                for key, val in obj.items():
+                    if key in {"path", "workdir", "file_path", "output_path"} and isinstance(
+                        val, str
+                    ):
+                        _dedupe_append(relevant_files, val, limit=12)
+                    _collect_paths_from_jsonish(val)
+            elif isinstance(obj, list):
+                for val in obj:
+                    _collect_paths_from_jsonish(val)
+            elif isinstance(obj, str):
+                _collect_path_mentions(obj, relevant_files)
+
+        for msg in turns_to_summarize:
+            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+                continue
+            for tool_call in msg.get("tool_calls") or []:
+                name, raw_args = _extract_tool_call_name_and_args(tool_call)
+                args = redact_sensitive_text(raw_args)
+                call_id = _extract_tool_call_id(tool_call)
+                if call_id:
+                    call_id_to_tool[call_id] = (name, args)
+                if not args:
+                    continue
+                try:
+                    parsed = json.loads(args)
+                except Exception:
+                    parsed = args
+                _collect_paths_from_jsonish(parsed)
+
+        for msg in turns_to_summarize:
+            role = msg.get("role", "unknown")
+            text = redact_sensitive_text(
+                _content_text_for_contains(msg.get("content"))
+            ).strip()
+            _collect_path_mentions(text, relevant_files)
+            if len(text) > 600:
+                text = text[:420].rstrip() + " ... " + text[-160:].lstrip()
+
+            if role == "user" and text:
+                user_asks.append(text)
+            elif role == "assistant":
+                tool_names: list[str] = []
+                for tool_call in msg.get("tool_calls") or []:
+                    name, _args = _extract_tool_call_name_and_args(tool_call)
+                    tool_names.append(name)
+                if tool_names:
+                    assistant_actions.append(
+                        "Called tool(s): " + ", ".join(tool_names[:6])
+                    )
+                elif text:
+                    assistant_actions.append(text)
+            elif role == "tool":
+                call_id = str(msg.get("tool_call_id") or "")
+                tool_name, tool_args = call_id_to_tool.get(call_id, ("unknown", ""))
+                tool_actions.append(
+                    _summarize_tool_result(tool_name, tool_args, text or "")
+                )
+                if re.search(
+                    r"\b(error|failed|exception|traceback|timeout|timed out|fatal)\b",
+                    text,
+                    re.I,
+                ):
+                    blockers.append(text[:500])
+
+        def _bullets(items: list[str], limit: int = 8) -> str:
+            unique: list[str] = []
+            seen: set[str] = set()
+            for item in items:
+                item = item.strip()
+                if not item or item in seen:
+                    continue
+                seen.add(item)
+                unique.append(item)
+                if len(unique) >= limit:
+                    break
+            return "\n".join(f"- {item}" for item in unique) if unique else "None."
+
+        completed = [
+            f"{idx}. {item}"
+            for idx, item in enumerate((assistant_actions + tool_actions)[:12], start=1)
+        ]
+        active_task = (
+            f"User asked: {user_asks[-1]!r}"
+            if user_asks
+            else "Unknown from deterministic fallback."
+        )
+        previous_summary_note = ""
+        if self._previous_summary:
+            previous_summary_note = (
+                "\n\nPrevious compaction summary was present and should still "
+                "be treated as background continuity context, but the latest "
+                "LLM summary update failed."
+            )
+        reason_text = f" Summary failure reason: {reason}." if reason else ""
+
+        body = f"""## Active Task
+{active_task}
+
+## Goal
+Recovered from a deterministic fallback because the LLM context summarizer was unavailable. Continue from the protected recent messages after this summary and use current file/system state for exact details.{previous_summary_note}
+
+## Constraints & Preferences
+- This fallback was generated locally without an LLM summary call.
+- Secrets and credentials were redacted before preservation.
+- The summary may be incomplete; prefer verifying current files, git state, processes, and test results instead of assuming omitted details.
+
+## Completed Actions
+{chr(10).join(completed) if completed else "None recoverable from compacted turns."}
+
+## Active State
+Unknown from deterministic fallback. Inspect current repository/session state if needed.
+
+## In Progress
+{active_task}
+
+## Blocked
+{_bullets(blockers, limit=5)}
+
+## Key Decisions
+None recoverable from deterministic fallback.
+
+## Resolved Questions
+None recoverable from deterministic fallback.
+
+## Pending User Asks
+{active_task}
+
+## Relevant Files
+{_bullets(relevant_files, limit=12)}
+
+## Remaining Work
+Continue from the most recent unfulfilled user ask and protected tail messages. Verify state with tools before making claims.
+
+## Critical Context
+Summary generation was unavailable, so this is a best-effort deterministic fallback for {len(turns_to_summarize)} compacted message(s).{reason_text}"""
+        summary = self._with_summary_prefix(redact_sensitive_text(body.strip()))
+        if len(summary) > _FALLBACK_SUMMARY_MAX_CHARS:
+            summary = (
+                summary[: _FALLBACK_SUMMARY_MAX_CHARS - 42].rstrip()
+                + "\n...[fallback summary truncated]"
+            )
+        return summary
+
     def _fallback_to_main_for_compression(self, e: Exception, reason: str) -> None:
         """Switch from a separate ``summary_model`` back to the main model.
 
@@ -1643,21 +1834,22 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                     )
             compressed.append(msg)
 
-        # Legacy fallback path: LLM summary failed and abort_on_summary_failure
-        # is False (the default).  Insert a static placeholder so the model
-        # knows context was lost rather than silently dropping everything.
+        # Fallback path: LLM summary failed and abort_on_summary_failure is
+        # False (the default).  Insert a deterministic local handoff so the
+        # model keeps recoverable continuity anchors instead of a content-free
+        # "N messages were removed" marker.
         if not summary:
             if not self.quiet_mode:
-                logger.warning("Summary generation failed — inserting static fallback context marker")
+                logger.warning(
+                    "Summary generation failed — inserting deterministic "
+                    "fallback context summary"
+                )
             n_dropped = compress_end - compress_start
             self._last_summary_dropped_count = n_dropped
             self._last_summary_fallback_used = True
-            summary = (
-                f"{SUMMARY_PREFIX}\n"
-                f"Summary generation was unavailable. {n_dropped} message(s) were "
-                f"removed to free context space but could not be summarized. The removed "
-                f"messages contained earlier work in this session. Continue based on the "
-                f"recent messages below and the current state of any files or resources."
+            summary = self._build_static_fallback_summary(
+                turns_to_summarize,
+                reason=self._last_summary_error,
             )
 
         _merge_summary_into_tail = False
