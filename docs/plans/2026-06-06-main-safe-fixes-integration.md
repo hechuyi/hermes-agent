@@ -3671,3 +3671,69 @@ Result: exit `0`.
 
 `git diff --check -- hermes_cli/nous_subscription.py tests/hermes_cli/test_nous_subscription.py tests/hermes_cli/test_tools_config.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Browser native vision routing absorption
+
+Upstream commits reviewed and absorbed:
+
+- `f05353397d036a1d072f7e0230e6850f1e453efd` — allow explicit
+  `supports_vision: true` to use the native `vision_analyze` path even when a
+  provider is not in the known tool-result media allowlist.
+- `f8b8dffccf48b1abfad68bf4fb1521a37ff1a53d` — add native screenshot routing
+  to `browser_vision`.
+- `2402ec5e7b251d115efdc24c231463f33b587902` — extend native image routing
+  tests.
+- `c3f28c651d59de1a2fdb9220cf0509b21cd25c9a` — update `browser_vision`
+  description for native routing.
+
+Local result:
+
+- Absorbed as `0977fcae`.
+- `vision_analyze` now treats explicit `model.supports_vision: true` as a
+  user assertion that native image routing is valid, while `agent.image_input_mode:
+  text` still blocks the native fast path.
+- `browser_vision` now returns a multimodal tool-result envelope for native
+  vision-capable active models, including `screenshot_path`, fallback warning,
+  and annotations metadata. It still falls back to the auxiliary vision LLM
+  when native mode is disabled or unsupported.
+- The earlier `270c8636` ledger entry was too narrow if read as covering the
+  whole browser/vision stack; this entry supersedes it for browser-side native
+  routing.
+- `c77a697fa4f3a5bc839bf569d6405489b0301c09` remains deferred as a refactor
+  only. The behavioral changes are now absorbed; the shared-helper cleanup can
+  be reconsidered later if it reduces duplication without changing routing
+  semantics.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/tools/test_vision_native_fast_path.py tests/tools/test_browser_console.py -q -rs -k "native or browser_vision or BrowserVisionConfig or BrowserVisionAnnotate"
+```
+
+Result after adding upstream tests but before code change: `2 failed, 25
+passed, 22 deselected`. Failures showed `supports_vision: true` still taking
+the auxiliary `vision_analyze` path and `browser_vision` returning auxiliary
+JSON instead of a multimodal envelope.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_vision_native_fast_path.py tests/tools/test_browser_console.py -q -rs -k "native or browser_vision or BrowserVisionConfig or BrowserVisionAnnotate"
+```
+
+Result: `27 passed, 22 deselected`.
+
+```bash
+uv run --extra dev ruff check tools/vision_tools.py tools/browser_tool.py tests/tools/test_vision_native_fast_path.py tests/tools/test_browser_console.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile tools/vision_tools.py tools/browser_tool.py tests/tools/test_vision_native_fast_path.py tests/tools/test_browser_console.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- tools/vision_tools.py tools/browser_tool.py tests/tools/test_browser_console.py tests/tools/test_vision_native_fast_path.py`
+produced no output before the code commit.
