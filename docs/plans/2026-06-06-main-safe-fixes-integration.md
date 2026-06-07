@@ -3110,3 +3110,90 @@ Result: exit `0`.
 
 `git diff HEAD --check -- hermes_cli/security_advisories.py hermes_cli/tools_config.py hermes_cli/web_server.py pyproject.toml uv.lock tools/lazy_deps.py tools/transcription_tools.py tools/tts_tool.py tests/test_project_metadata.py tests/tools/test_transcription_dotenv_fallback.py tests/tools/test_transcription_tools.py tests/tools/test_tts_mistral.py tests/plugins/tts/check_parity_vs_main.py tests/plugins/transcription/check_parity_vs_main.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Low-risk docs, CLI, and release-map equivalence batch
+
+Upstream commits reviewed and found already present/equivalent:
+
+- `28bb7e0a8e8d9218d593eea6c8b5941d225814a6` — Tailwind
+  `--font-sans` / `--font-mono` bridge.
+- `26b83a5f5f0acf32599f6449b685bec5a136e3d8` — ignore terminal focus
+  reports in the CLI.
+- `5921d667855880b0aa2083a50f001748aed52f3e` — stop OSC 11 background
+  probing from trapping users in a stray editor. This is already
+  patch-equivalent in `git cherry` (`-`).
+- `2410e1139547abcd5a6705d2a5f3297633f454ff` and
+  `c692000a57df41c953967f37eb34ed9b593f233c` — xAI OAuth bare-code manual
+  paste documentation.
+- `62e81b2d9b30f2a4c882f57732b5e213b6250c42` — WSL desktop shortcut guide.
+- `ae9dfa510e668552a804811d18017d1ad71ce157` — `separate` typo and
+  built-in trust wording.
+- `0673638560a43b1affce9ceecdc60c2758aae7c0` — GitHub org links in
+  memory-provider docs.
+- `6891e05e78b67beac3ef4f2f5acbdbd24f4e9e7b` — session recap image
+  `baseUrl` path.
+- `d86710528a0245e2638a801f46551dad35230d9b` — Google Workspace CLI link.
+- `03bdeaa87697dbfc12d3733aa904a2b3a85b4653` — Browserbase timeout unit
+  documentation.
+- `988cf1743be74e939241e9cbbb7695bda0fcc606` — quickstart playlist URL.
+- `053969fd533a2aea9fe402cb441b531164003f6d` — SimpleX download URL.
+- `3f0d44af8ae380996057b620afeae258af830634` — replace invalid
+  `hermes config get <key>` docs with `hermes config show`.
+- `71ae98b792b72bfbf2b60f01f9edda6d97b75f56`,
+  `8d5728165093ec4fda8faaaf4d99ab9dbc40ef2e`,
+  `c1485d52e3ec9fa9a5ce9fcee2adea93d78624b5`,
+  `0384398c65644c48aa1ed3484ecc5a56075a4851`, and
+  `58e1b04665155ac4d312f075945620db11993df7` — release `AUTHOR_MAP`
+  salvage mappings already present locally.
+- `61268ff7a9be93673361e433cbf2e775798a13ae` — `hermes prompt-size`
+  diagnostic command.
+
+Local result:
+
+- No code change needed for this batch. The current branch already contains
+  the behavior, docs text, author mappings, and prompt-size command surface.
+- The terminal-focus/OSC 11 items are stronger locally than the upstream
+  isolated fixes because existing-registration and light-mode tests both cover
+  the behavior.
+- Remaining upstream commits in the same reviewed region that touch protected
+  surfaces stay deferred: `5e7c2ffa` model catalog changes conflict with the
+  `5.5`-only constraint; `41ff6e593` disables Nous legacy auth; `fd09b2c55`
+  changes gateway default-deny/access-control semantics; Docker lifecycle docs
+  around `3c6e70ae` need to stay aligned with this fork's Docker reuse/orphan
+  contract; `d04b3c193` / related video-generation commits touch managed
+  gateway behavior and remain separate-review items.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/cli/test_cli_terminal_shortcuts.py tests/cli/test_cli_light_mode.py tests/hermes_cli/test_prompt_size.py -q -rs
+```
+
+Result: `31 passed, 1 warning` (`discord.player` imports deprecated
+`audioop` under Python 3.11).
+
+```bash
+uv run --extra dev ruff check scripts/release.py hermes_cli/main.py hermes_cli/prompt_size.py tests/cli/test_cli_terminal_shortcuts.py tests/cli/test_cli_light_mode.py tests/hermes_cli/test_prompt_size.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile scripts/release.py hermes_cli/main.py hermes_cli/prompt_size.py
+```
+
+Result: exit `0`.
+
+Additional read-only evidence collected with `rg`:
+
+- `web/src/index.css` contains `--font-sans: var(--theme-font-sans)` and
+  `--font-mono: var(--theme-font-mono)`.
+- Both xAI OAuth guides describe full URL, query-fragment, and bare-code
+  callback paste forms.
+- `website/docs/user-guide/windows-wsl-quickstart.md` contains the desktop
+  shortcut section and WSL command examples.
+- Memory-provider, Google Workspace, quickstart, SimpleX, browser, skills, and
+  sessions docs contain the corrected links/wording/path units.
+- `rg "hermes config get"` over the three affected docs returned no matches.
+- `scripts/release.py` contains the verified `seppe`, `Interstellar-code`,
+  `Moikapy`, `blackpilledsoftware-prog`, and `tillfalko` mappings.
