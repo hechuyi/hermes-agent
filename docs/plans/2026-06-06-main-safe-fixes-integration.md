@@ -414,6 +414,25 @@ This batch is limited to CLI startup and tool snapshot timing. It does not
 change gateway event ledgers, media extraction, delivery outcomes, Nous
 authentication behavior, model catalogs, or the fork's `5.5` customizations.
 
+### Ghostty Ctrl+J newline batch
+
+`cf8862cfa316626ab4e673b9e04e0105a937f9bd`
+(`fix: preserve Ctrl+J newlines in Ghostty`) was manually absorbed in local
+commit `2b81062c9`.
+
+Prompt-toolkit CLI key binding and the Ink TUI input handler now recognize
+Ghostty session markers, including `GHOSTTY_RESOURCES_DIR`/`GHOSTTY_BIN_DIR`,
+`TERM=xterm-ghostty`, and `TERM_PROGRAM=ghostty`, as terminals where bare LF
+can represent Ctrl+J/Ctrl+Enter newline input. The CLI leaves `c-j` unbound in
+those sessions so the newline binding can fire, while bare local POSIX
+LF-compatible prompts still bind `c-j` to submit. The TUI mirrors that
+detection and treats bare LF as newline only in the preserved environments.
+
+This batch is limited to interactive input compatibility. It does not change
+gateway event ledgers, media extraction, delivery outcomes, provider routing,
+model catalogs, Nous legacy authentication, or the fork's `5.5`
+customizations.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -848,6 +867,43 @@ uv run --extra dev ruff check cli.py hermes_cli/main.py hermes_cli/mcp_startup.p
 ```
 
 Result: `All checks passed!`.
+
+`git diff --check` produced no output.
+
+Ghostty Ctrl+J newline batch verification:
+
+```bash
+uv run --extra dev pytest tests/cli/test_ctrl_enter_newline.py tests/cli/test_cli_init.py::TestPromptToolkitTerminalCompatibility -q -rs
+```
+
+Result: `12 passed`.
+
+```bash
+uv run --extra dev ruff check cli.py tests/cli/test_cli_init.py tests/cli/test_ctrl_enter_newline.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+cd ui-tui && npm test -- --run src/__tests__/textInputPassThrough.test.ts
+```
+
+Result: `1 passed`, `6 passed`.
+
+```bash
+cd ui-tui && npx eslint src/components/textInput.tsx src/__tests__/textInputPassThrough.test.ts
+```
+
+Result: exit `0` with one existing warning in
+`src/components/textInput.tsx` from `react-compiler/react-compiler`; no errors.
+
+```bash
+cd ui-tui && npm run type-check
+```
+
+Result: failed on pre-existing TypeScript errors in
+`packages/hermes-ink/src/utils/execFileNoThrow.ts`; that file has no diff in
+this batch.
 
 `git diff --check` produced no output.
 
