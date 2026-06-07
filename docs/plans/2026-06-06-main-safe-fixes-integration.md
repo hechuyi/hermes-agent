@@ -2535,3 +2535,76 @@ Result: exit `0`.
 
 `git diff --check -- gateway/platforms/base.py gateway/run.py tests/gateway/test_platform_base.py tests/gateway/test_extract_local_files.py tests/gateway/test_run_tool_media_re.py`
 produced no output before the code commit.
+
+## 2026-06-07 — Feishu and multi-profile gateway docs
+
+Upstream commits reviewed and absorbed:
+
+- `fe7e0a8c1d9913d9cc54e71ec0748f046e5b6bfc` — Feishu setup docs:
+  permission scopes, event subscription, and app publish reminder.
+- `0c0a905011a61aa869a750caebd1488e0e83a65a` — multi-profile gateway
+  operations guide.
+- `0aa9f6acfa1861bf0c846a35d22abd40669431fc` — sidebar entry for the
+  multi-profile gateway guide.
+
+Local result:
+
+- Cherry-picked as `d8d6bc1da`, `2f286d9fe`, and `c9ebfa018`.
+- No runtime code changed.
+
+Verification:
+
+```bash
+rg -n "multi-profile-gateways|Configure Permissions|im.message.receive_v1" \
+  website/docs/user-guide/messaging/feishu.md \
+  website/docs/user-guide/multi-profile-gateways.md \
+  website/sidebars.ts
+```
+
+Result: the Feishu permission/event section and sidebar page reference were
+present at the expected paths.
+
+Attempted website verification:
+
+```bash
+npm run typecheck
+npm run lint:diagrams
+```
+
+Both failed before checking project content because local website dependencies
+were not installed (`tsc: command not found`, `ascii-guard: command not found`).
+An `npm ci` attempt was terminated after several minutes without progress; the
+worktree remained clean and only ignored `website/node_modules` content was
+left behind.
+
+## 2026-06-07 — Deferred cron jobs auto-restore port
+
+Upstream commit reviewed:
+
+- `3845d86b9330d8952fc1e9534d438f62ad1d53e5` — restore `cron/jobs.json`
+  from a pre-update quick snapshot if config migration leaves the live file
+  valid-but-empty.
+
+Local result:
+
+- Deferred, not absorbed.
+- Reason: the upstream implementation is directionally useful, but it lives in
+  backup/recovery code and currently collapses restore-copy failures and
+  safety-net exceptions into `None`/debug-only paths. This conflicts with this
+  workspace's disaster-recovery error discipline: unknown, unreadable,
+  unsupported, or failed restore states must surface as stable failure/unknown
+  categories with sanitized context instead of silently joining the no-op path.
+
+Required shape before absorption:
+
+- Preserve the conservative restore condition: only restore when the live
+  `cron/jobs.json` is readable and empty while the snapshot has one or more
+  jobs.
+- Represent restore-copy failure, unreadable live file, unreadable snapshot
+  material, and missing restore material as explicit result states or warnings
+  with stable reason codes.
+- Keep `hermes update` from bricking on this safety net, but print/log a
+  visible warning when the safety-net check itself fails or cannot prove a
+  safe restore.
+- Add tests for restored, healthy-noop, empty-snapshot-noop, unreadable-live,
+  unreadable-snapshot, missing-snapshot-material, and copy-failure outcomes.
