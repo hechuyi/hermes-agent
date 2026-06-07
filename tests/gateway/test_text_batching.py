@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, MessageType, SessionSource
 
 
@@ -393,8 +393,10 @@ def _make_telegram_adapter():
 
     config = PlatformConfig(enabled=True, token="test-token")
     adapter = object.__new__(TelegramAdapter)
+    adapter.platform = Platform.TELEGRAM
     adapter._platform = Platform.TELEGRAM
     adapter.config = config
+    adapter._session_isolation_config = GatewayConfig()
     adapter._pending_text_batches = {}
     adapter._pending_text_batch_tasks = {}
     adapter._text_batch_delay_seconds = 0.1
@@ -459,6 +461,7 @@ def _make_feishu_adapter():
     adapter = object.__new__(FeishuAdapter)
     adapter._platform = Platform.FEISHU
     adapter.config = config
+    adapter._session_isolation_config = GatewayConfig()
     batch_state = FeishuBatchState()
     adapter._pending_text_batches = batch_state.events
     adapter._pending_text_batch_tasks = batch_state.tasks
