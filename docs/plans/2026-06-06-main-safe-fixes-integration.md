@@ -2404,3 +2404,65 @@ git show --stat --oneline --find-renames --find-copies f61fd59b62655f6ee41e372af
 ```
 
 Confirmed the broad prune scope and the paired restore/documentation commits.
+
+## 2026-06-07 — Matrix approval reaction fail-closed auth
+
+Upstream commit reviewed:
+
+- `784d8dd2c24ed00e43e4b1e18660d1fc30fd1216` — Matrix approval reactions
+  fail closed when `MATRIX_ALLOWED_USERS` is empty.
+
+Local result:
+
+- Absorbed as `ae8ac4a58`.
+- Matrix reaction-based approval resolution now requires either an explicit
+  `GATEWAY_ALLOW_ALL_USERS=true|1|yes` override or a sender present in
+  `_allowed_user_ids`; an empty Matrix allowlist no longer admits arbitrary
+  room members.
+- Added focused regression coverage in the existing Matrix exec approval test
+  file for both the fail-closed default and explicit allow-all opt-in.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_matrix_exec_approval.py -q -rs -k "reaction_denies_when_allowlist_empty_and_allow_all_unset or reaction_allows_empty_allowlist_when_allow_all_set"
+```
+
+Result before the code change: `1 failed, 1 passed, 2 deselected`; the empty
+allowlist path still called `resolve_gateway_approval("sess-1", "once")`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_matrix_exec_approval.py -q -rs -k "reaction_denies_when_allowlist_empty_and_allow_all_unset or reaction_allows_empty_allowlist_when_allow_all_set"
+```
+
+Result: `2 passed, 2 deselected`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_matrix_exec_approval.py -q -rs
+```
+
+Result: `4 passed`.
+
+```bash
+uv run --extra dev pytest tests/gateway/test_matrix.py tests/gateway/test_matrix_exec_approval.py tests/gateway/test_ws_auth_retry.py -q -rs
+```
+
+Result: `160 passed`; the test process also printed an existing
+`Unclosed client session` aiohttp warning after completion.
+
+```bash
+uv run --extra dev ruff check gateway/platforms/matrix.py tests/gateway/test_matrix_exec_approval.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile gateway/platforms/matrix.py tests/gateway/test_matrix_exec_approval.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- gateway/platforms/matrix.py tests/gateway/test_matrix_exec_approval.py`
+produced no output before the code commit.
