@@ -119,8 +119,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams();
   // Lazy-init: the missing-token check happens at construction so the effect
   // body doesn't have to setState (React 19's set-state-in-effect rule).
+  // In gated/OAuth mode the server intentionally omits the loopback session
+  // token; the SPA authenticates the WebSocket with a single-use ticket.
   const [banner, setBanner] = useState<string | null>(() =>
-    typeof window !== "undefined" && !window.__HERMES_SESSION_TOKEN__
+    typeof window !== "undefined" &&
+    !window.__HERMES_SESSION_TOKEN__ &&
+    !window.__HERMES_AUTH_REQUIRED__
       ? "Session token unavailable. Open this page through `hermes dashboard`, not directly."
       : null,
   );
@@ -273,8 +277,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     if (!host) return;
 
     const token = (window.__HERMES_SESSION_TOKEN__);
+    const gated = !!window.__HERMES_AUTH_REQUIRED__;
     // Banner already initialised above; just bail before wiring xterm/WS.
-    if (!token) {
+    if (!token && !gated) {
       return;
     }
 
@@ -876,5 +881,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 declare global {
   interface Window {
     __HERMES_SESSION_TOKEN__?: string;
+    __HERMES_AUTH_REQUIRED__?: boolean;
   }
 }
