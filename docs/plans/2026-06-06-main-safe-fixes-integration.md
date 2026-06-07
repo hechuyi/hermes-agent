@@ -3994,3 +3994,56 @@ git diff --check -- hermes_cli/kanban_db.py tests/hermes_cli/test_kanban_db_init
 ```
 
 Result: exit `0`.
+
+## 2026-06-07 — Kanban mobile drawer safe-area absorption
+
+Upstream commit reviewed and absorbed:
+
+- `10dec7c6dc3e1e051a2a3c8a6e60eac2532449b3` — respect mobile safe areas in
+  the Kanban task detail drawer.
+
+Local result:
+
+- Absorbed as `b162bd4`.
+- The task detail drawer keeps the existing `100vh` fallback but now uses
+  `100dvh`/`max-height: 100dvh` for mobile browser chrome, adds top safe-area
+  padding, offsets the drawer header below the dashboard's fixed mobile top
+  bar at the `<1024px` breakpoint, and extends body/comment-row bottom padding
+  with `env(safe-area-inset-bottom)`.
+- Added a static CSS regression test in the existing Kanban dashboard plugin
+  test file.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/plugins/test_kanban_dashboard_plugin.py::test_dashboard_task_drawer_respects_mobile_safe_areas -q -rs
+```
+
+Result before CSS change: `1 failed`; the bundle did not contain
+`height: 100dvh`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/plugins/test_kanban_dashboard_plugin.py::test_dashboard_task_drawer_respects_mobile_safe_areas tests/plugins/test_kanban_dashboard_plugin.py::test_dashboard_failed_card_highlight_class_exists -q -rs
+```
+
+Result: `2 passed`.
+
+```bash
+uv run --extra dev ruff check tests/plugins/test_kanban_dashboard_plugin.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile tests/plugins/test_kanban_dashboard_plugin.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --check -- plugins/kanban/dashboard/dist/style.css tests/plugins/test_kanban_dashboard_plugin.py
+```
+
+Result: exit `0`.
