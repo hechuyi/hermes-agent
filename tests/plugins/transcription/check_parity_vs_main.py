@@ -244,8 +244,7 @@ SCENARIOS: list[tuple[str, str, dict[str, str], str]] = [
     ("explicit-openai", "stt:\n  provider: openai\n", {}, "no"),
     ("explicit-local", "stt:\n  provider: local\n", {}, "no"),
     ("explicit-xai", "stt:\n  provider: xai\n", {}, "no"),
-    # Mistral is quarantined → _get_provider returns "none" today, hence no_provider_error.
-    ("explicit-mistral-quarantine", "stt:\n  provider: mistral\n", {}, "no"),
+    ("explicit-mistral", "stt:\n  provider: mistral\n", {}, "no"),
     # Unknown name + no plugin → both: no_provider_error
     ("unknown-no-plugin", "stt:\n  provider: openrouter\n", {}, "no"),
     # Unknown name + plugin installed → main: no_provider_error, PR: plugin

@@ -23,7 +23,7 @@ Where ``dispatch_kind`` ∈
 * ``plugin`` — config selects a plugin-registered provider (PR only)
 * ``fallback_edge`` — config selects an unknown name with no matching
   plugin or command entry → Edge TTS default fallback
-* ``error`` — explicit fatal error (e.g. mistral quarantine)
+* ``error`` — explicit fatal dispatcher error
 
 The parent process diffs the reduced shape per scenario. The only
 acceptable diff is ``fallback_edge → plugin`` for the
@@ -134,11 +134,7 @@ voice_compat = False
 error_text = None
 
 try:
-    # Mistral is the one branch that returns a fatal error.
-    if provider == "mistral":
-        dispatch_kind = "error"
-        error_text = "mistral quarantine"
-    elif tts_tool._resolve_command_provider_config(provider, tts_config) is not None:
+    if tts_tool._resolve_command_provider_config(provider, tts_config) is not None:
         dispatch_kind = "command"
     elif have_plugin_hook and provider not in tts_tool.BUILTIN_TTS_PROVIDERS:
         # On PR side: check plugin dispatch.
@@ -204,8 +200,8 @@ SCENARIOS: list[tuple[str, str, dict[str, str], str]] = [
     # path to ensure the built-in branch still takes priority.
     ("explicit-edge-with-plugin-registered", "tts:\n  provider: edge\n", {}, "yes"),
 
-    # Scenario 7: mistral quarantine — both surface the explicit error
-    ("mistral-quarantine", "tts:\n  provider: mistral\n", {}, "no"),
+    # Scenario 7: built-in Mistral provider → both: built-in
+    ("explicit-mistral", "tts:\n  provider: mistral\n", {}, "no"),
 ]
 
 
