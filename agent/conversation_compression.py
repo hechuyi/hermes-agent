@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,10 @@ from typing import Any, List, Optional, Tuple
 from agent.model_metadata import estimate_request_tokens_rough
 
 logger = logging.getLogger(__name__)
+
+
+def _compression_lock_holder(agent: Any) -> str:
+    return f"{os.getpid()}:{threading.get_ident()}:{id(agent)}:{uuid.uuid4().hex[:8]}"
 
 
 def check_compression_model_feasibility(agent: Any) -> None:
@@ -305,6 +310,63 @@ def compress_context(
         "🗜️ Compacting context — summarizing earlier conversation so I can continue..."
     )
 
+    _lock_db = getattr(agent, "_session_db", None)
+    _lock_sid = agent.session_id or ""
+    _lock_holder: Optional[str] = None
+    if _lock_db is not None and _lock_sid:
+        _lock_holder = _compression_lock_holder(agent)
+        try:
+            _lock_acquired = _lock_db.try_acquire_compression_lock(
+                _lock_sid,
+                _lock_holder,
+            )
+        except Exception as lock_err:
+            _lock_holder = None
+            if getattr(agent, "_last_compression_lock_error_sid", None) != _lock_sid:
+                agent._last_compression_lock_error_sid = _lock_sid
+                logger.warning(
+                    "compression lock subsystem unavailable for session=%s "
+                    "(%s: %s) — proceeding without lock",
+                    _lock_sid,
+                    type(lock_err).__name__,
+                    lock_err,
+                )
+            _lock_acquired = True
+
+        if not _lock_acquired:
+            try:
+                existing_holder = _lock_db.get_compression_lock_holder(_lock_sid)
+            except Exception:
+                existing_holder = None
+            logger.warning(
+                "compression skipped: another path is compressing session=%s "
+                "(holder=%s) — returning messages unchanged to avoid session fork",
+                _lock_sid,
+                existing_holder,
+            )
+            _lock_holder = None
+            if getattr(agent, "_last_compression_lock_warning_sid", None) != _lock_sid:
+                agent._last_compression_lock_warning_sid = _lock_sid
+                try:
+                    agent._emit_warning(
+                        "⚠ Skipping concurrent compression — another path "
+                        "is already compressing this session. Will retry "
+                        "after it finishes."
+                    )
+                except Exception:
+                    pass
+            _existing_sp = getattr(agent, "_cached_system_prompt", None)
+            if not _existing_sp:
+                _existing_sp = agent._build_system_prompt(system_message)
+            return messages, _existing_sp
+
+    def _release_compression_lock() -> None:
+        if _lock_db is not None and _lock_sid and _lock_holder:
+            try:
+                _lock_db.release_compression_lock(_lock_sid, _lock_holder)
+            except Exception as rel_err:
+                logger.debug("compression lock release failed: %s", rel_err)
+
     # Notify external memory provider before compression discards context
     if agent._memory_manager:
         try:
@@ -313,11 +375,15 @@ def compress_context(
             pass
 
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
-    except TypeError:
-        # Plugin context engine with strict signature that doesn't accept
-        # focus_topic / force — fall back to calling without them.
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+        try:
+            compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
+        except TypeError:
+            # Plugin context engine with strict signature that doesn't accept
+            # focus_topic / force — fall back to calling without them.
+            compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+    except BaseException:
+        _release_compression_lock()
+        raise
 
     # If compression aborted (aux LLM failed to produce a usable summary)
     # the compressor returns the input messages unchanged.  Surface the
@@ -336,6 +402,7 @@ def compress_context(
         _existing_sp = getattr(agent, "_cached_system_prompt", None)
         if not _existing_sp:
             _existing_sp = agent._build_system_prompt(system_message)
+        _release_compression_lock()
         return messages, _existing_sp
 
     summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
@@ -500,6 +567,7 @@ def compress_context(
         agent.session_id or "none", _pre_msg_count, len(compressed),
         f"{_compressed_est:,}",
     )
+    _release_compression_lock()
     return compressed, new_system_prompt
 
 

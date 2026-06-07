@@ -7,7 +7,12 @@ import time
 import importlib.util
 from pathlib import Path
 
-from hermes_state import SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE, SCHEMA_VERSION
+from hermes_state import (
+    SCHEMA_CONTRACT_META_KEY,
+    SCHEMA_CONTRACT_META_VALUE,
+    SCHEMA_VERSION,
+    SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -140,6 +145,7 @@ def test_probe_migrates_temporary_copy_and_reports_invariants(tmp_path):
         ].items():
             assert digest == report["after"]["row_fingerprints"][table]["column_sha256"][column]
     assert report["after"]["tables"]["conversation_scopes"]["exists"] is True
+    assert report["after"]["tables"]["compression_locks"]["exists"] is True
     assert report["after"]["fts_counts"]["messages_fts"] == 2
     assert report["after"]["fts_counts"]["messages_fts_trigram"] == 2
     assert report["after"]["schema_fingerprint"]
@@ -148,6 +154,7 @@ def test_probe_migrates_temporary_copy_and_reports_invariants(tmp_path):
     assert report["after"]["state_meta_contract_marker"]["expected"] == SCHEMA_CONTRACT_META_VALUE
     assert report["after"]["state_meta_contract_marker"]["actual"] == SCHEMA_CONTRACT_META_VALUE
     assert report["after"]["required_object_invariants"]["conversation_scopes"]["ok"] is True
+    assert report["after"]["required_object_invariants"]["compression_locks"]["ok"] is True
     scope_distribution = report["after"]["scope_assignment_status"]
     assert scope_distribution.get("scoped", 0) == 0
     assert sum(scope_distribution.values()) == 2
@@ -290,6 +297,10 @@ def test_probe_fails_closed_when_version_14_lacks_required_scope_objects(tmp_pat
         "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
         ("s1", "user", "hello", 1001.0),
     )
+    conn.execute(
+        "INSERT INTO state_meta (key, value) VALUES (?, ?)",
+        (SCHEMA_CONTRACT_META_KEY, SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE),
+    )
     conn.commit()
     conn.close()
 
@@ -352,6 +363,10 @@ def test_probe_fails_closed_when_version_14_lacks_required_scope_columns(tmp_pat
     conn.execute(
         "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
         ("s1", "user", "hello", 1001.0),
+    )
+    conn.execute(
+        "INSERT INTO state_meta (key, value) VALUES (?, ?)",
+        (SCHEMA_CONTRACT_META_KEY, SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE),
     )
     conn.commit()
     conn.close()
@@ -418,6 +433,7 @@ def test_validate_after_requires_supported_schema_version():
             "messages": {"ok": True},
             "conversation_scopes": {"ok": True},
             "state_meta": {"ok": True},
+            "compression_locks": {"ok": True},
             "messages_fts": {"ok": True},
             "messages_fts_trigram": {"ok": True},
         },
@@ -483,6 +499,7 @@ def test_validate_after_detects_row_fingerprint_mismatch():
             "messages": {"ok": True},
             "conversation_scopes": {"ok": True},
             "state_meta": {"ok": True},
+            "compression_locks": {"ok": True},
             "messages_fts": {"ok": True},
             "messages_fts_trigram": {"ok": True},
         },
@@ -538,6 +555,7 @@ def test_validate_after_fails_closed_and_preserves_evidence_when_fts_counts_mism
             "messages": {"ok": True},
             "conversation_scopes": {"ok": True},
             "state_meta": {"ok": True},
+            "compression_locks": {"ok": True},
             "messages_fts": {"ok": True},
             "messages_fts_trigram": {"ok": True},
         },

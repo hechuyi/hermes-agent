@@ -1906,7 +1906,7 @@ class TestSchemaInit:
     ):
         import sqlite3
 
-        from hermes_state import SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE
+        from hermes_state import SCHEMA_CONTRACT_META_KEY, SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE
 
         conn = sqlite3.connect(str(db_path))
         sessions_id = "id TEXT PRIMARY KEY" if sessions_id_primary_key else "id TEXT"
@@ -2039,7 +2039,7 @@ class TestSchemaInit:
         if marker:
             conn.execute(
                 "INSERT INTO state_meta (key, value) VALUES (?, ?)",
-                (SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE),
+                (SCHEMA_CONTRACT_META_KEY, SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE),
             )
         conn.commit()
         conn.close()
@@ -2905,7 +2905,7 @@ class TestSchemaInit:
         """A marker cannot make an incomplete current-version schema valid."""
         import sqlite3
 
-        from hermes_state import SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE
+        from hermes_state import SCHEMA_CONTRACT_META_KEY, SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE
 
         db_path = tmp_path / "marked_but_incomplete_v14.db"
         conn = sqlite3.connect(str(db_path))
@@ -2932,7 +2932,7 @@ class TestSchemaInit:
         """)
         conn.execute(
             "INSERT INTO state_meta (key, value) VALUES (?, ?)",
-            (SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE),
+            (SCHEMA_CONTRACT_META_KEY, SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE),
         )
         conn.commit()
         conn.close()
@@ -2986,7 +2986,7 @@ class TestSchemaInit:
         """Current-version fork schemas must include required contract indexes."""
         import sqlite3
 
-        from hermes_state import SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE
+        from hermes_state import SCHEMA_CONTRACT_META_KEY, SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE
 
         db_path = tmp_path / "v14_missing_required_index.db"
         conn = sqlite3.connect(str(db_path))
@@ -3073,7 +3073,7 @@ class TestSchemaInit:
         """)
         conn.execute(
             "INSERT INTO state_meta (key, value) VALUES (?, ?)",
-            (SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE),
+            (SCHEMA_CONTRACT_META_KEY, SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE),
         )
         conn.commit()
         conn.close()
@@ -3152,6 +3152,64 @@ class TestSchemaInit:
         assert "reason=missing_foreign_key" in msg
         assert "table=messages" in msg
         assert "column=session_id" in msg
+
+    def test_schema_version_14_scope_contract_migrates_to_compression_lock_contract(self, tmp_path):
+        from hermes_state import SCHEMA_CONTRACT_META_VALUE, SCHEMA_VERSION
+
+        db_path = tmp_path / "v14_scope_contract.db"
+        self._create_v14_contract_db(db_path)
+
+        migrated_db = SessionDB(db_path=db_path)
+        try:
+            version = migrated_db._conn.execute(
+                "SELECT version FROM schema_version LIMIT 1"
+            ).fetchone()[0]
+            marker = migrated_db._conn.execute(
+                "SELECT value FROM state_meta WHERE key = 'hermes_schema_contract'"
+            ).fetchone()[0]
+            tables = {
+                row[0]
+                for row in migrated_db._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            indexes = {
+                row[0]
+                for row in migrated_db._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                ).fetchall()
+            }
+
+            assert version == SCHEMA_VERSION
+            assert marker == SCHEMA_CONTRACT_META_VALUE
+            assert "compression_locks" in tables
+            assert "idx_compression_locks_expires" in indexes
+        finally:
+            migrated_db.close()
+
+    def test_schema_version_15_missing_compression_lock_table_fails_closed(self, tmp_path):
+        import sqlite3
+
+        from hermes_state import SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE
+
+        db_path = tmp_path / "v15_missing_compression_locks.db"
+        self._create_v14_contract_db(db_path)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("UPDATE schema_version SET version = 15")
+        conn.execute(
+            "UPDATE state_meta SET value = ? WHERE key = ?",
+            (SCHEMA_CONTRACT_META_VALUE, SCHEMA_CONTRACT_META_KEY),
+        )
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=schema_contract" in msg
+        assert "reason=missing_required_object" in msg
+        assert "table=compression_locks" in msg
 
     def test_production_v13_shape_migrates_counts_and_keeps_legacy_unscoped(self, tmp_path):
         """v13 production-shaped DBs keep counts and do not mark old rows scoped."""
@@ -3278,7 +3336,8 @@ class TestSchemaInit:
                 "SELECT value FROM state_meta WHERE key = 'hermes_schema_contract'"
             ).fetchone()
             assert marker is not None
-            assert marker[0] == "rtoc-pr2a-scope-v1"
+            from hermes_state import SCHEMA_CONTRACT_META_VALUE
+            assert marker[0] == SCHEMA_CONTRACT_META_VALUE
         finally:
             migrated_db.close()
 

@@ -33,9 +33,11 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
+SCOPE_ONLY_SCHEMA_VERSION = 14
 SCHEMA_CONTRACT_META_KEY = "hermes_schema_contract"
-SCHEMA_CONTRACT_META_VALUE = "rtoc-pr2a-scope-v1"
+SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE = "rtoc-pr2a-scope-v1"
+SCHEMA_CONTRACT_META_VALUE = "rtoc-pr2a-scope-compression-lock-v2"
 
 VALID_SCOPE_ASSIGNMENT_STATUSES = {
     "scoped",
@@ -351,6 +353,13 @@ CREATE TABLE IF NOT EXISTS state_meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS compression_locks (
+    session_id TEXT PRIMARY KEY,
+    holder TEXT NOT NULL,
+    acquired_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
 """
 
 SCHEMA_INDEX_SQL = """
@@ -358,6 +367,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
 """
 
 FTS_SQL = """
@@ -449,11 +459,26 @@ SCOPE_CONTRACT_COLUMNS = {
     },
 }
 
+COMPRESSION_LOCK_CONTRACT_COLUMNS = {
+    "compression_locks": {
+        "session_id",
+        "holder",
+        "acquired_at",
+        "expires_at",
+    },
+}
+
+REQUIRED_CONTRACT_COLUMNS = {
+    **SCOPE_CONTRACT_COLUMNS,
+    **COMPRESSION_LOCK_CONTRACT_COLUMNS,
+}
+
 REQUIRED_CONTRACT_TABLES = {
     "sessions",
     "messages",
     "conversation_scopes",
     "state_meta",
+    "compression_locks",
 }
 
 REQUIRED_CONTRACT_INDEXES = {
@@ -461,6 +486,7 @@ REQUIRED_CONTRACT_INDEXES = {
     "idx_sessions_parent": ("sessions", ("parent_session_id",), False),
     "idx_sessions_started": ("sessions", ("started_at",), False),
     "idx_messages_session": ("messages", ("session_id", "timestamp"), False),
+    "idx_compression_locks_expires": ("compression_locks", ("expires_at",), False),
 }
 
 
@@ -620,6 +646,87 @@ class SessionDB:
                 self._conn.close()
                 self._conn = None
 
+    # ── Compression locks ────────────────────────────────────────────────
+
+    def try_acquire_compression_lock(
+        self,
+        session_id: str,
+        holder: str,
+        ttl_seconds: float = 300.0,
+    ) -> bool:
+        """Atomically acquire the per-session compression lock if available."""
+        if not session_id or not holder:
+            return False
+
+        now = time.time()
+        expires_at = now + max(float(ttl_seconds), 0.0)
+
+        def _do(conn: sqlite3.Connection) -> bool:
+            conn.execute(
+                "DELETE FROM compression_locks "
+                "WHERE session_id = ? AND expires_at < ?",
+                (session_id, now),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO compression_locks "
+                "(session_id, holder, acquired_at, expires_at) "
+                "VALUES (?, ?, ?, ?)",
+                (session_id, holder, now, expires_at),
+            )
+            row = conn.execute(
+                "SELECT holder FROM compression_locks WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            current_holder = row["holder"] if isinstance(row, sqlite3.Row) else row[0]
+            return current_holder == holder
+
+        try:
+            return bool(self._execute_write(_do))
+        except sqlite3.Error as exc:
+            logger.warning(
+                "try_acquire_compression_lock(%s) failed: %s",
+                session_id,
+                exc,
+            )
+            return False
+
+    def release_compression_lock(self, session_id: str, holder: str) -> None:
+        """Release a compression lock only when ``holder`` still owns it."""
+        if not session_id or not holder:
+            return
+
+        def _do(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "DELETE FROM compression_locks "
+                "WHERE session_id = ? AND holder = ?",
+                (session_id, holder),
+            )
+
+        try:
+            self._execute_write(_do)
+        except sqlite3.Error as exc:
+            logger.warning(
+                "release_compression_lock(%s) failed: %s",
+                session_id,
+                exc,
+            )
+
+    def get_compression_lock_holder(self, session_id: str) -> Optional[str]:
+        """Return the current non-expired compression lock holder, if any."""
+        if not session_id:
+            return None
+        now = time.time()
+        row = self._conn.execute(
+            "SELECT holder FROM compression_locks "
+            "WHERE session_id = ? AND expires_at >= ?",
+            (session_id, now),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["holder"] if isinstance(row, sqlite3.Row) else row[0]
+
     @staticmethod
     def _parse_schema_columns(schema_sql: str) -> Dict[str, Dict[str, str]]:
         """Extract expected columns per table from SCHEMA_SQL.
@@ -776,7 +883,7 @@ class SessionDB:
         expected_info = self._parse_schema_column_info(SCHEMA_SQL)
         protected_columns = {
             (table, column)
-            for table, columns in SCOPE_CONTRACT_COLUMNS.items()
+            for table, columns in REQUIRED_CONTRACT_COLUMNS.items()
             for column in columns
         }
 
@@ -971,9 +1078,18 @@ class SessionDB:
         *,
         full: bool = False,
         require_foreign_keys: bool = False,
+        include_compression_lock: bool = True,
     ) -> None:
         expected_info = self._parse_schema_column_info(SCHEMA_SQL)
-        for table_name in REQUIRED_CONTRACT_TABLES:
+        required_tables = set(REQUIRED_CONTRACT_TABLES)
+        required_indexes = dict(REQUIRED_CONTRACT_INDEXES)
+        contract_column_source = REQUIRED_CONTRACT_COLUMNS
+        if not include_compression_lock:
+            required_tables.discard("compression_locks")
+            required_indexes.pop("idx_compression_locks_expires", None)
+            contract_column_source = SCOPE_CONTRACT_COLUMNS
+
+        for table_name in required_tables:
             row = cursor.execute(
                 "SELECT type FROM sqlite_master WHERE name = ?",
                 (table_name,),
@@ -988,11 +1104,11 @@ class SessionDB:
         contract_columns = (
             {
                 table_name: set(expected_info[table_name])
-                for table_name in REQUIRED_CONTRACT_TABLES
+                for table_name in required_tables
                 if table_name in expected_info
             }
             if full
-            else SCOPE_CONTRACT_COLUMNS
+            else contract_column_source
         )
         for table_name, columns in contract_columns.items():
             safe_table = table_name.replace('"', '""')
@@ -1026,7 +1142,7 @@ class SessionDB:
             table_name="conversation_scopes",
             columns=("canonical_key",),
         )
-        for index_name, (table_name, columns, unique) in REQUIRED_CONTRACT_INDEXES.items():
+        for index_name, (table_name, columns, unique) in required_indexes.items():
             self._validate_required_index(
                 cursor,
                 index_name=index_name,
@@ -1050,8 +1166,13 @@ class SessionDB:
             (SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE),
         )
 
-    def _require_schema_contract_marker(self, cursor: sqlite3.Cursor) -> None:
-        if self._read_schema_contract_marker(cursor) != SCHEMA_CONTRACT_META_VALUE:
+    def _require_schema_contract_marker(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        accepted_values: Tuple[str, ...] = (SCHEMA_CONTRACT_META_VALUE,),
+    ) -> None:
+        if self._read_schema_contract_marker(cursor) not in accepted_values:
             raise sqlite3.OperationalError(
                 "schema migration failed: "
                 "stage=schema_contract reason=missing_contract_marker"
@@ -1355,6 +1476,17 @@ class SessionDB:
                     cursor,
                     full=True,
                     require_foreign_keys=True,
+                )
+            elif current_version == SCOPE_ONLY_SCHEMA_VERSION:
+                self._require_schema_contract_marker(
+                    cursor,
+                    accepted_values=(SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE,),
+                )
+                self._validate_schema_contract(
+                    cursor,
+                    full=True,
+                    require_foreign_keys=True,
+                    include_compression_lock=False,
                 )
 
             self._execute_sql_script(cursor, SCHEMA_SQL, stage="create_schema")

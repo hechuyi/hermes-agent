@@ -29,6 +29,8 @@ from hermes_state import (  # noqa: E402
     SCHEMA_CONTRACT_META_KEY,
     SCHEMA_CONTRACT_META_VALUE,
     SCHEMA_VERSION,
+    SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE,
+    SCOPE_ONLY_SCHEMA_VERSION,
     SessionDB,
 )
 
@@ -39,6 +41,7 @@ REQUIRED_TABLES = {
     "messages",
     "conversation_scopes",
     "state_meta",
+    "compression_locks",
     "messages_fts",
     "messages_fts_trigram",
 }
@@ -74,6 +77,12 @@ REQUIRED_COLUMNS = {
     "state_meta": {
         "key",
         "value",
+    },
+    "compression_locks": {
+        "session_id",
+        "holder",
+        "acquired_at",
+        "expires_at",
     },
 }
 
@@ -260,13 +269,17 @@ def _required_object_invariants(conn: sqlite3.Connection) -> dict[str, Any]:
     return invariants
 
 
-def _contract_marker_check(conn: sqlite3.Connection) -> dict[str, Any]:
+def _contract_marker_check(
+    conn: sqlite3.Connection,
+    *,
+    expected_value: str = SCHEMA_CONTRACT_META_VALUE,
+) -> dict[str, Any]:
     if not _table_exists(conn, "state_meta"):
         return {
             "ok": False,
             "read": False,
             "key": SCHEMA_CONTRACT_META_KEY,
-            "expected": SCHEMA_CONTRACT_META_VALUE,
+            "expected": expected_value,
             "actual": None,
         }
     try:
@@ -279,16 +292,16 @@ def _contract_marker_check(conn: sqlite3.Connection) -> dict[str, Any]:
             "ok": False,
             "read": False,
             "key": SCHEMA_CONTRACT_META_KEY,
-            "expected": SCHEMA_CONTRACT_META_VALUE,
+            "expected": expected_value,
             "actual": None,
         }
     actual = None if row is None else row[0]
-    read_ok = actual == SCHEMA_CONTRACT_META_VALUE
+    read_ok = actual == expected_value
     return {
         "ok": read_ok,
         "read": row is not None,
         "key": SCHEMA_CONTRACT_META_KEY,
-        "expected": SCHEMA_CONTRACT_META_VALUE,
+        "expected": expected_value,
         "actual": actual,
     }
 
@@ -317,6 +330,7 @@ def _snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
             "messages": _columns(conn, "messages"),
             "conversation_scopes": _columns(conn, "conversation_scopes"),
             "state_meta": _columns(conn, "state_meta"),
+            "compression_locks": _columns(conn, "compression_locks"),
         },
         "tables": {
             table: {"exists": _table_exists(conn, table)}
@@ -438,21 +452,51 @@ def _validate_supported_version(before: dict[str, Any], supported_version: int) 
         )
 
 
-def _find_invariant_failure(snapshot: dict[str, Any]) -> str | None:
+def _find_invariant_failure(
+    snapshot: dict[str, Any],
+    *,
+    ignore: set[str] | None = None,
+) -> str | None:
+    ignored = ignore or set()
     for name, invariant in snapshot["required_object_invariants"].items():
+        if name in ignored:
+            continue
         if not invariant["ok"]:
             return name
     return None
 
 
-def _validate_same_version_contract(before: dict[str, Any], supported_version: int) -> None:
-    if before["schema_version"] != supported_version:
+def _validate_version_contracts(before: dict[str, Any], supported_version: int) -> None:
+    schema_version = before["schema_version"]
+    if schema_version == supported_version:
+        marker = before.get("state_meta_contract_marker", {})
+        if not marker.get("ok"):
+            raise ProbeFailure(
+                "state_schema_contract_mismatch",
+                "current-version database schema contract marker missing or mismatched",
+            )
+        failed_object = _find_invariant_failure(before)
+        if failed_object is not None:
+            raise ProbeFailure(
+                "state_schema_missing_required_object",
+                f"current-version database missing required object: {failed_object}",
+            )
         return
-    failed_object = _find_invariant_failure(before)
+
+    if schema_version != SCOPE_ONLY_SCHEMA_VERSION:
+        return
+
+    marker = before.get("scope_only_contract_marker", {})
+    if not marker.get("ok"):
+        raise ProbeFailure(
+            "state_schema_contract_mismatch",
+            "scope-only v14 database schema contract marker missing or mismatched",
+        )
+    failed_object = _find_invariant_failure(before, ignore={"compression_locks"})
     if failed_object is not None:
         raise ProbeFailure(
             "state_schema_missing_required_object",
-            f"current-version database missing required object: {failed_object}",
+            f"scope-only v14 database missing required object: {failed_object}",
         )
 
 
@@ -563,6 +607,11 @@ def run_probe(
             conn.row_factory = sqlite3.Row
             try:
                 before = _snapshot(conn)
+                before["state_meta_contract_marker"] = _contract_marker_check(conn)
+                before["scope_only_contract_marker"] = _contract_marker_check(
+                    conn,
+                    expected_value=SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE,
+                )
                 report["before"] = before
                 _validate_before(before)
             finally:
@@ -570,7 +619,7 @@ def run_probe(
 
             report["supported_schema_version"] = SCHEMA_VERSION
             _validate_supported_version(before, SCHEMA_VERSION)
-            _validate_same_version_contract(before, SCHEMA_VERSION)
+            _validate_version_contracts(before, SCHEMA_VERSION)
 
             try:
                 migrated = SessionDB(db_path=copy_path)
