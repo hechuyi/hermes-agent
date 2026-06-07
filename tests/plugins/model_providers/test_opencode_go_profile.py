@@ -146,6 +146,34 @@ class TestOpenCodeGoModelGating:
         assert top_level == {}
 
 
+class TestOpenCodeGoModelMaxTokens:
+    """OpenCode Go can front models with different completion-token limits."""
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "mimo-v2.5-pro",
+            "xiaomi/mimo-v2.5-pro",
+            "MiMo-V2.5-Pro",
+        ],
+    )
+    def test_mimo_v25_pro_has_model_specific_cap(self, opencode_go_profile, model):
+        assert opencode_go_profile.get_max_tokens(model) == 131_072
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "mimo-v2.5",
+            "mimo-v2-pro",
+            "kimi-k2.6",
+            "glm-5",
+            None,
+        ],
+    )
+    def test_other_models_use_profile_default(self, opencode_go_profile, model):
+        assert opencode_go_profile.get_max_tokens(model) == opencode_go_profile.default_max_tokens
+
+
 class TestOpenCodeGoFullKwargsIntegration:
     """End-to-end transport kwargs include the profile-provided controls."""
 
@@ -162,6 +190,48 @@ class TestOpenCodeGoFullKwargsIntegration:
         )
         assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
         assert kwargs["reasoning_effort"] == "high"
+
+    def test_mimo_v25_pro_default_max_tokens_reaches_transport(self, opencode_go_profile):
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        kwargs = ChatCompletionsTransport().build_kwargs(
+            model="mimo-v2.5-pro",
+            messages=[{"role": "user", "content": "ping"}],
+            tools=None,
+            provider_profile=opencode_go_profile,
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+            base_url="https://opencode.ai/zen/go/v1",
+        )
+        assert kwargs["max_tokens"] == 131_072
+
+    def test_explicit_max_tokens_overrides_mimo_cap(self, opencode_go_profile):
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        kwargs = ChatCompletionsTransport().build_kwargs(
+            model="mimo-v2.5-pro",
+            messages=[{"role": "user", "content": "ping"}],
+            tools=None,
+            provider_profile=opencode_go_profile,
+            max_tokens=4096,
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+            base_url="https://opencode.ai/zen/go/v1",
+        )
+        assert kwargs["max_tokens"] == 4096
+
+    def test_other_opencode_go_models_do_not_gain_default_max_tokens(
+        self, opencode_go_profile
+    ):
+        from agent.transports.chat_completions import ChatCompletionsTransport
+
+        kwargs = ChatCompletionsTransport().build_kwargs(
+            model="kimi-k2.6",
+            messages=[{"role": "user", "content": "ping"}],
+            tools=None,
+            provider_profile=opencode_go_profile,
+            max_tokens_param_fn=lambda n: {"max_tokens": n},
+            base_url="https://opencode.ai/zen/go/v1",
+        )
+        assert "max_tokens" not in kwargs
 
     def test_deepseek_thinking_reaches_extra_body_and_top_level(
         self, opencode_go_profile

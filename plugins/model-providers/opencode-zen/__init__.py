@@ -34,6 +34,16 @@ def _is_deepseek_thinking_model(model: str | None) -> bool:
 class OpenCodeGoProfile(ProviderProfile):
     """OpenCode Go - model-specific reasoning controls."""
 
+    _MODEL_MAX_TOKENS: dict[str, int] = {
+        "mimo-v2.5-pro": 131_072,
+    }
+
+    def get_max_tokens(self, model: str | None) -> int | None:
+        cap = self._MODEL_MAX_TOKENS.get(_flat_model_name(model))
+        if cap is not None:
+            return cap
+        return self.default_max_tokens
+
     def build_api_kwargs_extras(
         self, *, reasoning_config: dict | None = None, model: str | None = None, **context
     ) -> tuple[dict[str, Any], dict[str, Any]]:

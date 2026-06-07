@@ -129,6 +129,15 @@ class ProviderProfile:
         """
         return {}, {}
 
+    def get_max_tokens(self, model: str | None) -> int | None:
+        """Return the default max_tokens cap for a specific model.
+
+        Provider profiles normally use one static ``default_max_tokens`` value.
+        Subclasses can override this when one provider fronts models with
+        different completion-token limits.
+        """
+        return self.default_max_tokens
+
     def fetch_models(
         self,
         *,
