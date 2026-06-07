@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from gateway.platforms.base import BasePlatformAdapter as _BasePlatformAdapter
+from gateway.platforms.base import MEDIA_TAG_CLEANUP_RE
 from gateway.platforms.base import _custom_unit_to_cp
 from gateway.config import (
     DEFAULT_STREAMING_EDIT_INTERVAL as _DEFAULT_STREAMING_EDIT_INTERVAL,
@@ -673,10 +674,10 @@ class GatewayStreamConsumer:
         except Exception as e:
             logger.error("Stream consumer error: %s", e)
 
-    # Pattern to strip MEDIA:<path> tags (including optional surrounding quotes).
-    # Matches the simple cleanup regex used by the non-streaming path in
-    # gateway/platforms/base.py for post-processing.
-    _MEDIA_RE = re.compile(r'''[`"']?MEDIA:\s*\S+[`"']?''')
+    # Strip MEDIA:<path> tags before display using the same extension-anchored
+    # regex as the non-streaming path. Unknown-extension tags remain visible
+    # instead of being silently dropped.
+    _MEDIA_RE = MEDIA_TAG_CLEANUP_RE
 
     @staticmethod
     def _clean_for_display(text: str) -> str:

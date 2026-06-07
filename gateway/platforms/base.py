@@ -1205,6 +1205,60 @@ SUPPORTED_IMAGE_DOCUMENT_TYPES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Media-delivery extension allowlist — single source of truth
+#
+# Both extractors that turn response text into native attachments derive their
+# extension set from this tuple:
+#   * extract_media()       — explicit MEDIA:<path> tags
+#   * extract_local_files() — bare absolute/home paths the agent mentions
+#
+# Keep the cleanup regex anchored to this set as well. Unknown-extension
+# MEDIA: tags should remain visible instead of being stripped before a later
+# detector or user can inspect them.
+# ---------------------------------------------------------------------------
+
+MEDIA_DELIVERY_EXTS: Tuple[str, ...] = (
+    # Images.
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg",
+    # Video.
+    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp",
+    # Audio.
+    ".mp3", ".wav", ".ogg", ".opus", ".m4a", ".flac",
+    # Documents.
+    ".pdf", ".docx", ".doc", ".odt", ".rtf", ".txt", ".md", ".epub",
+    # Spreadsheets / data.
+    ".xlsx", ".xls", ".ods", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml",
+    # Presentations.
+    ".pptx", ".ppt", ".odp", ".key",
+    # Archives.
+    ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".apk", ".ipa",
+    # Web / rendered output.
+    ".html", ".htm",
+)
+
+_MEDIA_EXT_ALTERNATION = "|".join(
+    sorted((ext.lstrip(".") for ext in MEDIA_DELIVERY_EXTS), key=len, reverse=True)
+)
+_MEDIA_PATH_PREFIX_RE = r"(?:~/|/|[A-Za-z]:[/\\])"
+_MEDIA_PATH_BODY_RE = (
+    _MEDIA_PATH_PREFIX_RE
+    + r'''\S+(?:[^\S\n]+\S+)*?\.(?:'''
+    + _MEDIA_EXT_ALTERNATION
+    + r''')'''
+)
+
+MEDIA_TAG_CLEANUP_RE = re.compile(
+    r'''[`"']?MEDIA:\s*(?P<path>'''
+    + "`" + _MEDIA_PATH_BODY_RE + "`"
+    + '|"' + _MEDIA_PATH_BODY_RE + '"'
+    + "|'" + _MEDIA_PATH_BODY_RE + "'"
+    + "|" + _MEDIA_PATH_BODY_RE
+    + r''')(?=[\s`"',;:)\]}]|$)[`"']?''',
+    re.IGNORECASE,
+)
+
+
 def get_document_cache_dir() -> Path:
     """Return the document cache directory, creating it if it doesn't exist."""
     DOCUMENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -2599,13 +2653,11 @@ class BasePlatformAdapter(ABC):
         # keep it out of the user-visible cleaned text.
         cleaned = cleaned.replace("[[as_document]]", "")
         
-        # Extract MEDIA:<path> tags, allowing optional whitespace after the colon
-        # and quoted/backticked paths for LLM-formatted outputs.
-        # Path anchors cover Unix absolute paths, Unix home-relative paths,
-        # and Windows drive-letter absolute paths.
-        media_pattern = re.compile(
-            r'''[`"']?MEDIA:\s*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|(?:~/|/|[A-Za-z]:[/\\])\S+(?:[^\S\n]+\S+)*?\.(?:png|jpe?g|gif|webp|mp4|mov|avi|mkv|webm|ogg|opus|mp3|wav|m4a|flac|epub|pdf|zip|rar|7z|docx?|xlsx?|pptx?|txt|csv|apk|ipa)(?=[\s`"',;:)\]}]|$))[`"']?'''
-        )
+        # Extract MEDIA:<path> tags, allowing optional whitespace after the
+        # colon and quoted/backticked paths for LLM-formatted outputs. The
+        # extension set is shared with extract_local_files and the display
+        # cleanup regex, so supported attachment types cannot drift.
+        media_pattern = MEDIA_TAG_CLEANUP_RE
         for match in media_pattern.finditer(content):
             path = match.group("path").strip()
             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
@@ -2646,25 +2698,7 @@ class BasePlatformAdapter(ABC):
             Tuple of (list of expanded file paths, cleaned text with the
             raw path strings removed).
         """
-        _LOCAL_MEDIA_EXTS = (
-            # Images (embed inline)
-            '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.svg',
-            # Video (embed inline where supported)
-            '.mp4', '.mov', '.avi', '.mkv', '.webm',
-            # Audio (delivered as voice/audio where supported)
-            '.mp3', '.wav', '.ogg', '.m4a', '.flac',
-            # Documents (uploaded as file attachments)
-            '.pdf', '.docx', '.doc', '.odt', '.rtf', '.txt', '.md',
-            # Spreadsheets / data
-            '.xlsx', '.xls', '.ods', '.csv', '.tsv', '.json', '.xml', '.yaml', '.yml',
-            # Presentations
-            '.pptx', '.ppt', '.odp', '.key',
-            # Archives
-            '.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar',
-            # Web / rendered output
-            '.html', '.htm',
-        )
-        ext_part = '|'.join(e.lstrip('.') for e in _LOCAL_MEDIA_EXTS)
+        ext_part = '|'.join(e.lstrip('.') for e in MEDIA_DELIVERY_EXTS)
 
         # (?<![/:\w.]) prevents matching inside URLs (e.g. https://…/img.png)
         #             and relative paths (./foo.png)
@@ -3801,7 +3835,7 @@ class BasePlatformAdapter(ABC):
                 # Strip any remaining internal directives from message body (fixes #1561)
                 text_content = text_content.replace("[[audio_as_voice]]", "").strip()
                 text_content = text_content.replace("[[as_document]]", "").strip()
-                text_content = re.sub(r"MEDIA:\s*\S+", "", text_content).strip()
+                text_content = MEDIA_TAG_CLEANUP_RE.sub("", text_content).strip()
                 if images:
                     logger.info("[%s] extract_images found %d image(s) in response (%d chars)", self.name, len(images), len(response))
 

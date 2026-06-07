@@ -76,6 +76,13 @@ class TestCleanForDisplay:
         assert "generated" in result
         assert "for you." in result
 
+    def test_unknown_extension_media_path_is_not_stripped(self):
+        """Unknown extensions stay visible instead of being silently dropped."""
+        text = "Saved debug artifact at MEDIA:/tmp/data.weirdext for review."
+        result = GatewayStreamConsumer._clean_for_display(text)
+        assert "MEDIA:/tmp/data.weirdext" in result
+        assert "for review." in result
+
     def test_preserves_non_media_colons(self):
         """Normal colons and text with 'MEDIA' as a word aren't stripped."""
         text = "The media: files are stored in /tmp. Use social MEDIA carefully."

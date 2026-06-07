@@ -385,6 +385,20 @@ class TestExtractMedia:
         assert media == []
         assert cleaned == r"MEDIA:Users\test\file.pdf"
 
+    def test_media_tag_extracts_document_data_and_web_extensions(self):
+        """MEDIA tags must not drop file types that bare-path delivery supports."""
+        for ext in ("md", "json", "yaml", "yml", "xml", "html", "htm", "tsv", "svg"):
+            path = f"/tmp/report.{ext}"
+            media, cleaned = BasePlatformAdapter.extract_media(f"MEDIA:{path}")
+            assert media == [(path, False)], f".{ext} should extract via MEDIA:"
+            assert cleaned == ""
+
+    def test_quoted_unknown_extension_media_tag_is_not_extracted_or_stripped(self):
+        content = "Saved artifact MEDIA:'/tmp/data.weirdext' for manual review."
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert "MEDIA:'/tmp/data.weirdext'" in cleaned
+
 
 class TestMediaDeliveryPathValidation:
     def _patch_roots(self, monkeypatch, *roots):
