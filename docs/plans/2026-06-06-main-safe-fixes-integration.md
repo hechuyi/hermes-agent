@@ -4608,6 +4608,92 @@ git diff --check -- hermes_cli/kanban_db.py hermes_cli/kanban.py hermes_cli/conf
 
 Result: exit `0`.
 
+## 2026-06-07 — Compression lock/runtime absorption
+
+Upstream commits reviewed and manually absorbed:
+
+- `a30480bd2` — state-db-backed compression lock to prevent two agents sharing
+  one `session_id` from concurrently splitting the same parent session.
+- `db2ce9e7d` — fail open when a long-lived process has a version-skewed
+  `SessionDB` object without the lock methods, avoiding no-progress compaction
+  loops.
+
+Local result:
+
+- Absorbed as `e5ef45177`.
+- `SessionDB` now has `compression_locks` with a TTL-based holder record,
+  `try_acquire_compression_lock()`, `release_compression_lock()`, and
+  `get_compression_lock_holder()`.
+- The fork schema contract moved from v14 scope-only
+  `rtoc-pr2a-scope-v1` to v15
+  `rtoc-pr2a-scope-compression-lock-v2`. Existing marked v14 scope-contract
+  databases migrate to v15; plain or incomplete v14 databases still fail
+  closed instead of being silently repaired.
+- `compress_context()` acquires the lock on the old parent `session_id` before
+  memory extraction, summarization, and session rotation. A losing concurrent
+  path returns the original messages unchanged so preflight callers can stop
+  the retry loop without creating a second child session.
+- If the lock subsystem is absent or broken at runtime, compression proceeds
+  without the mutex and logs the version-skew condition once per session. This
+  keeps the session making progress rather than repeatedly triggering
+  compaction with no token reduction.
+- The migration probe now reports `compression_locks` as a required v15 object
+  and treats v14 as a distinct legacy scope-only contract with its own marker.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/test_hermes_state_compression_locks.py tests/agent/test_compression_concurrent_fork.py -q -rs
+```
+
+Result: `13 passed, 1 warning` (`discord.player` importing deprecated
+`audioop`).
+
+```bash
+uv run --extra dev pytest tests/hermes_state -q -rs
+```
+
+Result: `45 passed`.
+
+```bash
+uv run --extra dev pytest tests/test_hermes_state_compression_locks.py tests/agent/test_compression_concurrent_fork.py tests/hermes_state tests/test_hermes_state.py -q -k "compression_lock or concurrent_compression or skipped_compression or missing_lock_subsystem or schema_version_14 or schema_version_15 or production_v13_shape or schema_version or tables_exist or missing_required_index or contract" -rs
+```
+
+Result: `32 passed, 300 deselected, 1 warning` (`discord.player` importing
+deprecated `audioop`).
+
+```bash
+uv run --extra dev pytest tests/test_hermes_state.py tests/test_hermes_state_compression_locks.py tests/agent/test_compression_concurrent_fork.py -q -rs
+```
+
+Result: `287 passed, 1 warning` (`discord.player` importing deprecated
+`audioop`).
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_413_compression.py tests/agent/test_system_prompt_restore.py tests/test_cli_manual_compress.py -q -rs
+```
+
+Result: `29 passed, 1 warning` (`discord.player` importing deprecated
+`audioop`).
+
+```bash
+uv run --extra dev ruff check hermes_state.py agent/conversation_compression.py scripts/hermes_state_migration_probe.py tests/test_hermes_state.py tests/test_hermes_state_compression_locks.py tests/agent/test_compression_concurrent_fork.py tests/hermes_state/test_migration_probe.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run python -m py_compile hermes_state.py agent/conversation_compression.py scripts/hermes_state_migration_probe.py tests/test_hermes_state.py tests/test_hermes_state_compression_locks.py tests/agent/test_compression_concurrent_fork.py tests/hermes_state/test_migration_probe.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --check
+```
+
+Result: exit `0`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work
