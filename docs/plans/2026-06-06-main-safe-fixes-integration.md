@@ -4047,3 +4047,83 @@ git diff --check -- plugins/kanban/dashboard/dist/style.css tests/plugins/test_k
 ```
 
 Result: exit `0`.
+
+## 2026-06-07 — Kanban worker heartbeat and budget-failure absorption
+
+Upstream commits reviewed and absorbed:
+
+- `bc31ee5cf8d5635271505fd01303609b3336b8cf` — bridge worker runtime
+  activity to Kanban board heartbeat.
+- `592a4ffb6bf046a7d9d473a15ad9972e025718c1` — close blocked/unblocked
+  cycling, iteration-exhaustion, and heartbeat-staleness gaps.
+- `7d10105918bded04b6e475531240f5cfe2e2b704` — update
+  iteration-exhaustion tests for the failure-counter contract.
+
+Local result:
+
+- Absorbed as `ddb75f1`.
+- `AIAgent._touch_activity()` now best-effort bridges dispatcher-spawned
+  worker activity into Kanban heartbeat fields via
+  `heartbeat_current_worker_from_env()`, rate-limited to one write attempt per
+  minute and guarded so it cannot break the agent loop.
+- Iteration-budget exhaustion in Kanban worker mode now records
+  `_record_task_failure(outcome="timed_out", release_claim=True, end_run=True)`
+  instead of calling `kanban_block`, so repeated budget exhaustion increments
+  `consecutive_failures` and can trip the configured breaker.
+- `release_stale_claims()` now reclaims live-PID workers whose last heartbeat
+  is older than `DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS`, with an explicit
+  `heartbeat_stale` event payload.
+- Kanban diagnostics gained a `block_unblock_cycling` rule so repeated
+  block→unblock loops surface even when `_rule_stuck_in_blocked` would keep
+  resetting its timer.
+- The upstream `scripts/release.py` author-map metadata hunk was not absorbed;
+  it conflicted in release metadata only and is unrelated to the runtime
+  behavior covered by this local absorption.
+
+Red test before production changes:
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_run_agent.py::TestRunConversation::test_kanban_block_called_on_iteration_exhaustion tests/run_agent/test_run_agent.py::TestRunConversation::test_no_kanban_block_when_not_in_kanban_mode -q -rs
+```
+
+Result after applying only the upstream tests: `1 failed, 1 passed, 1 warning`.
+The failure showed the legacy `kanban_block` path was still used and
+`_record_task_failure` was not called.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_run_agent.py::TestRunConversation::test_kanban_block_called_on_iteration_exhaustion tests/run_agent/test_run_agent.py::TestRunConversation::test_no_kanban_block_when_not_in_kanban_mode -q -rs
+```
+
+Result: `2 passed, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_kanban_tools.py tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_blocked_sticky.py -q -rs -k "heartbeat or stale or failure or blocked or iteration or diagnostic or cycling"
+```
+
+Result: `36 passed, 258 deselected`.
+
+```bash
+uv run --extra dev pytest tests/tools/test_kanban_tools.py tests/hermes_cli/test_kanban_db.py tests/hermes_cli/test_kanban_blocked_sticky.py tests/run_agent/test_run_agent.py -q -rs -k "kanban or heartbeat or stale or failure or blocked or iteration or diagnostic or cycling or TestRunConversation"
+```
+
+Result: `346 passed, 298 deselected, 1 warning`.
+
+```bash
+uv run --extra dev ruff check run_agent.py tools/kanban_tools.py agent/conversation_loop.py hermes_cli/kanban_db.py hermes_cli/kanban_diagnostics.py tests/run_agent/test_run_agent.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile run_agent.py tools/kanban_tools.py agent/conversation_loop.py hermes_cli/kanban_db.py hermes_cli/kanban_diagnostics.py tests/run_agent/test_run_agent.py
+```
+
+Result: exit `0`.
+
+```bash
+git diff --check -- run_agent.py tools/kanban_tools.py agent/conversation_loop.py hermes_cli/kanban_db.py hermes_cli/kanban_diagnostics.py tests/run_agent/test_run_agent.py
+```
+
+Result: exit `0`.
