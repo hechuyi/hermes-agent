@@ -1342,6 +1342,155 @@ class TestToolUseEnforcementConfig:
             assert TOOL_USE_ENFORCEMENT_GUIDANCE not in prompt
 
 
+class TestTaskCompletionGuidance:
+    """Universal completion guidance is independent of model-family gating."""
+
+    def _make_agent(self, model="anthropic/claude-sonnet-4", *, guidance=True):
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("terminal", "web_search"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={"agent": {"task_completion_guidance": guidance}},
+            ),
+        ):
+            a = AIAgent(
+                model=model,
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            a.client = MagicMock()
+            return a
+
+    def test_default_reaches_claude(self):
+        from agent.prompt_builder import TASK_COMPLETION_GUIDANCE
+
+        prompt = self._make_agent(model="anthropic/claude-sonnet-4")._build_system_prompt()
+
+        assert TASK_COMPLETION_GUIDANCE in prompt
+
+    def test_default_reaches_deepseek(self):
+        from agent.prompt_builder import TASK_COMPLETION_GUIDANCE
+
+        prompt = self._make_agent(model="deepseek/deepseek-r1")._build_system_prompt()
+
+        assert TASK_COMPLETION_GUIDANCE in prompt
+
+    def test_config_false_disables(self):
+        from agent.prompt_builder import TASK_COMPLETION_GUIDANCE
+
+        prompt = self._make_agent(guidance=False)._build_system_prompt()
+
+        assert TASK_COMPLETION_GUIDANCE not in prompt
+
+    def test_config_string_false_disables(self):
+        from agent.prompt_builder import TASK_COMPLETION_GUIDANCE
+
+        prompt = self._make_agent(guidance="false")._build_system_prompt()
+
+        assert TASK_COMPLETION_GUIDANCE not in prompt
+
+    def test_no_tools_stays_silent(self):
+        from agent.prompt_builder import TASK_COMPLETION_GUIDANCE
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={"agent": {"task_completion_guidance": True}},
+            ),
+        ):
+            a = AIAgent(
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                enabled_toolsets=[],
+            )
+            a.client = MagicMock()
+
+            assert TASK_COMPLETION_GUIDANCE not in a._build_system_prompt()
+
+
+class TestEnvironmentProbeIntegration:
+    """Local Python toolchain probe wiring into the stable system prompt."""
+
+    def _make_agent(self, *, enabled=True):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("terminal")),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={"agent": {"environment_probe": enabled}},
+            ),
+        ):
+            a = AIAgent(
+                model="anthropic/claude-sonnet-4",
+                api_key="test-key-1234567890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            a.client = MagicMock()
+            return a
+
+    def test_problem_line_reaches_prompt_when_enabled(self, monkeypatch):
+        from tools import env_probe
+
+        env_probe._reset_cache_for_tests()
+        monkeypatch.setattr(env_probe, "_python_version_of", lambda binary: {"python3": "3.11.15"}.get(binary))
+        monkeypatch.setattr(env_probe, "_has_pip_module", lambda _binary: False)
+        monkeypatch.setattr(env_probe, "_detect_pep668", lambda _binary: True)
+        monkeypatch.setattr(env_probe, "_pip_python_version", lambda: "3.12")
+        monkeypatch.setattr(env_probe.shutil, "which", lambda name: None if name == "uv" else f"/usr/bin/{name}")
+
+        prompt = self._make_agent(enabled=True)._build_system_prompt()
+
+        assert "Python toolchain:" in prompt
+        assert "python3=3.11.15" in prompt
+        assert "mismatch" in prompt
+
+    def test_probe_disabled_by_config(self, monkeypatch):
+        from tools import env_probe
+
+        env_probe._reset_cache_for_tests()
+        monkeypatch.setattr(env_probe, "_python_version_of", lambda binary: {"python3": "3.11.15"}.get(binary))
+        monkeypatch.setattr(env_probe, "_has_pip_module", lambda _binary: False)
+        monkeypatch.setattr(env_probe, "_detect_pep668", lambda _binary: True)
+        monkeypatch.setattr(env_probe, "_pip_python_version", lambda: "3.12")
+        monkeypatch.setattr(env_probe.shutil, "which", lambda name: None)
+
+        prompt = self._make_agent(enabled=False)._build_system_prompt()
+
+        assert "Python toolchain:" not in prompt
+
+    def test_probe_string_off_disabled_by_config(self, monkeypatch):
+        from tools import env_probe
+
+        env_probe._reset_cache_for_tests()
+        monkeypatch.setattr(env_probe, "_python_version_of", lambda binary: {"python3": "3.11.15"}.get(binary))
+        monkeypatch.setattr(env_probe, "_has_pip_module", lambda _binary: False)
+        monkeypatch.setattr(env_probe, "_detect_pep668", lambda _binary: True)
+        monkeypatch.setattr(env_probe, "_pip_python_version", lambda: "3.12")
+        monkeypatch.setattr(env_probe.shutil, "which", lambda name: None)
+
+        prompt = self._make_agent(enabled="off")._build_system_prompt()
+
+        assert "Python toolchain:" not in prompt
+
+
 class TestInvalidateSystemPrompt:
     def test_clears_cache(self, agent):
         agent._cached_system_prompt = "cached value"

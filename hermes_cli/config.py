@@ -699,6 +699,12 @@ DEFAULT_CONFIG = {
         # (force on/off for all models), or a list of model-name substrings
         # to match (e.g. ["gpt", "codex", "gemini", "qwen"]).
         "tool_use_enforcement": "auto",
+        # Universal completion/no-fabrication prompt block for tool-capable
+        # agents. Disable only if you need the leanest possible cached prompt.
+        "task_completion_guidance": True,
+        # Local Python toolchain probe. Emits one short system-prompt line only
+        # when a local python/pip/uv/PEP-668 mismatch is detected.
+        "environment_probe": True,
         # Embedder-supplied runtime description appended to environment hints.
         # Empty by default; HERMES_ENVIRONMENT_HINT overrides this key.
         "environment_hint": "",

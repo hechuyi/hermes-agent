@@ -2327,10 +2327,9 @@ Local result:
   is preserved in user-visible failures such as
   `rate_limit_exceeded: Slow down`.
 - Did not absorb the universal task-completion guidance, `agent.*` config
-  toggles, `tools/env_probe.py`, or prompt-build env-probe injection from the
-  same upstream commit in this node. That portion changes global system-prompt
-  shape and local environment probing behavior, so it remains for a separate
-  review rather than being bundled with this narrow error-reporting fix.
+  toggles, `tools/env_probe.py`, or prompt-build env-probe injection in this
+  narrow error-reporting node. That remaining slice was reviewed and absorbed
+  later in the dedicated prompt/probe node below.
 
 Red test before implementation:
 
@@ -2375,6 +2374,76 @@ Result: exit `0`.
 
 `git diff --check -- agent/codex_responses_adapter.py agent/transports/codex_app_server_session.py tests/agent/test_codex_responses_adapter.py`
 produced no output before the code commit.
+
+## 2026-06-08 — Task-completion guidance and local Python toolchain probe
+
+Upstream commit slice reviewed:
+
+- `a4d8f0f62a7e91650f542baf477779188f658917` — the remaining prompt/probe
+  portion of the mixed commit after the Codex Responses failed-error formatting
+  slice had already been absorbed.
+
+Local result:
+
+- Absorbed the universal task-completion/no-fabrication guidance as a
+  tool-capable stable system-prompt block, controlled by
+  `agent.task_completion_guidance` with a default of `true`.
+- Added `tools/env_probe.py`, a cached local Python toolchain probe that emits
+  a single `Python toolchain:` line only when python/pip/uv/PEP-668 state is
+  non-default. Remote terminal backends (`docker`, `modal`, `ssh`,
+  `managed_modal`, etc.) stay silent because the host Python state is not where
+  tools execute.
+- Added `agent.environment_probe` with a default of `true`, and used the
+  project's shared truthy-string parser so YAML booleans and strings such as
+  `"false"` / `"off"` disable the new prompt additions correctly.
+- Kept this limited to prompt/config/probe behavior. No model catalog entries,
+  provider routing, gateway event ledgers, media extraction, delivery outcomes,
+  Nous legacy authentication, or current local `5.5` channel availability were
+  changed.
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/tools/test_env_probe.py tests/run_agent/test_run_agent.py -q -rs -k "TaskCompletionGuidance or EnvironmentProbeIntegration or env_probe"
+```
+
+Result before the code change: collection failed with
+`ImportError: cannot import name 'env_probe' from 'tools'`.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/tools/test_env_probe.py tests/run_agent/test_run_agent.py -q -rs -k "TaskCompletionGuidance or EnvironmentProbeIntegration or env_probe"
+```
+
+Result: `18 passed, 350 deselected, 1 warning` (`discord.player` `audioop`
+deprecation).
+
+```bash
+uv run --extra dev pytest tests/agent/test_prompt_builder.py tests/agent/test_system_prompt_restore.py -q -rs
+```
+
+Result: `137 passed, 1 skipped` (APFS case-insensitive `CLAUDE.md` alias
+skip).
+
+```bash
+uv run --extra dev pytest tests/agent/test_prompt_builder.py tests/run_agent/test_run_agent.py tests/agent/test_system_prompt_restore.py tests/hermes_cli/test_config.py tests/hermes_cli/test_config_validation.py tests/tools/test_env_probe.py tests/agent/test_codex_responses_adapter.py -q -rs
+```
+
+Result: `618 passed, 1 skipped, 1 warning` (`discord.player` `audioop`
+deprecation).
+
+```bash
+uv run --extra dev pytest tests/agent/test_codex_responses_adapter.py tests/tools/test_env_probe.py -q -rs
+```
+
+Result: `15 passed`.
+
+```bash
+uv run --extra dev ruff check agent/agent_init.py agent/prompt_builder.py agent/system_prompt.py tools/env_probe.py tests/tools/test_env_probe.py tests/run_agent/test_run_agent.py
+```
+
+Result: `All checks passed!`.
 
 ## 2026-06-07 — Broad import-prune batch deferred
 

@@ -53,7 +53,7 @@ from hermes_cli.config import cfg_get
 from hermes_cli.timeouts import get_provider_request_timeout
 from hermes_constants import get_hermes_home
 from model_tools import check_toolset_requirements, get_tool_definitions
-from utils import base_url_host_matches
+from utils import base_url_host_matches, is_truthy_value
 
 # Use the same logger name as run_agent so tests patching ``run_agent.logger``
 # capture our warnings.  (run_agent.py also does
@@ -1201,6 +1201,8 @@ def init_agent(
     if not isinstance(_agent_section, dict):
         _agent_section = {}
     agent._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
+    agent._task_completion_guidance = is_truthy_value(_agent_section.get("task_completion_guidance"), default=True)
+    agent._environment_probe = is_truthy_value(_agent_section.get("environment_probe"), default=True)
 
     # App-level API retry count (wraps each model API call).  Default 3,
     # overridable via agent.api_max_retries in config.yaml.  See #11616.

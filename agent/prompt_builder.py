@@ -271,6 +271,18 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 # Add new patterns here when a model family needs explicit steering.
 TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")
 
+TASK_COMPLETION_GUIDANCE = (
+    "# Finishing the job\n"
+    "When the user asks you to build, run, or verify something, the deliverable "
+    "is a working artifact backed by real tool output, not a description of one. "
+    "Do not stop after writing a stub, a plan, or a single command. Keep working "
+    "until you have actually exercised the code or produced the requested result, "
+    "then report what real execution returned.\n"
+    "If a tool, install, or network call fails and blocks the real path, say so "
+    "directly and try an alternative. Never substitute plausible-looking "
+    "fabricated output for results you could not actually produce."
+)
+
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
 # hallucinate instead of using tools, and declare "done" without verification.
