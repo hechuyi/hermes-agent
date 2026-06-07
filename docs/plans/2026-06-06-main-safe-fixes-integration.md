@@ -3511,3 +3511,64 @@ uv run --extra dev pytest tests/gateway/test_feishu.py::TestChatLockEviction tes
 
 Result: `96 passed, 6 warnings` (Feishu/Lark and ntfy test-environment
 deprecation/runtime warnings only).
+
+## 2026-06-07 — Abnormal turn-ending explainer absorption
+
+Upstream commits reviewed and absorbed:
+
+- `59b0ea98c8956a2fd1e875a673423d30175b7f9b` — explain abnormal turn
+  endings instead of leaving a blank or fragmentary reply.
+- `de6d6023d7486dcaa757037f2e3ba13985302aca` — align dict tool-call
+  argument test expectations with the explainer suffix.
+- `fb0ab27649bac911bec4330d29cf4376d75a2552` — register the explainer config
+  key and shorten the footer prefix.
+
+Local result:
+
+- Absorbed as `b24a3f4`.
+- `AIAgent` now has a `display.turn_completion_explainer` config seam and
+  `HERMES_TURN_COMPLETION_EXPLAINER` env override, defaulting on.
+- Abnormal turn exits such as exhausted empty responses, partial stream
+  recovery, pending tool result, iteration limit, or budget exhaustion now
+  surface a concise user-visible reason when the final assistant text would
+  otherwise be empty or a suspicious short fragment.
+- Normal `text_response(...)` exits remain quiet, so terse valid replies such
+  as `Done.` are not modified.
+
+Red test before absorption:
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_turn_completion_explainer.py -q -rs
+```
+
+Result before code change: pytest error, file did not exist.
+
+Post-fix verification:
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_turn_completion_explainer.py tests/run_agent/test_dict_tool_call_args.py -q -rs
+```
+
+Result: `12 passed, 1 warning` (`discord.player` imports deprecated
+`audioop` under Python 3.11).
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_run_agent.py -q -rs -k "empty_response or partial_stream_recovery or turn_completion or truly_empty"
+```
+
+Result: `8 passed, 342 deselected, 1 warning` (`discord.player` imports
+deprecated `audioop` under Python 3.11).
+
+```bash
+uv run --extra dev ruff check agent/conversation_loop.py hermes_cli/config.py run_agent.py tests/run_agent/test_dict_tool_call_args.py tests/run_agent/test_run_agent.py tests/run_agent/test_turn_completion_explainer.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile agent/conversation_loop.py hermes_cli/config.py run_agent.py tests/run_agent/test_dict_tool_call_args.py tests/run_agent/test_run_agent.py tests/run_agent/test_turn_completion_explainer.py
+```
+
+Result: exit `0`.
+
+`git diff --cached --check` produced no output before the code commit.
