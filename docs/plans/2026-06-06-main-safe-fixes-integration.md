@@ -3197,3 +3197,47 @@ Additional read-only evidence collected with `rg`:
 - `rg "hermes config get"` over the three affected docs returned no matches.
 - `scripts/release.py` contains the verified `seppe`, `Interstellar-code`,
   `Moikapy`, `blackpilledsoftware-prog`, and `tillfalko` mappings.
+
+## 2026-06-07 — xAI tool-schema deepcopy equivalence and author-map absorption
+
+Upstream commit reviewed:
+
+- `1386a7e4789c9b886395804e8475a4252217e4ac` — deep-copy xAI
+  `tools_for_api` before in-place schema sanitization.
+
+Local result:
+
+- Functional code was already present/equivalent. Both xAI call sites already
+  deep-copy before invoking the in-place `strip_pattern_and_format()` /
+  `strip_slash_enum()` sanitizers:
+  `agent/chat_completion_helpers.py` deep-copies `tools_for_api`, and
+  `agent/auxiliary_client.py` deep-copies `list(tools)`.
+- Regression tests already cover slash-enum stripping, preservation of
+  `agent.tools`, and idempotence across repeated xAI calls.
+- The only missing upstream hunk was release metadata; absorbed as
+  `e8ec1e70d`, adding `barany.gabor@gmail.com -> gbarany` to
+  `scripts/release.py`.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_run_agent_codex_responses.py tests/agent/test_auxiliary_client.py tests/agent/transports/test_codex_transport.py tests/tools/test_schema_sanitizer.py -q -rs -k "xai or slash_enum or pattern_and_format or auxiliary"
+```
+
+Result: `227 passed, 126 deselected, 1 warning` (`discord.player` imports
+deprecated `audioop` under Python 3.11).
+
+```bash
+uv run --extra dev ruff check scripts/release.py agent/auxiliary_client.py agent/chat_completion_helpers.py tests/run_agent/test_run_agent_codex_responses.py tests/agent/test_auxiliary_client.py tests/agent/transports/test_codex_transport.py tests/tools/test_schema_sanitizer.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+python -m py_compile scripts/release.py agent/auxiliary_client.py agent/chat_completion_helpers.py tests/run_agent/test_run_agent_codex_responses.py tests/agent/test_auxiliary_client.py tests/agent/transports/test_codex_transport.py tests/tools/test_schema_sanitizer.py
+```
+
+Result: exit `0`.
+
+`git diff --check -- scripts/release.py` produced no output before the metadata
+commit.
