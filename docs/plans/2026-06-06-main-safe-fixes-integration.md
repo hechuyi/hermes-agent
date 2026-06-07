@@ -2706,6 +2706,32 @@ git diff --check
 
 Result: both commands exited `0`.
 
+## 2026-06-08 — Right-only upstream disposition audit
+
+After the cron restore absorption above, the remaining `git cherry` positives
+were audited mechanically against this integration record.
+
+Command shape:
+
+```bash
+git log --right-only --cherry-pick --format='%H %s' HEAD...origin/main
+```
+
+Result:
+
+- Every non-merge upstream commit listed by that command has a recorded local
+  disposition in this file: absorbed, manually equivalent, selectively
+  absorbed, protected/deferred, or record-only.
+- The only right-only SHAs not named directly in this record are merge commits:
+  `e481b153330311381b94cd0630731d7b59010f6f`,
+  `8738cb92c3a57c012eaf550b27824717df1af9bf`, and
+  `6928692cec3260b21e5574099c41034827c1c59e`.
+- This does not mean all deferred behavior should be merged. Protected runtime
+  contract groups remain deferred by design: dashboard public-bind/OAuth
+  policy, Nous JWT-only auth, progressive tool-search/tool disclosure, adapter
+  access-policy weakening, Docker lifecycle semantics, model catalog churn,
+  trusted external skill taps, and broad dead-code/import pruning.
+
 ## 2026-06-07 — MEDIA extension allowlist absorption
 
 Upstream commit reviewed and partially absorbed:
@@ -3668,10 +3694,10 @@ Upstream commits reviewed and classified:
 - `d473e7c9385e04c975b32d2d2cde3a02ba7d4f47` — exclude cron `jobs.json`
   registry from disk-cleanup classification: already equivalent locally.
 - `3845d86b9330d8952fc1e9534d438f62ad1d53e5` — restore `jobs.json` emptied
-  by update config migration: deferred. This is backup/recovery code, and the
-  upstream shape needs typed result states/reason codes before absorption so
-  missing restore material, unknown counts, copy failures, and safety-net
-  exceptions cannot collapse into a healthy no-op.
+  by update config migration: later absorbed as local commit `847df29dd` with
+  typed result states/reason codes, atomic restore, and post-restore
+  verification so missing restore material, unknown counts, copy failures, and
+  safety-net exceptions cannot collapse into a healthy no-op.
 
 Verification:
 
