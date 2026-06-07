@@ -6,12 +6,14 @@ from the same session and aggregate them before dispatching.
 """
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, MessageType, SessionSource
+from gateway.session import build_session_key
 
 
 def _make_adapter():
@@ -20,8 +22,10 @@ def _make_adapter():
 
     config = PlatformConfig(enabled=True, token="test-token")
     adapter = object.__new__(TelegramAdapter)
+    adapter.platform = Platform.TELEGRAM
     adapter._platform = Platform.TELEGRAM
     adapter.config = config
+    adapter._session_isolation_config = GatewayConfig()
     adapter._pending_text_batches = {}
     adapter._pending_text_batch_tasks = {}
     adapter._text_batch_delay_seconds = 0.1  # fast for tests
@@ -119,3 +123,64 @@ class TestTextBatching:
 
         assert len(adapter._pending_text_batches) == 0
         assert len(adapter._pending_text_batch_tasks) == 0
+
+    @pytest.mark.asyncio
+    async def test_dm_topic_batching_recovers_thread_before_keying(self):
+        """DM-topic text batches should be keyed by the recovered topic lane."""
+        adapter = _make_adapter()
+
+        class _Runner:
+            def _recover_telegram_topic_thread_id(self, source):
+                return "222" if str(source.thread_id or "") == "1" else None
+
+            async def _handle_message(self, _event):
+                return None
+
+        runner = _Runner()
+        adapter._message_handler = runner._handle_message
+        event = MessageEvent(
+            text="hello from DM topic",
+            message_type=MessageType.TEXT,
+            source=SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id="12345",
+                chat_type="dm",
+                user_id="user-1",
+                thread_id="1",
+            ),
+        )
+
+        adapter._enqueue_text_event(event)
+
+        recovered_key = build_session_key(
+            SimpleNamespace(
+                platform=Platform.TELEGRAM,
+                chat_id="12345",
+                chat_type="dm",
+                thread_id="222",
+            ),
+            group_sessions_per_user=True,
+            thread_sessions_per_user=False,
+            require_conversation_identity=True,
+        )
+        stale_key = build_session_key(
+            SimpleNamespace(
+                platform=Platform.TELEGRAM,
+                chat_id="12345",
+                chat_type="dm",
+                thread_id="1",
+            ),
+            group_sessions_per_user=True,
+            thread_sessions_per_user=False,
+            require_conversation_identity=True,
+        )
+
+        assert recovered_key in adapter._pending_text_batches
+        assert stale_key not in adapter._pending_text_batches
+        assert event.source.thread_id == "222"
+
+        await asyncio.sleep(0.2)
+
+        adapter.handle_message.assert_called_once()
+        dispatched = adapter.handle_message.call_args[0][0]
+        assert dispatched.source.thread_id == "222"

@@ -5054,7 +5054,25 @@ class TelegramAdapter(BasePlatformAdapter):
 
     def _text_batch_key(self, event: MessageEvent) -> str:
         """Session-scoped key for text message batching."""
-        return self._session_guard_key(event.source)
+        return self._session_guard_key(self._normalize_text_batch_source(event))
+
+    def _normalize_text_batch_source(self, event: MessageEvent):
+        """Apply runner-side Telegram DM topic recovery before batching."""
+        source = event.source
+        runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+        recover_fn = getattr(runner, "_recover_telegram_topic_thread_id", None)
+        if not callable(recover_fn):
+            return source
+        try:
+            recovered = recover_fn(source)
+        except Exception:
+            logger.debug("telegram text batch recovery failed", exc_info=True)
+            return source
+        if recovered is None or str(recovered) == str(source.thread_id or ""):
+            return source
+        normalized = dataclasses.replace(source, thread_id=str(recovered))
+        event.source = normalized
+        return normalized
 
     def _enqueue_text_event(self, event: MessageEvent) -> None:
         """Buffer a text event and reset the flush timer.
