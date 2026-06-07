@@ -606,6 +606,22 @@ gateway event ledgers, media extraction, delivery outcomes, provider routing,
 model catalogs, Nous legacy authentication, or the fork's `5.5`
 customizations.
 
+### Concurrent checkpoint guardrail batch
+
+`6baf0016bebe060f055b5466c6ea604f628d1217`
+(`fix(run_agent): gate concurrent checkpoint preflight on block_result`) was
+manually absorbed in local commit `a9f95f920`.
+
+The local port preserves the upstream invariant that already existed on the
+sequential path: plugin- or guardrail-blocked tools must not mutate checkpoint
+state before being rejected. In the concurrent path, checkpoint preflight for
+`write_file`, `patch`, and destructive `terminal` commands now runs only after
+block evaluation and only when `block_result is None`.
+
+This is limited to agent tool-executor bookkeeping. It does not change gateway
+event ledgers, media extraction, delivery outcomes, provider routing, model
+catalogs, Nous legacy authentication, or the fork's `5.5` customizations.
+
 ## Reverted attempted commit
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
@@ -1277,6 +1293,45 @@ Result: `All checks passed!`.
 
 ```bash
 uv run --extra dev python -m py_compile hermes_cli/main.py tests/hermes_cli/test_process_title.py
+```
+
+Result: exit `0`.
+
+`git diff --check` produced no output.
+
+Concurrent checkpoint guardrail batch verification:
+
+Red test before implementation:
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_run_agent.py -q -rs -k "concurrent_blocked_write_skips_checkpoint or concurrent_blocked_patch_skips_checkpoint or concurrent_blocked_terminal_skips_checkpoint or concurrent_blocked_write_does_not_steal_slot_from_allowed_write"
+```
+
+Result before the code change: `4 failed`; each failure showed
+`ensure_checkpoint` called before the blocked tool was rejected.
+
+Post-fix focused verification:
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_run_agent.py -q -rs -k "concurrent_blocked_write_skips_checkpoint or concurrent_blocked_patch_skips_checkpoint or concurrent_blocked_terminal_skips_checkpoint or concurrent_blocked_write_does_not_steal_slot_from_allowed_write or sequential_blocked_tool_skips_checkpoints_and_callbacks"
+```
+
+Result: `5 passed, 345 deselected, 1 warning`.
+
+```bash
+uv run --extra dev pytest tests/run_agent/test_run_agent.py -q -rs
+```
+
+Result: `350 passed, 1 warning`.
+
+```bash
+uv run --extra dev ruff check agent/tool_executor.py tests/run_agent/test_run_agent.py
+```
+
+Result: `All checks passed!`.
+
+```bash
+uv run --extra dev python -m py_compile agent/tool_executor.py tests/run_agent/test_run_agent.py
 ```
 
 Result: exit `0`.
