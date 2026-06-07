@@ -65,6 +65,31 @@ import os
 import sys
 
 
+def _set_process_title() -> None:
+    """Best-effort process title cosmetic for ps/top/htop."""
+    try:
+        import setproctitle  # type: ignore[import-untyped]
+
+        setproctitle.setproctitle("hermes")
+        return
+    except Exception:
+        pass
+
+    try:
+        import ctypes
+        import platform
+
+        system = platform.system()
+        if system == "Linux":
+            libc = ctypes.CDLL("libc.so.6", use_errno=True)
+            libc.prctl(15, b"hermes", 0, 0, 0)  # PR_SET_NAME = 15
+        elif system == "Darwin":
+            libc = ctypes.CDLL("libc.dylib", use_errno=True)
+            libc.pthread_setname_np(b"hermes")
+    except Exception:
+        pass
+
+
 # Mouse-tracking residue suppression — runs BEFORE every other import on the
 # TUI hot path so the terminal stops emitting SGR/X10 mouse reports while the
 # Python launcher is still doing imports (≈100–300ms in cooked + echo mode,
@@ -11357,6 +11382,8 @@ def _try_termux_fast_tui_launch() -> bool:
 
 def main():
     """Main entry point for hermes CLI."""
+    _set_process_title()
+
     # Force UTF-8 stdio on Windows before anything prints.  No-op elsewhere.
     try:
         from hermes_cli.stdio import configure_windows_stdio
