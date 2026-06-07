@@ -2949,3 +2949,28 @@ python -m py_compile agent/auxiliary_client.py tests/agent/test_auxiliary_client
 ```
 
 Result: exit `0`.
+
+## 2026-06-07 — Telegram DM-topic text batching equivalence
+
+Upstream commit reviewed and found already present/equivalent:
+
+- `5407d25599e55ba5d4c5d12f9dca793cfb6220a6` — recover Telegram DM-topic
+  thread ids before text batching key construction.
+
+Local result:
+
+- No code change needed. `gateway/platforms/telegram.py` already normalizes the
+  text-batch source through the runner's `_recover_telegram_topic_thread_id()`
+  hook before deriving the session guard key, and updates `event.source` to the
+  recovered thread lane.
+- `tests/gateway/test_telegram_text_batching.py` already covers the recovered
+  DM-topic lane, with this fork's stricter `require_conversation_identity`
+  session-key contract.
+
+Verification:
+
+```bash
+uv run --extra dev pytest tests/gateway/test_telegram_text_batching.py -q -rs
+```
+
+Result: `6 passed`.
