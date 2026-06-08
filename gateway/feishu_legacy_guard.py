@@ -5,8 +5,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+import hashlib
+import os
+from pathlib import Path
 import re
+import time
 from typing import Iterator
+
+from gateway.gateway_event_contract import GatewayEventResult
 
 
 LEGACY_FEISHU_BROKER_DENIAL_REASON = "feishu_legacy_tool_requires_broker"
@@ -80,10 +86,82 @@ def require_feishu_broker_context(
     return True, ""
 
 
+def audit_feishu_legacy_tool_denial(
+    *,
+    surface: str,
+    tool: str,
+) -> GatewayEventResult:
+    """Persist a sanitized legacy-tool denial event through the gateway ledger."""
+
+    state_dir = _legacy_audit_state_dir()
+    if state_dir is None:
+        return GatewayEventResult(
+            ok=False,
+            event_type="feishu_legacy_tool_denied",
+            failure_class="gateway_event_state_dir_missing",
+            reason="gateway event state dir missing",
+        )
+
+    event = {
+        "type": "feishu_legacy_tool_denied",
+        "timestamp": time.time(),
+        "correlation_id": _legacy_audit_correlation_id(),
+        "event_hash": _legacy_audit_event_hash(surface, tool),
+        "legacy_tool_hash": _fnv1a64(f"{surface}:{tool}:denied"),
+        "tool": tool,
+        "surface": surface,
+        "failure_class": LEGACY_FEISHU_BROKER_DENIAL_REASON,
+    }
+    try:
+        from gateway.gateway_event_ledger import apply_gateway_event
+
+        return apply_gateway_event(event, state_dir)
+    except Exception as exc:
+        return GatewayEventResult(
+            ok=False,
+            event_type="feishu_legacy_tool_denied",
+            failure_class="gateway_event_apply_failed",
+            reason=type(exc).__name__,
+        )
+
+
 def _validated_contract_hash(value: str) -> str:
     if not isinstance(value, str) or _CONTRACT_HASH_RE.fullmatch(value) is None:
         raise ValueError("contract_hash must be sha256:<64 lowercase hex>")
     return value
+
+
+def _legacy_audit_state_dir() -> Path | None:
+    value = (
+        os.getenv("HERMES_GATEWAY_EVENT_STATE_DIR", "")
+        or os.getenv("HERMES_TOOLS_STATE_DIR", "")
+    )
+    if not value:
+        return None
+    return Path(value)
+
+
+def _legacy_audit_correlation_id() -> str:
+    value = os.getenv("HERMES_FEISHU_LEGACY_AUDIT_CORRELATION_ID", "")
+    if re.fullmatch(r"^[A-Za-z0-9_.:@+-]{1,256}$", value):
+        return value
+    return "feishu-legacy-denial"
+
+
+def _legacy_audit_event_hash(surface: str, tool: str) -> str:
+    value = os.getenv("HERMES_FEISHU_LEGACY_AUDIT_EVENT_HASH", "")
+    if re.fullmatch(r"^sha256:[a-f0-9]{64}$", value):
+        return value
+    digest = hashlib.sha256(f"feishu_legacy_tool_denied:{surface}:{tool}".encode()).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _fnv1a64(value: str) -> str:
+    h = 0xCBF29CE484222325
+    for byte in value.encode("utf-8", "surrogatepass"):
+        h ^= byte
+        h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return f"fnv1a64:{h:016x}"
 
 
 def _validated_prefixed_digest(

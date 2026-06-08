@@ -9,6 +9,11 @@ import json
 import logging
 import threading
 
+from gateway.feishu_legacy_guard import (
+    LEGACY_FEISHU_BROKER_DENIAL_REASON,
+    audit_feishu_legacy_tool_denial,
+    require_feishu_broker_context,
+)
 from tools.registry import registry, tool_error, tool_result
 
 logger = logging.getLogger(__name__)
@@ -28,6 +33,9 @@ def get_client():
 
 
 def _check_feishu():
+    allowed, _ = require_feishu_broker_context("tool", "feishu_drive")
+    if not allowed:
+        return False
     # See ``tools/feishu_doc_tool.py::_check_feishu`` — ``find_spec`` keeps
     # CLI startup fast (the SDK itself takes ~5s to import eagerly).
     import importlib.util
@@ -37,8 +45,46 @@ def _check_feishu():
         return False
 
 
+_check_feishu._hermes_context_sensitive = True
+
+
+def _legacy_denial_result(tool: str, surface: str = "drive") -> str:
+    audit_result = audit_feishu_legacy_tool_denial(surface=surface, tool=tool)
+    if not audit_result.ok:
+        return tool_error(
+            "Feishu legacy denial audit failed",
+            success=False,
+            failure_class="feishu_denial_audit_unavailable",
+            audit_failure_class=audit_result.failure_class or "gateway_event_apply_failed",
+            audit_event="feishu_legacy_tool_denied",
+        )
+    return tool_error(
+        LEGACY_FEISHU_BROKER_DENIAL_REASON,
+        success=False,
+        failure_class=LEGACY_FEISHU_BROKER_DENIAL_REASON,
+        audit_event="feishu_legacy_tool_denied",
+    )
+
+
+def _legacy_denial_tuple(tool: str):
+    audit_result = audit_feishu_legacy_tool_denial(surface="drive", tool=tool)
+    if not audit_result.ok:
+        return None, "feishu_denial_audit_unavailable", {
+            "failure_class": "feishu_denial_audit_unavailable",
+            "audit_failure_class": audit_result.failure_class or "gateway_event_apply_failed",
+            "audit_event": "feishu_legacy_tool_denied",
+        }
+    return None, LEGACY_FEISHU_BROKER_DENIAL_REASON, {
+        "failure_class": LEGACY_FEISHU_BROKER_DENIAL_REASON,
+    }
+
+
 def _do_request(client, method, uri, paths=None, queries=None, body=None):
     """Build and execute a BaseRequest, return (code, msg, data_dict)."""
+    allowed, _ = require_feishu_broker_context("tool", "feishu_drive._do_request")
+    if not allowed:
+        return _legacy_denial_tuple("feishu_drive._do_request")
+
     from lark_oapi import AccessTokenType
     from lark_oapi.core.enum import HttpMethod
     from lark_oapi.core.model.base_request import BaseRequest
@@ -131,6 +177,12 @@ FEISHU_DRIVE_LIST_COMMENTS_SCHEMA = {
 
 
 def _handle_list_comments(args: dict, **kwargs) -> str:
+    allowed, _ = require_feishu_broker_context(
+        "tool", "feishu_drive_list_comments", args=args
+    )
+    if not allowed:
+        return _legacy_denial_result("feishu_drive_list_comments")
+
     client = get_client()
     if client is None:
         return tool_error("Feishu client not available")
@@ -206,6 +258,12 @@ FEISHU_DRIVE_LIST_REPLIES_SCHEMA = {
 
 
 def _handle_list_replies(args: dict, **kwargs) -> str:
+    allowed, _ = require_feishu_broker_context(
+        "tool", "feishu_drive_list_comment_replies", args=args
+    )
+    if not allowed:
+        return _legacy_denial_result("feishu_drive_list_comment_replies")
+
     client = get_client()
     if client is None:
         return tool_error("Feishu client not available")
@@ -278,6 +336,12 @@ FEISHU_DRIVE_REPLY_SCHEMA = {
 
 
 def _handle_reply_comment(args: dict, **kwargs) -> str:
+    allowed, _ = require_feishu_broker_context(
+        "tool", "feishu_drive_reply_comment", args=args
+    )
+    if not allowed:
+        return _legacy_denial_result("feishu_drive_reply_comment")
+
     client = get_client()
     if client is None:
         return tool_error("Feishu client not available")
@@ -349,6 +413,12 @@ FEISHU_DRIVE_ADD_COMMENT_SCHEMA = {
 
 
 def _handle_add_comment(args: dict, **kwargs) -> str:
+    allowed, _ = require_feishu_broker_context(
+        "tool", "feishu_drive_add_comment", args=args
+    )
+    if not allowed:
+        return _legacy_denial_result("feishu_drive_add_comment")
+
     client = get_client()
     if client is None:
         return tool_error("Feishu client not available")

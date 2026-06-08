@@ -301,6 +301,7 @@ def get_tool_definitions(
             registry._generation,
             cfg_fp,
             bool(os.environ.get("HERMES_KANBAN_TASK")),
+            _feishu_broker_cache_fingerprint(),
         )
         cached = _tool_defs_cache.get(cache_key)
         if cached is not None:
@@ -482,6 +483,23 @@ def _compute_tool_definitions(
         logger.warning("Schema sanitization skipped: %s", e)
 
     return filtered_tools
+
+
+def _feishu_broker_cache_fingerprint() -> tuple | None:
+    try:
+        from gateway.feishu_legacy_guard import current_feishu_broker_context
+
+        context = current_feishu_broker_context()
+    except Exception:
+        return None
+    if context is None:
+        return None
+    return (
+        context.grant_handle,
+        context.action_id,
+        context.contract_hash,
+        context.route_partition_key,
+    )
 
 
 # =============================================================================

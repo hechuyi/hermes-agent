@@ -8,6 +8,11 @@ import json
 import logging
 import threading
 
+from gateway.feishu_legacy_guard import (
+    LEGACY_FEISHU_BROKER_DENIAL_REASON,
+    audit_feishu_legacy_tool_denial,
+    require_feishu_broker_context,
+)
 from tools.registry import registry, tool_error, tool_result
 
 logger = logging.getLogger(__name__)
@@ -52,6 +57,9 @@ FEISHU_DOC_READ_SCHEMA = {
 
 
 def _check_feishu():
+    allowed, _ = require_feishu_broker_context("tool", "feishu_doc_read")
+    if not allowed:
+        return False
     # Use ``importlib.util.find_spec`` — it checks whether ``lark_oapi``
     # is importable without actually executing its ``__init__``.
     # Executing the real import here costs ~5 seconds (the SDK eagerly
@@ -66,7 +74,32 @@ def _check_feishu():
         return False
 
 
+_check_feishu._hermes_context_sensitive = True
+
+
+def _legacy_denial_result(tool: str, surface: str) -> str:
+    audit_result = audit_feishu_legacy_tool_denial(surface=surface, tool=tool)
+    if not audit_result.ok:
+        return tool_error(
+            "Feishu legacy denial audit failed",
+            success=False,
+            failure_class="feishu_denial_audit_unavailable",
+            audit_failure_class=audit_result.failure_class or "gateway_event_apply_failed",
+            audit_event="feishu_legacy_tool_denied",
+        )
+    return tool_error(
+        LEGACY_FEISHU_BROKER_DENIAL_REASON,
+        success=False,
+        failure_class=LEGACY_FEISHU_BROKER_DENIAL_REASON,
+        audit_event="feishu_legacy_tool_denied",
+    )
+
+
 def _handle_feishu_doc_read(args: dict, **kwargs) -> str:
+    allowed, _ = require_feishu_broker_context("tool", "feishu_doc_read", args=args)
+    if not allowed:
+        return _legacy_denial_result("feishu_doc_read", "doc")
+
     doc_token = args.get("doc_token", "").strip()
     if not doc_token:
         return tool_error("doc_token is required")

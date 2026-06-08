@@ -27,7 +27,40 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
+from gateway.feishu_legacy_guard import (
+    audit_feishu_legacy_tool_denial,
+    require_feishu_broker_context,
+)
+
 logger = logging.getLogger(__name__)
+
+
+_LEGACY_DENIAL_REASON = "feishu_legacy_tool_requires_broker"
+
+
+def _deny_legacy_comment_tool(tool: str) -> bool:
+    audit_result = audit_feishu_legacy_tool_denial(surface="comment", tool=tool)
+    if not audit_result.ok:
+        logger.error(
+            "[Feishu-Comment] Legacy denial audit failed: tool=%s failure_class=%s",
+            tool,
+            audit_result.failure_class or "gateway_event_apply_failed",
+        )
+        return False
+    logger.warning("[Feishu-Comment] Legacy comment surface denied without broker: tool=%s", tool)
+    return True
+
+
+def _comment_broker_allowed(tool: str) -> bool:
+    allowed, _ = require_feishu_broker_context("comment", tool)
+    return allowed
+
+
+def _guard_legacy_comment_tool(tool: str) -> bool:
+    if _comment_broker_allowed(tool):
+        return True
+    _deny_legacy_comment_tool(tool)
+    return False
 
 # ---------------------------------------------------------------------------
 # Lark SDK helpers (lazy-imported)
@@ -59,6 +92,9 @@ def _build_request(method: str, uri: str, paths=None, queries=None, body=None):
 
 async def _exec_request(client, method, uri, paths=None, queries=None, body=None):
     """Execute a lark API request and return (code, msg, data_dict)."""
+    if not _guard_legacy_comment_tool("feishu_comment._exec_request"):
+        return None, _LEGACY_DENIAL_REASON, {"failure_class": _LEGACY_DENIAL_REASON}
+
     logger.info("[Feishu-Comment] API >>> %s %s paths=%s queries=%s body=%s",
                  method, uri, paths, queries,
                  json.dumps(body, ensure_ascii=False)[:500] if body else None)
@@ -169,6 +205,9 @@ async def add_comment_reaction(
 
     Returns ``True`` on success, ``False`` on failure (errors are logged).
     """
+    if not _guard_legacy_comment_tool("feishu_comment.add_comment_reaction"):
+        return False
+
     try:
         from lark_oapi import AccessTokenType  # noqa: F401
     except ImportError:
@@ -215,6 +254,9 @@ async def delete_comment_reaction(
 
     Best-effort — errors are logged but not raised.
     """
+    if not _guard_legacy_comment_tool("feishu_comment.delete_comment_reaction"):
+        return False
+
     body = {
         "action": "delete",
         "reply_id": reply_id,
@@ -262,6 +304,9 @@ async def query_document_meta(
 
     Returns ``{"title": "...", "url": "...", "doc_type": "..."}`` or empty dict.
     """
+    if not _guard_legacy_comment_tool("feishu_comment.query_document_meta"):
+        return {}
+
     body = {
         "request_docs": [{"doc_token": file_token, "doc_type": file_type}],
         "with_url": True,
@@ -311,6 +356,9 @@ async def batch_query_comment(
     Returns the comment dict with fields like ``is_whole``, ``quote``,
     ``reply_list``, etc.  Empty dict on failure.
     """
+    if not _guard_legacy_comment_tool("feishu_comment.batch_query_comment"):
+        return {}
+
     logger.debug("[Feishu-Comment] batch_query_comment: file_token=%s comment_id=%s", file_token, comment_id)
 
     for attempt in range(_COMMENT_RETRY_LIMIT):
@@ -356,6 +404,9 @@ async def list_whole_comments(
     client: Any, file_token: str, file_type: str,
 ) -> List[Dict[str, Any]]:
     """List all whole-document comments (paginated, up to 500)."""
+    if not _guard_legacy_comment_tool("feishu_comment.list_whole_comments"):
+        return []
+
     logger.debug("[Feishu-Comment] list_whole_comments: file_token=%s", file_token)
     all_comments: List[Dict[str, Any]] = []
     page_token = ""
@@ -404,6 +455,9 @@ async def list_comment_replies(
     If *expect_reply_id* is set and not found in the first fetch,
     retries up to 6 times (handles eventual consistency).
     """
+    if not _guard_legacy_comment_tool("feishu_comment.list_comment_replies"):
+        return []
+
     logger.debug("[Feishu-Comment] list_comment_replies: file_token=%s comment_id=%s", file_token, comment_id)
 
     for attempt in range(_COMMENT_RETRY_LIMIT):
@@ -474,6 +528,9 @@ async def reply_to_comment(
 
     Returns ``(success, code)``.
     """
+    if not _guard_legacy_comment_tool("feishu_comment.reply_to_comment"):
+        return False, None
+
     text = _sanitize_comment_text(text)
     logger.info("[Feishu-Comment] reply_to_comment: comment_id=%s text=%s",
                 comment_id, text[:100])
@@ -508,6 +565,9 @@ async def add_whole_comment(
 
     Returns ``True`` on success.
     """
+    if not _guard_legacy_comment_tool("feishu_comment.add_whole_comment"):
+        return False
+
     text = _sanitize_comment_text(text)
     logger.info("[Feishu-Comment] add_whole_comment: file_token=%s text=%s",
                 file_token, text[:100])
@@ -564,6 +624,9 @@ async def deliver_comment_reply(
     - Whole comment -> add_whole_comment
     - Local comment -> reply_to_comment, fallback to add_whole_comment on 1069302
     """
+    if not _guard_legacy_comment_tool("feishu_comment.deliver_comment_reply"):
+        return False
+
     chunks = _chunk_text(text)
     logger.info("[Feishu-Comment] deliver_comment_reply: is_whole=%s comment_id=%s text_len=%d chunks=%d",
                 is_whole, comment_id, len(text), len(chunks))
@@ -716,6 +779,9 @@ async def _reverse_lookup_wiki_token(
     Returns the wiki_token if the document belongs to a wiki space,
     or None if it doesn't or the API call fails.
     """
+    if not _guard_legacy_comment_tool("feishu_comment._reverse_lookup_wiki_token"):
+        return None
+
     code, msg, data = await _exec_request(
         client, "GET", _WIKI_GET_NODE_URI,
         queries=[("token", obj_token), ("obj_type", obj_type)],
@@ -738,6 +804,9 @@ async def _resolve_wiki_nodes(
     Mutates entries in *links* in-place: replaces ``doc_type`` and ``token``
     with the resolved values for wiki links.  Non-wiki links are unchanged.
     """
+    if not _guard_legacy_comment_tool("feishu_comment._resolve_wiki_nodes"):
+        return []
+
     wiki_links = [l for l in links if l["doc_type"] == "wiki"]
     if not wiki_links:
         return links
@@ -1052,6 +1121,9 @@ def _run_comment_agent(prompt: str, client: Any, session_key: str = "") -> str:
 
     Returns the agent's final response text, or empty string on failure.
     """
+    if not _guard_legacy_comment_tool("feishu_comment._run_comment_agent"):
+        return ""
+
     from run_agent import AIAgent
 
     logger.info("[Feishu-Comment] _run_comment_agent: injecting lark client into tool thread-locals")
@@ -1156,6 +1228,9 @@ async def handle_drive_comment_event(
         return
     if not file_token or not file_type or not comment_id:
         logger.warning("[Feishu-Comment] Missing required fields, skipping")
+        return
+
+    if not _guard_legacy_comment_tool("feishu_comment.handle_drive_comment_event"):
         return
 
     logger.info(

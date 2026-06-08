@@ -6,11 +6,18 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from gateway.feishu_legacy_guard import feishu_broker_context
 from gateway.platforms.feishu_comment import (
     parse_drive_comment_event,
     _ALLOWED_NOTICE_TYPES,
     _sanitize_comment_text,
 )
+
+
+CONTRACT_HASH = "sha256:" + ("a" * 64)
+GRANT_HANDLE = "broker_grant_handle:sha256:" + ("b" * 64)
+ACTION_ID = "broker_action:sha256:" + ("c" * 64)
+ROUTE_PARTITION_KEY = "route_snapshot:sha256:" + ("d" * 64)
 
 
 def _make_event(
@@ -185,6 +192,14 @@ class TestWikiReverseLookup(unittest.TestCase):
     def _run(self, coro):
         return asyncio.get_event_loop().run_until_complete(coro)
 
+    def _broker_context(self):
+        return feishu_broker_context(
+            GRANT_HANDLE,
+            action_id=ACTION_ID,
+            contract_hash=CONTRACT_HASH,
+            route_partition_key=ROUTE_PARTITION_KEY,
+        )
+
     @patch("gateway.platforms.feishu_comment._exec_request")
     def test_reverse_lookup_success(self, mock_exec):
         from gateway.platforms.feishu_comment import _reverse_lookup_wiki_token
@@ -192,7 +207,8 @@ class TestWikiReverseLookup(unittest.TestCase):
         mock_exec.return_value = (0, "Success", {
             "node": {"node_token": "WIKI_TOKEN_123", "obj_token": "docx_abc"},
         })
-        result = self._run(_reverse_lookup_wiki_token(Mock(), "docx", "docx_abc"))
+        with self._broker_context():
+            result = self._run(_reverse_lookup_wiki_token(Mock(), "docx", "docx_abc"))
         self.assertEqual(result, "WIKI_TOKEN_123")
         # Verify correct API params
         call_args = mock_exec.call_args
@@ -206,7 +222,8 @@ class TestWikiReverseLookup(unittest.TestCase):
         from gateway.platforms.feishu_comment import _reverse_lookup_wiki_token
 
         mock_exec.return_value = (131001, "not found", {})
-        result = self._run(_reverse_lookup_wiki_token(Mock(), "docx", "docx_abc"))
+        with self._broker_context():
+            result = self._run(_reverse_lookup_wiki_token(Mock(), "docx", "docx_abc"))
         self.assertIsNone(result)
 
     @patch("gateway.platforms.feishu_comment._exec_request")
@@ -214,7 +231,8 @@ class TestWikiReverseLookup(unittest.TestCase):
         from gateway.platforms.feishu_comment import _reverse_lookup_wiki_token
 
         mock_exec.return_value = (500, "internal error", {})
-        result = self._run(_reverse_lookup_wiki_token(Mock(), "docx", "docx_abc"))
+        with self._broker_context():
+            result = self._run(_reverse_lookup_wiki_token(Mock(), "docx", "docx_abc"))
         self.assertIsNone(result)
 
     @patch("gateway.platforms.feishu_comment._reverse_lookup_wiki_token", new_callable=AsyncMock)
@@ -246,7 +264,8 @@ class TestWikiReverseLookup(unittest.TestCase):
         evt = _make_event()
         # Will proceed past access control but fail later — that's OK, we just test the lookup
         try:
-            self._run(handle_drive_comment_event(Mock(), evt, self_open_id="ou_bot"))
+            with self._broker_context():
+                self._run(handle_drive_comment_event(Mock(), evt, self_open_id="ou_bot"))
         except Exception:
             pass
 
