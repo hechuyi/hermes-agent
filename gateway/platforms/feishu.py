@@ -1834,7 +1834,7 @@ class FeishuAdapter(BasePlatformAdapter):
         if "feishu_current_admission" not in merged:
             reply_admission = dict(admission)
             reply_ref = feishu_hashed_ref("feishu_reply_anchor", reply_to)
-            if reply_ref is not None:
+            if "reply_anchor_ref" not in reply_admission and reply_ref is not None:
                 reply_admission["reply_anchor_ref"] = reply_ref.value_hash
             merged["feishu_current_admission"] = reply_admission
         return merged
@@ -5069,6 +5069,8 @@ class FeishuAdapter(BasePlatformAdapter):
             existing.reply_to_message_id == incoming.reply_to_message_id
             and existing.reply_to_text == incoming.reply_to_text
             and existing.source.thread_id == incoming.source.thread_id
+            and FeishuAdapter._reply_anchor_value(existing)
+            == FeishuAdapter._reply_anchor_value(incoming)
         )
 
     async def _enqueue_text_event(self, event: MessageEvent) -> None:
@@ -6751,10 +6753,12 @@ class FeishuAdapter(BasePlatformAdapter):
         reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]],
         uuid_value: Optional[str] = None,
+        allow_admitted_reply_fallback: bool = False,
     ) -> Any:
         self._validate_current_reply_admission_metadata(
             reply_to=reply_to,
             metadata=metadata,
+            allow_admitted_reply_fallback=allow_admitted_reply_fallback,
         )
         stable_uuid = uuid_value or str(uuid.uuid4())
         effective_reply_to = reply_to
@@ -6790,6 +6794,7 @@ class FeishuAdapter(BasePlatformAdapter):
         *,
         reply_to: Optional[str],
         metadata: Optional[Dict[str, Any]],
+        allow_admitted_reply_fallback: bool = False,
     ) -> None:
         if not metadata:
             return
@@ -6810,6 +6815,8 @@ class FeishuAdapter(BasePlatformAdapter):
         if not required.issubset(admission):
             raise ValueError("feishu_current_reply_admission_incomplete")
         if not reply_to:
+            if allow_admitted_reply_fallback:
+                return
             raise ValueError("feishu_current_reply_anchor_missing")
         reply_ref = feishu_hashed_ref("feishu_reply_anchor", reply_to)
         if reply_ref is None or admission.get("reply_anchor_ref") != reply_ref.value_hash:
@@ -6977,6 +6984,7 @@ class FeishuAdapter(BasePlatformAdapter):
                             payload=payload,
                             reply_to=None,
                             metadata=metadata,
+                            allow_admitted_reply_fallback=True,
                         )
                 return response
             except Exception as exc:

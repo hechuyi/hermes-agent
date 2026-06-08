@@ -20,7 +20,7 @@ from gateway.feishu_contracts import (
     feishu_hashed_ref,
 )
 from gateway.platforms.base import MessageEvent, MessageType, _reply_anchor_for_event
-from gateway.platforms.feishu import FeishuAdapter
+from gateway.platforms.feishu import FeishuAdapter, _FEISHU_CURRENT_ADMISSION_CONTEXT
 from gateway.session import SessionSource, build_session_key
 
 
@@ -379,6 +379,36 @@ def test_thread_reply_preserves_thread_reply_to_anchor_and_fails_when_detached_o
     assert ambiguous.failure_class == "feishu_current_reply_anchor_missing"
 
 
+def test_thread_reply_context_metadata_preserves_admitted_explicit_reply_anchor(tmp_path):
+    adapter = _adapter(tmp_path)
+    source = _source(chat_id="oc_fake_group", chat_type="group", thread_id="omt_thread_fake")
+    contract = _contract(source, adapter)
+    event = _event(source, mentions_bot=True, reply_to_message_id="om_thread_parent_fake")
+    result = adapter._admit_current_conversation_event(
+        event,
+        transport_kind="thread",
+        expected_contract=contract,
+        mention_required=True,
+    )
+    assert result.ok is True
+    admitted_parent_ref = feishu_hashed_ref("feishu_reply_anchor", "om_thread_parent_fake")
+    current_message_ref = feishu_hashed_ref("feishu_reply_anchor", source.message_id)
+    assert admitted_parent_ref is not None and current_message_ref is not None
+
+    token = _FEISHU_CURRENT_ADMISSION_CONTEXT.set(dict(result.record))
+    try:
+        metadata = adapter._metadata_with_current_admission(
+            None,
+            reply_to=source.message_id,
+        )
+    finally:
+        _FEISHU_CURRENT_ADMISSION_CONTEXT.reset(token)
+
+    admission = metadata["feishu_current_admission"]
+    assert admission["reply_anchor_ref"] == admitted_parent_ref.value_hash
+    assert admission["reply_anchor_ref"] != current_message_ref.value_hash
+
+
 def test_webhook_and_websocket_normalize_to_equivalent_route_binding(tmp_path):
     adapter = _adapter(tmp_path)
     source = _source(chat_id="oc_fake_dm", chat_type="dm")
@@ -584,6 +614,115 @@ async def test_current_admission_reaches_normal_inbound_reply_metadata(tmp_path)
     assert len(sent) == 1
     admission = sent[0]["metadata"]["feishu_current_admission"]
     assert admission["transport_kind"] == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_reply_missing_fallback_reaches_create_after_admitted_reply(tmp_path):
+    adapter = _adapter(tmp_path)
+    source = _source(chat_id="oc_fake_dm", chat_type="dm")
+    contract = _contract(source, adapter)
+    event = _event(source, reply_to_message_id=None)
+    result = adapter._admit_current_conversation_event(
+        event,
+        transport_kind="dm",
+        expected_contract=contract,
+    )
+    assert result.ok is True
+    reply_anchor = _reply_anchor_for_event(event)
+    assert reply_anchor == source.message_id
+    metadata = {"feishu_current_admission": dict(result.record)}
+    reply_response = SimpleNamespace(
+        success=lambda: False,
+        code=230011,
+        msg="message not found",
+    )
+    create_response = SimpleNamespace(
+        success=lambda: True,
+        data=SimpleNamespace(message_id="om_created_after_fallback"),
+    )
+    adapter._client = SimpleNamespace(
+        im=SimpleNamespace(
+            v1=SimpleNamespace(
+                message=SimpleNamespace(
+                    reply=Mock(return_value=reply_response),
+                    create=Mock(return_value=create_response),
+                )
+            )
+        )
+    )
+    adapter._build_reply_message_body = lambda **_kwargs: object()
+    adapter._build_reply_message_request = lambda *_args: object()
+    adapter._build_create_message_body = lambda **_kwargs: object()
+    adapter._build_create_message_request = lambda *_args: object()
+
+    response = await adapter._feishu_send_with_retry(
+        chat_id=source.chat_id,
+        msg_type="text",
+        payload='{"text":"ok"}',
+        reply_to=reply_anchor,
+        metadata=metadata,
+    )
+
+    assert response is create_response
+    assert adapter._client.im.v1.message.reply.call_count == 1
+    assert adapter._client.im.v1.message.create.call_count == 1
+    assert metadata["feishu_current_admission"]["reply_anchor_ref"].startswith("sha256:")
+    assert source.message_id not in str(metadata)
+
+
+@pytest.mark.asyncio
+async def test_root_dm_text_batch_flushes_before_admission_anchor_can_diverge(tmp_path):
+    adapter = _adapter(tmp_path)
+    source = _source(chat_id="oc_fake_dm", chat_type="dm")
+    adapter._text_batch_delay_seconds = 3600
+    first = _event(
+        source,
+        message_id="om_root_first_fake",
+        reply_to_message_id=None,
+        raw_event_id="evt_root_first_fake",
+    )
+    first.text = "first"
+    second_source = _source(
+        chat_id=source.chat_id,
+        chat_type=source.chat_type,
+        user_id=source.user_id,
+        user_id_alt=source.user_id_alt,
+        message_id="om_root_second_fake",
+    )
+    second = _event(
+        second_source,
+        message_id="om_root_second_fake",
+        reply_to_message_id=None,
+        raw_event_id="evt_root_second_fake",
+    )
+    second.text = "second"
+    for event in (first, second):
+        contract = adapter._build_current_conversation_contract(
+            event,
+            reply_anchor_ref=adapter._reply_anchor_ref(event),
+            expected_contract=None,
+        )
+        setattr(event, "feishu_current_conversation_contract", contract)
+        setattr(event, "feishu_current_transport_kind", "dm")
+        setattr(event, "feishu_current_mention_required", False)
+
+    await adapter._dispatch_inbound_event(first)
+    await adapter._dispatch_inbound_event(second)
+
+    first_ref = feishu_hashed_ref("feishu_reply_anchor", "om_root_first_fake")
+    second_ref = feishu_hashed_ref("feishu_reply_anchor", "om_root_second_fake")
+    assert first_ref is not None and second_ref is not None
+    adapter.handle_message.assert_awaited_once()
+    flushed = adapter.handle_message.await_args.args[0]
+    flushed_admission = getattr(flushed, "feishu_current_conversation_admission")
+    assert flushed_admission["contract_hash"] == getattr(
+        flushed,
+        "feishu_current_conversation_contract",
+    ).contract_hash
+    assert flushed_admission["reply_anchor_ref"] == first_ref.value_hash
+    assert flushed_admission["reply_anchor_ref"] != second_ref.value_hash
+    pending = adapter._pending_text_batches[adapter._text_batch_key(second)]
+    assert pending.message_id == "om_root_second_fake"
 
 
 @pytest.mark.asyncio
