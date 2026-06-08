@@ -9,10 +9,15 @@ from gateway.feishu_contracts import (
     FeishuContractError,
     HashedRef,
     ObjectCapabilityGrant,
+    build_feishu_conversation_contract,
     canonical_contract_json,
     can_issue_object_grant,
     feishu_contract_hash,
+    feishu_hashed_ref,
 )
+from gateway.config import Platform
+from gateway.conversation_scope import conversation_identity, route_partition_key
+from gateway.session import SessionSource, build_session_key
 
 
 _SHA256_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
@@ -21,6 +26,55 @@ _OTHER_OBJECT_REF = "sha256:" + "9" * 64
 _ACTOR_REF = "sha256:" + "b" * 64
 _OTHER_ACTOR_REF = "sha256:" + "c" * 64
 _EVIDENCE_REF = "sha256:" + "d" * 64
+_FEISHU_SOURCE_APP_ID = "feishu-source-app-fixture"
+_FEISHU_SOURCE_CHAT_ID = "feishu-source-chat-fixture"
+_FEISHU_SOURCE_OPEN_ID = "feishu-source-open-fixture"
+_FEISHU_SOURCE_UNION_ID = "feishu-source-union-fixture"
+_FEISHU_SOURCE_MESSAGE_ID = "feishu-source-message-fixture"
+
+
+def _fake_feishu_source(**overrides) -> SessionSource:
+    values = {
+        "platform": Platform.FEISHU,
+        "chat_id": _FEISHU_SOURCE_CHAT_ID,
+        "chat_type": "group",
+        "user_id": _FEISHU_SOURCE_OPEN_ID,
+        "user_id_alt": _FEISHU_SOURCE_UNION_ID,
+        "message_id": _FEISHU_SOURCE_MESSAGE_ID,
+    }
+    values.update(overrides)
+    return SessionSource(**values)
+
+
+def _inbound_contract(**overrides) -> ConversationContract:
+    source = overrides.pop("source", _fake_feishu_source())
+    platform_account_id = overrides.pop("platform_account_id", "feishu_app:test")
+    scope_identity = overrides.pop(
+        "scope_identity",
+        conversation_identity(
+            source,
+            platform_account_id=platform_account_id,
+        ),
+    )
+    assert scope_identity is not None
+    values = {
+        "scope_identity": scope_identity,
+        "route_partition_key": route_partition_key(source),
+        "route_session_key_snapshot": build_session_key(source),
+        "scope_assignment_status": "scoped",
+        "actor_ref": feishu_hashed_ref("feishu_actor", source.user_id_alt),
+        "authority_subject_ref": feishu_hashed_ref("feishu_user", source.user_id_alt),
+        "identity_evidence_set": (
+            feishu_hashed_ref("feishu_message_actor", source.user_id),
+            feishu_hashed_ref("feishu_message_union", source.user_id_alt),
+        ),
+        "session_id": "session:test",
+        "tenant_partition_key": "tenant:test",
+        "app_partition_key": "app:test",
+        "thread_anchor_ref": feishu_hashed_ref("feishu_message", source.message_id),
+    }
+    values.update(overrides)
+    return build_feishu_conversation_contract(**values)
 
 
 def test_hash_output_uses_sha256_prefix_and_lowercase_hex():
@@ -508,3 +562,111 @@ def test_insufficient_scope_object_authority_denies_grant():
         False,
         "feishu_object_authority_scope_insufficient",
     )
+
+
+def test_populate_inbound_contract_includes_scope_route_subject_evidence_and_hash():
+    source = _fake_feishu_source()
+    scope_identity = conversation_identity(source, platform_account_id="feishu_app:test")
+    assert scope_identity is not None
+
+    contract = _inbound_contract(source=source, scope_identity=scope_identity)
+
+    assert contract.platform_account_id == "feishu_app:test"
+    assert contract.conversation_scope_id == scope_identity.id
+    assert contract.route_partition_key == route_partition_key(source)
+    assert contract.route_session_key_snapshot == build_session_key(source)
+    assert contract.scope_assignment_status == "scoped"
+    assert contract.authority_subject_ref == feishu_hashed_ref(
+        "feishu_user",
+        _FEISHU_SOURCE_UNION_ID,
+    )
+    assert contract.identity_evidence_set == (
+        feishu_hashed_ref("feishu_message_actor", _FEISHU_SOURCE_OPEN_ID),
+        feishu_hashed_ref("feishu_message_union", _FEISHU_SOURCE_UNION_ID),
+    )
+    assert contract.shared_context_scope_id == f"shared_context:{scope_identity.id}"
+    assert _SHA256_HASH_RE.fullmatch(contract.contract_hash)
+
+
+def test_populate_inbound_contract_hash_changes_when_route_snapshot_changes():
+    base = _inbound_contract(
+        route_session_key_snapshot="agent:main:feishu:group:fixture-chat:a"
+    )
+    changed = _inbound_contract(
+        route_session_key_snapshot="agent:main:feishu:group:fixture-chat:b"
+    )
+
+    assert base.contract_hash != changed.contract_hash
+
+
+def test_populate_inbound_contract_hash_changes_when_conversation_scope_changes():
+    first_source = _fake_feishu_source(chat_id="feishu-source-chat-one")
+    second_source = _fake_feishu_source(chat_id="feishu-source-chat-two")
+
+    first = _inbound_contract(source=first_source)
+    second = _inbound_contract(source=second_source)
+
+    assert first.conversation_scope_id != second.conversation_scope_id
+    assert first.contract_hash != second.contract_hash
+
+
+def test_populate_inbound_contract_uses_hashed_identity_evidence_not_raw_feishu_ids():
+    contract = _inbound_contract()
+    identity_payload_json = canonical_contract_json(
+        {
+            "actor_ref": contract.actor_ref,
+            "authority_subject_ref": contract.authority_subject_ref,
+            "identity_evidence_set": contract.identity_evidence_set,
+            "thread_anchor_ref": contract.thread_anchor_ref,
+            "root_anchor_ref": contract.root_anchor_ref,
+        }
+    )
+
+    assert _FEISHU_SOURCE_APP_ID not in identity_payload_json
+    assert _FEISHU_SOURCE_CHAT_ID not in identity_payload_json
+    assert _FEISHU_SOURCE_OPEN_ID not in identity_payload_json
+    assert _FEISHU_SOURCE_UNION_ID not in identity_payload_json
+    assert _FEISHU_SOURCE_MESSAGE_ID not in identity_payload_json
+    assert "sha256:" in identity_payload_json
+
+
+@pytest.mark.parametrize(
+    "scope_assignment_status",
+    [
+        "ambiguous",
+        "legacy_unscoped",
+        "detached",
+        "backfilled",
+        "resume_pending",
+        "cli_handoff",
+        "implicit_switch",
+    ],
+)
+def test_legacy_state_contracts_are_not_authorizable(scope_assignment_status):
+    contract = _inbound_contract(scope_assignment_status=scope_assignment_status)
+
+    allowed, failure_class = can_issue_object_grant(
+        contract,
+        _evidence(route_session_key_snapshot=contract.route_session_key_snapshot),
+        object_type="doc",
+        object_ref=_object_ref(),
+        action="read",
+    )
+
+    assert (allowed, failure_class) == (False, "feishu_scope_not_scoped")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"authority_subject_ref": None},
+        {"identity_evidence_set": ()},
+    ],
+)
+def test_populate_inbound_contract_requires_scoped_identity_for_authorizable_subject(
+    overrides,
+):
+    with pytest.raises(FeishuContractError) as exc_info:
+        _inbound_contract(**overrides)
+
+    assert exc_info.value.failure_class == "feishu_scoped_identity_incomplete"

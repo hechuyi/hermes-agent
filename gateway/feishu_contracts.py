@@ -17,6 +17,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any
 
+from gateway.conversation_scope import ConversationScopeIdentity
+
 
 class FeishuContractError(ValueError):
     def __init__(
@@ -261,6 +263,94 @@ class ObjectCapabilityGrant:
                 schema_version=self.schema_version,
             ),
         )
+
+
+def feishu_hashed_ref(
+    kind: str,
+    value: str | None,
+    *,
+    schema_version: int = 1,
+) -> HashedRef | None:
+    if value is None:
+        return None
+    _require_nonempty_string(kind, "hashed ref kind")
+    _require_nonempty_string(value, "hashed ref value")
+    _require_schema_version(schema_version)
+
+    payload = {
+        "kind": unicodedata.normalize("NFC", kind),
+        "schema_version": schema_version,
+        "value": unicodedata.normalize("NFC", value),
+    }
+    digest = hashlib.sha256(
+        canonical_contract_json(
+            {
+                "domain": "feishu.hashed_ref",
+                "payload": payload,
+                "version": "v1",
+            }
+        ).encode("utf-8")
+    ).hexdigest()
+    return HashedRef(
+        kind=kind,
+        value_hash=f"sha256:{digest}",
+        schema_version=schema_version,
+    )
+
+
+def build_feishu_conversation_contract(
+    *,
+    scope_identity: ConversationScopeIdentity,
+    route_partition_key: str,
+    route_session_key_snapshot: str,
+    scope_assignment_status: str,
+    actor_ref: HashedRef,
+    authority_subject_ref: HashedRef | None,
+    identity_evidence_set: Sequence[HashedRef] = (),
+    session_id: str,
+    tenant_partition_key: str,
+    app_partition_key: str,
+    shared_context_scope_id: str | None = None,
+    thread_anchor_ref: HashedRef | None = None,
+    root_anchor_ref: HashedRef | None = None,
+    policy_version: str = "policy:v1",
+    evidence_state: str = "current",
+) -> ConversationContract:
+    if not isinstance(scope_identity, ConversationScopeIdentity):
+        raise FeishuContractError(
+            "scope_identity must be a ConversationScopeIdentity",
+            failure_class="invalid_feishu_scope_identity",
+        )
+    _require_nonempty_string(scope_identity.platform_account_id, "platform_account_id")
+    _require_nonempty_string(scope_identity.id, "conversation_scope_id")
+
+    evidence_tuple = _hashed_ref_tuple(identity_evidence_set, "identity_evidence_set")
+    if scope_assignment_status == "scoped":
+        if authority_subject_ref is None or not evidence_tuple:
+            raise FeishuContractError(
+                "scoped Feishu conversation contract requires authority subject and identity evidence",
+                failure_class="feishu_scoped_identity_incomplete",
+            )
+
+    return ConversationContract(
+        platform_account_id=scope_identity.platform_account_id,
+        tenant_partition_key=tenant_partition_key,
+        app_partition_key=app_partition_key,
+        conversation_scope_id=scope_identity.id,
+        shared_context_scope_id=shared_context_scope_id
+        or f"shared_context:{scope_identity.id}",
+        route_partition_key=route_partition_key,
+        route_session_key_snapshot=route_session_key_snapshot,
+        scope_assignment_status=scope_assignment_status,
+        actor_ref=actor_ref,
+        authority_subject_ref=authority_subject_ref,
+        session_id=session_id,
+        thread_anchor_ref=thread_anchor_ref,
+        root_anchor_ref=root_anchor_ref,
+        identity_evidence_set=evidence_tuple,
+        policy_version=policy_version,
+        evidence_state=evidence_state,
+    )
 
 
 def canonical_contract_json(value: Any) -> str:
