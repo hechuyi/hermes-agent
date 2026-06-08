@@ -573,8 +573,10 @@ def test_populate_inbound_contract_includes_scope_route_subject_evidence_and_has
 
     assert contract.platform_account_id == "feishu_app:test"
     assert contract.conversation_scope_id == scope_identity.id
-    assert contract.route_partition_key == route_partition_key(source)
-    assert contract.route_session_key_snapshot == build_session_key(source)
+    assert contract.route_partition_key.startswith("route_partition_hash:sha256:")
+    assert contract.route_session_key_snapshot.startswith(
+        "route_session_snapshot_hash:sha256:"
+    )
     assert contract.scope_assignment_status == "scoped"
     assert contract.authority_subject_ref == feishu_hashed_ref(
         "feishu_user",
@@ -628,6 +630,37 @@ def test_populate_inbound_contract_uses_hashed_identity_evidence_not_raw_feishu_
     assert _FEISHU_SOURCE_UNION_ID not in identity_payload_json
     assert _FEISHU_SOURCE_MESSAGE_ID not in identity_payload_json
     assert "sha256:" in identity_payload_json
+
+
+def test_populate_inbound_contract_sanitizes_raw_route_material_in_full_payload():
+    raw_chat = "oc_raw_chat_fixture"
+    raw_actor = "ou_raw_actor_fixture"
+    raw_union = "on_raw_union_fixture"
+    raw_thread = "thread_raw_fixture"
+    source = _fake_feishu_source(
+        chat_id=raw_chat,
+        thread_id=raw_thread,
+        user_id=raw_actor,
+        user_id_alt=raw_union,
+    )
+    contract = _inbound_contract(
+        source=source,
+        route_partition_key=(
+            f"agent:main:feishu:group:{raw_chat}:{raw_thread}:{raw_union}"
+        ),
+        route_session_key_snapshot=build_session_key(source),
+    )
+
+    payload_json = canonical_contract_json(contract)
+
+    assert contract.route_partition_key.startswith("route_partition_hash:sha256:")
+    assert contract.route_session_key_snapshot.startswith(
+        "route_session_snapshot_hash:sha256:"
+    )
+    assert raw_chat not in payload_json
+    assert raw_actor not in payload_json
+    assert raw_union not in payload_json
+    assert raw_thread not in payload_json
 
 
 @pytest.mark.parametrize(

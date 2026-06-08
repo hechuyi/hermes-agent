@@ -316,6 +316,14 @@ def build_feishu_conversation_contract(
     policy_version: str = "policy:v1",
     evidence_state: str = "current",
 ) -> ConversationContract:
+    """Build a sanitized Feishu conversation contract from inbound route material.
+
+    ``route_partition_key`` and ``route_session_key_snapshot`` may be raw route
+    material from existing builders.  The contract stores only hash snapshots
+    so raw Feishu conversation or participant identifiers do not cross the
+    contract boundary.
+    """
+
     if not isinstance(scope_identity, ConversationScopeIdentity):
         raise FeishuContractError(
             "scope_identity must be a ConversationScopeIdentity",
@@ -339,8 +347,14 @@ def build_feishu_conversation_contract(
         conversation_scope_id=scope_identity.id,
         shared_context_scope_id=shared_context_scope_id
         or f"shared_context:{scope_identity.id}",
-        route_partition_key=route_partition_key,
-        route_session_key_snapshot=route_session_key_snapshot,
+        route_partition_key=_route_material_hash(
+            "route_partition_hash",
+            route_partition_key,
+        ),
+        route_session_key_snapshot=_route_material_hash(
+            "route_session_snapshot_hash",
+            route_session_key_snapshot,
+        ),
         scope_assignment_status=scope_assignment_status,
         actor_ref=actor_ref,
         authority_subject_ref=authority_subject_ref,
@@ -351,6 +365,17 @@ def build_feishu_conversation_contract(
         policy_version=policy_version,
         evidence_state=evidence_state,
     )
+
+
+def _route_material_hash(prefix: str, value: str) -> str:
+    _require_nonempty_string(prefix, "route material hash prefix")
+    _require_nonempty_string(value, "route material")
+    digest = feishu_contract_hash(
+        {"route_material": unicodedata.normalize("NFC", value)},
+        domain=f"feishu.{prefix}",
+        version="v1",
+    )
+    return f"{prefix}:{digest}"
 
 
 def canonical_contract_json(value: Any) -> str:
