@@ -1734,6 +1734,33 @@ async def test_execute_feishu_request_descriptor_requires_broker_before_sdk_buil
 
 
 @pytest.mark.asyncio
+async def test_execute_feishu_request_descriptor_requires_audit_state_before_sdk_builder():
+    adapter, message_api = _non_audited_adapter()
+    adapter._build_create_message_body = MagicMock(
+        wraps=adapter._build_create_message_body
+    )
+    adapter._build_create_message_request = MagicMock(
+        wraps=adapter._build_create_message_request
+    )
+
+    with _broker_context():
+        result = await adapter.execute_feishu_request_descriptor(
+            _create_descriptor('{"config":{"wide_screen_mode":true}}'),
+            delivery_id="delivery-card-create",
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
+
+    assert result.success is False
+    assert result.error == "feishu_legacy_descriptor_audit_state_missing"
+    adapter._build_create_message_body.assert_not_called()
+    adapter._build_create_message_request.assert_not_called()
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
+
+
+@pytest.mark.asyncio
 async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_http(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)

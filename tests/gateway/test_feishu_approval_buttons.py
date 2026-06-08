@@ -1765,8 +1765,8 @@ class TestCardActionCallbackResponse:
         assert response.card is None
         mock_submit.assert_not_called()
 
-    def test_returns_card_for_approve_action(self, _patch_callback_card_types):
-        adapter = _make_adapter()
+    def test_approve_action_with_audit_state_schedules_without_inline_card(self, tmp_path, _patch_callback_card_types):
+        adapter = _make_audited_adapter(tmp_path)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         adapter._allowed_group_users = {"ou_bob"}
@@ -1783,17 +1783,17 @@ class TestCardActionCallbackResponse:
 
         with (
             _broker_context(),
-            patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro),
+            patch.object(
+                adapter,
+                "_submit_on_loop",
+                side_effect=lambda _loop, coro: coro.close() or True,
+            ) as mock_submit,
         ):
             response = adapter._on_card_action_trigger(data)
 
         assert response is not None
-        assert response.card is not None
-        assert response.card.type == "raw"
-        card = response.card.data
-        assert card["header"]["template"] == "green"
-        assert "Approved once" in card["header"]["title"]["content"]
-        assert "Bob" in card["elements"][0]["content"]
+        assert response.card is None
+        mock_submit.assert_called_once()
 
     def test_approval_requires_broker_without_audit_state(
         self,
@@ -1819,6 +1819,36 @@ class TestCardActionCallbackResponse:
         assert response is not None
         assert response.card is None
         mock_submit.assert_not_called()
+
+    def test_approval_with_broker_context_requires_audit_state_before_submit(
+        self,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._allowed_group_users = {"ou_bob"}
+        adapter._approval_state[1] = {
+            "session_key": "sess-1",
+            "message_id": "msg-1",
+            "chat_id": "oc_12345",
+        }
+        data = _make_card_action_data(
+            {"hermes_action": "approve_once", "approval_id": 1},
+            open_id="ou_bob",
+        )
+
+        with (
+            _broker_context(),
+            patch.object(adapter, "_submit_on_loop") as mock_submit,
+            patch("asyncio.run_coroutine_threadsafe") as mock_threadsafe_submit,
+        ):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is None
+        mock_submit.assert_not_called()
+        mock_threadsafe_submit.assert_not_called()
 
     def test_approval_requires_broker_before_scheduling_resolution(
         self,
@@ -2010,8 +2040,8 @@ class TestCardActionCallbackResponse:
             "approval_prompt_card_update",
         ]
 
-    def test_returns_card_for_deny_action(self, _patch_callback_card_types):
-        adapter = _make_adapter()
+    def test_deny_action_with_audit_state_schedules_without_inline_card(self, tmp_path, _patch_callback_card_types):
+        adapter = _make_audited_adapter(tmp_path)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         adapter._allowed_group_users = {"ou_user1"}
@@ -2026,14 +2056,16 @@ class TestCardActionCallbackResponse:
 
         with (
             _broker_context(),
-            patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro),
+            patch.object(
+                adapter,
+                "_submit_on_loop",
+                side_effect=lambda _loop, coro: coro.close() or True,
+            ) as mock_submit,
         ):
             response = adapter._on_card_action_trigger(data)
 
-        assert response.card is not None
-        card = response.card.data
-        assert card["header"]["template"] == "red"
-        assert "Denied" in card["header"]["title"]["content"]
+        assert response.card is None
+        mock_submit.assert_called_once()
 
     def test_ignores_missing_approval_id(self, _patch_callback_card_types):
         adapter = _make_adapter()
@@ -2063,8 +2095,8 @@ class TestCardActionCallbackResponse:
         assert response is not None
         assert response.card is None
 
-    def test_falls_back_to_open_id_when_name_not_cached(self, _patch_callback_card_types):
-        adapter = _make_adapter()
+    def test_approval_without_cached_name_still_schedules_audited_resolution(self, tmp_path, _patch_callback_card_types):
+        adapter = _make_audited_adapter(tmp_path)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         adapter._allowed_group_users = {"ou_unknown"}
@@ -2080,15 +2112,23 @@ class TestCardActionCallbackResponse:
 
         with (
             _broker_context(),
-            patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro),
+            patch.object(
+                adapter,
+                "_submit_on_loop",
+                side_effect=lambda _loop, coro: coro.close() or True,
+            ) as mock_submit,
         ):
             response = adapter._on_card_action_trigger(data)
 
-        card = response.card.data
-        assert "ou_unknown" in card["elements"][0]["content"]
+        assert response.card is None
+        mock_submit.assert_called_once()
 
-    def test_ignores_expired_cached_name(self, _patch_callback_card_types):
-        adapter = _make_adapter()
+    def test_approval_with_expired_cached_name_still_schedules_audited_resolution(
+        self,
+        tmp_path,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         adapter._allowed_group_users = {"ou_expired"}
@@ -2105,13 +2145,16 @@ class TestCardActionCallbackResponse:
 
         with (
             _broker_context(),
-            patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro),
+            patch.object(
+                adapter,
+                "_submit_on_loop",
+                side_effect=lambda _loop, coro: coro.close() or True,
+            ) as mock_submit,
         ):
             response = adapter._on_card_action_trigger(data)
 
-        card = response.card.data
-        assert "Old Name" not in card["elements"][0]["content"]
-        assert "ou_expired" in card["elements"][0]["content"]
+        assert response.card is None
+        mock_submit.assert_called_once()
 
     def test_rejects_approval_click_from_unauthorized_user(self, _patch_callback_card_types):
         adapter = _make_adapter()
@@ -2158,8 +2201,8 @@ class TestCardActionCallbackResponse:
         assert response.card is None
         mock_submit.assert_not_called()
 
-    def test_returns_card_for_update_prompt_yes(self, _patch_callback_card_types):
-        adapter = _make_adapter()
+    def test_update_prompt_yes_with_audit_state_schedules_without_inline_card(self, tmp_path, _patch_callback_card_types):
+        adapter = _make_audited_adapter(tmp_path)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         adapter._update_prompt_state[1] = {
@@ -2175,16 +2218,17 @@ class TestCardActionCallbackResponse:
 
         with (
             _broker_context(),
-            patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro),
+            patch.object(
+                adapter,
+                "_submit_on_loop",
+                side_effect=lambda _loop, coro: coro.close() or True,
+            ) as mock_submit,
         ):
             response = adapter._on_card_action_trigger(data)
 
         assert response is not None
-        assert response.card is not None
-        card = response.card.data
-        assert card["header"]["template"] == "green"
-        assert "answered: Yes" in card["header"]["title"]["content"]
-        assert "Bob" in card["elements"][0]["content"]
+        assert response.card is None
+        mock_submit.assert_called_once()
 
     def test_update_prompt_requires_broker_without_audit_state(
         self,
@@ -2209,6 +2253,35 @@ class TestCardActionCallbackResponse:
         assert response is not None
         assert response.card is None
         mock_submit.assert_not_called()
+
+    def test_update_prompt_with_broker_context_requires_audit_state_before_submit(
+        self,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._update_prompt_state[1] = {
+            "session_key": "sess-up-1",
+            "message_id": "msg_up_003",
+            "chat_id": "oc_12345",
+        }
+        data = _make_card_action_data(
+            {"hermes_update_prompt_action": "y", "update_prompt_id": 1},
+            open_id="ou_bob",
+        )
+
+        with (
+            _broker_context(),
+            patch.object(adapter, "_submit_on_loop") as mock_submit,
+            patch("asyncio.run_coroutine_threadsafe") as mock_threadsafe_submit,
+        ):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is None
+        mock_submit.assert_not_called()
+        mock_threadsafe_submit.assert_not_called()
 
     def test_update_prompt_audited_click_returns_no_inline_card_and_schedules_resolution(
         self,
@@ -2341,8 +2414,8 @@ class TestCardActionCallbackResponse:
             "update_prompt_card_update",
         ]
 
-    def test_returns_card_for_update_prompt_no(self, _patch_callback_card_types):
-        adapter = _make_adapter()
+    def test_update_prompt_no_with_audit_state_schedules_without_inline_card(self, tmp_path, _patch_callback_card_types):
+        adapter = _make_audited_adapter(tmp_path)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
         adapter._update_prompt_state[2] = {
@@ -2356,15 +2429,17 @@ class TestCardActionCallbackResponse:
 
         with (
             _broker_context(),
-            patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro),
+            patch.object(
+                adapter,
+                "_submit_on_loop",
+                side_effect=lambda _loop, coro: coro.close() or True,
+            ) as mock_submit,
         ):
             response = adapter._on_card_action_trigger(data)
 
         assert response is not None
-        assert response.card is not None
-        card = response.card.data
-        assert card["header"]["template"] == "red"
-        assert "answered: No" in card["header"]["title"]["content"]
+        assert response.card is None
+        mock_submit.assert_called_once()
 
     def test_ignores_missing_update_prompt_id(self, _patch_callback_card_types):
         adapter = _make_adapter()

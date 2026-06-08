@@ -3254,6 +3254,12 @@ class FeishuAdapter(BasePlatformAdapter):
         if not state:
             logger.debug("[Feishu] Approval %s already resolved or unknown", approval_id)
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+        if self._gateway_event_state_dir is None:
+            logger.warning(
+                "[Feishu] Dropping approval callback before submit: "
+                "reason=feishu_action_audit_state_missing action=approval_prompt_card_action"
+            )
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
         choice = _APPROVAL_CHOICE_MAP.get(action_value.get("hermes_action"), "deny")
         if not self._feishu_broker_context_present():
             if not self._apply_feishu_action_denied_sync(
@@ -3322,6 +3328,12 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] Update prompt %s already resolved or unknown", prompt_id)
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
         state = self._update_prompt_state[prompt_id]
+        if self._gateway_event_state_dir is None:
+            logger.warning(
+                "[Feishu] Dropping update prompt callback before submit: "
+                "reason=feishu_action_audit_state_missing action=update_prompt_card_action"
+            )
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
         if not self._feishu_broker_context_present():
             if not self._apply_feishu_action_denied_sync(
                 action="update_prompt_card_action",
@@ -5591,6 +5603,15 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(
                 success=False,
                 error="feishu_legacy_descriptor_requires_broker",
+            )
+        if self._gateway_event_state_dir is None:
+            logger.warning(
+                "[Feishu] Refusing descriptor before SDK delivery: "
+                "reason=feishu_legacy_descriptor_audit_state_missing surface=feishu.descriptor"
+            )
+            return SendResult(
+                success=False,
+                error="feishu_legacy_descriptor_audit_state_missing",
             )
         if not self._client:
             return SendResult(success=False, error="Not connected")
