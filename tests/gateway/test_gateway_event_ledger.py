@@ -496,6 +496,12 @@ def test_feishu_audit_event_families_are_persisted_as_sanitized_records(
         _feishu_audit_event("feishu_action_requested", surface="/open-apis/im/v1/messages"),
         _feishu_audit_event("feishu_action_requested", action='{"raw":"body"}'),
         _feishu_audit_event("feishu_action_requested", object_ref="doccn_raw_id"),
+        _feishu_audit_event("feishu_action_requested", action="ou_raw_feishu_id"),
+        _feishu_audit_event("feishu_action_requested", surface="oc_raw_chat_id"),
+        _feishu_audit_event("feishu_action_requested", tool="tenant_access_token"),
+        _feishu_audit_event("feishu_action_requested", surface="doccnrawid"),
+        _feishu_audit_event("feishu_action_requested", surface="raw_response"),
+        _feishu_audit_event("feishu_action_requested", action="body"),
     ],
 )
 def test_feishu_audit_rejects_raw_token_body_document_path_and_ids(tmp_path, event):
@@ -506,6 +512,20 @@ def test_feishu_audit_rejects_raw_token_body_document_path_and_ids(tmp_path, eve
     assert not (tmp_path / LEDGER_FILENAME).exists()
 
 
+def test_feishu_auth_decision_success_event_does_not_require_failure_class(tmp_path):
+    event = _feishu_audit_event(
+        "feishu_auth_decision",
+        decision="authorized",
+        decision_hash="fnv1a64:aaaaaaaaaaaaaaaa",
+    )
+
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is True
+    assert result.action is not None
+    assert result.action["record"] == event
+
+
 @pytest.mark.parametrize(
     "event",
     [
@@ -513,6 +533,11 @@ def test_feishu_audit_rejects_raw_token_body_document_path_and_ids(tmp_path, eve
         _feishu_audit_event("feishu_action_requested", event_hash="sha256:" + ("z" * 64)),
         _feishu_audit_event("feishu_action_requested", event_hash=None),
         _feishu_audit_event("feishu_action_denied", action_hash="fnv1a64:aaaaaaaaaaaaaaaa"),
+        _feishu_audit_event(
+            "feishu_auth_decision",
+            decision="denied",
+            decision_hash="fnv1a64:aaaaaaaaaaaaaaaa",
+        ),
     ],
 )
 def test_feishu_audit_requires_sanitized_hashes_and_denial_failure_class(tmp_path, event):
@@ -548,6 +573,39 @@ def test_feishu_audit_keeps_legacy_v1_ledger_version_and_backfills_missing_secti
     assert state["feishu_audit_events"] == [
         _feishu_audit_event("feishu_contract_observed")
     ]
+
+
+@pytest.mark.parametrize(
+    "poisoned_event",
+    [
+        _feishu_audit_event("feishu_action_requested", token="tenant-access-token"),
+        _feishu_audit_event("feishu_action_requested", action="ou_raw_feishu_id"),
+        _feishu_audit_event("feishu_action_requested", surface="doccnrawid"),
+    ],
+)
+def test_feishu_audit_poisoned_persisted_records_fail_closed_without_overwrite(
+    tmp_path, poisoned_event
+):
+    ledger = {
+        "version": 1,
+        "inbounds": {},
+        "deliveries": {},
+        "delivery_identity_index": {},
+        "feishu_message_index": {},
+        "ack_event_index": {},
+        "session_routes": {},
+        "compression_rejections": [],
+        "feishu_audit_events": [poisoned_event],
+    }
+    ledger_path = tmp_path / LEDGER_FILENAME
+    original_text = json.dumps(ledger)
+    ledger_path.write_text(original_text, encoding="utf-8")
+
+    result = apply_gateway_event(_feishu_audit_event("feishu_contract_observed"), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "gateway_event_state_schema_invalid"
+    assert ledger_path.read_text(encoding="utf-8") == original_text
 
 
 def test_mismatched_persisted_delivery_key_fails_with_schema_class(tmp_path):

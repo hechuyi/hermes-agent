@@ -67,7 +67,6 @@ FEISHU_AUDIT_EVENT_TYPES: frozenset[str] = frozenset(
 FEISHU_AUDIT_FAILURE_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "feishu_authorization_evidence_denied",
-        "feishu_auth_decision",
         "feishu_capability_denied",
         "feishu_action_denied",
         "feishu_api_failure",
@@ -90,6 +89,9 @@ _SAFE_FAILURE_CLASS_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _FNV1A64_RE = re.compile(r"^fnv1a64:[a-f0-9]{16}$")
 _SHA256_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 _SAFE_AUDIT_ATOM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_RAW_FEISHU_ID_VALUE_RE = re.compile(
+    r"^(?:ou|oc|on|om|user|open|union|chat|doccn|file|fld|boxcn|wikcn)[a-z0-9_.:-]*$"
+)
 _SAFE_FEISHU_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_]{1,256}$")
 _SAFE_FEISHU_RECEIVE_ID_RE = re.compile(r"^[A-Za-z0-9_@.+-]{1,256}$")
 _SAFE_DESCRIPTOR_UUID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,127}$")
@@ -154,6 +156,35 @@ _FEISHU_AUDIT_RAW_FIELD_NAMES = frozenset(
         "path",
         "content",
         "object_ref",
+    }
+)
+_FEISHU_AUDIT_SENSITIVE_VALUE_TOKENS = frozenset(
+    {
+        "access_token",
+        "tenant_access_token",
+        "token",
+        "secret",
+        "raw_body",
+        "raw_response",
+        "api_response",
+        "document_content",
+        "body",
+        "content",
+        "path",
+        "response",
+    }
+)
+_FEISHU_AUDIT_NEGATIVE_DECISIONS = frozenset(
+    {
+        "denied",
+        "deny",
+        "failure",
+        "failed",
+        "rejected",
+        "unauthorized",
+        "forbidden",
+        "blocked",
+        "not_allowed",
     }
 )
 
@@ -591,6 +622,7 @@ def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> N
             hash_fields_present.append(field)
         elif field in _FEISHU_AUDIT_ATOM_FIELDS:
             _require_safe_audit_atom(value, field)
+            _reject_sensitive_audit_value(value)
 
     for field in ("timestamp", "correlation_id"):
         if field not in event:
@@ -605,10 +637,21 @@ def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> N
             "invalid_gateway_event_contract",
             "feishu audit event requires a sanitized hash field",
         )
-    if event_type in FEISHU_AUDIT_FAILURE_EVENT_TYPES:
+    if _feishu_audit_event_requires_failure_class(event_type, event):
         require_failure_class(event.get("failure_class"))
     elif "failure_class" in event:
         require_failure_class(event.get("failure_class"))
+
+
+def _feishu_audit_event_requires_failure_class(
+    event_type: str, event: Mapping[str, Any]
+) -> bool:
+    if event_type in FEISHU_AUDIT_FAILURE_EVENT_TYPES:
+        return True
+    if event_type != "feishu_auth_decision":
+        return False
+    decision = event.get("decision")
+    return isinstance(decision, str) and decision.lower() in _FEISHU_AUDIT_NEGATIVE_DECISIONS
 
 
 def _is_feishu_audit_raw_field(field: str) -> bool:
@@ -639,6 +682,41 @@ def _require_safe_audit_atom(value: Any, field: str) -> str:
             f"{field} is missing or invalid",
         )
     return value
+
+
+def _reject_sensitive_audit_value(value: Any) -> None:
+    if isinstance(value, Mapping):
+        for key, nested_value in value.items():
+            if not isinstance(key, str) or _is_feishu_audit_raw_field(key):
+                raise GatewayEventContractError(
+                    "invalid_gateway_event_contract",
+                    "feishu audit event contains sensitive value",
+                )
+            _reject_sensitive_audit_value(nested_value)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _reject_sensitive_audit_value(item)
+        return
+    if not isinstance(value, str):
+        return
+    normalized = value.strip().lower()
+    tokenized = normalized.replace("-", "_").replace(".", "_").replace(":", "_")
+    if (
+        normalized.startswith("/")
+        or "/" in normalized
+        or "open_apis" in tokenized
+        or _RAW_FEISHU_ID_VALUE_RE.fullmatch(normalized) is not None
+        or tokenized in _FEISHU_AUDIT_SENSITIVE_VALUE_TOKENS
+        or any(
+            token in tokenized
+            for token in ("access_token", "api_response", "raw_response")
+        )
+    ):
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "feishu audit event contains sensitive value",
+        )
 
 
 def _require_nonempty_string(event: Mapping[str, Any], field: str) -> str:
