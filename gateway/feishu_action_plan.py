@@ -85,6 +85,7 @@ class FeishuActionContract:
     contract_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
+        _raise_if_invalid(*_validate_action_contract_fields(self))
         object.__setattr__(
             self,
             "contract_hash",
@@ -117,6 +118,7 @@ class RenderPlanPart:
     part_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
+        _raise_if_invalid(*_validate_render_part_fields(self))
         object.__setattr__(
             self,
             "part_hash",
@@ -139,12 +141,9 @@ class RenderPlan:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parts", _part_tuple(self.parts))
-        valid, failure_class = _validate_render_plan_fields(self)
-        if not valid:
-            raise FeishuContractError(
-                "invalid Feishu render plan",
-                failure_class=failure_class or "feishu_render_plan_invalid",
-            )
+        _raise_if_invalid(*_validate_render_plan_fields(self))
+        for part in self.parts:
+            _raise_if_invalid(*_validate_render_part_fields(part))
         object.__setattr__(
             self,
             "plan_hash",
@@ -165,31 +164,7 @@ class RenderPlan:
 def validate_render_part(part: RenderPlanPart) -> tuple[bool, str | None]:
     if not isinstance(part, RenderPlanPart):
         return False, "feishu_render_part_invalid"
-    if part.part_type not in _SUPPORTED_PART_TYPES:
-        return False, "feishu_render_part_type_invalid"
-    if part.fallback_action not in _FALLBACK_ACTIONS:
-        return False, "feishu_render_fallback_invalid"
-    if _contains_raw_tool_material(part.metadata):
-        return False, "feishu_action_raw_tool_material"
-    if not _chunk_is_coherent(part):
-        return False, "feishu_render_chunk_invalid"
-    if part.part_type in _ATTACHMENT_PART_TYPES:
-        attachment_valid, attachment_failure = _validate_attachment_part(part)
-        if not attachment_valid:
-            return False, attachment_failure
-    hash_valid, hash_failure = _validate_render_part_hash_fields(part)
-    if not hash_valid:
-        return False, hash_failure
-    if part.part_type in _ACTION_PART_TYPES:
-        if part.action_contract is None:
-            return False, "feishu_action_contract_missing"
-        contract_valid, contract_failure = validate_action_contract(part.action_contract)
-        if not contract_valid:
-            return False, contract_failure
-        sibling_valid, sibling_failure = _validate_action_sibling_fields(part)
-        if not sibling_valid:
-            return False, sibling_failure
-    return True, None
+    return _validate_render_part_fields(part)
 
 
 def validate_render_plan(plan: RenderPlan) -> tuple[bool, str | None]:
@@ -210,8 +185,48 @@ def validate_action_contract(
 ) -> tuple[bool, str | None]:
     if not isinstance(contract, FeishuActionContract):
         return False, "feishu_action_contract_invalid"
+    return _validate_action_contract_fields(contract)
+
+
+def _validate_render_part_fields(part: RenderPlanPart) -> tuple[bool, str | None]:
+    if part.part_type not in _SUPPORTED_PART_TYPES:
+        return False, "feishu_render_part_type_invalid"
+    if part.fallback_action not in _FALLBACK_ACTIONS:
+        return False, "feishu_render_fallback_invalid"
+    if _contains_raw_tool_material(part.metadata):
+        return False, "feishu_action_raw_tool_material"
+    if _contains_sensitive_metadata_key(part.metadata):
+        return False, "feishu_action_sensitive_metadata"
+    if not _chunk_is_coherent(part):
+        return False, "feishu_render_chunk_invalid"
+    if part.part_type in _ATTACHMENT_PART_TYPES:
+        attachment_valid, attachment_failure = _validate_attachment_part(part)
+        if not attachment_valid:
+            return False, attachment_failure
+    hash_valid, hash_failure = _validate_render_part_hash_fields(part)
+    if not hash_valid:
+        return False, hash_failure
+    if part.part_type in _ACTION_PART_TYPES:
+        if part.action_contract is None:
+            return False, "feishu_action_contract_missing"
+        contract_valid, contract_failure = _validate_action_contract_fields(
+            part.action_contract
+        )
+        if not contract_valid:
+            return False, contract_failure
+        sibling_valid, sibling_failure = _validate_action_sibling_fields(part)
+        if not sibling_valid:
+            return False, sibling_failure
+    return True, None
+
+
+def _validate_action_contract_fields(
+    contract: FeishuActionContract,
+) -> tuple[bool, str | None]:
     if _contains_raw_tool_material(contract.metadata):
         return False, "feishu_action_raw_tool_material"
+    if _contains_sensitive_metadata_key(contract.metadata):
+        return False, "feishu_action_sensitive_metadata"
     if contract.action_digest is None:
         return False, "feishu_action_digest_missing"
     if not _is_hash(contract.action_digest):
@@ -231,6 +246,14 @@ def validate_action_contract(
     if not _is_hash(contract.payload_hash):
         return False, "feishu_action_payload_hash_invalid"
     return True, None
+
+
+def _raise_if_invalid(valid: bool, failure_class: str | None) -> None:
+    if not valid:
+        raise FeishuContractError(
+            "invalid Feishu action plan contract",
+            failure_class=failure_class or "invalid_feishu_action_plan",
+        )
 
 
 def _validate_attachment_part(part: RenderPlanPart) -> tuple[bool, str | None]:
