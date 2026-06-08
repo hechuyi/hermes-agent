@@ -71,6 +71,16 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from gateway import hermes_tools_gateway_event
+from gateway.conversation_scope import (
+    conversation_identity,
+    feishu_platform_account_id,
+    route_partition_key,
+)
+from gateway.feishu_contracts import (
+    ConversationContract,
+    build_feishu_conversation_contract,
+    feishu_hashed_ref,
+)
 from gateway.feishu_legacy_guard import current_feishu_broker_context
 
 try:
@@ -137,7 +147,7 @@ FEISHU_WEBSOCKET_AVAILABLE = websockets is not None
 FEISHU_WEBHOOK_AVAILABLE = aiohttp is not None
 
 from gateway.config import Platform, PlatformConfig
-from gateway.session import InvalidLiveSessionSource
+from gateway.session import InvalidLiveSessionSource, build_session_key
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -447,6 +457,14 @@ RejectReason = Literal[
     "bot_not_mentioned",
     "group_policy_rejected",
 ]
+
+
+@dataclass(frozen=True)
+class FeishuCurrentConversationAdmissionResult:
+    ok: bool
+    record: Dict[str, Any] | None = None
+    failure_class: str | None = None
+    evidence: Dict[str, Any] = field(default_factory=dict)
 
 
 def _is_bot_sender(sender: Any) -> bool:
@@ -3828,13 +3846,58 @@ class FeishuAdapter(BasePlatformAdapter):
         self._chat_locks[chat_id] = lock
         return lock
 
-    async def _handle_message_with_guards(self, event: MessageEvent) -> None:
+    async def _handle_message_with_guards(
+        self,
+        event: MessageEvent,
+        *,
+        current_conversation_contract: ConversationContract | None = None,
+        transport_kind: str | None = None,
+        mention_required: bool | None = None,
+    ) -> None:
         """Dispatch a single event through the agent pipeline with per-chat serialization
         before handing the event off to the agent.
 
         Per-chat lock ensures messages in the same chat are processed one at a
         time (matches openclaw's createChatQueue serial queue behaviour).
         """
+        if current_conversation_contract is None:
+            current_conversation_contract = getattr(
+                event,
+                "feishu_current_conversation_contract",
+                None,
+            )
+        if transport_kind is None:
+            transport_kind = getattr(
+                event,
+                "feishu_current_transport_kind",
+                None,
+            )
+        if mention_required is None:
+            mention_required = getattr(
+                event,
+                "feishu_current_mention_required",
+                False,
+            )
+        if current_conversation_contract is not None:
+            admission = self._admit_current_conversation_event(
+                event,
+                transport_kind=transport_kind or self._transport_kind_for_event(event),
+                expected_contract=current_conversation_contract,
+                mention_required=bool(mention_required),
+            )
+            if not admission.ok:
+                setattr(
+                    event,
+                    "feishu_current_conversation_denial",
+                    self._sanitized_current_conversation_denial(admission),
+                )
+                logger.warning(
+                    "[Feishu] Dropping current-conversation inbound before dispatch: failure_class=%s",
+                    admission.failure_class,
+                )
+                return
+            setattr(event, "feishu_current_conversation_admission", admission.record)
+
         chat_id = getattr(event.source, "chat_id", "") or "" if event.source else ""
         chat_lock = self._get_chat_lock(chat_id)
         async with chat_lock:
@@ -3844,6 +3907,294 @@ class FeishuAdapter(BasePlatformAdapter):
                 await self.handle_message(event)
             except InvalidLiveSessionSource as exc:
                 logger.warning("[Feishu] Ignoring invalid live inbound source: reason=%s", exc.reason)
+
+    def _admit_current_conversation_event(
+        self,
+        event: MessageEvent,
+        *,
+        transport_kind: str,
+        expected_contract: ConversationContract | None = None,
+        mention_required: bool = False,
+    ) -> FeishuCurrentConversationAdmissionResult:
+        transport = str(transport_kind or "").strip().lower()
+        if transport not in {"dm", "group", "thread", "webhook", "websocket"}:
+            return self._current_conversation_denied(
+                "feishu_current_transport_unsupported",
+                transport_kind=transport or "unknown",
+            )
+        source = getattr(event, "source", None)
+        if source is None or getattr(source, "platform", None) != Platform.FEISHU:
+            return self._current_conversation_denied(
+                "feishu_current_route_evidence_missing",
+                transport_kind=transport,
+            )
+        if expected_contract is not None and not isinstance(
+            expected_contract, ConversationContract
+        ):
+            return self._current_conversation_denied(
+                "feishu_current_contract_missing",
+                transport_kind=transport,
+            )
+        if expected_contract is not None and expected_contract.evidence_state != "current":
+            return self._current_conversation_denied(
+                "feishu_current_route_evidence_stale",
+                contract_hash=getattr(expected_contract, "contract_hash", None),
+                transport_kind=transport,
+            )
+        if mention_required and not self._event_has_mention_evidence(event):
+            return self._current_conversation_denied(
+                "feishu_current_route_evidence_missing",
+                transport_kind=transport,
+            )
+        if transport == "thread":
+            thread_failure = self._thread_anchor_failure(event, expected_contract)
+            if thread_failure is not None:
+                return self._current_conversation_denied(
+                    thread_failure,
+                    contract_hash=getattr(expected_contract, "contract_hash", None),
+                    transport_kind=transport,
+                )
+
+        reply_anchor_ref = self._reply_anchor_ref(event)
+        if reply_anchor_ref is None:
+            return self._current_conversation_denied(
+                "feishu_current_reply_anchor_missing",
+                contract_hash=getattr(expected_contract, "contract_hash", None),
+                transport_kind=transport,
+            )
+
+        observed_contract = self._build_current_conversation_contract(
+            event,
+            reply_anchor_ref=reply_anchor_ref,
+            expected_contract=expected_contract,
+        )
+        if observed_contract is None:
+            return self._current_conversation_denied(
+                "feishu_current_route_evidence_missing",
+                transport_kind=transport,
+            )
+        if observed_contract.evidence_state != "current":
+            return self._current_conversation_denied(
+                "feishu_current_route_evidence_stale",
+                contract_hash=observed_contract.contract_hash,
+                transport_kind=transport,
+            )
+        if expected_contract is not None:
+            mismatch = self._current_contract_mismatch(
+                observed_contract,
+                expected_contract,
+            )
+            if mismatch is not None:
+                return self._current_conversation_denied(
+                    mismatch,
+                    contract_hash=expected_contract.contract_hash,
+                    transport_kind=transport,
+                )
+
+        contract = expected_contract or observed_contract
+        authority = contract.authority_subject_ref
+        thread_anchor = (
+            contract.thread_anchor_ref.value_hash
+            if contract.thread_anchor_ref is not None
+            else None
+        )
+        record = {
+            "contract_hash": contract.contract_hash,
+            "route_partition_key": contract.route_partition_key,
+            "route_session_key_snapshot": contract.route_session_key_snapshot,
+            "actor_ref": contract.actor_ref.value_hash,
+            "authority_subject_ref": authority.value_hash if authority else None,
+            "transport_kind": transport,
+            "reply_anchor_ref": reply_anchor_ref.value_hash,
+            "thread_anchor_ref": thread_anchor,
+            "canonical_event_ref": self._canonical_event_ref(event),
+        }
+        return FeishuCurrentConversationAdmissionResult(ok=True, record=record)
+
+    def _build_current_conversation_contract(
+        self,
+        event: MessageEvent,
+        *,
+        reply_anchor_ref: Any | None,
+        expected_contract: ConversationContract | None,
+    ) -> ConversationContract | None:
+        source = getattr(event, "source", None)
+        if source is None:
+            return None
+        isolation = self._effective_session_isolation()
+        account_id = self._current_feishu_platform_account_id()
+        identity = conversation_identity(
+            source,
+            platform_account_id=account_id,
+            **isolation,
+        )
+        if identity is None:
+            return None
+        actor_ref = feishu_hashed_ref(
+            "feishu_actor",
+            getattr(source, "user_id_alt", None) or getattr(source, "user_id", None),
+        )
+        authority_ref = feishu_hashed_ref(
+            "feishu_authority_subject",
+            getattr(source, "user_id_alt", None) or getattr(source, "user_id", None),
+        )
+        if actor_ref is None or authority_ref is None:
+            return None
+        thread_anchor_ref = feishu_hashed_ref(
+            "feishu_thread",
+            getattr(source, "thread_id", None),
+        )
+        session_id = (
+            getattr(expected_contract, "session_id", None)
+            if expected_contract is not None
+            else None
+        ) or "session:current-conversation"
+        tenant_partition_key = (
+            getattr(expected_contract, "tenant_partition_key", None)
+            if expected_contract is not None
+            else None
+        ) or self._current_feishu_partition_key("tenant_partition_key", "tenant:feishu")
+        app_partition_key = (
+            getattr(expected_contract, "app_partition_key", None)
+            if expected_contract is not None
+            else None
+        ) or self._current_feishu_partition_key("app_partition_key", "app:feishu")
+        return build_feishu_conversation_contract(
+            scope_identity=identity,
+            route_partition_key=route_partition_key(source, **isolation),
+            route_session_key_snapshot=build_session_key(
+                source,
+                **isolation,
+                require_conversation_identity=True,
+            ),
+            scope_assignment_status="scoped",
+            actor_ref=actor_ref,
+            authority_subject_ref=authority_ref,
+            identity_evidence_set=(actor_ref, authority_ref),
+            session_id=session_id,
+            tenant_partition_key=tenant_partition_key,
+            app_partition_key=app_partition_key,
+            thread_anchor_ref=thread_anchor_ref,
+            root_anchor_ref=reply_anchor_ref,
+            evidence_state="current",
+        )
+
+    @staticmethod
+    def _current_contract_mismatch(
+        observed: ConversationContract,
+        expected: ConversationContract,
+    ) -> str | None:
+        if observed.route_partition_key != expected.route_partition_key:
+            return "feishu_current_route_mismatch"
+        if (
+            observed.route_session_key_snapshot
+            != expected.route_session_key_snapshot
+        ):
+            return "feishu_current_route_snapshot_mismatch"
+        if observed.actor_ref != expected.actor_ref:
+            return "feishu_current_actor_mismatch"
+        if observed.authority_subject_ref != expected.authority_subject_ref:
+            return "feishu_current_actor_mismatch"
+        if observed.conversation_scope_id != expected.conversation_scope_id:
+            return "feishu_current_route_mismatch"
+        return None
+
+    def _thread_anchor_failure(
+        self,
+        event: MessageEvent,
+        expected_contract: ConversationContract | None,
+    ) -> str | None:
+        source = getattr(event, "source", None)
+        source_thread = str(getattr(source, "thread_id", "") or "")
+        if not source_thread:
+            return "feishu_current_thread_detached"
+        raw_message = self._raw_feishu_message(event)
+        raw_thread = str(getattr(raw_message, "thread_id", "") or "")
+        if not raw_thread or raw_thread != source_thread:
+            return "feishu_current_thread_detached"
+        if (
+            expected_contract is not None
+            and expected_contract.thread_anchor_ref is None
+        ):
+            return "feishu_current_thread_detached"
+        return None
+
+    @staticmethod
+    def _event_has_mention_evidence(event: MessageEvent) -> bool:
+        raw_message = FeishuAdapter._raw_feishu_message(event)
+        mentions = getattr(raw_message, "mentions", None) or []
+        if mentions:
+            return True
+        raw_content = str(getattr(raw_message, "content", "") or "")
+        return "@_user_" in raw_content or "@_all" in raw_content
+
+    @staticmethod
+    def _reply_anchor_ref(event: MessageEvent) -> Any | None:
+        anchor = str(getattr(event, "reply_to_message_id", "") or "").strip()
+        if not anchor:
+            return None
+        return feishu_hashed_ref("feishu_reply_anchor", anchor)
+
+    @staticmethod
+    def _raw_feishu_message(event: MessageEvent) -> Any:
+        raw = getattr(event, "raw_message", None)
+        raw_event = getattr(raw, "event", None)
+        return getattr(raw_event, "message", None) or SimpleNamespace()
+
+    def _canonical_event_ref(self, event: MessageEvent) -> str:
+        event_id = self._feishu_event_id(getattr(event, "raw_message", None))
+        if not event_id:
+            event_id = str(getattr(event, "message_id", "") or "")
+        ref = feishu_hashed_ref("feishu_event", event_id)
+        return ref.value_hash if ref is not None else ""
+
+    def _transport_kind_for_event(self, event: MessageEvent) -> str:
+        source = getattr(event, "source", None)
+        if getattr(source, "thread_id", None):
+            return "thread"
+        chat_type = str(getattr(source, "chat_type", "") or "")
+        return "dm" if chat_type == "dm" else "group"
+
+    def _current_feishu_platform_account_id(self) -> str:
+        configured = self._current_feishu_partition_key("platform_account_id", "")
+        return feishu_platform_account_id(
+            platform_account_id=configured or None,
+            app_id=getattr(self, "_app_id", None),
+            config=getattr(self, "config", None),
+        ) or "feishu_app:unknown"
+
+    def _current_feishu_partition_key(self, key: str, default: str) -> str:
+        extra = getattr(getattr(self, "config", None), "extra", {}) or {}
+        value = extra.get(key)
+        return str(value) if value else default
+
+    @staticmethod
+    def _current_conversation_denied(
+        failure_class: str,
+        **evidence: Any,
+    ) -> FeishuCurrentConversationAdmissionResult:
+        sanitized = {
+            key: value
+            for key, value in evidence.items()
+            if value is None
+            or isinstance(value, (bool, int, float))
+            or (isinstance(value, str) and not value.startswith(("oc_", "ou_", "om_")))
+        }
+        return FeishuCurrentConversationAdmissionResult(
+            ok=False,
+            failure_class=failure_class,
+            evidence=sanitized,
+        )
+
+    @staticmethod
+    def _sanitized_current_conversation_denial(
+        admission: FeishuCurrentConversationAdmissionResult,
+    ) -> Dict[str, Any]:
+        return {
+            "type": "feishu_current_conversation_admission_denied",
+            "failure_class": admission.failure_class,
+            "evidence": dict(admission.evidence),
+        }
 
     @staticmethod
     def _string_field(obj: Any, field: str) -> str:
@@ -4208,6 +4559,29 @@ class FeishuAdapter(BasePlatformAdapter):
             reply_to_message_id=reply_to_message_id,
             reply_to_text=reply_to_text,
             timestamp=datetime.now(),
+        )
+        expected_contract = self._build_current_conversation_contract(
+            normalized,
+            reply_anchor_ref=feishu_hashed_ref(
+                "feishu_reply_anchor",
+                reply_to_message_id,
+            ),
+            expected_contract=None,
+        )
+        setattr(
+            normalized,
+            "feishu_current_conversation_contract",
+            expected_contract,
+        )
+        setattr(
+            normalized,
+            "feishu_current_transport_kind",
+            self._transport_kind_for_event(normalized),
+        )
+        setattr(
+            normalized,
+            "feishu_current_mention_required",
+            source.chat_type != "dm" and self._require_mention_for(chat_id),
         )
         await self._dispatch_inbound_event(normalized)
 
@@ -6241,6 +6615,10 @@ class FeishuAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]],
         uuid_value: Optional[str] = None,
     ) -> Any:
+        self._validate_current_reply_admission_metadata(
+            reply_to=reply_to,
+            metadata=metadata,
+        )
         stable_uuid = uuid_value or str(uuid.uuid4())
         effective_reply_to = reply_to
         if not effective_reply_to and metadata and metadata.get("thread_id"):
@@ -6269,6 +6647,36 @@ class FeishuAdapter(BasePlatformAdapter):
             receive_id_type = "chat_id"
         request = self._build_create_message_request(receive_id_type, body)
         return await asyncio.to_thread(self._client.im.v1.message.create, request)
+
+    @staticmethod
+    def _validate_current_reply_admission_metadata(
+        *,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        if not metadata:
+            return
+        admission = metadata.get("feishu_current_admission")
+        if admission is None:
+            return
+        if not isinstance(admission, dict):
+            raise ValueError("feishu_current_reply_admission_invalid")
+        required = {
+            "contract_hash",
+            "route_partition_key",
+            "route_session_key_snapshot",
+            "actor_ref",
+            "authority_subject_ref",
+            "transport_kind",
+            "reply_anchor_ref",
+        }
+        if not required.issubset(admission):
+            raise ValueError("feishu_current_reply_admission_incomplete")
+        if not reply_to:
+            raise ValueError("feishu_current_reply_anchor_missing")
+        reply_ref = feishu_hashed_ref("feishu_reply_anchor", reply_to)
+        if reply_ref is None or admission.get("reply_anchor_ref") != reply_ref.value_hash:
+            raise ValueError("feishu_current_reply_anchor_mismatch")
 
     @staticmethod
     def _response_succeeded(response: Any) -> bool:
