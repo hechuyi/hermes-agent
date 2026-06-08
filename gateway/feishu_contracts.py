@@ -43,9 +43,21 @@ _SENSITIVE_KEY_MARKERS = frozenset(
         "unionid",
     }
 )
-_ALLOWED_SENSITIVE_METADATA_KEYS = frozenset({"tokenclass"})
 _NORMALIZED_KEY_CHARS_RE = re.compile(r"[^a-z0-9]+")
 _SHA256_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+_TOKEN_CLASSES = frozenset(
+    {
+        "none",
+        "app_token",
+        "app_access_token",
+        "tenant_access_token",
+        "user_token",
+        "user_access_token",
+        "delegated_user_token",
+        "system_test_credential",
+        "app_owned_object_credential",
+    }
+)
 _P3_OBJECT_ACTIONS = frozenset(
     {
         "delete",
@@ -200,7 +212,7 @@ class AuthorizationEvidence:
         _require_optional_hashed_ref(self.object_ref, "object_ref")
         object.__setattr__(self, "scopes", _scope_tuple(self.scopes))
         if self.token_class is not None:
-            _require_nonempty_string(self.token_class, "token_class")
+            _require_token_class(self.token_class)
         _require_known_value(self.evidence_state, _EVIDENCE_STATES, "evidence_state")
         _require_schema_version(self.schema_version)
         object.__setattr__(
@@ -282,8 +294,7 @@ def feishu_contract_hash(
         raise FeishuContractError("contract hash domain must be a non-empty string")
     if not isinstance(version, str) or not version:
         raise FeishuContractError("contract hash version must be a non-empty string")
-    if not isinstance(schema_version, int) or isinstance(schema_version, bool):
-        raise FeishuContractError("contract schema_version must be an integer")
+    _require_schema_version(schema_version)
 
     envelope = {
         "algorithm": algorithm,
@@ -323,6 +334,10 @@ def can_issue_object_grant(
         for item in evidences
     ):
         return False, "feishu_route_snapshot_mismatch"
+    if contract.evidence_state == "stale":
+        return False, "feishu_contract_evidence_stale"
+    if contract.evidence_state == "revoked":
+        return False, "feishu_contract_evidence_revoked"
     if all(item.evidence_kind == "discovery_only" for item in evidences):
         return False, "feishu_discovery_only_evidence"
     if all(_is_app_token_only_evidence(item) for item in evidences):
@@ -410,7 +425,7 @@ def _canonical_mapping(value: Mapping[Any, Any]) -> dict[str, Any]:
         if not isinstance(key, str):
             raise FeishuContractError("contract mapping keys must be strings")
         normalized_key = unicodedata.normalize("NFC", key)
-        _reject_sensitive_raw_key(normalized_key)
+        _reject_sensitive_raw_key(normalized_key, item)
         if normalized_key in normalized:
             raise FeishuContractError(
                 "contract mapping has duplicate keys after Unicode normalization",
@@ -419,14 +434,21 @@ def _canonical_mapping(value: Mapping[Any, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _reject_sensitive_raw_key(key: str) -> None:
+def _reject_sensitive_raw_key(key: str, value: Any) -> None:
     comparable = _normalized_key_for_policy(key)
-    if comparable in _ALLOWED_SENSITIVE_METADATA_KEYS:
-        return
-    if key.lower().endswith("_hash"):
+    if comparable == "tokenclass":
+        if value is not None:
+            _require_token_class(value)
         return
     for marker in _SENSITIVE_KEY_MARKERS:
         if marker in comparable:
+            if comparable.endswith("hash"):
+                if not isinstance(value, str) or not _SHA256_HASH_RE.fullmatch(value):
+                    raise FeishuContractError(
+                        f"sensitive hash field must be a sha256 hash: {key}",
+                        failure_class="invalid_hashed_sensitive_ref",
+                    )
+                return
             raise FeishuContractError(
                 f"sensitive raw field is not allowed in Feishu contracts: {key}",
                 failure_class="sensitive_raw_field",
@@ -553,9 +575,20 @@ def _require_known_value(value: Any, allowed: frozenset[str], field_name: str) -
         )
 
 
+def _require_token_class(value: Any) -> None:
+    if not isinstance(value, str) or value not in _TOKEN_CLASSES:
+        raise FeishuContractError(
+            f"token_class must be one of: {', '.join(sorted(_TOKEN_CLASSES))}",
+            failure_class="invalid_feishu_token_class",
+        )
+
+
 def _require_schema_version(value: Any) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise FeishuContractError("schema_version must be a positive integer")
+        raise FeishuContractError(
+            "schema_version must be a positive integer",
+            failure_class="invalid_feishu_schema_version",
+        )
 
 
 def _is_app_token_only_evidence(evidence: AuthorizationEvidence) -> bool:

@@ -144,6 +144,45 @@ def test_hash_allows_hash_suffixed_sensitive_references_and_token_class_metadata
     )
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"open_id_hash": "ou_raw"},
+        {"user_id_hash": "user_raw"},
+        {"union_id_hash": "union_raw"},
+        {"file_path_hash": "/tmp/raw"},
+        {"document_content_hash": "plain document text"},
+    ],
+)
+def test_hash_suffixed_sensitive_references_must_be_sha256_hashes(payload):
+    with pytest.raises(FeishuContractError) as exc_info:
+        feishu_contract_hash(payload, domain="feishu.contract.test", version="v1")
+
+    assert exc_info.value.failure_class == "invalid_hashed_sensitive_ref"
+
+
+def test_hash_rejects_unknown_token_class_metadata():
+    with pytest.raises(FeishuContractError) as exc_info:
+        feishu_contract_hash(
+            {"authorization": {"token_class": "tenant_token_but_raw"}},
+            domain="feishu.contract.test",
+            version="v1",
+        )
+
+    assert exc_info.value.failure_class == "invalid_feishu_token_class"
+
+
+@pytest.mark.parametrize("schema_version", [0, -1])
+def test_hash_requires_positive_schema_version(schema_version):
+    with pytest.raises(FeishuContractError, match="schema_version"):
+        feishu_contract_hash(
+            {"kind": "message"},
+            domain="feishu.contract.test",
+            version="v1",
+            schema_version=schema_version,
+        )
+
+
 def _ref(kind: str = "feishu_user", digest: str = _ACTOR_REF) -> HashedRef:
     return HashedRef(kind=kind, value_hash=digest)
 
@@ -213,6 +252,13 @@ def test_evidence_contract_dataclasses_produce_stable_hashes():
     assert _SHA256_HASH_RE.fullmatch(grant.grant_hash)
     assert contract == _contract(authority_subject_ref=subject)
     assert evidence == _evidence(authority_subject_ref=subject)
+
+
+def test_authorization_evidence_rejects_unknown_token_class():
+    with pytest.raises(FeishuContractError) as exc_info:
+        _evidence(token_class="tenant_token_but_raw")
+
+    assert exc_info.value.failure_class == "invalid_feishu_token_class"
 
 
 def test_grant_decision_allows_scoped_user_object_authority_evidence():
@@ -319,6 +365,25 @@ def test_grant_route_snapshot_mismatch_denies():
     )
 
     assert (allowed, failure_class) == (False, "feishu_route_snapshot_mismatch")
+
+
+@pytest.mark.parametrize(
+    ("evidence_state", "failure_class"),
+    [
+        ("stale", "feishu_contract_evidence_stale"),
+        ("revoked", "feishu_contract_evidence_revoked"),
+    ],
+)
+def test_contract_evidence_state_denies_grant(evidence_state, failure_class):
+    allowed, observed = can_issue_object_grant(
+        _contract(evidence_state=evidence_state),
+        _evidence(),
+        object_type="doc",
+        object_ref=_object_ref(),
+        action="read",
+    )
+
+    assert (allowed, observed) == (False, failure_class)
 
 
 def test_evidence_app_token_only_denies_grant():
