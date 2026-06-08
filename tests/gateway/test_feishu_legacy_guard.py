@@ -551,6 +551,139 @@ async def test_comment_exec_request_audit_failure_returns_typed_unavailable(
     assert data["audit_failure_class"] == "gateway_event_state_io_failed"
 
 
+def _make_audit_write_fail(monkeypatch, tmp_path):
+    def _apply(event, state_dir, **kwargs):
+        return GatewayEventResult(
+            ok=False,
+            event_type=event["type"],
+            failure_class="gateway_event_state_io_failed",
+            reason="state ledger IO failed",
+        )
+
+    monkeypatch.setenv("HERMES_GATEWAY_EVENT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("HERMES_FEISHU_LEGACY_AUDIT_EVENT_HASH", SAFE_EVENT_HASH)
+    monkeypatch.setattr("gateway.gateway_event_ledger.apply_gateway_event", _apply)
+
+
+@pytest.mark.asyncio
+async def test_comment_dict_helper_audit_failure_returns_typed_unavailable(
+    monkeypatch, tmp_path
+):
+    comment = importlib.import_module("gateway.platforms.feishu_comment")
+    client = RecordingClient()
+    _make_audit_write_fail(monkeypatch, tmp_path)
+
+    result = await comment.query_document_meta(client, "fileUnsafeToken", "docx")
+
+    assert client.requests == []
+    assert result["failure_class"] == "feishu_denial_audit_unavailable"
+    assert result["audit_failure_class"] == "gateway_event_state_io_failed"
+    assert result["audit_event"] == "feishu_legacy_tool_denied"
+
+
+@pytest.mark.asyncio
+async def test_comment_list_helper_audit_failure_returns_falsey_typed_unavailable(
+    monkeypatch, tmp_path
+):
+    comment = importlib.import_module("gateway.platforms.feishu_comment")
+    client = RecordingClient()
+    _make_audit_write_fail(monkeypatch, tmp_path)
+
+    result = await comment.list_comment_replies(
+        client, "fileUnsafeToken", "docx", "commentUnsafe"
+    )
+
+    assert client.requests == []
+    assert not result
+    assert result.failure_class == "feishu_denial_audit_unavailable"
+    assert result.audit_failure_class == "gateway_event_state_io_failed"
+
+
+@pytest.mark.asyncio
+async def test_comment_tuple_helper_audit_failure_returns_typed_reason(
+    monkeypatch, tmp_path
+):
+    comment = importlib.import_module("gateway.platforms.feishu_comment")
+    client = RecordingClient()
+    _make_audit_write_fail(monkeypatch, tmp_path)
+
+    result = await comment.reply_to_comment(
+        client, "fileUnsafeToken", "docx", "commentUnsafe", "raw body"
+    )
+
+    assert client.requests == []
+    assert result == (False, "feishu_denial_audit_unavailable")
+
+
+@pytest.mark.asyncio
+async def test_comment_bool_helper_audit_failure_returns_falsey_typed_unavailable(
+    monkeypatch, tmp_path
+):
+    comment = importlib.import_module("gateway.platforms.feishu_comment")
+    client = RecordingClient()
+    _make_audit_write_fail(monkeypatch, tmp_path)
+
+    result = await comment.add_comment_reaction(
+        client,
+        file_token="fileUnsafeToken",
+        file_type="docx",
+        reply_id="replyUnsafe",
+    )
+
+    assert client.requests == []
+    assert not result
+    assert result.failure_class == "feishu_denial_audit_unavailable"
+    assert result.audit_failure_class == "gateway_event_state_io_failed"
+
+
+def test_comment_string_helper_audit_failure_returns_falsey_typed_unavailable(
+    monkeypatch, tmp_path
+):
+    comment = importlib.import_module("gateway.platforms.feishu_comment")
+    _make_audit_write_fail(monkeypatch, tmp_path)
+
+    result = comment._run_comment_agent(
+        "prompt with raw path /tmp/x", RecordingClient(), "session"
+    )
+
+    assert not result
+    assert result.failure_class == "feishu_denial_audit_unavailable"
+    assert result.audit_failure_class == "gateway_event_state_io_failed"
+
+
+@pytest.mark.asyncio
+async def test_comment_event_handler_audit_failure_returns_typed_unavailable(
+    monkeypatch, tmp_path
+):
+    comment = importlib.import_module("gateway.platforms.feishu_comment")
+    client = RecordingClient()
+    data = SimpleNamespace(
+        event={
+            "event_id": "eventUnsafe",
+            "comment_id": "commentUnsafe",
+            "reply_id": "replyUnsafe",
+            "is_mentioned": True,
+            "notice_meta": {
+                "file_token": "fileUnsafeToken",
+                "file_type": "docx",
+                "notice_type": "add_reply",
+                "from_user_id": {"open_id": "ou_user"},
+                "to_user_id": {"open_id": "ou_bot"},
+            },
+        }
+    )
+    _make_audit_write_fail(monkeypatch, tmp_path)
+
+    result = await comment.handle_drive_comment_event(
+        client, data, self_open_id="ou_bot"
+    )
+
+    assert client.requests == []
+    assert not result
+    assert result.failure_class == "feishu_denial_audit_unavailable"
+    assert result.audit_failure_class == "gateway_event_state_io_failed"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("func_name", "args"),

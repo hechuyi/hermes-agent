@@ -2,9 +2,12 @@
 
 import asyncio
 import json
+import logging
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
 
 from gateway.feishu_legacy_guard import feishu_broker_context
 from gateway.platforms.feishu_comment import (
@@ -118,6 +121,58 @@ class TestEventFiltering(unittest.TestCase):
         self.assertIn("add_comment", _ALLOWED_NOTICE_TYPES)
         self.assertIn("add_reply", _ALLOWED_NOTICE_TYPES)
         self.assertNotIn("resolve_comment", _ALLOWED_NOTICE_TYPES)
+
+
+@pytest.mark.asyncio
+async def test_broker_allowed_comment_api_logs_redacted_request_material(
+    monkeypatch, caplog
+):
+    from gateway.platforms import feishu_comment as comment
+
+    class _Client:
+        def request(self, request):
+            return SimpleNamespace(
+                code=0,
+                msg="ok",
+                raw=SimpleNamespace(content='{"data": {}}'),
+                data={},
+            )
+
+    monkeypatch.setattr(
+        comment,
+        "_build_request",
+        lambda method, uri, paths=None, queries=None, body=None: {
+            "method": method,
+            "uri": uri,
+            "paths": paths,
+            "queries": queries,
+            "body": body,
+        },
+    )
+
+    raw_file_token = "fileRawSecretToken"
+    raw_comment_id = "commentRawSecretId"
+    raw_text = "raw reply body with /tmp/secret-path"
+    with feishu_broker_context(
+        GRANT_HANDLE,
+        action_id=ACTION_ID,
+        contract_hash=CONTRACT_HASH,
+        route_partition_key=ROUTE_PARTITION_KEY,
+    ):
+        with caplog.at_level(logging.INFO, logger=comment.logger.name):
+            await comment.reply_to_comment(
+                _Client(), raw_file_token, "docx", raw_comment_id, raw_text
+            )
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "operation=reply_to_comment" in logs
+    assert "stage=request" in logs
+    assert raw_file_token not in logs
+    assert raw_comment_id not in logs
+    assert raw_text not in logs
+    assert "/tmp/secret-path" not in logs
+    assert "paths=" not in logs
+    assert "body=" not in logs
 
 
 class TestAccessControlIntegration(unittest.TestCase):

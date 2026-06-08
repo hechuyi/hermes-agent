@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import hashlib
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -38,6 +39,67 @@ logger = logging.getLogger(__name__)
 
 _LEGACY_DENIAL_REASON = "feishu_legacy_tool_requires_broker"
 _AUDIT_UNAVAILABLE_REASON = "feishu_denial_audit_unavailable"
+
+
+class CommentGuardFailure:
+    """Falsey typed denial used only when the denial audit cannot be persisted."""
+
+    __slots__ = ("reason", "failure_class", "audit_failure_class", "audit_event")
+
+    def __init__(self, audit_result: Any):
+        self.reason = _AUDIT_UNAVAILABLE_REASON
+        self.failure_class = _AUDIT_UNAVAILABLE_REASON
+        self.audit_failure_class = (
+            getattr(audit_result, "failure_class", None)
+            or "gateway_event_apply_failed"
+        )
+        self.audit_event = "feishu_legacy_tool_denied"
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __len__(self) -> int:
+        return 0
+
+    def __iter__(self):
+        return iter(())
+
+    def as_dict(self) -> dict:
+        return {
+            "failure_class": self.failure_class,
+            "audit_failure_class": self.audit_failure_class,
+            "audit_event": self.audit_event,
+        }
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.as_dict().get(key, default)
+
+
+def _hash_value(value: Any) -> str:
+    data = str(value).encode("utf-8", "surrogatepass")
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _hash_collection_values(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [_hash_value(v) for _, v in sorted(value.items())]
+    if isinstance(value, (list, tuple)):
+        return [_hash_value(v) for v in value]
+    if value in (None, ""):
+        return []
+    return [_hash_value(value)]
+
+
+def _mapping_key_count(value: Any) -> int:
+    return len(value) if isinstance(value, dict) else 0
+
+
+def _sequence_count(value: Any) -> int:
+    return len(value) if isinstance(value, (list, tuple)) else 0
+
+
+def _message_hash(value: Any) -> str:
+    return _hash_value(value) if value not in (None, "") else "empty"
 
 
 def _audit_legacy_comment_denial(tool: str):
@@ -58,10 +120,12 @@ def _comment_broker_allowed(tool: str) -> bool:
     return allowed
 
 
-def _guard_legacy_comment_tool(tool: str) -> bool:
+def _guard_legacy_comment_tool(tool: str) -> bool | CommentGuardFailure:
     if _comment_broker_allowed(tool):
         return True
-    _audit_legacy_comment_denial(tool)
+    audit_result = _audit_legacy_comment_denial(tool)
+    if not audit_result.ok:
+        return CommentGuardFailure(audit_result)
     return False
 
 
@@ -110,9 +174,18 @@ async def _exec_request(client, method, uri, paths=None, queries=None, body=None
         )
         return None, reason, data
 
-    logger.info("[Feishu-Comment] API >>> %s %s paths=%s queries=%s body=%s",
-                 method, uri, paths, queries,
-                 json.dumps(body, ensure_ascii=False)[:500] if body else None)
+    body_keys = sorted(body.keys()) if isinstance(body, dict) else []
+    logger.info(
+        "[Feishu-Comment] operation=api_request stage=request method=%s uri_hash=%s "
+        "path_count=%d path_hashes=%s query_count=%d body_key_count=%d body_hash=%s",
+        method,
+        _hash_value(uri),
+        _mapping_key_count(paths),
+        _hash_collection_values(paths),
+        _sequence_count(queries),
+        len(body_keys),
+        _hash_value(body) if body is not None else "empty",
+    )
     request = _build_request(method, uri, paths, queries, body)
     response = await asyncio.to_thread(client.request, request)
 
@@ -134,15 +207,31 @@ async def _exec_request(client, method, uri, paths=None, queries=None, body=None
         elif resp_data and hasattr(resp_data, "__dict__"):
             data = vars(resp_data)
 
-    logger.info("[Feishu-Comment] API <<< %s %s code=%s msg=%s data_keys=%s",
-                 method, uri, code, msg, list(data.keys()) if data else "empty")
+    logger.info(
+        "[Feishu-Comment] operation=api_request stage=response method=%s "
+        "uri_hash=%s code=%s msg_hash=%s data_key_count=%d",
+        method,
+        _hash_value(uri),
+        code,
+        _message_hash(msg),
+        len(data.keys()) if data else 0,
+    )
     if code != 0:
-        # Log raw response for debugging failed API calls
         raw = getattr(response, "raw", None)
-        raw_content = ""
+        raw_len = 0
+        raw_hash = "empty"
         if raw and hasattr(raw, "content"):
-            raw_content = raw.content[:500] if isinstance(raw.content, (str, bytes)) else str(raw.content)[:500]
-        logger.warning("[Feishu-Comment] API FAIL raw response: %s", raw_content)
+            raw_content = raw.content
+            raw_len = len(raw_content) if hasattr(raw_content, "__len__") else 0
+            raw_hash = _hash_value(raw_content)
+        logger.warning(
+            "[Feishu-Comment] operation=api_request stage=failure code=%s "
+            "msg_hash=%s raw_len=%d raw_hash=%s",
+            code,
+            _message_hash(msg),
+            raw_len,
+            raw_hash,
+        )
     return code, msg, data
 
 
@@ -220,8 +309,9 @@ async def add_comment_reaction(
 
     Returns ``True`` on success, ``False`` on failure (errors are logged).
     """
-    if not _guard_legacy_comment_tool("feishu_comment.add_comment_reaction"):
-        return False
+    guard = _guard_legacy_comment_tool("feishu_comment.add_comment_reaction")
+    if guard is not True:
+        return guard if isinstance(guard, CommentGuardFailure) else False
 
     try:
         from lark_oapi import AccessTokenType  # noqa: F401
@@ -245,14 +335,15 @@ async def add_comment_reaction(
     succeeded = code == 0
     if succeeded:
         logger.info(
-            "[Feishu-Comment] Reaction '%s' added: file=%s:%s reply=%s",
-            reaction_type, file_type, file_token, reply_id,
+            "[Feishu-Comment] operation=add_comment_reaction stage=success "
+            "reaction_type=%s file_type=%s file_hash=%s reply_hash=%s",
+            reaction_type, file_type, _hash_value(file_token), _hash_value(reply_id),
         )
     else:
         logger.warning(
-            "[Feishu-Comment] Reaction API failed: code=%s msg=%s "
-            "file=%s:%s reply=%s",
-            code, msg, file_type, file_token, reply_id,
+            "[Feishu-Comment] operation=add_comment_reaction stage=failure "
+            "code=%s msg_hash=%s file_type=%s file_hash=%s reply_hash=%s",
+            code, _message_hash(msg), file_type, _hash_value(file_token), _hash_value(reply_id),
         )
     return succeeded
 
@@ -269,8 +360,9 @@ async def delete_comment_reaction(
 
     Best-effort — errors are logged but not raised.
     """
-    if not _guard_legacy_comment_tool("feishu_comment.delete_comment_reaction"):
-        return False
+    guard = _guard_legacy_comment_tool("feishu_comment.delete_comment_reaction")
+    if guard is not True:
+        return guard if isinstance(guard, CommentGuardFailure) else False
 
     body = {
         "action": "delete",
@@ -288,14 +380,15 @@ async def delete_comment_reaction(
     succeeded = code == 0
     if succeeded:
         logger.info(
-            "[Feishu-Comment] Reaction '%s' deleted: file=%s:%s reply=%s",
-            reaction_type, file_type, file_token, reply_id,
+            "[Feishu-Comment] operation=delete_comment_reaction stage=success "
+            "reaction_type=%s file_type=%s file_hash=%s reply_hash=%s",
+            reaction_type, file_type, _hash_value(file_token), _hash_value(reply_id),
         )
     else:
         logger.warning(
-            "[Feishu-Comment] Reaction API failed: code=%s msg=%s "
-            "file=%s:%s reply=%s",
-            code, msg, file_type, file_token, reply_id,
+            "[Feishu-Comment] operation=delete_comment_reaction stage=failure "
+            "code=%s msg_hash=%s file_type=%s file_hash=%s reply_hash=%s",
+            code, _message_hash(msg), file_type, _hash_value(file_token), _hash_value(reply_id),
         )
     return succeeded
 
@@ -319,24 +412,39 @@ async def query_document_meta(
 
     Returns ``{"title": "...", "url": "...", "doc_type": "..."}`` or empty dict.
     """
-    if not _guard_legacy_comment_tool("feishu_comment.query_document_meta"):
-        return {}
+    guard = _guard_legacy_comment_tool("feishu_comment.query_document_meta")
+    if guard is not True:
+        return guard.as_dict() if isinstance(guard, CommentGuardFailure) else {}
 
     body = {
         "request_docs": [{"doc_token": file_token, "doc_type": file_type}],
         "with_url": True,
     }
-    logger.debug("[Feishu-Comment] query_document_meta: file_token=%s file_type=%s", file_token, file_type)
+    logger.debug(
+        "[Feishu-Comment] operation=query_document_meta stage=request "
+        "file_type=%s file_hash=%s",
+        file_type,
+        _hash_value(file_token),
+    )
     code, msg, data = await _exec_request(
         client, "POST", _BATCH_QUERY_META_URI, body=body,
     )
     if code != 0:
-        logger.warning("[Feishu-Comment] Meta batch_query failed: code=%s msg=%s", code, msg)
+        logger.warning(
+            "[Feishu-Comment] operation=query_document_meta stage=failure "
+            "code=%s msg_hash=%s",
+            code,
+            _message_hash(msg),
+        )
         return {}
 
     metas = data.get("metas", [])
-    logger.debug("[Feishu-Comment] query_document_meta: raw metas type=%s value=%s",
-                 type(metas).__name__, str(metas)[:300])
+    logger.debug(
+        "[Feishu-Comment] operation=query_document_meta stage=parse "
+        "metas_type=%s metas_count=%d",
+        type(metas).__name__,
+        len(metas) if isinstance(metas, (list, dict)) else 0,
+    )
     if not metas:
         # Try alternate response shape: metas may be a dict keyed by token
         if isinstance(data.get("metas"), dict):
@@ -352,8 +460,12 @@ async def query_document_meta(
         "url": meta.get("url", ""),
         "doc_type": meta.get("doc_type", file_type),
     }
-    logger.info("[Feishu-Comment] query_document_meta: title=%s url=%s",
-                result["title"], result["url"][:80] if result["url"] else "")
+    logger.info(
+        "[Feishu-Comment] operation=query_document_meta stage=success "
+        "title_hash=%s url_hash=%s",
+        _hash_value(result["title"]) if result["title"] else "empty",
+        _hash_value(result["url"]) if result["url"] else "empty",
+    )
     return result
 
 
@@ -371,10 +483,16 @@ async def batch_query_comment(
     Returns the comment dict with fields like ``is_whole``, ``quote``,
     ``reply_list``, etc.  Empty dict on failure.
     """
-    if not _guard_legacy_comment_tool("feishu_comment.batch_query_comment"):
-        return {}
+    guard = _guard_legacy_comment_tool("feishu_comment.batch_query_comment")
+    if guard is not True:
+        return guard.as_dict() if isinstance(guard, CommentGuardFailure) else {}
 
-    logger.debug("[Feishu-Comment] batch_query_comment: file_token=%s comment_id=%s", file_token, comment_id)
+    logger.debug(
+        "[Feishu-Comment] operation=batch_query_comment stage=request "
+        "file_hash=%s comment_hash=%s",
+        _hash_value(file_token),
+        _hash_value(comment_id),
+    )
 
     for attempt in range(_COMMENT_RETRY_LIMIT):
         code, msg, data = await _exec_request(
@@ -390,14 +508,16 @@ async def batch_query_comment(
             break
         if attempt < _COMMENT_RETRY_LIMIT - 1:
             logger.info(
-                "[Feishu-Comment] batch_query_comment retry %d/%d: code=%s msg=%s",
-                attempt + 1, _COMMENT_RETRY_LIMIT, code, msg,
+                "[Feishu-Comment] operation=batch_query_comment stage=retry "
+                "attempt=%d limit=%d code=%s msg_hash=%s",
+                attempt + 1, _COMMENT_RETRY_LIMIT, code, _message_hash(msg),
             )
             await asyncio.sleep(_COMMENT_RETRY_DELAY_S)
         else:
             logger.warning(
-                "[Feishu-Comment] batch_query_comment failed after %d attempts: code=%s msg=%s",
-                _COMMENT_RETRY_LIMIT, code, msg,
+                "[Feishu-Comment] operation=batch_query_comment stage=failure "
+                "attempts=%d code=%s msg_hash=%s",
+                _COMMENT_RETRY_LIMIT, code, _message_hash(msg),
             )
             return {}
 
@@ -406,12 +526,19 @@ async def batch_query_comment(
     logger.debug("[Feishu-Comment] batch_query_comment: got %d items", len(items) if isinstance(items, list) else 0)
     if items and isinstance(items, list):
         item = items[0]
-        logger.info("[Feishu-Comment] batch_query_comment: is_whole=%s quote=%s reply_count=%s",
-                    item.get("is_whole"),
-                    (item.get("quote", "") or "")[:60],
-                    len(item.get("reply_list", {}).get("replies", [])) if isinstance(item.get("reply_list"), dict) else "?")
+        logger.info(
+            "[Feishu-Comment] operation=batch_query_comment stage=success "
+            "is_whole=%s quote_hash=%s reply_count=%s",
+            item.get("is_whole"),
+            _hash_value(item.get("quote", "")) if item.get("quote") else "empty",
+            len(item.get("reply_list", {}).get("replies", [])) if isinstance(item.get("reply_list"), dict) else "?",
+        )
         return item
-    logger.warning("[Feishu-Comment] batch_query_comment: empty items, raw data keys=%s", list(data.keys()))
+    logger.warning(
+        "[Feishu-Comment] operation=batch_query_comment stage=empty "
+        "data_key_count=%d",
+        len(data.keys()),
+    )
     return {}
 
 
@@ -419,10 +546,14 @@ async def list_whole_comments(
     client: Any, file_token: str, file_type: str,
 ) -> List[Dict[str, Any]]:
     """List all whole-document comments (paginated, up to 500)."""
-    if not _guard_legacy_comment_tool("feishu_comment.list_whole_comments"):
-        return []
+    guard = _guard_legacy_comment_tool("feishu_comment.list_whole_comments")
+    if guard is not True:
+        return guard if isinstance(guard, CommentGuardFailure) else []
 
-    logger.debug("[Feishu-Comment] list_whole_comments: file_token=%s", file_token)
+    logger.debug(
+        "[Feishu-Comment] operation=list_whole_comments stage=request file_hash=%s",
+        _hash_value(file_token),
+    )
     all_comments: List[Dict[str, Any]] = []
     page_token = ""
 
@@ -442,7 +573,12 @@ async def list_whole_comments(
             queries=queries,
         )
         if code != 0:
-            logger.warning("[Feishu-Comment] List whole comments failed: code=%s msg=%s", code, msg)
+            logger.warning(
+                "[Feishu-Comment] operation=list_whole_comments stage=failure "
+                "code=%s msg_hash=%s",
+                code,
+                _message_hash(msg),
+            )
             break
 
         items = data.get("items", [])
@@ -457,7 +593,10 @@ async def list_whole_comments(
         if not page_token:
             break
 
-    logger.info("[Feishu-Comment] list_whole_comments: total %d whole comments fetched", len(all_comments))
+    logger.info(
+        "[Feishu-Comment] operation=list_whole_comments stage=success count=%d",
+        len(all_comments),
+    )
     return all_comments
 
 
@@ -470,10 +609,16 @@ async def list_comment_replies(
     If *expect_reply_id* is set and not found in the first fetch,
     retries up to 6 times (handles eventual consistency).
     """
-    if not _guard_legacy_comment_tool("feishu_comment.list_comment_replies"):
-        return []
+    guard = _guard_legacy_comment_tool("feishu_comment.list_comment_replies")
+    if guard is not True:
+        return guard if isinstance(guard, CommentGuardFailure) else []
 
-    logger.debug("[Feishu-Comment] list_comment_replies: file_token=%s comment_id=%s", file_token, comment_id)
+    logger.debug(
+        "[Feishu-Comment] operation=list_comment_replies stage=request "
+        "file_hash=%s comment_hash=%s",
+        _hash_value(file_token),
+        _hash_value(comment_id),
+    )
 
     for attempt in range(_COMMENT_RETRY_LIMIT):
         all_replies: List[Dict[str, Any]] = []
@@ -495,7 +640,12 @@ async def list_comment_replies(
                 queries=queries,
             )
             if code != 0:
-                logger.warning("[Feishu-Comment] List replies failed: code=%s msg=%s", code, msg)
+                logger.warning(
+                    "[Feishu-Comment] operation=list_comment_replies stage=failure "
+                    "code=%s msg_hash=%s",
+                    code,
+                    _message_hash(msg),
+                )
                 fetch_ok = False
                 break
 
@@ -517,17 +667,22 @@ async def list_comment_replies(
             break
         if attempt < _COMMENT_RETRY_LIMIT - 1:
             logger.info(
-                "[Feishu-Comment] list_comment_replies: reply_id=%s not found, retry %d/%d",
-                expect_reply_id, attempt + 1, _COMMENT_RETRY_LIMIT,
+                "[Feishu-Comment] operation=list_comment_replies stage=retry_missing "
+                "reply_hash=%s attempt=%d limit=%d",
+                _hash_value(expect_reply_id), attempt + 1, _COMMENT_RETRY_LIMIT,
             )
             await asyncio.sleep(_COMMENT_RETRY_DELAY_S)
         else:
             logger.warning(
-                "[Feishu-Comment] list_comment_replies: reply_id=%s not found after %d attempts",
-                expect_reply_id, _COMMENT_RETRY_LIMIT,
+                "[Feishu-Comment] operation=list_comment_replies stage=missing "
+                "reply_hash=%s attempts=%d",
+                _hash_value(expect_reply_id), _COMMENT_RETRY_LIMIT,
             )
 
-    logger.info("[Feishu-Comment] list_comment_replies: total %d replies fetched", len(all_replies))
+    logger.info(
+        "[Feishu-Comment] operation=list_comment_replies stage=success count=%d",
+        len(all_replies),
+    )
     return all_replies
 
 
@@ -543,12 +698,19 @@ async def reply_to_comment(
 
     Returns ``(success, code)``.
     """
-    if not _guard_legacy_comment_tool("feishu_comment.reply_to_comment"):
+    guard = _guard_legacy_comment_tool("feishu_comment.reply_to_comment")
+    if guard is not True:
+        if isinstance(guard, CommentGuardFailure):
+            return False, guard.reason
         return False, None
 
     text = _sanitize_comment_text(text)
-    logger.info("[Feishu-Comment] reply_to_comment: comment_id=%s text=%s",
-                comment_id, text[:100])
+    logger.info(
+        "[Feishu-Comment] operation=reply_to_comment stage=request "
+        "comment_hash=%s text_chars=%d",
+        _hash_value(comment_id),
+        len(text),
+    )
     body = {
         "content": {
             "elements": [
@@ -565,11 +727,15 @@ async def reply_to_comment(
     )
     if code != 0:
         logger.warning(
-            "[Feishu-Comment] reply_to_comment FAILED: code=%s msg=%s comment_id=%s",
-            code, msg, comment_id,
+            "[Feishu-Comment] operation=reply_to_comment stage=failure "
+            "code=%s msg_hash=%s comment_hash=%s",
+            code, _message_hash(msg), _hash_value(comment_id),
         )
     else:
-        logger.info("[Feishu-Comment] reply_to_comment OK: comment_id=%s", comment_id)
+        logger.info(
+            "[Feishu-Comment] operation=reply_to_comment stage=success comment_hash=%s",
+            _hash_value(comment_id),
+        )
     return code == 0, code
 
 
@@ -580,12 +746,17 @@ async def add_whole_comment(
 
     Returns ``True`` on success.
     """
-    if not _guard_legacy_comment_tool("feishu_comment.add_whole_comment"):
-        return False
+    guard = _guard_legacy_comment_tool("feishu_comment.add_whole_comment")
+    if guard is not True:
+        return guard if isinstance(guard, CommentGuardFailure) else False
 
     text = _sanitize_comment_text(text)
-    logger.info("[Feishu-Comment] add_whole_comment: file_token=%s text=%s",
-                file_token, text[:100])
+    logger.info(
+        "[Feishu-Comment] operation=add_whole_comment stage=request "
+        "file_hash=%s text_chars=%d",
+        _hash_value(file_token),
+        len(text),
+    )
     body = {
         "file_type": file_type,
         "reply_elements": [
@@ -599,9 +770,14 @@ async def add_whole_comment(
         body=body,
     )
     if code != 0:
-        logger.warning("[Feishu-Comment] add_whole_comment FAILED: code=%s msg=%s", code, msg)
+        logger.warning(
+            "[Feishu-Comment] operation=add_whole_comment stage=failure "
+            "code=%s msg_hash=%s",
+            code,
+            _message_hash(msg),
+        )
     else:
-        logger.info("[Feishu-Comment] add_whole_comment OK")
+        logger.info("[Feishu-Comment] operation=add_whole_comment stage=success")
     return code == 0
 
 
@@ -639,12 +815,19 @@ async def deliver_comment_reply(
     - Whole comment -> add_whole_comment
     - Local comment -> reply_to_comment, fallback to add_whole_comment on 1069302
     """
-    if not _guard_legacy_comment_tool("feishu_comment.deliver_comment_reply"):
-        return False
+    guard = _guard_legacy_comment_tool("feishu_comment.deliver_comment_reply")
+    if guard is not True:
+        return guard if isinstance(guard, CommentGuardFailure) else False
 
     chunks = _chunk_text(text)
-    logger.info("[Feishu-Comment] deliver_comment_reply: is_whole=%s comment_id=%s text_len=%d chunks=%d",
-                is_whole, comment_id, len(text), len(chunks))
+    logger.info(
+        "[Feishu-Comment] operation=deliver_comment_reply stage=start "
+        "is_whole=%s comment_hash=%s text_chars=%d chunk_count=%d",
+        is_whole,
+        _hash_value(comment_id),
+        len(text),
+        len(chunks),
+    )
 
     all_ok = True
     for i, chunk in enumerate(chunks):
@@ -794,8 +977,9 @@ async def _reverse_lookup_wiki_token(
     Returns the wiki_token if the document belongs to a wiki space,
     or None if it doesn't or the API call fails.
     """
-    if not _guard_legacy_comment_tool("feishu_comment._reverse_lookup_wiki_token"):
-        return None
+    guard = _guard_legacy_comment_tool("feishu_comment._reverse_lookup_wiki_token")
+    if guard is not True:
+        return guard if isinstance(guard, CommentGuardFailure) else None
 
     code, msg, data = await _exec_request(
         client, "GET", _WIKI_GET_NODE_URI,
@@ -806,7 +990,14 @@ async def _reverse_lookup_wiki_token(
         wiki_token = node.get("node_token", "")
         return wiki_token if wiki_token else None
     # code != 0: either not a wiki doc or service error — log and return None
-    logger.warning("[Feishu-Comment] Wiki reverse lookup failed: code=%s msg=%s obj=%s:%s", code, msg, obj_type, obj_token)
+    logger.warning(
+        "[Feishu-Comment] operation=wiki_reverse_lookup stage=failure "
+        "code=%s msg_hash=%s obj_type=%s obj_hash=%s",
+        code,
+        _message_hash(msg),
+        obj_type,
+        _hash_value(obj_token),
+    )
     return None
 
 
@@ -819,8 +1010,9 @@ async def _resolve_wiki_nodes(
     Mutates entries in *links* in-place: replaces ``doc_type`` and ``token``
     with the resolved values for wiki links.  Non-wiki links are unchanged.
     """
-    if not _guard_legacy_comment_tool("feishu_comment._resolve_wiki_nodes"):
-        return []
+    guard = _guard_legacy_comment_tool("feishu_comment._resolve_wiki_nodes")
+    if guard is not True:
+        return guard if isinstance(guard, CommentGuardFailure) else []
 
     wiki_links = [l for l in links if l["doc_type"] == "wiki"]
     if not wiki_links:
@@ -838,15 +1030,24 @@ async def _resolve_wiki_nodes(
             resolved_token = node.get("obj_token", "")
             if resolved_type and resolved_token:
                 logger.info(
-                    "[Feishu-Comment] Wiki resolved: %s -> %s:%s",
-                    wiki_token, resolved_type, resolved_token,
+                    "[Feishu-Comment] operation=wiki_resolve stage=success "
+                    "wiki_hash=%s resolved_type=%s resolved_hash=%s",
+                    _hash_value(wiki_token), resolved_type, _hash_value(resolved_token),
                 )
                 link["resolved_type"] = resolved_type
                 link["resolved_token"] = resolved_token
             else:
-                logger.warning("[Feishu-Comment] Wiki resolve returned empty: %s", wiki_token)
+                logger.warning(
+                    "[Feishu-Comment] operation=wiki_resolve stage=empty "
+                    "wiki_hash=%s",
+                    _hash_value(wiki_token),
+                )
         else:
-            logger.warning("[Feishu-Comment] Wiki resolve failed: code=%s msg=%s token=%s", code, msg, wiki_token)
+            logger.warning(
+                "[Feishu-Comment] operation=wiki_resolve stage=failure "
+                "code=%s msg_hash=%s wiki_hash=%s",
+                code, _message_hash(msg), _hash_value(wiki_token),
+            )
 
     return links
 
@@ -1104,7 +1305,10 @@ def _load_session_history(key: str) -> List[Dict[str, Any]]:
         # Check TTL
         if _time.time() - entry["last_access"] > _SESSION_TTL_S:
             del _session_cache[key]
-            logger.info("[Feishu-Comment] Session expired: %s", key)
+            logger.info(
+                "[Feishu-Comment] operation=session stage=expired session_hash=%s",
+                _hash_value(key),
+            )
             return []
         entry["last_access"] = _time.time()
         return list(entry["messages"])
@@ -1125,7 +1329,11 @@ def _save_session_history(key: str, messages: List[Dict[str, Any]]) -> None:
             "messages": cleaned,
             "last_access": _time.time(),
         }
-        logger.info("[Feishu-Comment] Session saved: %s (%d messages)", key, len(cleaned))
+        logger.info(
+            "[Feishu-Comment] operation=session stage=saved session_hash=%s count=%d",
+            _hash_value(key),
+            len(cleaned),
+        )
 
 
 def _run_comment_agent(prompt: str, client: Any, session_key: str = "") -> str:
@@ -1136,8 +1344,9 @@ def _run_comment_agent(prompt: str, client: Any, session_key: str = "") -> str:
 
     Returns the agent's final response text, or empty string on failure.
     """
-    if not _guard_legacy_comment_tool("feishu_comment._run_comment_agent"):
-        return ""
+    guard = _guard_legacy_comment_tool("feishu_comment._run_comment_agent")
+    if guard is not True:
+        return guard if isinstance(guard, CommentGuardFailure) else ""
 
     from run_agent import AIAgent
 
@@ -1149,14 +1358,23 @@ def _run_comment_agent(prompt: str, client: Any, session_key: str = "") -> str:
 
     try:
         model, runtime_kwargs = _resolve_model_and_runtime()
-        logger.info("[Feishu-Comment] _run_comment_agent: model=%s provider=%s base_url=%s",
-                    model, runtime_kwargs.get("provider"), (runtime_kwargs.get("base_url") or "")[:50])
+        logger.info(
+            "[Feishu-Comment] operation=run_comment_agent stage=runtime "
+            "model_hash=%s provider=%s base_url_hash=%s",
+            _hash_value(model) if model else "empty",
+            runtime_kwargs.get("provider"),
+            _hash_value(runtime_kwargs.get("base_url")) if runtime_kwargs.get("base_url") else "empty",
+        )
 
         # Load session history for cross-card memory
         history = _load_session_history(session_key) if session_key else []
         if history:
-            logger.info("[Feishu-Comment] _run_comment_agent: loaded %d history messages from session %s",
-                        len(history), session_key)
+            logger.info(
+                "[Feishu-Comment] operation=run_comment_agent stage=history_loaded "
+                "count=%d session_hash=%s",
+                len(history),
+                _hash_value(session_key),
+            )
 
         agent = AIAgent(
             model=model,
@@ -1176,8 +1394,13 @@ def _run_comment_agent(prompt: str, client: Any, session_key: str = "") -> str:
         result = agent.run_conversation(prompt, conversation_history=history or None)
         response = (result.get("final_response") or "").strip()
         api_calls = result.get("api_calls", 0)
-        logger.info("[Feishu-Comment] _run_comment_agent: done api_calls=%d response_len=%d response=%s",
-                    api_calls, len(response), response[:200])
+        logger.info(
+            "[Feishu-Comment] operation=run_comment_agent stage=done "
+            "api_calls=%d response_len=%d response_hash=%s",
+            api_calls,
+            len(response),
+            _hash_value(response) if response else "empty",
+        )
 
         # Save updated history
         if session_key:
@@ -1187,7 +1410,12 @@ def _run_comment_agent(prompt: str, client: Any, session_key: str = "") -> str:
 
         return response
     except Exception as e:
-        logger.exception("[Feishu-Comment] _run_comment_agent: agent failed: %s", e)
+        logger.exception(
+            "[Feishu-Comment] operation=run_comment_agent stage=failure "
+            "failure_class=%s error_hash=%s",
+            type(e).__name__,
+            _hash_value(e),
+        )
         return ""
     finally:
         set_doc_client(None)
@@ -1233,10 +1461,18 @@ async def handle_drive_comment_event(
 
     # Filter: self-reply, receiver check, notice_type
     if from_open_id and self_open_id and from_open_id == self_open_id:
-        logger.debug("[Feishu-Comment] Skipping self-authored event: from=%s", from_open_id)
+        logger.debug(
+            "[Feishu-Comment] operation=handle_drive_comment_event stage=skip_self "
+            "from_hash=%s",
+            _hash_value(from_open_id),
+        )
         return
     if not to_open_id or (self_open_id and to_open_id != self_open_id):
-        logger.debug("[Feishu-Comment] Skipping event not addressed to self: to=%s", to_open_id or "(empty)")
+        logger.debug(
+            "[Feishu-Comment] operation=handle_drive_comment_event stage=skip_receiver "
+            "to_hash=%s",
+            _hash_value(to_open_id) if to_open_id else "empty",
+        )
         return
     if notice_type and notice_type not in _ALLOWED_NOTICE_TYPES:
         logger.debug("[Feishu-Comment] Skipping notice_type=%s", notice_type)
@@ -1245,12 +1481,18 @@ async def handle_drive_comment_event(
         logger.warning("[Feishu-Comment] Missing required fields, skipping")
         return
 
-    if not _guard_legacy_comment_tool("feishu_comment.handle_drive_comment_event"):
-        return
+    guard = _guard_legacy_comment_tool("feishu_comment.handle_drive_comment_event")
+    if guard is not True:
+        return guard if isinstance(guard, CommentGuardFailure) else None
 
     logger.info(
-        "[Feishu-Comment] Event: notice=%s file=%s:%s comment=%s from=%s",
-        notice_type, file_type, file_token, comment_id, from_open_id,
+        "[Feishu-Comment] operation=handle_drive_comment_event stage=parsed "
+        "notice=%s file_type=%s file_hash=%s comment_hash=%s from_hash=%s",
+        notice_type,
+        file_type,
+        _hash_value(file_token),
+        _hash_value(comment_id),
+        _hash_value(from_open_id),
     )
 
     # Access control
@@ -1266,13 +1508,30 @@ async def handle_drive_comment_event(
             rule = resolve_rule(comments_cfg, file_type, file_token, wiki_token=wiki_token)
 
     if not rule.enabled:
-        logger.info("[Feishu-Comment] Comments disabled for %s:%s, skipping", file_type, file_token)
+        logger.info(
+            "[Feishu-Comment] operation=handle_drive_comment_event stage=disabled "
+            "file_type=%s file_hash=%s",
+            file_type,
+            _hash_value(file_token),
+        )
         return
     if not is_user_allowed(rule, from_open_id):
-        logger.info("[Feishu-Comment] User %s denied (policy=%s, rule=%s)", from_open_id, rule.policy, rule.match_source)
+        logger.info(
+            "[Feishu-Comment] operation=handle_drive_comment_event stage=user_denied "
+            "user_hash=%s policy=%s rule=%s",
+            _hash_value(from_open_id),
+            rule.policy,
+            rule.match_source,
+        )
         return
 
-    logger.info("[Feishu-Comment] Access granted: user=%s policy=%s rule=%s", from_open_id, rule.policy, rule.match_source)
+    logger.info(
+        "[Feishu-Comment] operation=handle_drive_comment_event stage=access_granted "
+        "user_hash=%s policy=%s rule=%s",
+        _hash_value(from_open_id),
+        rule.policy,
+        rule.match_source,
+    )
     if reply_id:
         asyncio.ensure_future(
             add_comment_reaction(
@@ -1299,8 +1558,10 @@ async def handle_drive_comment_event(
     is_whole = bool(comment_detail.get("is_whole"))
 
     logger.info(
-        "[Feishu-Comment] Comment context: title=%s is_whole=%s",
-        doc_title, is_whole,
+        "[Feishu-Comment] operation=handle_drive_comment_event stage=comment_context "
+        "title_hash=%s is_whole=%s",
+        _hash_value(doc_title) if doc_title else "empty",
+        is_whole,
     )
 
     # Step 3: Build timeline based on comment type
@@ -1341,9 +1602,14 @@ async def handle_drive_comment_event(
                     current_index = i
                     break
 
-        logger.info("[Feishu-Comment] Whole timeline: %d entries, current_idx=%d, self_idx=%d, text=%s",
-                    len(timeline), current_index, nearest_self_index,
-                    current_text[:80] if current_text else "(empty)")
+        logger.info(
+            "[Feishu-Comment] operation=handle_drive_comment_event stage=whole_timeline "
+            "count=%d current_idx=%d self_idx=%d current_text_hash=%s",
+            len(timeline),
+            current_index,
+            nearest_self_index,
+            _hash_value(current_text) if current_text else "empty",
+        )
 
         # Extract and resolve document links from all replies
         all_raw_replies = []
@@ -1406,11 +1672,15 @@ async def handle_drive_comment_event(
                     target_index = i
                     break
 
-        logger.info("[Feishu-Comment] Local timeline: %d entries, target_idx=%d, quote=%s root=%s target=%s",
-                    len(timeline), target_index,
-                    quote_text[:60] if quote_text else "(empty)",
-                    root_text[:60] if root_text else "(empty)",
-                    target_text[:60] if target_text else "(empty)")
+        logger.info(
+            "[Feishu-Comment] operation=handle_drive_comment_event stage=local_timeline "
+            "count=%d target_idx=%d quote_hash=%s root_hash=%s target_hash=%s",
+            len(timeline),
+            target_index,
+            _hash_value(quote_text) if quote_text else "empty",
+            _hash_value(root_text) if root_text else "empty",
+            _hash_value(target_text) if target_text else "empty",
+        )
 
         # Extract and resolve document links from replies
         doc_links = _extract_docs_links(replies)
@@ -1434,7 +1704,12 @@ async def handle_drive_comment_event(
         )
 
     logger.info("[Feishu-Comment] [Step 4/5] Prompt built (%d chars), running agent...", len(prompt))
-    logger.debug("[Feishu-Comment] Full prompt:\n%s", prompt)
+    logger.debug(
+        "[Feishu-Comment] operation=handle_drive_comment_event stage=prompt "
+        "prompt_hash=%s prompt_chars=%d",
+        _hash_value(prompt),
+        len(prompt),
+    )
 
     # Step 4: Run agent in a thread (run_conversation is synchronous)
     # Session key groups all comment cards on the same document
@@ -1448,10 +1723,20 @@ async def handle_drive_comment_event(
     if not response or _NO_REPLY_SENTINEL in response:
         logger.info("[Feishu-Comment] Agent returned NO_REPLY, skipping delivery")
     else:
-        logger.info("[Feishu-Comment] Agent response (%d chars): %s", len(response), response[:200])
+        logger.info(
+            "[Feishu-Comment] operation=handle_drive_comment_event stage=agent_response "
+            "response_chars=%d response_hash=%s",
+            len(response),
+            _hash_value(response),
+        )
 
         # Step 5: Deliver reply
-        logger.info("[Feishu-Comment] [Step 5/5] Delivering reply (is_whole=%s, comment_id=%s)", is_whole, comment_id)
+        logger.info(
+            "[Feishu-Comment] operation=handle_drive_comment_event stage=deliver "
+            "is_whole=%s comment_hash=%s",
+            is_whole,
+            _hash_value(comment_id),
+        )
         success = await deliver_comment_reply(
             client, file_token, file_type, comment_id, response, is_whole,
         )

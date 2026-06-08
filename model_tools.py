@@ -494,12 +494,7 @@ def _feishu_broker_cache_fingerprint() -> tuple | None:
         return None
     if context is None:
         return None
-    return (
-        context.grant_handle,
-        context.action_id,
-        context.contract_hash,
-        context.route_partition_key,
-    )
+    return ("feishu_broker_context", "present")
 
 
 # =============================================================================

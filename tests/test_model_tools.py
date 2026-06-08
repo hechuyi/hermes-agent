@@ -13,6 +13,34 @@ from model_tools import (
     _LEGACY_TOOLSET_MAP,
     TOOL_TO_TOOLSET_MAP,
 )
+from gateway.feishu_legacy_guard import feishu_broker_context
+
+
+CONTRACT_HASH = "sha256:" + ("a" * 64)
+GRANT_HANDLE = "broker_grant_handle:sha256:" + ("b" * 64)
+ACTION_ID = "broker_action:sha256:" + ("c" * 64)
+ROUTE_PARTITION_KEY = "route_snapshot:sha256:" + ("d" * 64)
+
+
+def test_feishu_broker_quiet_cache_fingerprint_is_presence_only():
+    import model_tools
+
+    assert model_tools._feishu_broker_cache_fingerprint() is None
+    with feishu_broker_context(
+        GRANT_HANDLE,
+        action_id=ACTION_ID,
+        contract_hash=CONTRACT_HASH,
+        route_partition_key=ROUTE_PARTITION_KEY,
+    ):
+        fingerprint = model_tools._feishu_broker_cache_fingerprint()
+
+    assert fingerprint == ("feishu_broker_context", "present")
+    serialized = repr(fingerprint)
+    assert GRANT_HANDLE not in serialized
+    assert ACTION_ID not in serialized
+    assert CONTRACT_HASH not in serialized
+    assert ROUTE_PARTITION_KEY not in serialized
+    assert model_tools._feishu_broker_cache_fingerprint() is None
 
 
 # =========================================================================
