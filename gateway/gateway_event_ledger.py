@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from gateway.gateway_event_contract import (
+    FEISHU_AUDIT_EVENT_TYPES,
     GatewayEventContractError,
     GatewayEventResult,
     PREFLIGHT_CHECK_NAMES,
@@ -27,6 +28,7 @@ LEDGER_FILENAME = "gateway_event_ledger.json"
 LOCK_FILENAME = ".gateway_event_ledger.lock"
 _DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
 _MAX_COMPRESSION_REJECTIONS = 1000
+_MAX_FEISHU_AUDIT_EVENTS = 1000
 _STATE_DICT_SECTIONS: tuple[str, ...] = (
     "inbounds",
     "deliveries",
@@ -35,7 +37,7 @@ _STATE_DICT_SECTIONS: tuple[str, ...] = (
     "ack_event_index",
     "session_routes",
 )
-_STATE_LIST_SECTIONS: tuple[str, ...] = ("compression_rejections",)
+_STATE_LIST_SECTIONS: tuple[str, ...] = ("compression_rejections", "feishu_audit_events")
 _IS_WINDOWS = os.name == "nt"
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.Lock] = {}
@@ -163,6 +165,8 @@ def _apply_validated_event(
         return _apply_session_locked(event, state)
     if event_type == "compression_result":
         return _apply_compression_result(event, state)
+    if event_type in FEISHU_AUDIT_EVENT_TYPES:
+        return _apply_feishu_audit_event(event, state)
     raise GatewayEventContractError(
         "unsupported_gateway_event_type", "unsupported gateway event type"
     )
@@ -417,6 +421,17 @@ def _apply_compression_result(
     )
 
 
+def _apply_feishu_audit_event(
+    event: Mapping[str, Any], state: dict[str, Any]
+) -> dict[str, Any]:
+    record = dict(event)
+    audit_events = state["feishu_audit_events"]
+    audit_events.append(record)
+    if len(audit_events) > _MAX_FEISHU_AUDIT_EVENTS:
+        del audit_events[: len(audit_events) - _MAX_FEISHU_AUDIT_EVENTS]
+    return {"type": "feishu_audit_event_record", "record": record}
+
+
 def _read_state(state_path: Path) -> dict[str, Any]:
     if not state_path.exists():
         return _empty_state()
@@ -428,7 +443,11 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict) or raw.get("version") != 1:
         raise _state_schema_error()
     state = _empty_state()
-    required_keys = {"version", *_STATE_DICT_SECTIONS, *_STATE_LIST_SECTIONS}
+    required_keys = {
+        "version",
+        *_STATE_DICT_SECTIONS,
+        *tuple(key for key in _STATE_LIST_SECTIONS if key != "feishu_audit_events"),
+    }
     if not required_keys.issubset(raw):
         raise _state_schema_error()
     for key in _STATE_DICT_SECTIONS:
@@ -440,10 +459,18 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     if not isinstance(compression_rejections, list):
         raise _state_schema_error()
     state["compression_rejections"] = compression_rejections
+    # `feishu_audit_events` is the only v1-compatible additive section. Missing
+    # legacy ledgers are deterministically backfilled; all other missing
+    # sections remain fail-closed through the required_keys check above.
+    feishu_audit_events = raw.get("feishu_audit_events", [])
+    if not isinstance(feishu_audit_events, list):
+        raise _state_schema_error()
+    state["feishu_audit_events"] = feishu_audit_events
     _validate_persisted_inbound_records(state["inbounds"])
     _validate_persisted_delivery_records(state["deliveries"])
     _validate_persisted_session_routes(state["session_routes"])
     _validate_persisted_compression_rejections(state["compression_rejections"])
+    _validate_persisted_feishu_audit_events(state["feishu_audit_events"])
     _reconcile_persisted_indexes(state)
     return state
 
@@ -485,6 +512,7 @@ def _empty_state() -> dict[str, Any]:
         "ack_event_index": {},
         "session_routes": {},
         "compression_rejections": [],
+        "feishu_audit_events": [],
     }
 
 
@@ -552,6 +580,16 @@ def _validate_persisted_compression_rejections(rejections: list[Any]) -> None:
                 }
             )
         except (GatewayEventContractError, ValueError) as exc:
+            raise _state_schema_error() from exc
+
+
+def _validate_persisted_feishu_audit_events(events: list[Any]) -> None:
+    for event in events:
+        try:
+            validate_gateway_action(
+                {"type": "feishu_audit_event_record", "record": event}
+            )
+        except ValueError as exc:
             raise _state_schema_error() from exc
 
 

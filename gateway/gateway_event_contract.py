@@ -44,6 +44,38 @@ EVENT_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "compression_result": ("session_key", "observed_session_id", "correlation_id"),
 }
 
+FEISHU_AUDIT_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "feishu_contract_observed",
+        "feishu_authorization_evidence_observed",
+        "feishu_authorization_evidence_denied",
+        "feishu_auth_decision",
+        "feishu_object_scope_resolved",
+        "feishu_capability_granted",
+        "feishu_capability_denied",
+        "feishu_action_requested",
+        "feishu_action_authorized",
+        "feishu_action_denied",
+        "feishu_action_executed",
+        "feishu_tool_result_redacted",
+        "feishu_api_failure",
+        "feishu_legacy_tool_denied",
+        "feishu_legacy_descriptor_denied",
+    }
+)
+
+FEISHU_AUDIT_FAILURE_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "feishu_authorization_evidence_denied",
+        "feishu_auth_decision",
+        "feishu_capability_denied",
+        "feishu_action_denied",
+        "feishu_api_failure",
+        "feishu_legacy_tool_denied",
+        "feishu_legacy_descriptor_denied",
+    }
+)
+
 PREFLIGHT_CHECK_NAMES: tuple[str, ...] = (
     "state_dir_writable",
     "feishu_inbound",
@@ -56,6 +88,8 @@ PREFLIGHT_CHECK_NAMES: tuple[str, ...] = (
 _SAFE_EVENT_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
 _SAFE_FAILURE_CLASS_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _FNV1A64_RE = re.compile(r"^fnv1a64:[a-f0-9]{16}$")
+_SHA256_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+_SAFE_AUDIT_ATOM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_FEISHU_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_]{1,256}$")
 _SAFE_FEISHU_RECEIVE_ID_RE = re.compile(r"^[A-Za-z0-9_@.+-]{1,256}$")
 _SAFE_DESCRIPTOR_UUID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,127}$")
@@ -68,6 +102,60 @@ _FEISHU_RECEIVE_ID_TYPES = frozenset(
     {"open_id", "user_id", "union_id", "email", "chat_id"}
 )
 _MAX_FEISHU_DESCRIPTOR_CONTENT_CHARS = 32768
+_FEISHU_AUDIT_HASH_FIELDS = frozenset(
+    {
+        "event_hash",
+        "contract_hash",
+        "authorization_evidence_hash",
+        "decision_hash",
+        "object_ref_hash",
+        "actor_hash",
+        "route_snapshot_hash",
+        "capability_hash",
+        "action_hash",
+        "result_hash",
+        "request_hash",
+        "response_hash",
+        "legacy_tool_hash",
+        "descriptor_hash",
+    }
+)
+_FEISHU_AUDIT_ATOM_FIELDS = frozenset(
+    {
+        "surface",
+        "tool",
+        "action",
+        "scope",
+        "decision",
+        "capability",
+        "object_kind",
+        "api",
+        "method",
+        "outcome",
+    }
+)
+_FEISHU_AUDIT_COMMON_FIELDS = frozenset(
+    {"type", "timestamp", "correlation_id", "failure_class"}
+)
+_FEISHU_AUDIT_RAW_FIELD_NAMES = frozenset(
+    {
+        "token",
+        "secret",
+        "body",
+        "raw_body",
+        "document_content",
+        "file_path",
+        "api_response",
+        "open_id",
+        "user_id",
+        "union_id",
+        "message_id",
+        "file_id",
+        "path",
+        "content",
+        "object_ref",
+    }
+)
 
 
 class GatewayEventContractError(ValueError):
@@ -97,6 +185,9 @@ def validate_gateway_event(event: Mapping[str, Any]) -> str:
             "event type is missing or invalid",
         )
     required = EVENT_REQUIREMENTS.get(event_type)
+    if required is None and event_type in FEISHU_AUDIT_EVENT_TYPES:
+        _validate_feishu_audit_event(event_type, event)
+        return event_type
     if required is None:
         raise GatewayEventContractError(
             "unsupported_gateway_event_type",
@@ -163,6 +254,8 @@ def validate_gateway_action(action: Mapping[str, Any]) -> dict[str, Any]:
         return _validate_compression_record_action(action)
     if action_type == "preflight":
         return _validate_preflight_action(action)
+    if action_type == "feishu_audit_event_record":
+        return _validate_feishu_audit_event_record_action(action)
     raise ValueError("unsupported gateway action type")
 
 
@@ -457,6 +550,95 @@ def _validate_preflight_action(action: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("invalid preflight check detail")
         validated.append({"name": name, "ok": check["ok"], "detail": detail})
     return {"type": "preflight", "checks": validated}
+
+
+def _validate_feishu_audit_event_record_action(action: Mapping[str, Any]) -> dict[str, Any]:
+    if set(action) != {"type", "record"}:
+        raise ValueError("invalid feishu audit action keys")
+    record = action.get("record")
+    if not isinstance(record, Mapping):
+        raise ValueError("invalid feishu audit record")
+    event_type = event_type_from(record)
+    if event_type is None or event_type not in FEISHU_AUDIT_EVENT_TYPES:
+        raise ValueError("invalid feishu audit event type")
+    try:
+        _validate_feishu_audit_event(event_type, record)
+    except GatewayEventContractError as exc:
+        raise ValueError("invalid feishu audit record") from exc
+    return {"type": "feishu_audit_event_record", "record": dict(record)}
+
+
+def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> None:
+    allowed_fields = (
+        _FEISHU_AUDIT_COMMON_FIELDS
+        | _FEISHU_AUDIT_HASH_FIELDS
+        | _FEISHU_AUDIT_ATOM_FIELDS
+    )
+    hash_fields_present = []
+    for field, value in event.items():
+        if not isinstance(field, str) or field not in allowed_fields:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "feishu audit event contains unsupported field",
+            )
+        if _is_feishu_audit_raw_field(field):
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "feishu audit event contains raw field",
+            )
+        if field in _FEISHU_AUDIT_HASH_FIELDS:
+            _require_sanitized_hash_value(value, field)
+            hash_fields_present.append(field)
+        elif field in _FEISHU_AUDIT_ATOM_FIELDS:
+            _require_safe_audit_atom(value, field)
+
+    for field in ("timestamp", "correlation_id"):
+        if field not in event:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                f"missing required field: {field}",
+            )
+    _require_number(event, "timestamp")
+    _require_session_route_value(event, "correlation_id")
+    if not hash_fields_present:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "feishu audit event requires a sanitized hash field",
+        )
+    if event_type in FEISHU_AUDIT_FAILURE_EVENT_TYPES:
+        require_failure_class(event.get("failure_class"))
+    elif "failure_class" in event:
+        require_failure_class(event.get("failure_class"))
+
+
+def _is_feishu_audit_raw_field(field: str) -> bool:
+    normalized = field.lower()
+    if normalized in _FEISHU_AUDIT_RAW_FIELD_NAMES:
+        return True
+    if normalized.endswith("_hash"):
+        return False
+    parts = normalized.split("_")
+    return "token" in parts or "secret" in parts
+
+
+def _require_sanitized_hash_value(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not (
+        _FNV1A64_RE.fullmatch(value) or _SHA256_RE.fullmatch(value)
+    ):
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            f"{field} is missing or invalid",
+        )
+    return value
+
+
+def _require_safe_audit_atom(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not _SAFE_AUDIT_ATOM_RE.fullmatch(value):
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            f"{field} is missing or invalid",
+        )
+    return value
 
 
 def _require_nonempty_string(event: Mapping[str, Any], field: str) -> str:
