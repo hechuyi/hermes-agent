@@ -7,8 +7,10 @@ from gateway.feishu_action_plan import (
     RenderPlan,
     RenderPlanPart,
     validate_action_contract,
+    validate_render_plan,
     validate_render_part,
 )
+from gateway.feishu_contracts import FeishuContractError
 
 
 _SHA256_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
@@ -68,13 +70,13 @@ def test_plan_hash_is_stable_for_supported_render_part_snapshots():
         ),
         _part(
             "image",
-            source_class="generated_asset",
+            source_class="generated",
             provenance_hash=_PROVENANCE_HASH,
             fallback_action="replace",
         ),
         _part(
             "file",
-            source_class="user_attachment",
+            source_class="upload",
             provenance_hash="sha256:" + "9" * 64,
             fallback_action="drop",
         ),
@@ -102,6 +104,7 @@ def test_plan_hash_is_stable_for_supported_render_part_snapshots():
     assert _PLAN_HASH_RE.fullmatch(plan.plan_hash)
     assert plan.plan_hash == equivalent.plan_hash
     assert plan.schema_version == 1
+    assert validate_render_plan(plan) == (True, None)
 
 
 @pytest.mark.parametrize("part_type", ["card", "button"])
@@ -159,6 +162,62 @@ def test_raw_tool_material_is_rejected_from_parts_and_actions(metadata):
     )
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"document_token": "doc_raw"},
+        {"open_id": "ou_raw"},
+        {"file_path": "/tmp/raw-file"},
+        {"document_content": "raw document text"},
+    ],
+)
+def test_render_part_rejects_sensitive_metadata_keys(metadata):
+    with pytest.raises(FeishuContractError) as exc_info:
+        _part("post", metadata=metadata)
+
+    assert exc_info.value.failure_class == "feishu_action_sensitive_metadata"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"document_token": "doc_raw"},
+        {"open_id": "ou_raw"},
+        {"file_path": "/tmp/raw-file"},
+        {"document_content": "raw document text"},
+    ],
+)
+def test_action_contract_rejects_sensitive_metadata_keys(metadata):
+    with pytest.raises(FeishuContractError) as exc_info:
+        _action(metadata=metadata)
+
+    assert exc_info.value.failure_class == "feishu_action_sensitive_metadata"
+
+
+def test_metadata_hash_does_not_mask_contract_redaction_errors():
+    with pytest.raises(FeishuContractError) as exc_info:
+        _action(metadata={"open_id_hash": "ou_raw"})
+
+    assert exc_info.value.failure_class == "invalid_hashed_sensitive_ref"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "failure_class"),
+    [
+        ({"payload_hash": "raw payload"}, "feishu_render_payload_hash_invalid"),
+        ({"content_hash": "raw content"}, "feishu_render_content_hash_invalid"),
+        ({"provenance_hash": "raw provenance"}, "feishu_render_provenance_hash_invalid"),
+        ({"action_digest": "raw action"}, "feishu_action_sibling_digest_invalid"),
+        ({"route_snapshot_hash": "raw route"}, "feishu_action_sibling_route_invalid"),
+    ],
+)
+def test_render_part_hash_fields_must_be_sha256(overrides, failure_class):
+    assert validate_render_part(_part("post", **overrides)) == (
+        False,
+        failure_class,
+    )
+
+
 @pytest.mark.parametrize("fallback_action", ["preserve", "replace", "drop"])
 def test_fallback_matrix_allows_declared_actions(fallback_action):
     assert validate_render_part(_part("markdown", fallback_action=fallback_action)) == (
@@ -195,10 +254,10 @@ def test_chunk_group_index_and_count_are_coherent(overrides):
 @pytest.mark.parametrize("part_type", ["image", "file"])
 def test_attachment_parts_require_source_class_and_provenance_hash(part_type):
     missing_source = _part(part_type, provenance_hash=_PROVENANCE_HASH)
-    missing_provenance = _part(part_type, source_class="generated_asset")
+    missing_provenance = _part(part_type, source_class="generated")
     raw_provenance = _part(
         part_type,
-        source_class="generated_asset",
+        source_class="generated",
         provenance_hash="/tmp/raw-file",
     )
 
@@ -214,6 +273,153 @@ def test_attachment_parts_require_source_class_and_provenance_hash(part_type):
         False,
         "feishu_render_attachment_provenance_invalid",
     )
+
+
+@pytest.mark.parametrize(
+    "source_class",
+    [
+        "generated_asset",
+        "user_attachment",
+        "/tmp/upload",
+        "token_cache",
+        "open_id",
+        "document_content",
+    ],
+)
+def test_attachment_source_class_is_sanitized_enum(source_class):
+    assert validate_render_part(
+        _part(
+            "image",
+            source_class=source_class,
+            provenance_hash=_PROVENANCE_HASH,
+        )
+    ) == (False, "feishu_render_attachment_source_invalid")
+
+
+@pytest.mark.parametrize(
+    ("target_ref_hash", "object_ref_hash", "failure_class"),
+    [
+        ("oc_raw_chat", "sha256:" + "b" * 64, "feishu_render_target_ref_invalid"),
+        ("sha256:" + "a" * 64, "/tmp/raw-object", "feishu_render_object_ref_invalid"),
+        ("sha256:" + "a" * 64, "doc_token_raw", "feishu_render_object_ref_invalid"),
+    ],
+)
+def test_render_plan_rejects_raw_target_or_object_refs(
+    target_ref_hash,
+    object_ref_hash,
+    failure_class,
+):
+    with pytest.raises(FeishuContractError) as exc_info:
+        RenderPlan(
+            target_ref_hash=target_ref_hash,
+            object_ref_hash=object_ref_hash,
+            render_mode="offline_snapshot",
+            parts=(_part("markdown"),),
+        )
+
+    assert exc_info.value.failure_class == failure_class
+
+
+def test_render_plan_rejects_unknown_render_mode():
+    with pytest.raises(FeishuContractError) as exc_info:
+        RenderPlan(
+            target_ref_hash="sha256:" + "a" * 64,
+            object_ref_hash="sha256:" + "b" * 64,
+            render_mode="live_send",
+            parts=(_part("markdown"),),
+        )
+
+    assert exc_info.value.failure_class == "feishu_render_mode_invalid"
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        (
+            _part(
+                "plain_text",
+                chunk_group="sha256:" + "8" * 64,
+                chunk_index=0,
+                chunk_count=3,
+            ),
+            _part(
+                "plain_text",
+                chunk_group="sha256:" + "8" * 64,
+                chunk_index=1,
+                chunk_count=3,
+            ),
+        ),
+        (
+            _part(
+                "plain_text",
+                chunk_group="sha256:" + "8" * 64,
+                chunk_index=0,
+                chunk_count=2,
+            ),
+            _part(
+                "plain_text",
+                chunk_group="sha256:" + "8" * 64,
+                chunk_index=0,
+                chunk_count=2,
+            ),
+        ),
+        (
+            _part(
+                "plain_text",
+                chunk_group="sha256:" + "8" * 64,
+                chunk_index=0,
+                chunk_count=2,
+            ),
+            _part(
+                "plain_text",
+                chunk_group="sha256:" + "8" * 64,
+                chunk_index=1,
+                chunk_count=3,
+            ),
+        ),
+    ],
+)
+def test_render_plan_validates_chunk_group_completeness(parts):
+    with pytest.raises(FeishuContractError) as exc_info:
+        RenderPlan(
+            target_ref_hash="sha256:" + "a" * 64,
+            object_ref_hash="sha256:" + "b" * 64,
+            render_mode="offline_snapshot",
+            parts=parts,
+        )
+
+    assert exc_info.value.failure_class == "feishu_render_chunk_group_incomplete"
+
+
+@pytest.mark.parametrize(
+    ("sibling_overrides", "failure_class"),
+    [
+        ({"action_digest": "sha256:" + "6" * 64}, "feishu_action_sibling_mismatch"),
+        ({"route_snapshot_hash": "sha256:" + "6" * 64}, "feishu_action_sibling_mismatch"),
+        ({"same_operator_scope": False}, "feishu_action_sibling_mismatch"),
+        ({"expires_at": "2026-06-08T11:00:00Z"}, "feishu_action_sibling_mismatch"),
+    ],
+)
+def test_card_button_action_sibling_fields_must_match_or_be_unset(
+    sibling_overrides,
+    failure_class,
+):
+    part = _part("button", action_contract=_action(), **sibling_overrides)
+
+    assert validate_render_part(part) == (False, failure_class)
+
+
+def test_card_button_action_sibling_fields_may_match_nested_contract():
+    part = _part(
+        "button",
+        action_contract=_action(),
+        action_digest=_ACTION_DIGEST,
+        route_snapshot_hash=_ROUTE_HASH,
+        same_operator_scope=True,
+        expires_at="2026-06-08T10:30:00Z",
+    )
+
+    assert validate_render_part(part) == (True, None)
 
 
 def test_action_contract_hash_is_opaque_and_stable():

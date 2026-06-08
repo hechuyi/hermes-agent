@@ -33,6 +33,10 @@ _SUPPORTED_PART_TYPES = frozenset(
 )
 _ACTION_PART_TYPES = frozenset({"card", "button"})
 _ATTACHMENT_PART_TYPES = frozenset({"image", "file"})
+_RENDER_MODES = frozenset({"offline_snapshot"})
+_ATTACHMENT_SOURCE_CLASSES = frozenset(
+    {"upload", "generated", "cached", "object_store", "sanitized_reference"}
+)
 _RAW_TOOL_KEYS = frozenset(
     {
         "args",
@@ -51,6 +55,19 @@ _RAW_TOOL_KEYS = frozenset(
         "toolbody",
         "toolmethod",
         "toolpath",
+    }
+)
+_SENSITIVE_METADATA_MARKERS = frozenset(
+    {
+        "token",
+        "secret",
+        "privatekey",
+        "rawmessage",
+        "documentcontent",
+        "filepath",
+        "openid",
+        "userid",
+        "unionid",
     }
 )
 
@@ -122,6 +139,12 @@ class RenderPlan:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parts", _part_tuple(self.parts))
+        valid, failure_class = _validate_render_plan_fields(self)
+        if not valid:
+            raise FeishuContractError(
+                "invalid Feishu render plan",
+                failure_class=failure_class or "feishu_render_plan_invalid",
+            )
         object.__setattr__(
             self,
             "plan_hash",
@@ -154,10 +177,31 @@ def validate_render_part(part: RenderPlanPart) -> tuple[bool, str | None]:
         attachment_valid, attachment_failure = _validate_attachment_part(part)
         if not attachment_valid:
             return False, attachment_failure
+    hash_valid, hash_failure = _validate_render_part_hash_fields(part)
+    if not hash_valid:
+        return False, hash_failure
     if part.part_type in _ACTION_PART_TYPES:
         if part.action_contract is None:
             return False, "feishu_action_contract_missing"
-        return validate_action_contract(part.action_contract)
+        contract_valid, contract_failure = validate_action_contract(part.action_contract)
+        if not contract_valid:
+            return False, contract_failure
+        sibling_valid, sibling_failure = _validate_action_sibling_fields(part)
+        if not sibling_valid:
+            return False, sibling_failure
+    return True, None
+
+
+def validate_render_plan(plan: RenderPlan) -> tuple[bool, str | None]:
+    if not isinstance(plan, RenderPlan):
+        return False, "feishu_render_plan_invalid"
+    fields_valid, fields_failure = _validate_render_plan_fields(plan)
+    if not fields_valid:
+        return False, fields_failure
+    for part in plan.parts:
+        part_valid, part_failure = validate_render_part(part)
+        if not part_valid:
+            return False, part_failure
     return True, None
 
 
@@ -192,11 +236,94 @@ def validate_action_contract(
 def _validate_attachment_part(part: RenderPlanPart) -> tuple[bool, str | None]:
     if not isinstance(part.source_class, str) or not part.source_class:
         return False, "feishu_render_attachment_source_missing"
+    if part.source_class not in _ATTACHMENT_SOURCE_CLASSES:
+        return False, "feishu_render_attachment_source_invalid"
     if part.provenance_hash is None:
         return False, "feishu_render_attachment_provenance_missing"
     if not _is_hash(part.provenance_hash):
         return False, "feishu_render_attachment_provenance_invalid"
     return True, None
+
+
+def _validate_render_part_hash_fields(
+    part: RenderPlanPart,
+) -> tuple[bool, str | None]:
+    hash_fields = (
+        ("payload_hash", part.payload_hash, "feishu_render_payload_hash_invalid"),
+        ("content_hash", part.content_hash, "feishu_render_content_hash_invalid"),
+        (
+            "provenance_hash",
+            part.provenance_hash,
+            "feishu_render_provenance_hash_invalid",
+        ),
+        ("action_digest", part.action_digest, "feishu_action_sibling_digest_invalid"),
+        (
+            "route_snapshot_hash",
+            part.route_snapshot_hash,
+            "feishu_action_sibling_route_invalid",
+        ),
+    )
+    for _field_name, value, failure_class in hash_fields:
+        if value is not None and not _is_hash(value):
+            return False, failure_class
+    return True, None
+
+
+def _validate_action_sibling_fields(part: RenderPlanPart) -> tuple[bool, str | None]:
+    contract = part.action_contract
+    if contract is None:
+        return False, "feishu_action_contract_missing"
+    comparisons = (
+        (part.action_digest, contract.action_digest),
+        (part.route_snapshot_hash, contract.route_snapshot_hash),
+        (part.same_operator_scope, contract.same_operator_scope),
+        (part.expires_at, contract.expires_at),
+    )
+    for sibling_value, contract_value in comparisons:
+        if sibling_value is not None and sibling_value != contract_value:
+            return False, "feishu_action_sibling_mismatch"
+    return True, None
+
+
+def _validate_render_plan_fields(plan: RenderPlan) -> tuple[bool, str | None]:
+    if not _is_hash(plan.target_ref_hash):
+        return False, "feishu_render_target_ref_invalid"
+    if plan.object_ref_hash is not None and not _is_hash(plan.object_ref_hash):
+        return False, "feishu_render_object_ref_invalid"
+    if plan.render_mode not in _RENDER_MODES:
+        return False, "feishu_render_mode_invalid"
+    if not _chunk_groups_are_complete(plan.parts):
+        return False, "feishu_render_chunk_group_incomplete"
+    return True, None
+
+
+def _chunk_groups_are_complete(parts: Sequence[RenderPlanPart]) -> bool:
+    groups: dict[str, dict[str, Any]] = {}
+    for part in parts:
+        if part.chunk_group is None:
+            continue
+        if (
+            not _is_hash(part.chunk_group)
+            or not isinstance(part.chunk_index, int)
+            or isinstance(part.chunk_index, bool)
+            or not isinstance(part.chunk_count, int)
+            or isinstance(part.chunk_count, bool)
+        ):
+            return False
+        group = groups.setdefault(
+            part.chunk_group,
+            {"count": part.chunk_count, "indexes": set()},
+        )
+        if group["count"] != part.chunk_count:
+            return False
+        if part.chunk_index in group["indexes"]:
+            return False
+        group["indexes"].add(part.chunk_index)
+    for group in groups.values():
+        count = group["count"]
+        if count <= 0 or group["indexes"] != set(range(count)):
+            return False
+    return True
 
 
 def _chunk_is_coherent(part: RenderPlanPart) -> bool:
@@ -227,6 +354,27 @@ def _contains_raw_tool_material(value: Any) -> bool:
         return False
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
         return any(_contains_raw_tool_material(item) for item in value)
+    return False
+
+
+def _contains_sensitive_metadata_key(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if isinstance(key, str) and _is_sensitive_raw_metadata_key(key):
+                return True
+            if _contains_sensitive_metadata_key(item):
+                return True
+        return False
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        return any(_contains_sensitive_metadata_key(item) for item in value)
+    return False
+
+
+def _is_sensitive_raw_metadata_key(key: str) -> bool:
+    comparable = _normalized_key(key)
+    for marker in _SENSITIVE_METADATA_MARKERS:
+        if marker in comparable and not comparable.endswith("hash"):
+            return True
     return False
 
 
@@ -270,6 +418,10 @@ def _render_part_payload(part: RenderPlanPart) -> dict[str, Any]:
         "chunk_index": part.chunk_index,
         "chunk_count": part.chunk_count,
         "source_class": part.source_class,
+        "action_digest": part.action_digest,
+        "route_snapshot_hash": part.route_snapshot_hash,
+        "same_operator_scope": part.same_operator_scope,
+        "expires_at": part.expires_at,
         "action_contract_hash": (
             part.action_contract.contract_hash if part.action_contract else None
         ),
@@ -295,21 +447,29 @@ def _metadata_hash(metadata: Mapping[str, Any]) -> str | None:
     if not metadata:
         return None
     if _contains_raw_tool_material(metadata):
-        return "sha256:" + "0" * 64
-    return _stable_hash(
+        return feishu_contract_hash(
+            {"redaction_failure": "feishu_action_raw_tool_material"},
+            domain="feishu.action_plan_metadata",
+            version="v1",
+            schema_version=1,
+        )
+    if _contains_sensitive_metadata_key(metadata):
+        raise FeishuContractError(
+            "sensitive raw metadata is not allowed in Feishu action plans",
+            failure_class="feishu_action_sensitive_metadata",
+        )
+    return feishu_contract_hash(
         metadata,
         domain="feishu.action_plan_metadata",
+        version="v1",
         schema_version=1,
     )
 
 
 def _stable_hash(value: Any, *, domain: str, schema_version: int) -> str:
-    try:
-        return feishu_contract_hash(
-            value,
-            domain=domain,
-            version="v1",
-            schema_version=schema_version,
-        )
-    except FeishuContractError:
-        return "sha256:" + "0" * 64
+    return feishu_contract_hash(
+        value,
+        domain=domain,
+        version="v1",
+        schema_version=schema_version,
+    )
