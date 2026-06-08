@@ -160,6 +160,7 @@ from gateway.platforms.base import (
     ProcessingOutcome,
     SendResult,
     SUPPORTED_DOCUMENT_TYPES,
+    _reply_anchor_for_event,
     cache_document_from_bytes,
     cache_image_from_url,
     cache_audio_from_bytes,
@@ -4257,10 +4258,18 @@ class FeishuAdapter(BasePlatformAdapter):
         return "@_user_" in raw_content or "@_all" in raw_content
 
     @staticmethod
+    def _reply_anchor_value(event: MessageEvent) -> str | None:
+        source = getattr(event, "source", None)
+        if getattr(source, "thread_id", None):
+            anchor = getattr(event, "reply_to_message_id", None)
+        else:
+            anchor = _reply_anchor_for_event(event)
+        anchor = str(anchor or "").strip()
+        return anchor or None
+
+    @staticmethod
     def _reply_anchor_ref(event: MessageEvent) -> Any | None:
-        anchor = str(getattr(event, "reply_to_message_id", "") or "").strip()
-        if not anchor:
-            return None
+        anchor = FeishuAdapter._reply_anchor_value(event)
         return feishu_hashed_ref("feishu_reply_anchor", anchor)
 
     @staticmethod
@@ -4691,10 +4700,7 @@ class FeishuAdapter(BasePlatformAdapter):
         )
         expected_contract = self._build_current_conversation_contract(
             normalized,
-            reply_anchor_ref=feishu_hashed_ref(
-                "feishu_reply_anchor",
-                reply_to_message_id,
-            ),
+            reply_anchor_ref=self._reply_anchor_ref(normalized),
             expected_contract=None,
         )
         setattr(

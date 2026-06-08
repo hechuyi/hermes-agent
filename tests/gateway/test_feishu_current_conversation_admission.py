@@ -19,7 +19,7 @@ from gateway.feishu_contracts import (
     build_feishu_conversation_contract,
     feishu_hashed_ref,
 )
-from gateway.platforms.base import MessageEvent, MessageType
+from gateway.platforms.base import MessageEvent, MessageType, _reply_anchor_for_event
 from gateway.platforms.feishu import FeishuAdapter
 from gateway.session import SessionSource, build_session_key
 
@@ -134,7 +134,7 @@ def _raw_message_data(
     source: SessionSource,
     *,
     text: str = "/status",
-    message_id: str = "om_fake_001",
+    message_id: str | None = "om_fake_001",
     reply_to_message_id: str | None = "om_parent_fake_001",
 ) -> SimpleNamespace:
     return SimpleNamespace(
@@ -245,11 +245,13 @@ async def test_private_dm_continuity_and_current_reply_binding_failures(tmp_path
     )
     adapter._build_reply_message_body = lambda **_kwargs: object()
     adapter._build_reply_message_request = lambda *_args: object()
+    reply_anchor = _reply_anchor_for_event(_event(source))
+    assert reply_anchor == source.message_id
     await adapter._send_raw_message(
         chat_id=source.chat_id,
         msg_type="text",
         payload='{"text":"ok"}',
-        reply_to="om_parent_fake_001",
+        reply_to=reply_anchor,
         metadata={"feishu_current_admission": result.record},
     )
     assert adapter._client.im.v1.message.reply.call_count == 1
@@ -273,7 +275,7 @@ async def test_private_dm_continuity_and_current_reply_binding_failures(tmp_path
     assert denied.failure_class == "feishu_current_route_evidence_stale"
 
     denied = adapter._admit_current_conversation_event(
-        _event(source, reply_to_message_id=None),
+        _event(source, message_id=None, reply_to_message_id=None),
         transport_kind="dm",
         expected_contract=contract,
     )
@@ -354,7 +356,11 @@ def test_thread_reply_preserves_thread_reply_to_anchor_and_fails_when_detached_o
 
     assert result.ok is True
     assert result.record["thread_anchor_ref"] == contract.thread_anchor_ref.value_hash
-    assert result.record["reply_anchor_ref"].startswith("sha256:")
+    parent_ref = feishu_hashed_ref("feishu_reply_anchor", "om_thread_parent_fake")
+    current_ref = feishu_hashed_ref("feishu_reply_anchor", source.message_id)
+    assert parent_ref is not None and current_ref is not None
+    assert result.record["reply_anchor_ref"] == parent_ref.value_hash
+    assert result.record["reply_anchor_ref"] != current_ref.value_hash
 
     detached = adapter._admit_current_conversation_event(
         _event(source, mentions_bot=True, detached_thread=True),
@@ -468,6 +474,59 @@ async def test_websocket_inbound_preserves_websocket_transport_in_admission(tmp_
     assert len(captured) == 1
     admission = getattr(captured[0], "feishu_current_conversation_admission")
     assert admission["transport_kind"] == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_root_dm_inbound_current_message_id_is_admitted_with_actual_reply_anchor(tmp_path):
+    adapter = _adapter(tmp_path)
+    source = _source(chat_id="oc_fake_dm", chat_type="dm")
+    captured = await _prepare_near_real_inbound(adapter, source)
+    data = _raw_message_data(
+        source,
+        text="/status",
+        message_id="om_root_fake_001",
+        reply_to_message_id=None,
+    )
+    data.event.message.upper_message_id = None
+    data.event.message.root_id = None
+    data.event.message.thread_id = None
+
+    await adapter._handle_message_event_data(data)
+
+    assert len(captured) == 1
+    event = captured[0]
+    assert event.message_id == "om_root_fake_001"
+    assert event.reply_to_message_id is None
+    assert event.source.thread_id is None
+    actual_reply_anchor = _reply_anchor_for_event(event)
+    assert actual_reply_anchor == "om_root_fake_001"
+    expected_ref = feishu_hashed_ref("feishu_reply_anchor", actual_reply_anchor)
+    assert expected_ref is not None
+    admission = getattr(event, "feishu_current_conversation_admission")
+    assert admission["reply_anchor_ref"] == expected_ref.value_hash
+    assert admission["reply_anchor_ref"].startswith("sha256:")
+    assert "om_root_fake_001" not in str(admission)
+
+
+@pytest.mark.asyncio
+async def test_root_dm_inbound_without_current_or_parent_anchor_denies_before_dispatch(tmp_path):
+    adapter = _adapter(tmp_path)
+    source = _source(chat_id="oc_fake_dm", chat_type="dm")
+    captured = await _prepare_near_real_inbound(adapter, source)
+    data = _raw_message_data(
+        source,
+        text="/status",
+        message_id=None,
+        reply_to_message_id=None,
+    )
+    data.event.message.upper_message_id = None
+    data.event.message.root_id = None
+    data.event.message.thread_id = None
+
+    await adapter._handle_message_event_data(data)
+
+    adapter.handle_message.assert_not_awaited()
+    assert captured == []
 
 
 @pytest.mark.asyncio
