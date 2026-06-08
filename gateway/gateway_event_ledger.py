@@ -28,7 +28,6 @@ LEDGER_FILENAME = "gateway_event_ledger.json"
 LOCK_FILENAME = ".gateway_event_ledger.lock"
 _DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
 _MAX_COMPRESSION_REJECTIONS = 1000
-_MAX_FEISHU_AUDIT_EVENTS = 1000
 _STATE_DICT_SECTIONS: tuple[str, ...] = (
     "inbounds",
     "deliveries",
@@ -427,8 +426,6 @@ def _apply_feishu_audit_event(
     record = dict(event)
     audit_events = state["feishu_audit_events"]
     audit_events.append(record)
-    if len(audit_events) > _MAX_FEISHU_AUDIT_EVENTS:
-        del audit_events[: len(audit_events) - _MAX_FEISHU_AUDIT_EVENTS]
     return {"type": "feishu_audit_event_record", "record": record}
 
 

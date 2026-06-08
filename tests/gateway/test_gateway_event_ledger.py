@@ -476,6 +476,26 @@ def test_feishu_audit_event_families_are_persisted_as_sanitized_records(
     assert state["feishu_audit_events"] == [event]
 
 
+def test_feishu_audit_events_are_append_only_without_rolling_truncation(tmp_path):
+    for index in range(1001):
+        event = _feishu_audit_event(
+            "feishu_action_requested",
+            correlation_id=f"corr-{index}",
+            event_hash=f"fnv1a64:{index:016x}",
+            action_hash=f"fnv1a64:{index + 1:016x}",
+            action="reply",
+        )
+        result = apply_gateway_event(event, tmp_path)
+        assert result.ok is True
+
+    with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+
+    assert len(state["feishu_audit_events"]) == 1001
+    assert state["feishu_audit_events"][0]["correlation_id"] == "corr-0"
+    assert state["feishu_audit_events"][-1]["correlation_id"] == "corr-1000"
+
+
 @pytest.mark.parametrize(
     "event",
     [
