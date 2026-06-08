@@ -10,6 +10,7 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.gateway_event_ledger import LEDGER_FILENAME, apply_gateway_event
+from gateway.platforms.base import MessageEvent
 from gateway.platforms.base import MessageType
 from gateway.platforms.feishu import FeishuAdapter
 
@@ -128,6 +129,13 @@ def _ledger_state(tmp_path) -> dict:
     return json.loads(ledger_path.read_text(encoding="utf-8"))
 
 
+async def _flush_all_batches(adapter: FeishuAdapter) -> None:
+    for key in list(adapter._pending_text_batches):
+        await adapter._flush_text_batch_now(key)
+    for key in list(adapter._pending_media_batches):
+        await adapter._flush_media_batch_now(key)
+
+
 @pytest.mark.asyncio
 async def test_processing_same_inbound_event_id_twice_dispatches_once(tmp_path):
     adapter = _adapter(tmp_path)
@@ -241,6 +249,53 @@ async def test_concurrent_duplicate_admission_has_one_winner_and_one_duplicate(t
 
 
 @pytest.mark.asyncio
+async def test_duplicate_text_fanout_is_dropped_before_batch_merge(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._extract_message_content = AsyncMock(
+        return_value=("hello", MessageType.TEXT, [], [], [])
+    )
+    data = _raw_message_data(
+        event_id="evt_text_fanout_fake",
+        message_id="om_text_fanout_fake",
+        text="hello",
+    )
+
+    await adapter._handle_message_event_data(data, transport_kind="websocket")
+    await adapter._handle_message_event_data(data, transport_kind="webhook")
+    await _flush_all_batches(adapter)
+
+    adapter.handle_message.assert_awaited_once()
+    dispatched = adapter.handle_message.await_args.args[0]
+    assert dispatched.text == "hello"
+    state = _ledger_state(tmp_path)
+    assert len(state["inbounds"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_media_fanout_is_dropped_before_batch_append(tmp_path):
+    adapter = _adapter(tmp_path)
+    adapter._extract_message_content = AsyncMock(
+        return_value=("", MessageType.PHOTO, ["/tmp/image.png"], ["image/png"], [])
+    )
+    data = _raw_message_data(
+        event_id="evt_media_fanout_fake",
+        message_id="om_media_fanout_fake",
+        text="",
+    )
+
+    await adapter._handle_message_event_data(data, transport_kind="websocket")
+    await adapter._handle_message_event_data(data, transport_kind="webhook")
+    await _flush_all_batches(adapter)
+
+    adapter.handle_message.assert_awaited_once()
+    dispatched = adapter.handle_message.await_args.args[0]
+    assert dispatched.media_urls == ["/tmp/image.png"]
+    assert dispatched.media_types == ["image/png"]
+    state = _ledger_state(tmp_path)
+    assert len(state["inbounds"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_legacy_non_brokered_callback_replay_fails_closed_without_dispatch(tmp_path):
     adapter = _adapter(tmp_path)
     callback = SimpleNamespace(
@@ -267,4 +322,56 @@ def test_idempotency_unknown_fails_closed_without_persistent_success_state(tmp_p
 
     assert result.ok is False
     assert result.failure_class == "feishu_inbound_idempotency_unknown"
+    assert _ledger_state(tmp_path) == before
+
+
+def test_current_inbound_without_any_idempotency_evidence_fails_closed(tmp_path):
+    event = _inbound_event(message_id="om_no_evidence_fake")
+    for field in (
+        "canonical_event_ref",
+        "route_partition_key",
+        "contract_hash",
+        "transport_kind",
+    ):
+        event.pop(field)
+    before = _ledger_state(tmp_path)
+
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "feishu_inbound_idempotency_unknown"
+    assert _ledger_state(tmp_path) == before
+
+
+@pytest.mark.asyncio
+async def test_missing_current_admission_evidence_fails_before_batching_or_dispatch(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    source = adapter.build_source(
+        chat_id="oc_fake_dm",
+        chat_name="Feishu Current",
+        chat_type="dm",
+        user_id="ou_actor_fake_001",
+        user_name="Current User",
+        user_id_alt="on_actor_fake_001",
+    )
+    event = MessageEvent(
+        text="hello",
+        message_type=MessageType.TEXT,
+        source=source,
+        raw_message={},
+        message_id="om_missing_admission_fake",
+        timestamp=datetime.now(),
+    )
+    adapter._admit_current_conversation_for_event = lambda _event: True
+    before = _ledger_state(tmp_path)
+
+    await adapter._dispatch_inbound_event(event)
+
+    adapter.handle_message.assert_not_awaited()
+    assert len(adapter._pending_text_batches) == 0
+    assert len(adapter._pending_text_batch_tasks) == 0
+    assert len(adapter._pending_media_batches) == 0
+    assert len(adapter._pending_media_batch_tasks) == 0
     assert _ledger_state(tmp_path) == before

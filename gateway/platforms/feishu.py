@@ -3959,8 +3959,9 @@ class FeishuAdapter(BasePlatformAdapter):
             if isinstance(admission_record, dict):
                 token = _FEISHU_CURRENT_ADMISSION_CONTEXT.set(dict(admission_record))
             try:
-                if not await self._apply_inbound_gateway_event(event):
-                    return
+                if not getattr(event, "feishu_inbound_gateway_event_preapplied", False):
+                    if not await self._apply_inbound_gateway_event(event):
+                        return
                 await self.handle_message(event)
             except InvalidLiveSessionSource as exc:
                 logger.warning("[Feishu] Ignoring invalid live inbound source: reason=%s", exc.reason)
@@ -4418,6 +4419,12 @@ class FeishuAdapter(BasePlatformAdapter):
                     "transport_kind": str(admission.get("transport_kind") or ""),
                 }
             )
+        elif not getattr(
+            event,
+            "feishu_current_inbound_requires_idempotency_evidence",
+            False,
+        ) and not hasattr(event, "feishu_current_conversation_contract"):
+            event_payload["idempotency_evidence_state"] = "legacy_unscoped"
         return await self._apply_gateway_event(event_payload)
 
     @staticmethod
@@ -4756,6 +4763,10 @@ class FeishuAdapter(BasePlatformAdapter):
         """Apply Feishu-specific burst protection before entering the base adapter."""
         if not self._admit_current_conversation_for_event(event):
             return
+        setattr(event, "feishu_current_inbound_requires_idempotency_evidence", True)
+        if not await self._apply_inbound_gateway_event(event):
+            return
+        setattr(event, "feishu_inbound_gateway_event_preapplied", True)
         if event.message_type == MessageType.TEXT and not event.is_command():
             await self._enqueue_text_event(event)
             return

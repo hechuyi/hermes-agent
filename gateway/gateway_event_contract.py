@@ -97,6 +97,9 @@ _SAFE_FEISHU_RECEIVE_ID_RE = re.compile(r"^[A-Za-z0-9_@.+-]{1,256}$")
 _SAFE_DESCRIPTOR_UUID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,127}$")
 _SAFE_FEISHU_EVENT_ID_RE = _SAFE_DESCRIPTOR_UUID_RE
 _SAFE_SESSION_ROUTE_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,256}$")
+FEISHU_INBOUND_TRANSPORT_KINDS = frozenset(
+    {"webhook", "websocket", "dm", "group", "thread"}
+)
 _FEISHU_PATCH_MESSAGE_PATH_RE = re.compile(
     r"^/open-apis/im/v1/messages/([A-Za-z0-9_]{1,256})$"
 )
@@ -437,7 +440,7 @@ def _validate_inbound_admission(action: Mapping[str, Any]) -> dict[str, Any]:
             record["contract_hash"]
         ):
             raise ValueError("invalid contract hash")
-        if record.get("transport_kind") not in {"webhook", "websocket", "dm", "group", "thread"}:
+        if record.get("transport_kind") not in FEISHU_INBOUND_TRANSPORT_KINDS:
             raise ValueError("invalid transport kind")
     return {
         "type": "inbound_admission",
