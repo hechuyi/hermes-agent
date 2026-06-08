@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement Package A from `docs/plans/2026-06-08-feishu-native-hermes-design.md`: Feishu-native contract foundations, audit/preflight readiness primitives, and fail-closed gates for every legacy Feishu bypass path, without enabling P1/P2/P3 live Feishu behavior.
+**Goal:** Implement Package A from `docs/plans/2026-06-08-feishu-native-hermes-design.md` and `docs/plans/2026-06-08-feishu-native-hermes-master-plan.md`: Feishu-native contract foundations, audit/preflight readiness primitives, and fail-closed gates for every legacy Feishu bypass path, without enabling any Package B-G live Feishu behavior.
 
 **Architecture:** Keep Package A mostly pure and fail-closed. Add focused contract modules under `gateway/`, extend the existing ledger with sanitized audit events, add an out-of-band broker context that ordinary model/tool JSON cannot forge, and route legacy Feishu doc/comment/action paths through a shared guard that denies by default.
 
@@ -17,8 +17,8 @@
 - Create `gateway/feishu_legacy_guard.py`: out-of-band broker context and fail-closed checks for legacy Feishu tools/actions.
 - Create `gateway/feishu_smoke.py`: pure smoke evidence classifier and TTL/invalidation helpers.
 - Modify `gateway/conversation_scope.py`: add helper(s) needed to build `ConversationContract` without changing existing route semantics.
-- Modify `gateway/platforms/feishu.py`: populate conversation contracts on inbound metadata where feasible; gate descriptor/status-card/generic-card paths; gate approval/update prompt callbacks before side effects unless existing path can provide broker evidence.
-- Modify `gateway/platforms/feishu_comment.py`: require broker context before injecting Feishu doc/drive tools or calling comment-side Feishu operations from agent-driven paths.
+- Modify `gateway/platforms/feishu.py`: populate conversation contracts on inbound metadata where feasible; gate descriptor/status-card/generic-card/reaction paths; gate gateway exec approval-card/update prompt callbacks before side effects unless existing path can provide broker evidence.
+- Modify `gateway/platforms/feishu_comment.py`: require broker context before injecting Feishu doc/drive tools or calling any direct comment-side Feishu API from the handler, including reaction, meta/comment query, list, wiki resolution, reply, add-comment, and cleanup operations.
 - Modify `gateway/gateway_event_contract.py`: add contract/auth/action audit event names and validators.
 - Modify `gateway/gateway_event_ledger.py`: persist new audit event families and preflight them without changing delivery semantics.
 - Modify `tools/feishu_doc_tool.py` and `tools/feishu_drive_tool.py`: keep registration but make handlers/checks fail closed unless out-of-band broker context is present.
@@ -32,9 +32,12 @@
 
 ## Non-negotiable Boundaries
 
-- No P1 live behavior expansion: no new Feishu send UX, no docs/comment read/write enablement, no calendar/task/approval tool enablement.
+- No Package B-G live behavior expansion: no new Feishu send UX, no docs/comment read/write enablement, no authorization-provider-backed business tools, no calendar/task/contact/Feishu approval instance tools, no Base/Sheets data-object behavior, no Drive/wiki search, no cross-chat/admin behavior, no Minutes/VC/Mail/Slides/Whiteboard/Apps/Miaoda behavior.
 - No user/model-forgeable broker grants: `_feishu_broker_grant` or similar user JSON keys must not bypass guards.
 - Every legacy Feishu API path either has out-of-band broker context or fails before SDK call, synthetic command injection, or success ledger write.
+- Denial audit write failure is not a successful denial. The denied path must return a typed failed/unknown/not-ready result and must not continue to the side effect.
+- Logs have the same redaction standard as ledger events: no raw token, raw Feishu ID, raw document token, raw message/document/Feishu approval content, raw file path, or raw API response body.
+- Existing positive tests for legacy Feishu side effects must become broker-context-only positives; skipped/deferred tests must not hide a legacy bypass.
 - Every new behavior follows RED -> GREEN -> commit.
 
 ## Task 1: Canonical Hashes and Core Contract Types
@@ -254,6 +257,8 @@ Cover Package A readiness/preflight classifications:
 - unknown delivery evidence -> not ready/degraded with `unknown_delivery_state`
 - redaction failure -> not ready with `feishu_redaction_failed`
 - legacy-tool bypass denial -> not ready/degraded with `feishu_legacy_tool_requires_broker`
+- unchecked legacy surface -> not ready with `feishu_legacy_surface_unchecked`
+- denial audit write failure -> not ready with `feishu_denial_audit_unavailable`
 
 Run: `uv run --extra dev pytest tests/gateway/test_feishu_readiness.py -q`
 
@@ -265,7 +270,7 @@ Implement `FeishuReadinessEvidence` and `classify_feishu_package_a_readiness`. T
 
 - [ ] **Step 3: Add preflight audit hook tests**
 
-Add tests that audit events from Task 4 can be summarized into the readiness classifier without writing fake business events into the real ledger.
+Add tests that audit events from Task 4 can be summarized into the readiness classifier without writing fake business events into the real ledger. The preflight/readiness summary must include legacy doc/drive/comment/descriptor/status-card/gateway-exec-approval/update-prompt/generic-card/reaction surfaces; a preflight that excludes a known legacy surface must fail closed instead of passing by omission.
 
 Run: `uv run --extra dev pytest tests/gateway/test_feishu_readiness.py tests/gateway/test_gateway_event_ledger.py -q -k "readiness or preflight or feishu_audit"`
 
@@ -382,8 +387,10 @@ Cover:
 - args with `_feishu_broker_grant` do not bypass
 - with out-of-band broker context, old behavior can proceed to existing client checks
 - `tools.registry` entries for legacy Feishu tool names are unavailable through ordinary discovery when broker context is absent
+- the `hermes-feishu` composite toolset cannot make `feishu_doc` or `feishu_drive` available without broker context
 - toolset check aliases cannot make `feishu_doc` or `feishu_drive` available without broker context
 - if a legacy Feishu check is evaluated inside broker context, registry `check_fn` TTL/cache and `model_tools.get_tool_definitions(..., quiet_mode=True)` cache must not keep the tool discoverable after the broker context exits
+- direct `tools.registry.dispatch(...)` and `model_tools.handle_function_call(...)` calls to legacy Feishu tools do not call the injected client without broker context
 
 Run: `uv run --extra dev pytest tests/gateway/test_feishu_legacy_guard.py -q -k "doc or drive"`
 
@@ -395,7 +402,7 @@ Update check functions and handlers to call `require_feishu_broker_context`. Def
 
 - [ ] **Step 3: Write failing comment-handler tests**
 
-Add focused tests proving `feishu_comment` agent/tool injection path does not inject or call legacy Feishu doc/drive tools without broker context.
+Add focused tests proving `feishu_comment` denies before any direct Feishu client call without broker context. This includes add/delete reaction, meta query, comment batch query, list comments, list replies, wiki-token resolution that calls Feishu, agent/tool injection, reply, add whole comment, and delivery cleanup.
 
 Run: `uv run --extra dev pytest tests/gateway/test_feishu_legacy_guard.py -q -k "comment"`
 
@@ -403,11 +410,13 @@ Expected: current handler has no guard.
 
 - [ ] **Step 4: Apply guard to comment handler**
 
-Gate comment-side doc/drive tool client injection and Feishu API actions that are agent/tool side effects. Do not break non-agent event admission tests unless they rely on formerly unsafe behavior; update expectations to typed fail-closed.
+Gate comment-side doc/drive tool client injection and every direct comment-handler Feishu API action before the first client call. Do not break non-agent event admission tests unless they rely on formerly unsafe behavior; update expectations to typed fail-closed.
 
 - [ ] **Step 5: Add audit-write tests for legacy denials**
 
 Assert denied doc/drive/comment paths append `feishu_legacy_tool_denied` audit events through the gateway ledger before returning, and that no success ledger event is written on denial. Returning data sufficient for a caller to write later is not enough.
+
+Also assert denial audit write failure returns a typed failed/unknown/not-ready result rather than a successful denial.
 
 Run: `uv run --extra dev pytest tests/gateway/test_feishu_legacy_guard.py -q -k "audit or denied"`
 
@@ -423,12 +432,13 @@ git add gateway/platforms/feishu_comment.py tools/feishu_doc_tool.py tools/feish
 git commit -m "fix(feishu): gate legacy document tools"
 ```
 
-## Task 9: Gate Legacy Descriptor, Status-card, Approval, Update Prompt, and Generic Card Paths
+## Task 9: Gate Legacy Descriptor, Status-card, Gateway Exec Approval-card, Update Prompt, Generic Card, and Reaction Paths
 
 **Files:**
 - Modify: `gateway/platforms/feishu.py`
 - Extend: `tests/gateway/test_feishu_gateway_descriptor_send.py`
 - Extend: `tests/gateway/test_feishu_approval_buttons.py`
+- May extend: `tests/gateway/test_feishu_gateway_event_apply.py`
 
 - [ ] **Step 1: Write failing descriptor/status-card tests**
 
@@ -438,6 +448,7 @@ Cover:
 - `execute_status_card_action` without broker context fails before descriptor execution
 - no `delivery_sent` is written on denied descriptor/status-card paths
 - denied descriptor/status-card paths append `feishu_legacy_descriptor_denied` audit events before returning; exposing data for a caller to write later is not enough
+- existing positive descriptor/status-card tests are converted to broker-context-only positive tests; skipped/deferred success cases do not hide a no-broker bypass
 
 Run: `uv run --extra dev pytest tests/gateway/test_feishu_gateway_descriptor_send.py -q -k "requires_broker or status_card"`
 
@@ -447,11 +458,11 @@ Expected: current descriptor/status-card paths execute.
 
 Call `require_feishu_broker_context` before descriptor SDK builders or status-card descriptor extraction can produce side effects. Return stable `SendResult(success=False, error=...)`.
 
-- [ ] **Step 3: Write failing approval/update prompt tests**
+- [ ] **Step 3: Write failing gateway exec approval-card/update prompt tests**
 
 Cover:
 
-- approval-button callback without broker evidence cannot resolve gateway approval side effect
+- gateway exec approval-card callback without broker evidence cannot resolve Hermes gateway approval side effect
 - update-prompt callback without broker evidence cannot resolve prompt side effect
 - denial happens before `resolve_gateway_approval`, before audited prompt-card update, and before success ledger write
 - denial appends `feishu_action_denied` audit events before returning; exposing data for a caller to write later is not enough
@@ -461,7 +472,7 @@ Run: `uv run --extra dev pytest tests/gateway/test_feishu_approval_buttons.py -q
 
 Expected: current callbacks can execute legacy side effects.
 
-- [ ] **Step 4: Gate approval/update prompt callbacks**
+- [ ] **Step 4: Gate gateway exec approval-card/update prompt callbacks**
 
 Gate before side effects. If existing synchronous UX must return a callback card, it may return a denial/noop card, but it must not resolve approval/update state or write success ledger without broker context.
 
@@ -482,16 +493,35 @@ Expected: current code routes synthetic command.
 
 In `_handle_card_action_event`, deny before `synthetic_text = f"/card {action_tag}"` unless broker context is active.
 
-- [ ] **Step 7: Run GREEN and commit**
+- [ ] **Step 7: Write failing reaction callback tests**
+
+Cover:
+
+- reaction callback without broker context does not route a synthetic `reaction:*` message event
+- reaction callback cannot issue object grants or object authorization evidence
+- denial happens before synthetic event submission and before success ledger write
+- denial appends `feishu_legacy_descriptor_denied` or a dedicated `feishu_reaction_denied` audit event before returning
+- reaction replay/duplicate handling still prevents duplicate side effects
+
+Run: `uv run --extra dev pytest tests/gateway/test_feishu_gateway_event_apply.py tests/gateway/test_feishu_approval_buttons.py -q -k "reaction or requires_broker"`
+
+Expected: current code routes synthetic reaction text.
+
+- [ ] **Step 8: Gate reaction path**
+
+Represent reactions as typed event/action intent with route/session/operator binding or deny before synthetic text event submission. Reactions must not grant object authority.
+
+- [ ] **Step 9: Run GREEN and commit**
 
 Run:
 
 ```bash
 uv run --extra dev pytest \
   tests/gateway/test_feishu_gateway_descriptor_send.py \
+  tests/gateway/test_feishu_gateway_event_apply.py \
   tests/gateway/test_feishu_approval_buttons.py \
-  -q -k "requires_broker or status_card or approval or update_prompt or generic_card"
-git add gateway/platforms/feishu.py tests/gateway/test_feishu_gateway_descriptor_send.py tests/gateway/test_feishu_approval_buttons.py
+  -q -k "requires_broker or status_card or approval or update_prompt or generic_card or reaction"
+git add gateway/platforms/feishu.py tests/gateway/test_feishu_gateway_descriptor_send.py tests/gateway/test_feishu_gateway_event_apply.py tests/gateway/test_feishu_approval_buttons.py
 git commit -m "fix(feishu): gate legacy card actions"
 ```
 
@@ -513,6 +543,7 @@ uv run --extra dev pytest \
   tests/gateway/test_feishu_legacy_guard.py \
   tests/gateway/test_gateway_event_ledger.py \
   tests/gateway/test_feishu_gateway_descriptor_send.py \
+  tests/gateway/test_feishu_gateway_event_apply.py \
   tests/gateway/test_feishu_approval_buttons.py \
   -q
 ```
@@ -532,10 +563,10 @@ Run:
 ```bash
 BASE=$(git merge-base HEAD origin/fix/live-gateway-hermes-tools)
 git diff --name-only "$BASE"..HEAD
-rg -n "calendar|task|approval|Base|Sheets|Drive search|create event|approve/reject" gateway tools tests/gateway
+rg -n "calendar|task|contact|feishu_approval_instance|Base|Sheets|Drive search|wiki search|create event|approve/reject|directory search|cross-chat|group admin|Minutes|VC|Mail|Slides|Whiteboard|Apps|Miaoda|batch|export|room booking" gateway tools tests/gateway
 ```
 
-Expected: no new P2/P3 live enablement. Existing references may remain only where they are being gated or tested for denial. If `git merge-base` cannot identify an upstream base, stop and require an explicit base commit instead of falling back to the last local commit.
+Expected: no new Package B-G live enablement. Existing references may remain only where they are being gated, represented as offline contracts, classified for readiness/smoke, or tested for denial. If `git merge-base` cannot identify an upstream base, stop and require an explicit base commit instead of falling back to the last local commit.
 
 - [ ] **Step 4: Commit verification fixes if needed**
 

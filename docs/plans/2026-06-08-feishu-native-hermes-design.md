@@ -23,19 +23,19 @@ Relevant existing surfaces:
 
 Hermes should become "Hermes inside Feishu", not "Hermes calling a Feishu CLI". The runtime capability must be internal to Hermes: typed contracts, policy decisions, object capability grants, audited action dispatch, renderer plans, and Feishu API execution behind the gateway guard. `lark-cli` may remain useful for development, manual diagnostics, or one-off ops, but it must not be the runtime authority model.
 
-The right MVP is not a universal Feishu workspace assistant. The right MVP is a current-conversation Feishu-native shell: correct chat/thread/session identity, native replies, stable message rendering, controlled attachment handling, and complete delivery evidence. Feishu business objects such as docs, comments, calendar events, tasks, approvals, Base, Sheets, Drive search, group administration, and organization contacts should be added only after object-level capability and audit are in place.
+The right MVP is not a universal Feishu workspace assistant. The right MVP is a current-conversation Feishu-native shell: correct chat/thread/session identity, native replies, stable message rendering, controlled attachment handling, and complete delivery evidence. Feishu business objects such as docs, comments, calendar events, tasks, Feishu approval instances, Base, Sheets, Drive search, group administration, and organization contacts should be added only after object-level capability and audit are in place.
 
 This design also avoids model catalog churn. It does not encode the user's current accessible model/channel state as a Hermes product constraint, and it does not add new model-selection behavior.
 
 ## Non-negotiable Invariants
 
-1. App token is not user authorization. Feishu app credentials prove bot/app capability only. They do not authorize reading a user's calendar, task list, approval queue, document, or arbitrary Drive object.
+1. App token is not user authorization. Feishu app credentials prove bot/app capability only. They do not authorize reading a user's calendar, task list, Feishu approval queue, document, or arbitrary Drive object.
 
 2. Unknown is not success. Missing message IDs, unsupported descriptor kinds, unknown Feishu API responses, stale smoke evidence, ledger write failures, truncated outputs, route mismatches, and unverified delivery outcomes must produce typed `unknown`, `failed`, `blocked`, or `not_ready` states.
 
 3. Gateway final guard remains authoritative, but it is not the only guard. Any action that can create side effects must be authorized before the side effect is attempted. Final guard then verifies the result transition and prevents false success.
 
-4. Feishu object discovery is not Feishu object authorization. A doc link, file key, comment token, calendar ID, task ID, or approval instance ID found in an event is only a candidate object reference. It does not grant read or write permission.
+4. Feishu object discovery is not Feishu object authorization. A doc link, file key, comment token, calendar ID, task ID, or Feishu approval instance ID found in an event is only a candidate object reference. It does not grant read or write permission.
 
 5. Conversation context may be shared; authority is not shared. Group/thread semantic context can be shared by design, but tool authorization must remain bound to actor, object, route, action, expiry, and policy version.
 
@@ -43,11 +43,17 @@ This design also avoids model catalog churn. It does not encode the user's curre
 
 7. No task-card-first architecture. Cards and buttons are allowed only as interaction surfaces for typed actions. They are not the source of truth for state, authorization, or delivery success.
 
-8. User authorization evidence is mandatory for user-domain objects. Actor identity, app token, object discovery, SDK availability, tool registration, or model availability cannot independently issue a grant. Calendar, task, approval, document, Drive, Base, Sheets, and file-export operations require explicit `AuthorizationEvidence`.
+8. User authorization evidence is mandatory for user-domain objects. Actor identity, app token, object discovery, SDK availability, tool registration, or model availability cannot independently issue a grant. Calendar, task, Feishu approval instance, document, Drive, Base, Sheets, and file-export operations require explicit `AuthorizationEvidence`.
 
 9. Legacy Feishu tools cannot bypass the broker. Existing Feishu document, Drive, comment, descriptor, and status-card execution paths must either be routed through `FeishuActionContract` and `ObjectCapabilityGrant`, or fail closed before they can call Feishu APIs.
 
 10. Persistent grants are not an early-phase capability. P0 through P3 may use one-time or short session grants only. Persistent grants move to a later separately approved design with revocation, reauthentication, use limits, policy invalidation, and token-rotation semantics.
+
+11. Broker context is out-of-band authority. It must be created by Hermes policy code in process-local state and cannot be represented by kwargs, environment variables, user JSON, serialized card payloads, or model-visible fields such as `_feishu_broker_grant`.
+
+12. Denial audit is part of the denial. If a denied Feishu side-effect path cannot append its sanitized denial event, it must return a typed failed/unknown/not-ready state and must not continue to the side effect.
+
+13. Logs and ledgers share the same redaction standard. Neither may contain app secrets, tenant tokens, user tokens, private keys, raw Feishu IDs, raw document tokens, raw message bodies, raw document content, raw Feishu approval content, unredacted file paths, or raw API response bodies.
 
 ## Architecture
 
@@ -101,7 +107,7 @@ Canonical hash rules:
 
 Identity inconsistency across `open_id`, `user_id`, and `union_id`, missing platform account identity, name-only fallback, or ambiguous route evidence must fail closed and must not generate object grants. Only `scope_assignment_status = scoped` with matching current route, route snapshot, ledger lock, and contract hash may issue a grant.
 
-Shared context and authority must be separate. A group/thread transcript may use `shared_context_scope_id` for semantic continuity, but `authority_subject_ref` remains per actor or per approved authority subject. Shared context never implies shared object capability, shared approval, or shared write permission.
+Shared context and authority must be separate. A group/thread transcript may use `shared_context_scope_id` for semantic continuity, but `authority_subject_ref` remains per actor or per approved authority subject. Shared context never implies shared object capability, shared Feishu approval-instance authority, or shared write permission.
 
 Adapter-owned raw details such as original Feishu payloads, receive ID type, bot open ID, mention parsing, card payload parsing, upload tokens, and SDK-specific response shapes should remain adapter-owned. Core and ledger should consume only normalized, sanitized, contract-shaped evidence.
 
@@ -160,17 +166,18 @@ Execution must go through the gateway guard and Feishu action broker. The broker
 
 Interactive cards and buttons are part of P1 rendering primitives, but only as typed action surfaces. A card may display a confirmation, clarification, or post-click state, but it is not the source of truth for authorization, delivery, or task state. Button payloads must contain only opaque action IDs and digests; they must not carry raw object tokens, Feishu API request bodies, or free-form tool arguments.
 
-Existing Feishu descriptor, approval-button, status-card, and generic card callback paths must be closed over this broker. During P0 they should either emit `FeishuActionContract` and pass broker validation, or return a typed failure before any SDK call or synthetic command injection. A mixed world where new brokered actions and legacy descriptor-side effects coexist is not acceptable.
+Existing Feishu descriptor, gateway exec approval-card, status-card, and generic card callback paths must be closed over this broker. During P0 they should either emit `FeishuActionContract` and pass broker validation, or return a typed failure before any SDK call or synthetic command injection. A mixed world where new brokered actions and legacy descriptor-side effects coexist is not acceptable.
 
 Legacy Feishu action migration table:
 
 | Existing path | P0 requirement |
 | --- | --- |
 | Descriptor send/update execution | Emit `FeishuActionContract` and broker through descriptor allowlist, or fail closed before SDK call |
-| Approval button callbacks | Emit `FeishuActionContract` with same operator, route, session, payload hash, and expiry, or fail closed |
+| Gateway exec approval-card callbacks | Emit `FeishuActionContract` with same operator, route, session, payload hash, and expiry, or fail closed |
 | Status-card patch/update actions | Emit typed action/update intent; card state is not authoritative |
 | Generic card action to synthetic `/card ...` command | Replace with `ActionIntent`; synthetic command injection must be disabled or fail closed |
 | Comment/doc/Drive tool-side Feishu calls | Require `AuthorizationEvidence` and object grant through broker |
+| Reaction callbacks routed as synthetic text | Represent as typed event/action intent or fail closed; reactions cannot issue object grants or bypass route/session/operator checks |
 
 ### 3. AuthorizationEvidence
 
@@ -212,7 +219,7 @@ Missing, stale, revoked, ambiguous, object-mismatched, actor-mismatched, route-m
 
 ### 4. ObjectCapabilityGrant
 
-`ObjectCapabilityGrant` is required for Feishu object operations. It is not required for plain current-conversation IM replies, but it is required when the system touches docs, comments, attachments beyond current safe upload, calendar, tasks, approvals, Drive, Base, Sheets, contacts, group membership, or any cross-chat operation.
+`ObjectCapabilityGrant` is required for Feishu object operations. It is not required for plain current-conversation IM replies, but it is required when the system touches docs, comments, attachments beyond current safe upload, calendar, tasks, Feishu approval instances, Drive, Base, Sheets, contacts, group membership, or any cross-chat operation.
 
 Minimum grant fields:
 
@@ -265,7 +272,7 @@ The existing delivery ledger should be extended with Feishu authorization and ob
 - `feishu_legacy_tool_denied`
 - `feishu_legacy_descriptor_denied`
 
-Records should keep stable, non-sensitive evidence: hashed app/account, hashed actor, hashed authority subject, hashed chat/thread/object references, action, scope, policy version, rule source, authorization evidence kind, grant kind, decision, failure class, correlation ID, descriptor hash, payload hash, redaction count, and classified Feishu API code. Records must not store app secrets, tenant tokens, user tokens, document tokens, private keys, raw message bodies, raw document content, approval content, or unredacted file paths.
+Records should keep stable, non-sensitive evidence: hashed app/account, hashed actor, hashed authority subject, hashed chat/thread/object references, action, scope, policy version, rule source, authorization evidence kind, grant kind, decision, failure class, correlation ID, descriptor hash, payload hash, redaction count, and classified Feishu API code. Records must not store app secrets, tenant tokens, user tokens, document tokens, private keys, raw message bodies, raw document content, raw Feishu approval content, or unredacted file paths.
 
 ## Phased Plan
 
@@ -284,8 +291,10 @@ Required outcomes:
 - `session_locked` binds scope, route, and session, not only a session key.
 - Renderer/action plans carry authorization-relevant contract hashes.
 - Authorization evidence defaults to deny; object grants default to deny.
-- Existing `tools/feishu_doc_tool.py`, `tools/feishu_drive_tool.py`, Feishu comment handlers, descriptor sends, approval buttons, status-card paths, and generic card-action-to-`/card` paths are either broker-routed or fail closed before SDK calls or synthetic command injection.
-- Tool registry tests prove that legacy Feishu tool names cannot bypass the broker by being discovered as ordinary tools.
+- Existing `tools/feishu_doc_tool.py`, `tools/feishu_drive_tool.py`, Feishu comment handlers, descriptor sends, gateway exec approval-card callbacks, status-card paths, generic card-action-to-`/card` paths, and reaction callbacks are either broker-routed or fail closed before SDK calls, direct comment-handler client calls, synthetic command injection, local state mutation, or success ledger writes.
+- Tool registry tests prove that legacy Feishu tool names cannot bypass the broker by being discovered as ordinary tools, included through `hermes-feishu`, cached by quiet-mode tool definition lookup, cached through registry check TTL, or invoked through direct dispatch.
+- Denied legacy paths write sanitized denial audit before returning; audit-write failure is a typed failure/unknown/not-ready state, not a successful denial.
+- Log redaction tests cover Feishu denial and API failure paths, including comment-handler raw response logging.
 - Ledger preflight can prove schema compatibility and fail closed on malformed state.
 - Ledger schema version migration defines how old records are read. Old v1 records lacking contract/scope evidence cannot authorize grants and must be marked `legacy_unscoped` or `ambiguous`.
 - Tests cover route mismatch, route snapshot mismatch, operator mismatch, missing capability, identity ambiguity, legacy session, implicit compression switch, delivery unknown, redaction failure, unsupported descriptor, and legacy tool bypass denial.
@@ -299,7 +308,7 @@ Required outcomes:
 - `RenderPlan` supports part kind, feature set, chunk group/order, fallback matrix, attachment source class, button action digest, operator scope, post-click update policy, and delivery expectation.
 - Interactive card/button primitives exist as typed action surfaces, not task-state authorities.
 - Existing adapter-local rendering paths can be mapped into `RenderPlan` or are explicitly scoped out.
-- Descriptor, approval-button, status-card, and generic card callback payloads are represented as `FeishuActionContract`/`ActionIntent` fixtures with opaque payloads, same-operator scope, same-route/session binding, expiry, idempotency, and no side effects before broker approval.
+- Descriptor, gateway exec approval-card, status-card, generic card, and reaction callback payloads are represented as `FeishuActionContract`/`ActionIntent` fixtures with opaque payloads, same-operator scope, same-route/session binding, expiry, idempotency, and no side effects before broker approval.
 - Fallback behavior is deterministic: if post falls back to markdown or text, the plan declares whether buttons/actions are preserved, replaced, or dropped.
 - Offline snapshots cover post, markdown, plain text, code blocks, tables, links, long chunking, image/file parts, and interactive buttons.
 
@@ -324,7 +333,7 @@ Attachment handling must be explicitly split:
 
 Safe Hermes outputs must have provenance closure: output root allowlist, producing tool/action ID, source grant handles when source data came from Feishu objects, content hash, sensitivity classification, redaction status, and retention policy. A file produced from historical cache, local filesystem, downloaded document, or sensitive tool output is not safe merely because it is located under a Hermes directory.
 
-P1 should not include calendar, task, approval, Drive search, Base, Sheets, organization contact search, group management, or generic OpenAPI execution.
+P1 should not include calendar, task, Feishu approval instance, Drive search, Base, Sheets, organization contact search, group management, or generic OpenAPI execution.
 
 ### P2: Current-event Docs and Comments
 
@@ -346,9 +355,11 @@ Draft and commit must be separate:
 
 Authorization evidence can come from same-actor explicit confirmation plus verified object ACL, user-delegated credential with sufficient document/comment scope, admin policy grant for the object scope, or app-owned object authority. A pasted link, comment token in an event, wiki reverse lookup, or tenant-token API reachability is not enough.
 
-### P3: Calendar, Task, and Approval
+### P3: Calendar, Task, Feishu Approval Instance, and Narrow Contacts
 
 Add business object tools only after P0-P2 security and audit gates are proven.
+
+Terminology is strict in this phase: a Hermes execution-confirmation card is a gateway exec approval card; it is not Feishu approval authorization evidence. A Feishu approval workflow object is a Feishu approval instance and uses separate capability scopes.
 
 Confirmation-only is insufficient for every P3 operation. P3 authorization must come from an allowed evidence combination for the object and action:
 
@@ -358,8 +369,8 @@ Confirmation-only is insufficient for every P3 operation. P3 authorization must 
 | Calendar create/update/invite/room booking | `user_delegated_credential` with the corresponding calendar write, invite, or room-booking scope; or `verified_object_acl` proving the actor has the corresponding write/booking permission; or `admin_policy_grant` naming the actor/object/action scope. Then add same-actor explicit confirmation, exact payload hash, one-time grant, route match, expiry, and idempotency |
 | Task read | `user_delegated_credential` with task read scope, or `verified_object_acl`, or `admin_policy_grant` naming actor/object scope |
 | Task create/update/status change | Task write evidence plus same-actor explicit confirmation, exact payload hash, one-time grant, route match, expiry, and idempotency |
-| Approval read | `user_delegated_credential` with approval read scope, or `verified_object_acl` proving actor can view that instance, or `admin_policy_grant` naming actor/object scope |
-| Approval approve/reject | Approver-authority evidence from `user_delegated_credential` with approval action scope or `verified_object_acl` proving actor is the approver, plus same-actor explicit confirmation, exact payload hash, one-time grant, route match, expiry, and idempotency |
+| Feishu approval instance read | `user_delegated_credential` with approval read scope, or `verified_object_acl` proving actor can view that instance, or `admin_policy_grant` naming actor/object scope |
+| Feishu approval instance approve/reject | Approver-authority evidence from `user_delegated_credential` with approval action scope or `verified_object_acl` proving actor is the approver, plus same-actor explicit confirmation, exact payload hash, one-time grant, route match, expiry, and idempotency |
 
 `explicit_user_confirmation` alone never authorizes P3 read or write. It can only commit an already-authorized payload.
 
@@ -373,14 +384,23 @@ Task:
 - first allow current actor scoped read or explicit object read with valid authorization evidence
 - create/update/status changes require task write authorization evidence, one-time object grant, exact payload hash, same-actor confirmation, route match, expiry, and idempotency key
 
-Approval:
+Feishu approval instances:
 
-- first allow narrowly scoped read of explicitly referenced or actor-owned approval items only with valid authorization evidence
+- first allow narrowly scoped read of explicitly referenced or actor-owned Feishu approval items only with valid authorization evidence
 - approve/reject is higher risk than task or calendar writes and must use a stricter, separate capability scope
-- approval write actions must not be included in a generic confirmation flow
-- approval write actions require exact payload hash, approver-authority evidence, one-time grant, same-actor confirmation, route match, expiry, idempotency key, and typed denial for insufficient approver authority
+- Feishu approval write actions must not be included in a generic confirmation flow
+- Feishu approval write actions require exact payload hash, approver-authority evidence, one-time grant, same-actor confirmation, route match, expiry, idempotency key, and typed denial for insufficient approver authority
 
-No P3 read path may become tenant-wide read. Calendar, task, and approval metadata are sensitive even when read-only.
+No P3 read path may become tenant-wide read. Calendar, task, and Feishu approval metadata are sensitive even when read-only.
+
+Contacts:
+
+- allow explicit name-to-Feishu-identity resolution only as a dependency of an already authorized calendar, task, or Feishu approval instance action
+- deny directory browsing, organization-wide search, group member enumeration, and group administration in P3
+
+### P3.5: Current-event Data Objects
+
+Base and Sheets are data objects even when read-only. Current-event or explicit-reference read/summary may be considered only after object-level authorization evidence and object capability grants exist. Search, export, write, batch update, formula, dashboard, workflow, and cross-object aggregation remain P4+.
 
 ### P4: Cross-object and Administrative Feishu Capabilities
 
@@ -391,10 +411,11 @@ Only after the earlier phases are stable should Hermes consider:
 - wiki/doc search
 - organization contact lookup beyond explicit resolution
 - group member operations
-- Base and Sheets write APIs
+- Base and Sheets broad read, search, export, write, batch, formula, dashboard, and workflow APIs
 - bulk operations
-- automated approval workflows
+- automated Feishu approval workflows
 - admin or tenant-wide capabilities
+- Minutes/VC, Mail, Slides, Whiteboard, and Apps/Miaoda capabilities
 
 These capabilities remain default off and require explicit policy, object/tenant capability grants, dedicated audit, and real smoke coverage. They should not be exposed as raw OpenAPI passthrough.
 
@@ -505,7 +526,9 @@ P0a acceptance:
 - route snapshot/current route/ledger lock mismatch fails before renderer or SDK execution
 - shared context with a different actor cannot reuse another actor's object grant
 - existing Feishu doc/Drive/comment tools are denied or broker-routed; direct tenant-token calls are not reachable through ordinary tool discovery
-- descriptor sends, approval buttons, status-card updates, and generic card-action-to-`/card` callbacks are broker-routed or fail before SDK calls, synthetic command injection, or success ledger writes
+- descriptor sends, gateway exec approval-card callbacks, status-card updates, generic card-action-to-`/card` callbacks, and reaction callbacks are broker-routed or fail before SDK calls, direct client calls, synthetic command injection, local state mutation, or success ledger writes
+- legacy Feishu tool availability through toolsets, registry check cache, quiet-mode model tool cache, and direct dispatch cannot outlive broker context
+- denial audit write failure blocks the path from reporting success
 - old ledger schema without contract evidence cannot authorize grants
 
 P0b acceptance:
@@ -513,7 +536,7 @@ P0b acceptance:
 - post, markdown, plain, table, code, link, chunked, image/file, and card/button render plans match snapshots
 - fallback matrix states whether action payloads are preserved, replaced, or dropped
 - button action digest, expiry, operator scope, route, and payload hash are present
-- descriptor, approval-button, status-card, and generic card callback fixtures use opaque action IDs, same-operator route/session binding, expiry, idempotency, and payload hash
+- descriptor, gateway exec approval-card, status-card, generic card, and reaction callback fixtures use opaque action IDs, same-operator route/session binding, expiry, idempotency, and payload hash
 - invalid or unsupported render/action descriptors fail before SDK execution, synthetic command injection, or success ledger writes
 
 P1 acceptance:
@@ -538,18 +561,18 @@ P2 acceptance:
 
 P3 acceptance:
 
-- calendar/task/approval read is denied without valid actor-object authorization evidence
+- calendar/task/Feishu approval instance read is denied without valid actor-object authorization evidence
 - tenant-wide read is denied even if app token and SDK are available
 - calendar write, invitation, or room booking is denied when the only evidence is calendar read evidence plus confirmation
-- calendar write, invitation, room booking, task write, and approval write require exact payload hash, same actor confirmation, one-time grant, route match, expiry, and idempotency
-- approval write requires approver-authority evidence and cannot use generic task/calendar confirmation
+- calendar write, invitation, room booking, task write, and Feishu approval write require exact payload hash, same actor confirmation, one-time grant, route match, expiry, and idempotency
+- Feishu approval instance write requires approver-authority evidence and cannot use generic task/calendar confirmation
 
 Cross-cutting acceptance:
 
 - callback, replay, restart, stale queue, resume, and compression paths cannot implicitly switch session
 - policy denied, invalid grant, invalid descriptor, signature/token failure, Feishu 403/404, and redaction failure do not write success events
 - unknown Feishu code, network failure after admission, ledger write failure, output truncation, and missing delivery evidence become typed unknown/failed states
-- logs and audit contain stable hashes and failure classes, not app secrets, tenant tokens, user tokens, document tokens, raw IDs, raw document content, raw approval content, or private file paths
+- logs and audit contain stable hashes and failure classes, not app secrets, tenant tokens, user tokens, document tokens, raw IDs, raw document content, raw Feishu approval content, private file paths, or raw API response bodies
 
 Real Feishu smoke should be opt-in or deploy-gated, not part of ordinary unit CI.
 
@@ -580,7 +603,7 @@ After activating:
 - Do not depend on `lark-cli` for runtime tool execution.
 - Do not expose tenant-wide read/search by default.
 - Do not treat Feishu app token as user authorization.
-- Do not add broad Base/Sheets/Drive/calendar/task/approval writes in MVP.
+- Do not add broad Base/Sheets/Drive/calendar/task/Feishu approval writes in MVP.
 - Do not send arbitrary local files to Feishu without object grant.
 - Do not hardcode current model/channel availability into Hermes behavior.
 - Do not change unrelated NixOS or remote-host configuration.
@@ -601,7 +624,7 @@ Package B:
 2. P1 interactive confirmation/clarification cards through brokered `ActionIntent`.
 3. P1 attachment boundary tests for inbound event files, Hermes outputs with provenance closure, and arbitrary local file denial.
 
-Docs/comments, calendar, task, approval, Drive, Base, Sheets, group management, and cross-chat features are deliberately excluded from the first package.
+Docs/comments, calendar, task, Feishu approval instance, Drive, Base, Sheets, group management, and cross-chat features are deliberately excluded from the first package.
 
 ## Internal Review Status
 
