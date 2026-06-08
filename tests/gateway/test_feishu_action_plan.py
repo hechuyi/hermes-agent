@@ -281,7 +281,7 @@ def test_metadata_hash_does_not_mask_contract_redaction_errors():
     with pytest.raises(FeishuContractError) as exc_info:
         _action(metadata={"open_id_hash": "ou_raw"})
 
-    assert exc_info.value.failure_class == "invalid_hashed_sensitive_ref"
+    assert exc_info.value.failure_class == "feishu_action_metadata_hash_invalid"
 
 
 @pytest.mark.parametrize(
@@ -507,3 +507,107 @@ def test_action_contract_hash_is_opaque_and_stable():
     assert validate_action_contract(contract) == (True, None)
     assert _SHA256_HASH_RE.fullmatch(contract.contract_hash)
     assert contract.contract_hash == equivalent.contract_hash
+
+
+@pytest.mark.parametrize("metadata", ["raw", ["raw"], 1])
+def test_non_mapping_metadata_is_rejected_before_hashing(metadata):
+    _assert_raises_failure(
+        lambda: _action(metadata=metadata),
+        "feishu_action_metadata_invalid",
+    )
+    _assert_raises_failure(
+        lambda: _part("post", metadata=metadata),
+        "feishu_action_metadata_invalid",
+    )
+
+
+def test_none_metadata_is_canonicalized_to_empty_mapping():
+    action = _action(metadata=None)
+    part = _part("post", metadata=None)
+
+    assert action.metadata == {}
+    assert part.metadata == {}
+    assert validate_action_contract(action) == (True, None)
+    assert validate_render_part(part) == (True, None)
+
+
+def test_external_metadata_mutation_cannot_change_constructed_contracts():
+    metadata = {
+        "label": "approve",
+        "nested": {"intent_hash": "sha256:" + "c" * 64},
+        "tags": ["primary"],
+    }
+    action = _action(metadata=metadata)
+    part = _part("post", metadata=metadata)
+    action_hash = action.contract_hash
+    part_hash = part.part_hash
+
+    metadata["label"] = "mutated"
+    metadata["nested"]["intent_hash"] = "raw"
+    metadata["tags"].append("mutated")
+
+    assert action.metadata["label"] == "approve"
+    assert action.metadata["nested"]["intent_hash"] == "sha256:" + "c" * 64
+    assert action.metadata["tags"] == ("primary",)
+    assert part.metadata["label"] == "approve"
+    assert validate_action_contract(action) == (True, None)
+    assert validate_render_part(part) == (True, None)
+    assert action.contract_hash == action_hash
+    assert part.part_hash == part_hash
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "message_id",
+        "file_id",
+        "raw_content",
+        "source_path",
+        "api_path",
+        "http_method",
+        "request_body",
+        "content",
+    ],
+)
+def test_raw_metadata_keys_are_rejected_recursively(key):
+    metadata = {"outer": [{"nested": {key: "raw"}}]}
+
+    _assert_raises_failure(
+        lambda: _action(metadata=metadata),
+        "feishu_action_sensitive_metadata",
+    )
+    _assert_raises_failure(
+        lambda: _part("post", metadata=metadata),
+        "feishu_action_sensitive_metadata",
+    )
+
+
+def test_metadata_hash_keys_must_have_sha256_values_recursively():
+    metadata = {"outer": [{"content_hash": "raw content"}]}
+
+    _assert_raises_failure(
+        lambda: _action(metadata=metadata),
+        "feishu_action_metadata_hash_invalid",
+    )
+    _assert_raises_failure(
+        lambda: _part("post", metadata=metadata),
+        "feishu_action_metadata_hash_invalid",
+    )
+
+
+def test_unknown_action_kind_is_rejected_before_hashing():
+    _assert_raises_failure(
+        lambda: _action(action_kind="menu"),
+        "feishu_action_kind_invalid",
+    )
+
+
+@pytest.mark.parametrize(
+    ("part_type", "action_kind"),
+    [("button", "card"), ("card", "button")],
+)
+def test_card_button_action_kind_must_match_part_type(part_type, action_kind):
+    _assert_raises_failure(
+        lambda: _part(part_type, action_contract=_action(action_kind=action_kind)),
+        "feishu_action_kind_mismatch",
+    )

@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from gateway.feishu_contracts import FeishuContractError, feishu_contract_hash
@@ -32,6 +33,7 @@ _SUPPORTED_PART_TYPES = frozenset(
     }
 )
 _ACTION_PART_TYPES = frozenset({"card", "button"})
+_ACTION_KINDS = frozenset({"card", "button"})
 _ATTACHMENT_PART_TYPES = frozenset({"image", "file"})
 _RENDER_MODES = frozenset({"offline_snapshot"})
 _ATTACHMENT_SOURCE_CLASSES = frozenset(
@@ -68,6 +70,14 @@ _SENSITIVE_METADATA_MARKERS = frozenset(
         "openid",
         "userid",
         "unionid",
+        "messageid",
+        "fileid",
+        "rawcontent",
+        "sourcepath",
+        "apipath",
+        "httpmethod",
+        "requestbody",
+        "content",
     }
 )
 
@@ -85,6 +95,7 @@ class FeishuActionContract:
     contract_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", _canonical_metadata(self.metadata))
         _raise_if_invalid(*_validate_action_contract_fields(self))
         object.__setattr__(
             self,
@@ -118,6 +129,7 @@ class RenderPlanPart:
     part_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", _canonical_metadata(self.metadata))
         _raise_if_invalid(*_validate_render_part_fields(self))
         object.__setattr__(
             self,
@@ -195,6 +207,8 @@ def _validate_render_part_fields(part: RenderPlanPart) -> tuple[bool, str | None
         return False, "feishu_render_fallback_invalid"
     if _contains_raw_tool_material(part.metadata):
         return False, "feishu_action_raw_tool_material"
+    if _contains_invalid_metadata_hash(part.metadata):
+        return False, "feishu_action_metadata_hash_invalid"
     if _contains_sensitive_metadata_key(part.metadata):
         return False, "feishu_action_sensitive_metadata"
     if not _chunk_is_coherent(part):
@@ -217,14 +231,20 @@ def _validate_render_part_fields(part: RenderPlanPart) -> tuple[bool, str | None
         sibling_valid, sibling_failure = _validate_action_sibling_fields(part)
         if not sibling_valid:
             return False, sibling_failure
+        if part.action_contract.action_kind != part.part_type:
+            return False, "feishu_action_kind_mismatch"
     return True, None
 
 
 def _validate_action_contract_fields(
     contract: FeishuActionContract,
 ) -> tuple[bool, str | None]:
+    if contract.action_kind not in _ACTION_KINDS:
+        return False, "feishu_action_kind_invalid"
     if _contains_raw_tool_material(contract.metadata):
         return False, "feishu_action_raw_tool_material"
+    if _contains_invalid_metadata_hash(contract.metadata):
+        return False, "feishu_action_metadata_hash_invalid"
     if _contains_sensitive_metadata_key(contract.metadata):
         return False, "feishu_action_sensitive_metadata"
     if contract.action_digest is None:
@@ -393,6 +413,20 @@ def _contains_sensitive_metadata_key(value: Any) -> bool:
     return False
 
 
+def _contains_invalid_metadata_hash(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if isinstance(key, str) and _normalized_key(key).endswith("hash"):
+                if not _is_hash(item):
+                    return True
+            if _contains_invalid_metadata_hash(item):
+                return True
+        return False
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        return any(_contains_invalid_metadata_hash(item) for item in value)
+    return False
+
+
 def _is_sensitive_raw_metadata_key(key: str) -> bool:
     comparable = _normalized_key(key)
     for marker in _SENSITIVE_METADATA_MARKERS:
@@ -407,6 +441,42 @@ def _normalized_key(key: str) -> str:
 
 def _is_hash(value: Any) -> bool:
     return isinstance(value, str) and _HASH_RE.fullmatch(value) is not None
+
+
+def _canonical_metadata(value: Any) -> Mapping[str, Any]:
+    if value is None:
+        return MappingProxyType({})
+    if not isinstance(value, Mapping):
+        raise FeishuContractError(
+            "Feishu action metadata must be a mapping",
+            failure_class="feishu_action_metadata_invalid",
+        )
+    return _freeze_metadata_mapping(value)
+
+
+def _freeze_metadata_mapping(value: Mapping[Any, Any]) -> Mapping[str, Any]:
+    frozen: dict[str, Any] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise FeishuContractError(
+                "Feishu action metadata keys must be strings",
+                failure_class="feishu_action_metadata_invalid",
+            )
+        frozen[key] = _freeze_metadata_value(item)
+    return MappingProxyType(frozen)
+
+
+def _freeze_metadata_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return _freeze_metadata_mapping(value)
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        return tuple(_freeze_metadata_value(item) for item in value)
+    if isinstance(value, (str, bool, int, float)) or value is None:
+        return value
+    raise FeishuContractError(
+        "Feishu action metadata value type is invalid",
+        failure_class="feishu_action_metadata_invalid",
+    )
 
 
 def _part_tuple(parts: Sequence[RenderPlanPart]) -> tuple[RenderPlanPart, ...]:
