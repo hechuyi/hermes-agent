@@ -62,11 +62,28 @@ _P3_OBJECT_ACTIONS = frozenset(
         "doc.permission_update",
     }
 )
+_CONVERSATION_CONTRACT_HASH_DOMAIN = "feishu.conversation_contract"
+_CONVERSATION_CONTRACT_HASH_VERSION = "v1"
+_AUTHORIZATION_EVIDENCE_KINDS = frozenset(
+    {
+        "verified_object_acl",
+        "user_delegated_credential",
+        "admin_policy_grant",
+        "app_owned_object",
+        "explicit_user_confirmation",
+        "system_test_object",
+        "app_token_only",
+        "discovery_only",
+    }
+)
+_EVIDENCE_STATES = frozenset({"current", "stale", "revoked"})
 _OBJECT_AUTHORITY_EVIDENCE_KINDS = frozenset(
     {
-        "object_acl",
-        "object_capability",
-        "broker_object_authority",
+        "verified_object_acl",
+        "user_delegated_credential",
+        "admin_policy_grant",
+        "app_owned_object",
+        "system_test_object",
     }
 )
 
@@ -86,18 +103,35 @@ class HashedRef:
 @dataclass(frozen=True)
 class ConversationContract:
     platform_account_id: str
+    tenant_partition_key: str
+    app_partition_key: str
     conversation_scope_id: str
+    shared_context_scope_id: str
     route_partition_key: str
     route_session_key_snapshot: str
     scope_assignment_status: str
+    actor_ref: HashedRef
     authority_subject_ref: HashedRef | None
+    session_id: str
+    thread_anchor_ref: HashedRef | None
+    root_anchor_ref: HashedRef | None
+    policy_version: str
+    evidence_state: str
     identity_evidence_set: tuple[HashedRef, ...] = ()
+    contract_hash_domain: str = _CONVERSATION_CONTRACT_HASH_DOMAIN
+    contract_hash_version: str = _CONVERSATION_CONTRACT_HASH_VERSION
     schema_version: int = 1
     contract_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
         _require_nonempty_string(self.platform_account_id, "platform_account_id")
+        _require_nonempty_string(self.tenant_partition_key, "tenant_partition_key")
+        _require_nonempty_string(self.app_partition_key, "app_partition_key")
         _require_nonempty_string(self.conversation_scope_id, "conversation_scope_id")
+        _require_nonempty_string(
+            self.shared_context_scope_id,
+            "shared_context_scope_id",
+        )
         _require_nonempty_string(self.route_partition_key, "route_partition_key")
         _require_nonempty_string(
             self.route_session_key_snapshot,
@@ -107,23 +141,31 @@ class ConversationContract:
             self.scope_assignment_status,
             "scope_assignment_status",
         )
+        _require_hashed_ref(self.actor_ref, "actor_ref")
         _require_optional_hashed_ref(
             self.authority_subject_ref,
             "authority_subject_ref",
         )
+        _require_nonempty_string(self.session_id, "session_id")
+        _require_optional_hashed_ref(self.thread_anchor_ref, "thread_anchor_ref")
+        _require_optional_hashed_ref(self.root_anchor_ref, "root_anchor_ref")
+        _require_nonempty_string(self.policy_version, "policy_version")
+        _require_known_value(self.evidence_state, _EVIDENCE_STATES, "evidence_state")
         object.__setattr__(
             self,
             "identity_evidence_set",
             _hashed_ref_tuple(self.identity_evidence_set, "identity_evidence_set"),
         )
+        _require_nonempty_string(self.contract_hash_domain, "contract_hash_domain")
+        _require_nonempty_string(self.contract_hash_version, "contract_hash_version")
         _require_schema_version(self.schema_version)
         object.__setattr__(
             self,
             "contract_hash",
             feishu_contract_hash(
                 _conversation_contract_payload(self),
-                domain="feishu.conversation_contract",
-                version="v1",
+                domain=self.contract_hash_domain,
+                version=self.contract_hash_version,
                 schema_version=self.schema_version,
             ),
         )
@@ -137,11 +179,16 @@ class AuthorizationEvidence:
     object_ref: HashedRef | None = None
     scopes: tuple[str, ...] = ()
     token_class: str | None = None
+    evidence_state: str = "current"
     schema_version: int = 1
     evidence_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
-        _require_nonempty_string(self.evidence_kind, "evidence_kind")
+        _require_known_value(
+            self.evidence_kind,
+            _AUTHORIZATION_EVIDENCE_KINDS,
+            "evidence_kind",
+        )
         _require_optional_hashed_ref(
             self.authority_subject_ref,
             "authority_subject_ref",
@@ -154,6 +201,7 @@ class AuthorizationEvidence:
         object.__setattr__(self, "scopes", _scope_tuple(self.scopes))
         if self.token_class is not None:
             _require_nonempty_string(self.token_class, "token_class")
+        _require_known_value(self.evidence_state, _EVIDENCE_STATES, "evidence_state")
         _require_schema_version(self.schema_version)
         object.__setattr__(
             self,
@@ -254,6 +302,7 @@ def can_issue_object_grant(
     evidence: AuthorizationEvidence | Sequence[AuthorizationEvidence],
     *,
     object_type: str,
+    object_ref: HashedRef,
     action: str,
 ) -> tuple[bool, str | None]:
     if not isinstance(contract, ConversationContract):
@@ -263,6 +312,7 @@ def can_issue_object_grant(
     if contract.authority_subject_ref is None:
         return False, "feishu_authority_subject_missing"
     _require_nonempty_string(object_type, "object_type")
+    _require_hashed_ref(object_ref, "object_ref")
     _require_nonempty_string(action, "action")
 
     evidences = _evidence_tuple(evidence)
@@ -273,27 +323,56 @@ def can_issue_object_grant(
         for item in evidences
     ):
         return False, "feishu_route_snapshot_mismatch"
-    if all(item.evidence_kind == "discovery" for item in evidences):
+    if all(item.evidence_kind == "discovery_only" for item in evidences):
         return False, "feishu_discovery_only_evidence"
     if all(_is_app_token_only_evidence(item) for item in evidences):
         return False, "feishu_app_token_only_evidence"
     if _is_p3_object_action(object_type, action) and all(
-        item.evidence_kind == "explicit_confirmation" for item in evidences
+        item.evidence_kind == "explicit_user_confirmation" for item in evidences
     ):
         return False, "feishu_p3_requires_object_authority_evidence"
+
+    required_scope = f"{object_type}:{action}"
+    saw_authority_subject_mismatch = False
+    saw_object_mismatch = False
+    saw_revoked = False
+    saw_stale = False
+    saw_insufficient_scope = False
 
     for item in evidences:
         if not _is_object_authority_evidence(item):
             continue
         if item.authority_subject_ref != contract.authority_subject_ref:
+            saw_authority_subject_mismatch = (
+                saw_authority_subject_mismatch or item.authority_subject_ref is not None
+            )
             continue
         if item.object_ref is None:
             continue
-        required_scope = f"{object_type}:{action}"
+        if item.object_ref != object_ref:
+            saw_object_mismatch = True
+            continue
+        if item.evidence_state == "revoked":
+            saw_revoked = True
+            continue
+        if item.evidence_state == "stale":
+            saw_stale = True
+            continue
         if required_scope not in item.scopes:
+            saw_insufficient_scope = True
             continue
         return True, None
 
+    if saw_revoked:
+        return False, "feishu_authorization_evidence_revoked"
+    if saw_stale:
+        return False, "feishu_authorization_evidence_stale"
+    if saw_insufficient_scope:
+        return False, "feishu_object_authority_scope_insufficient"
+    if saw_object_mismatch:
+        return False, "feishu_object_ref_mismatch"
+    if saw_authority_subject_mismatch:
+        return False, "feishu_authority_subject_mismatch"
     if all(
         item.authority_subject_ref is not None
         and item.authority_subject_ref != contract.authority_subject_ref
@@ -362,12 +441,23 @@ def _normalized_key_for_policy(key: str) -> str:
 def _conversation_contract_payload(contract: ConversationContract) -> dict[str, Any]:
     return {
         "platform_account_id": contract.platform_account_id,
+        "tenant_partition_key": contract.tenant_partition_key,
+        "app_partition_key": contract.app_partition_key,
         "conversation_scope_id": contract.conversation_scope_id,
+        "shared_context_scope_id": contract.shared_context_scope_id,
         "route_partition_key": contract.route_partition_key,
         "route_session_key_snapshot": contract.route_session_key_snapshot,
         "scope_assignment_status": contract.scope_assignment_status,
+        "actor_ref": contract.actor_ref,
         "authority_subject_ref": contract.authority_subject_ref,
+        "session_id": contract.session_id,
+        "thread_anchor_ref": contract.thread_anchor_ref,
+        "root_anchor_ref": contract.root_anchor_ref,
         "identity_evidence_set": contract.identity_evidence_set,
+        "policy_version": contract.policy_version,
+        "evidence_state": contract.evidence_state,
+        "contract_hash_domain": contract.contract_hash_domain,
+        "contract_hash_version": contract.contract_hash_version,
     }
 
 
@@ -379,6 +469,7 @@ def _authorization_evidence_payload(evidence: AuthorizationEvidence) -> dict[str
         "object_ref": evidence.object_ref,
         "scopes": evidence.scopes,
         "token_class": evidence.token_class,
+        "evidence_state": evidence.evidence_state,
     }
 
 
@@ -454,6 +545,14 @@ def _require_nonempty_string(value: Any, field_name: str) -> None:
         raise FeishuContractError(f"{field_name} must be a non-empty string")
 
 
+def _require_known_value(value: Any, allowed: frozenset[str], field_name: str) -> None:
+    if not isinstance(value, str) or value not in allowed:
+        raise FeishuContractError(
+            f"{field_name} must be one of: {', '.join(sorted(allowed))}",
+            failure_class=f"unsupported_{field_name}",
+        )
+
+
 def _require_schema_version(value: Any) -> None:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise FeishuContractError("schema_version must be a positive integer")
@@ -461,8 +560,11 @@ def _require_schema_version(value: Any) -> None:
 
 def _is_app_token_only_evidence(evidence: AuthorizationEvidence) -> bool:
     return (
-        evidence.evidence_kind == "app_token"
-        or evidence.token_class == "app_access_token"
+        evidence.evidence_kind == "app_token_only"
+        or (
+            evidence.token_class == "app_access_token"
+            and evidence.evidence_kind not in _OBJECT_AUTHORITY_EVIDENCE_KINDS
+        )
     )
 
 
