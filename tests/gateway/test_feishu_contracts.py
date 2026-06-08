@@ -161,10 +161,11 @@ def test_hash_suffixed_sensitive_references_must_be_sha256_hashes(payload):
     assert exc_info.value.failure_class == "invalid_hashed_sensitive_ref"
 
 
-def test_hash_rejects_unknown_token_class_metadata():
+@pytest.mark.parametrize("token_class", ["tenant_token_but_raw", None, 1])
+def test_hash_rejects_unknown_token_class_metadata(token_class):
     with pytest.raises(FeishuContractError) as exc_info:
         feishu_contract_hash(
-            {"authorization": {"token_class": "tenant_token_but_raw"}},
+            {"authorization": {"token_class": token_class}},
             domain="feishu.contract.test",
             version="v1",
         )
@@ -172,7 +173,7 @@ def test_hash_rejects_unknown_token_class_metadata():
     assert exc_info.value.failure_class == "invalid_feishu_token_class"
 
 
-@pytest.mark.parametrize("schema_version", [0, -1])
+@pytest.mark.parametrize("schema_version", [0, -1, True, False])
 def test_hash_requires_positive_schema_version(schema_version):
     with pytest.raises(FeishuContractError, match="schema_version"):
         feishu_contract_hash(
@@ -254,9 +255,10 @@ def test_evidence_contract_dataclasses_produce_stable_hashes():
     assert evidence == _evidence(authority_subject_ref=subject)
 
 
-def test_authorization_evidence_rejects_unknown_token_class():
+@pytest.mark.parametrize("token_class", ["tenant_token_but_raw", None, 1])
+def test_authorization_evidence_rejects_unknown_token_class(token_class):
     with pytest.raises(FeishuContractError) as exc_info:
-        _evidence(token_class="tenant_token_but_raw")
+        _evidence(token_class=token_class)
 
     assert exc_info.value.failure_class == "invalid_feishu_token_class"
 

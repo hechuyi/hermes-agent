@@ -211,8 +211,7 @@ class AuthorizationEvidence:
         )
         _require_optional_hashed_ref(self.object_ref, "object_ref")
         object.__setattr__(self, "scopes", _scope_tuple(self.scopes))
-        if self.token_class is not None:
-            _require_token_class(self.token_class)
+        _require_token_class(self.token_class)
         _require_known_value(self.evidence_state, _EVIDENCE_STATES, "evidence_state")
         _require_schema_version(self.schema_version)
         object.__setattr__(
@@ -437,8 +436,7 @@ def _canonical_mapping(value: Mapping[Any, Any]) -> dict[str, Any]:
 def _reject_sensitive_raw_key(key: str, value: Any) -> None:
     comparable = _normalized_key_for_policy(key)
     if comparable == "tokenclass":
-        if value is not None:
-            _require_token_class(value)
+        _require_token_class(value)
         return
     for marker in _SENSITIVE_KEY_MARKERS:
         if marker in comparable:
