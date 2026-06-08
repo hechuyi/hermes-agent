@@ -3638,9 +3638,6 @@ class FeishuAdapter(BasePlatformAdapter):
                 "reason=feishu_card_action_missing_token"
             )
             return
-        if token and self._is_card_action_duplicate(token):
-            logger.debug("[Feishu] Dropping duplicate card action token: %s", token)
-            return
         if not self._feishu_broker_context_present():
             audited = await self._apply_feishu_legacy_descriptor_denied(
                 surface="feishu.card_action",
@@ -3653,6 +3650,9 @@ class FeishuAdapter(BasePlatformAdapter):
                     "[Feishu] Dropping card action after audit failure: "
                     "reason=feishu_legacy_descriptor_denied_apply_failed"
                 )
+            return
+        if self._is_card_action_duplicate(token):
+            logger.debug("[Feishu] Dropping duplicate card action token: %s", token)
             return
 
         context = getattr(event, "context", None)

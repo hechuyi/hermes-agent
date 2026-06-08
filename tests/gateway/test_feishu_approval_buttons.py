@@ -1426,12 +1426,17 @@ class TestNonApprovalCardAction:
             await adapter._handle_card_action_event(data)
             await adapter._handle_card_action_event(data)
 
-        assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
-        _assert_legacy_descriptor_denied(
-            events[0],
-            surface="feishu.card_action",
-            failure_class="feishu_legacy_card_action_requires_broker",
-        )
+        assert _event_types(events) == [
+            "feishu_legacy_descriptor_denied",
+            "feishu_legacy_descriptor_denied",
+        ]
+        for event in events:
+            _assert_legacy_descriptor_denied(
+                event,
+                surface="feishu.card_action",
+                failure_class="feishu_legacy_card_action_requires_broker",
+            )
+        assert "tok_requires_broker" not in adapter._card_action_tokens
         mock_profile.assert_not_awaited()
         mock_chat.assert_not_awaited()
         mock_handle.assert_not_awaited()
