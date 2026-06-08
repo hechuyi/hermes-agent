@@ -4413,17 +4413,20 @@ class FeishuAdapter(BasePlatformAdapter):
         if isinstance(admission, dict):
             event_payload.update(
                 {
+                    "idempotency_evidence_state": "current_admitted",
                     "canonical_event_ref": str(admission.get("canonical_event_ref") or ""),
                     "route_partition_key": str(admission.get("route_partition_key") or ""),
                     "contract_hash": str(admission.get("contract_hash") or ""),
                     "transport_kind": str(admission.get("transport_kind") or ""),
                 }
             )
-        elif not getattr(
+        elif getattr(
             event,
             "feishu_current_inbound_requires_idempotency_evidence",
             False,
-        ) and not hasattr(event, "feishu_current_conversation_contract"):
+        ):
+            event_payload["idempotency_evidence_state"] = "current_required"
+        elif not hasattr(event, "feishu_current_conversation_contract"):
             event_payload["idempotency_evidence_state"] = "legacy_unscoped"
         return await self._apply_gateway_event(event_payload)
 

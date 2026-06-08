@@ -100,6 +100,9 @@ _SAFE_SESSION_ROUTE_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,256}$")
 FEISHU_INBOUND_TRANSPORT_KINDS = frozenset(
     {"webhook", "websocket", "dm", "group", "thread"}
 )
+FEISHU_INBOUND_IDEMPOTENCY_EVIDENCE_STATES = frozenset(
+    {"current_admitted", "current_required", "legacy_unscoped"}
+)
 _FEISHU_PATCH_MESSAGE_PATH_RE = re.compile(
     r"^/open-apis/im/v1/messages/([A-Za-z0-9_]{1,256})$"
 )
@@ -253,6 +256,12 @@ def validate_gateway_event(event: Mapping[str, Any]) -> str:
         _require_feishu_event_id(event, "ack_event_id")
         _require_number(event, "timestamp")
         return event_type
+    if event_type == "feishu_inbound" and "idempotency_evidence_state" in event:
+        if event.get("idempotency_evidence_state") not in FEISHU_INBOUND_IDEMPOTENCY_EVIDENCE_STATES:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "invalid Feishu inbound idempotency evidence state",
+            )
     for field in required:
         if field == "timestamp":
             _require_number(event, field)

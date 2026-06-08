@@ -193,7 +193,7 @@ def _apply_feishu_inbound(event: Mapping[str, Any], state: dict[str, Any]) -> di
         "first_seen_at": event["timestamp"],
     }
     current_key = _feishu_current_inbound_key(event)
-    if current_key is None and _looks_like_current_feishu_inbound(event):
+    if current_key is None and _feishu_inbound_requires_current_evidence(event):
         raise GatewayEventContractError(
             "feishu_inbound_idempotency_unknown",
             "feishu inbound idempotency evidence missing",
@@ -271,12 +271,11 @@ def _feishu_current_inbound_key(event: Mapping[str, Any]) -> str | None:
     return _sha256_ref(key_material)
 
 
-def _looks_like_current_feishu_inbound(event: Mapping[str, Any]) -> bool:
-    if event.get("idempotency_evidence_state") == "legacy_unscoped":
-        return False
-    inbound_id = str(event.get("inbound_id") or "")
-    message_id = str(event.get("message_id") or "")
-    return inbound_id.startswith("om_") or message_id.startswith("om_")
+def _feishu_inbound_requires_current_evidence(event: Mapping[str, Any]) -> bool:
+    return event.get("idempotency_evidence_state") in {
+        "current_admitted",
+        "current_required",
+    }
 
 
 def _apply_delivery_pending(event: Mapping[str, Any], state: dict[str, Any]) -> dict[str, Any]:

@@ -334,6 +334,7 @@ def test_current_inbound_without_any_idempotency_evidence_fails_closed(tmp_path)
         "transport_kind",
     ):
         event.pop(field)
+    event["idempotency_evidence_state"] = "current_required"
     before = _ledger_state(tmp_path)
 
     result = apply_gateway_event(event, tmp_path)
@@ -362,6 +363,40 @@ async def test_missing_current_admission_evidence_fails_before_batching_or_dispa
         source=source,
         raw_message={},
         message_id="om_missing_admission_fake",
+        timestamp=datetime.now(),
+    )
+    adapter._admit_current_conversation_for_event = lambda _event: True
+    before = _ledger_state(tmp_path)
+
+    await adapter._dispatch_inbound_event(event)
+
+    adapter.handle_message.assert_not_awaited()
+    assert len(adapter._pending_text_batches) == 0
+    assert len(adapter._pending_text_batch_tasks) == 0
+    assert len(adapter._pending_media_batches) == 0
+    assert len(adapter._pending_media_batch_tasks) == 0
+    assert _ledger_state(tmp_path) == before
+
+
+@pytest.mark.asyncio
+async def test_non_om_current_missing_admission_evidence_fails_before_batching_or_dispatch(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    source = adapter.build_source(
+        chat_id="oc_fake_dm",
+        chat_name="Feishu Current",
+        chat_type="dm",
+        user_id="ou_actor_fake_001",
+        user_name="Current User",
+        user_id_alt="on_actor_fake_001",
+    )
+    event = MessageEvent(
+        text="hello",
+        message_type=MessageType.TEXT,
+        source=source,
+        raw_message={},
+        message_id="msg_fake_non_om_001",
         timestamp=datetime.now(),
     )
     adapter._admit_current_conversation_for_event = lambda _event: True
