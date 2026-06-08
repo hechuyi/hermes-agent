@@ -382,6 +382,28 @@ def test_scope_shared_context_does_not_imply_shared_authority_subject():
     assert (allowed, failure_class) == (False, "feishu_authority_subject_missing")
 
 
+def test_shared_context_does_not_allow_reusing_another_actor_authority():
+    shared_context_contract = replace(
+        _contract(),
+        shared_context_scope_id="shared_context:oc_test",
+        actor_ref=_ref(kind="feishu_actor", digest=_ACTOR_REF),
+        authority_subject_ref=_ref(kind="feishu_user", digest=_ACTOR_REF),
+    )
+    other_actor_evidence = _evidence(
+        authority_subject_ref=_ref(kind="feishu_user", digest=_OTHER_ACTOR_REF),
+    )
+
+    allowed, failure_class = can_issue_object_grant(
+        shared_context_contract,
+        other_actor_evidence,
+        object_type="doc",
+        object_ref=_object_ref(),
+        action="read",
+    )
+
+    assert (allowed, failure_class) == (False, "feishu_authority_subject_mismatch")
+
+
 def test_stale_authorization_evidence_denies_grant():
     allowed, failure_class = can_issue_object_grant(
         _contract(),
