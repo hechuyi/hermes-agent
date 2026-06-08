@@ -2899,6 +2899,15 @@ class FeishuAdapter(BasePlatformAdapter):
             or bool(getattr(loop, "is_closed", lambda: False)())
         ):
             return
+        reaction_event_id = self._feishu_event_id(data)
+        if not self._feishu_legacy_descriptor_entry_gate_sync(
+            surface="feishu.reaction",
+            failure_class="feishu_legacy_descriptor_requires_broker",
+            correlation_id=reaction_event_id,
+            descriptor_seed=reaction_event_id,
+            drop_label="reaction",
+        ):
+            return
         self._submit_on_loop(loop, self._handle_reaction_event(event_type, data))
 
     def _on_card_action_trigger(self, data: Any) -> Any:
@@ -2934,6 +2943,16 @@ class FeishuAdapter(BasePlatformAdapter):
                 action_value=action_value,
                 loop=loop,
             )
+
+        token = str(getattr(event, "token", "") or "")
+        if not self._feishu_legacy_descriptor_entry_gate_sync(
+            surface="feishu.card_action",
+            failure_class="feishu_legacy_card_action_requires_broker",
+            correlation_id=token,
+            descriptor_seed=token,
+            drop_label="card action",
+        ):
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
         self._submit_on_loop(loop, self._handle_card_action_event(data))
         if P2CardActionTriggerResponse is None:
@@ -3171,6 +3190,59 @@ class FeishuAdapter(BasePlatformAdapter):
                 correlation_id=correlation_id,
             )
         )
+
+    def _apply_feishu_legacy_descriptor_denied_sync(
+        self,
+        *,
+        surface: str,
+        failure_class: str = "feishu_legacy_descriptor_requires_broker",
+        correlation_id: Optional[str] = None,
+        descriptor_seed: str = "",
+    ) -> bool:
+        return self._apply_feishu_audit_event_sync(
+            self._build_feishu_legacy_descriptor_denied_event(
+                surface=surface,
+                failure_class=failure_class,
+                correlation_id=correlation_id,
+                descriptor_seed=descriptor_seed,
+            )
+        )
+
+    def _feishu_legacy_descriptor_entry_gate_sync(
+        self,
+        *,
+        surface: str,
+        failure_class: str = "feishu_legacy_descriptor_requires_broker",
+        correlation_id: Optional[str] = None,
+        descriptor_seed: str = "",
+        drop_label: str,
+    ) -> bool:
+        if self._gateway_event_state_dir is None:
+            logger.warning(
+                "[Feishu] Dropping %s before submit: "
+                "reason=feishu_legacy_descriptor_audit_state_missing surface=%s failure_class=%s",
+                drop_label,
+                surface,
+                failure_class,
+            )
+            return False
+        if self._feishu_broker_context_present():
+            return True
+        audited = self._apply_feishu_legacy_descriptor_denied_sync(
+            surface=surface,
+            failure_class=failure_class,
+            correlation_id=correlation_id,
+            descriptor_seed=descriptor_seed,
+        )
+        if not audited:
+            logger.warning(
+                "[Feishu] Dropping %s before submit after audit failure: "
+                "reason=feishu_legacy_descriptor_denied_apply_failed surface=%s failure_class=%s",
+                drop_label,
+                surface,
+                failure_class,
+            )
+        return False
 
     def _handle_approval_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
         """Schedule approval resolution and build the synchronous callback response."""

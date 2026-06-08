@@ -1853,6 +1853,95 @@ class TestCardActionCallbackResponse:
         assert _event_types(events) == ["feishu_action_denied"]
         _assert_action_denied(events[0], action="approval_prompt_card_action")
 
+    def test_generic_card_entrypoint_requires_broker_before_submit(
+        self,
+        tmp_path,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        events = []
+        submit_calls = []
+        adapter._apply_feishu_audit_event_sync = lambda event: events.append(event) or True
+
+        def fake_submit(loop, coro):
+            submit_calls.append((loop, coro))
+            coro.close()
+            return True
+
+        adapter._submit_on_loop = fake_submit
+        data = _make_card_action_data(
+            action_value={"custom_action": "something_else"},
+            token="tok_generic_entry_requires_broker",
+        )
+
+        response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert submit_calls == []
+        assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
+        _assert_legacy_descriptor_denied(
+            events[0],
+            surface="feishu.card_action",
+            failure_class="feishu_legacy_card_action_requires_broker",
+        )
+
+    def test_generic_card_entrypoint_with_broker_context_submits(
+        self,
+        tmp_path,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        submit_calls = []
+
+        def fake_submit(loop, coro):
+            submit_calls.append((loop, coro))
+            coro.close()
+            return True
+
+        adapter._submit_on_loop = fake_submit
+        data = _make_card_action_data(
+            action_value={"custom_action": "something_else"},
+            token="tok_generic_entry_brokered",
+        )
+
+        with _broker_context():
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert len(submit_calls) == 1
+
+    def test_generic_card_entrypoint_requires_audit_state_before_submit(
+        self,
+        caplog,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        submit_calls = []
+
+        def fake_submit(loop, coro):
+            submit_calls.append((loop, coro))
+            coro.close()
+            return True
+
+        adapter._submit_on_loop = fake_submit
+        data = _make_card_action_data(
+            action_value={"custom_action": "something_else"},
+            token="tok_generic_entry_no_audit",
+        )
+
+        with _broker_context():
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert submit_calls == []
+        assert "feishu_legacy_descriptor_audit_state_missing" in caplog.text
+
     @pytest.mark.asyncio
     async def test_approval_audited_click_restores_actionable_card_when_side_effect_fails(
         self,

@@ -112,6 +112,11 @@ def _event_types(calls):
     return [call.get("type") for call in calls if "type" in call]
 
 
+def _close_submitted_coro(coro, _loop):
+    coro.close()
+    return SimpleNamespace(add_done_callback=lambda *_args, **_kwargs: None)
+
+
 def _reaction_adapter(tmp_path, *, audited=True):
     if audited:
         adapter = _adapter(tmp_path)
@@ -139,6 +144,85 @@ def _reaction_adapter(tmp_path, *, audited=True):
     adapter.get_chat_info = AsyncMock(return_value={"name": "Feishu Chat", "type": "group", "reliable": True})
     adapter._handle_message_with_guards = AsyncMock()
     return adapter
+
+
+def test_reaction_entrypoint_requires_broker_before_submit(tmp_path):
+    adapter = _reaction_adapter(tmp_path)
+    adapter._loop = SimpleNamespace(is_closed=lambda: False)
+    events = []
+    submit_calls = []
+    adapter._apply_feishu_audit_event_sync = lambda event: events.append(event) or True
+    adapter._submit_on_loop = (
+        lambda loop, coro: submit_calls.append((loop, coro))
+        or _close_submitted_coro(coro, loop)
+    )
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="ev_reaction_entrypoint_requires_broker"),
+        event=SimpleNamespace(
+            message_id="om_bot_target",
+            operator_type="user",
+            user_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+        ),
+    )
+
+    adapter._on_reaction_event("im.message.reaction.created_v1", data)
+
+    assert submit_calls == []
+    assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
+    event = events[0]
+    assert event["surface"] == "feishu.reaction"
+    assert event["failure_class"] == "feishu_legacy_descriptor_requires_broker"
+    assert event["descriptor_hash"].startswith("fnv1a64:")
+
+
+def test_reaction_entrypoint_with_broker_context_submits(tmp_path):
+    adapter = _reaction_adapter(tmp_path)
+    adapter._loop = SimpleNamespace(is_closed=lambda: False)
+    submit_calls = []
+    adapter._submit_on_loop = (
+        lambda loop, coro: submit_calls.append((loop, coro))
+        or _close_submitted_coro(coro, loop)
+    )
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="ev_reaction_entrypoint_brokered"),
+        event=SimpleNamespace(
+            message_id="om_bot_target",
+            operator_type="user",
+            user_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+        ),
+    )
+
+    with _broker_context():
+        adapter._on_reaction_event("im.message.reaction.created_v1", data)
+
+    assert len(submit_calls) == 1
+
+
+def test_reaction_entrypoint_requires_audit_state_before_submit(tmp_path, caplog):
+    adapter = _reaction_adapter(tmp_path, audited=False)
+    adapter._loop = SimpleNamespace(is_closed=lambda: False)
+    submit_calls = []
+    adapter._submit_on_loop = (
+        lambda loop, coro: submit_calls.append((loop, coro))
+        or _close_submitted_coro(coro, loop)
+    )
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="ev_reaction_entrypoint_no_audit"),
+        event=SimpleNamespace(
+            message_id="om_bot_target",
+            operator_type="user",
+            user_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+        ),
+    )
+
+    with _broker_context():
+        adapter._on_reaction_event("im.message.reaction.created_v1", data)
+
+    assert submit_calls == []
+    assert "feishu_legacy_descriptor_audit_state_missing" in caplog.text
 
 
 @pytest.mark.asyncio
