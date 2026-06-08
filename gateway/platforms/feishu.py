@@ -3183,7 +3183,7 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] Approval %s already resolved or unknown", approval_id)
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
         choice = _APPROVAL_CHOICE_MAP.get(action_value.get("hermes_action"), "deny")
-        if self._gateway_event_state_dir is not None and not self._feishu_broker_context_present():
+        if not self._feishu_broker_context_present():
             if not self._apply_feishu_action_denied_sync(
                 action="approval_prompt_card_action",
                 correlation_id=state.get("correlation_id"),
@@ -3250,7 +3250,7 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] Update prompt %s already resolved or unknown", prompt_id)
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
         state = self._update_prompt_state[prompt_id]
-        if self._gateway_event_state_dir is not None and not self._feishu_broker_context_present():
+        if not self._feishu_broker_context_present():
             if not self._apply_feishu_action_denied_sync(
                 action="update_prompt_card_action",
                 correlation_id=state.get("correlation_id"),
@@ -3540,7 +3540,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 bool(message_id),
             )
             return
-        if self._gateway_event_state_dir is not None and not self._feishu_broker_context_present():
+        if not self._feishu_broker_context_present():
             audited = await self._apply_feishu_legacy_descriptor_denied(
                 surface="feishu.reaction",
                 correlation_id=reaction_event_id,
@@ -3641,7 +3641,7 @@ class FeishuAdapter(BasePlatformAdapter):
         if token and self._is_card_action_duplicate(token):
             logger.debug("[Feishu] Dropping duplicate card action token: %s", token)
             return
-        if self._gateway_event_state_dir is not None and not self._feishu_broker_context_present():
+        if not self._feishu_broker_context_present():
             audited = await self._apply_feishu_legacy_descriptor_denied(
                 surface="feishu.card_action",
                 failure_class="feishu_legacy_card_action_requires_broker",

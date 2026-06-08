@@ -112,8 +112,12 @@ def _event_types(calls):
     return [call.get("type") for call in calls if "type" in call]
 
 
-def _reaction_adapter(tmp_path):
-    adapter = _adapter(tmp_path)
+def _reaction_adapter(tmp_path, *, audited=True):
+    if audited:
+        adapter = _adapter(tmp_path)
+    else:
+        adapter = FeishuAdapter(PlatformConfig(extra={}))
+        adapter.handle_message = AsyncMock()
     adapter._app_id = "cli_self_app"
     msg = SimpleNamespace(
         sender=SimpleNamespace(sender_type="app", id="cli_self_app", id_type="app_id"),
@@ -350,6 +354,26 @@ async def test_reaction_requires_broker_before_fetch_or_synthetic_submission(tmp
     assert event["surface"] == "feishu.reaction"
     assert event["failure_class"] == "feishu_legacy_descriptor_requires_broker"
     assert event["descriptor_hash"].startswith("fnv1a64:")
+    adapter._build_get_message_request.assert_not_called()
+    adapter._client.im.v1.message.get.assert_not_called()
+    adapter._resolve_sender_profile.assert_not_awaited()
+    adapter._handle_message_with_guards.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reaction_requires_broker_without_audit_state(tmp_path):
+    adapter = _reaction_adapter(tmp_path, audited=False)
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="ev_reaction_requires_broker_no_audit"),
+        event=SimpleNamespace(
+            message_id="om_bot_target",
+            user_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+        ),
+    )
+
+    await adapter._handle_reaction_event("im.message.reaction.created_v1", data)
+
     adapter._build_get_message_request.assert_not_called()
     adapter._client.im.v1.message.get.assert_not_called()
     adapter._resolve_sender_profile.assert_not_awaited()
