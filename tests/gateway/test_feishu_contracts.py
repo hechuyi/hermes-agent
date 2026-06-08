@@ -1,15 +1,25 @@
 import re
+from dataclasses import replace
 
 import pytest
 
 from gateway.feishu_contracts import (
+    AuthorizationEvidence,
+    ConversationContract,
     FeishuContractError,
+    HashedRef,
+    ObjectCapabilityGrant,
     canonical_contract_json,
+    can_issue_object_grant,
     feishu_contract_hash,
 )
 
 
 _SHA256_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+_OBJECT_REF = "sha256:" + "a" * 64
+_ACTOR_REF = "sha256:" + "b" * 64
+_OTHER_ACTOR_REF = "sha256:" + "c" * 64
+_EVIDENCE_REF = "sha256:" + "d" * 64
 
 
 def test_hash_output_uses_sha256_prefix_and_lowercase_hex():
@@ -131,3 +141,152 @@ def test_hash_allows_hash_suffixed_sensitive_references_and_token_class_metadata
     assert _SHA256_HASH_RE.fullmatch(
         feishu_contract_hash(payload, domain="feishu.contract.test", version="v1")
     )
+
+
+def _ref(kind: str = "feishu_user", digest: str = _ACTOR_REF) -> HashedRef:
+    return HashedRef(kind=kind, value_hash=digest)
+
+
+def _object_ref() -> HashedRef:
+    return HashedRef(kind="feishu_doc", value_hash=_OBJECT_REF)
+
+
+def _contract(**overrides) -> ConversationContract:
+    values = {
+        "platform_account_id": "feishu_app:test",
+        "conversation_scope_id": "cs_test",
+        "route_partition_key": "agent:main:feishu:group:oc_test",
+        "route_session_key_snapshot": "agent:main:feishu:group:oc_test:u_test",
+        "scope_assignment_status": "scoped",
+        "authority_subject_ref": _ref(),
+        "identity_evidence_set": (
+            HashedRef(kind="message_actor", value_hash=_EVIDENCE_REF),
+        ),
+    }
+    values.update(overrides)
+    return ConversationContract(**values)
+
+
+def _evidence(**overrides) -> AuthorizationEvidence:
+    values = {
+        "evidence_kind": "object_acl",
+        "authority_subject_ref": _ref(),
+        "route_session_key_snapshot": "agent:main:feishu:group:oc_test:u_test",
+        "object_ref": _object_ref(),
+        "scopes": ("doc:read", "doc:write"),
+        "token_class": "user_access_token",
+    }
+    values.update(overrides)
+    return AuthorizationEvidence(**values)
+
+
+def test_evidence_contract_dataclasses_produce_stable_hashes():
+    subject = _ref()
+    contract = _contract(authority_subject_ref=subject)
+    evidence = _evidence(authority_subject_ref=subject)
+    grant = ObjectCapabilityGrant(
+        contract_hash=contract.contract_hash,
+        evidence_hashes=(evidence.evidence_hash,),
+        object_type="doc",
+        object_ref=_object_ref(),
+        action="read",
+        authority_subject_ref=subject,
+    )
+
+    assert _SHA256_HASH_RE.fullmatch(contract.contract_hash)
+    assert _SHA256_HASH_RE.fullmatch(evidence.evidence_hash)
+    assert _SHA256_HASH_RE.fullmatch(grant.grant_hash)
+    assert contract == _contract(authority_subject_ref=subject)
+    assert evidence == _evidence(authority_subject_ref=subject)
+
+
+def test_grant_decision_allows_scoped_user_object_authority_evidence():
+    allowed, failure_class = can_issue_object_grant(
+        _contract(),
+        _evidence(),
+        object_type="doc",
+        action="read",
+    )
+
+    assert (allowed, failure_class) == (True, None)
+
+
+def test_scope_assignment_status_other_than_scoped_denies_grant():
+    allowed, failure_class = can_issue_object_grant(
+        _contract(scope_assignment_status="legacy_unscoped"),
+        _evidence(),
+        object_type="doc",
+        action="read",
+    )
+
+    assert (allowed, failure_class) == (False, "feishu_scope_not_scoped")
+
+
+def test_grant_route_snapshot_mismatch_denies():
+    allowed, failure_class = can_issue_object_grant(
+        _contract(route_session_key_snapshot="agent:main:feishu:group:oc_test:u_test"),
+        _evidence(route_session_key_snapshot="agent:main:feishu:group:oc_test:u_other"),
+        object_type="doc",
+        action="read",
+    )
+
+    assert (allowed, failure_class) == (False, "feishu_route_snapshot_mismatch")
+
+
+def test_evidence_app_token_only_denies_grant():
+    allowed, failure_class = can_issue_object_grant(
+        _contract(),
+        _evidence(
+            evidence_kind="app_token",
+            token_class="app_access_token",
+            authority_subject_ref=None,
+        ),
+        object_type="doc",
+        action="read",
+    )
+
+    assert (allowed, failure_class) == (False, "feishu_app_token_only_evidence")
+
+
+def test_evidence_discovery_only_denies_grant():
+    allowed, failure_class = can_issue_object_grant(
+        _contract(),
+        _evidence(evidence_kind="discovery", scopes=("doc:metadata",)),
+        object_type="doc",
+        action="read",
+    )
+
+    assert (allowed, failure_class) == (False, "feishu_discovery_only_evidence")
+
+
+def test_grant_explicit_confirmation_alone_denies_p3_object_actions():
+    allowed, failure_class = can_issue_object_grant(
+        _contract(),
+        _evidence(evidence_kind="explicit_confirmation", scopes=()),
+        object_type="doc",
+        action="delete",
+    )
+
+    assert (
+        allowed,
+        failure_class,
+    ) == (False, "feishu_p3_requires_object_authority_evidence")
+
+
+def test_scope_shared_context_does_not_imply_shared_authority_subject():
+    shared_context_contract = replace(
+        _contract(),
+        authority_subject_ref=None,
+        identity_evidence_set=(
+            HashedRef(kind="conversation_scope", value_hash="sha256:" + "e" * 64),
+        ),
+    )
+
+    allowed, failure_class = can_issue_object_grant(
+        shared_context_contract,
+        _evidence(authority_subject_ref=_ref(digest=_OTHER_ACTOR_REF)),
+        object_type="doc",
+        action="read",
+    )
+
+    assert (allowed, failure_class) == (False, "feishu_authority_subject_missing")
