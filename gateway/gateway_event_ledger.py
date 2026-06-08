@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -191,19 +192,78 @@ def _apply_feishu_inbound(event: Mapping[str, Any], state: dict[str, Any]) -> di
         "message_type": str(event["message_type"]),
         "first_seen_at": event["timestamp"],
     }
-    key = f'{record["inbound_id_hash"]}:{record["message_id_hash"]}'
+    current_key = _feishu_current_inbound_key(event)
+    key = current_key or f'{record["inbound_id_hash"]}:{record["message_id_hash"]}'
+    if current_key is not None:
+        record.update(
+            {
+                "canonical_event_ref": str(event["canonical_event_ref"]),
+                "route_partition_hash": _sha256_ref(str(event["route_partition_key"])),
+                "contract_hash": str(event["contract_hash"]),
+                "transport_kind": str(event["transport_kind"]),
+            }
+        )
     inbounds = state["inbounds"]
     duplicate = key in inbounds
     if duplicate:
         record = dict(inbounds[key])
     else:
         inbounds[key] = record
+    decision = "feishu_inbound_duplicate" if duplicate else "continue"
     return {
         "type": "inbound_admission",
-        "decision": "continue",
+        "decision": decision,
         "duplicate": duplicate,
         "record": record,
     }
+
+
+def _feishu_current_inbound_key(event: Mapping[str, Any]) -> str | None:
+    present = {
+        field
+        for field in (
+            "canonical_event_ref",
+            "route_partition_key",
+            "contract_hash",
+            "transport_kind",
+        )
+        if field in event
+    }
+    if not present:
+        return None
+    required = {
+        "canonical_event_ref",
+        "route_partition_key",
+        "contract_hash",
+        "transport_kind",
+    }
+    if present != required:
+        raise GatewayEventContractError(
+            "feishu_inbound_idempotency_unknown",
+            "feishu inbound idempotency evidence incomplete",
+        )
+    canonical_event_ref = str(event.get("canonical_event_ref") or "")
+    route_partition_key = str(event.get("route_partition_key") or "")
+    contract_hash = str(event.get("contract_hash") or "")
+    transport_kind = str(event.get("transport_kind") or "")
+    if (
+        not _is_sha256_ref(canonical_event_ref)
+        or not route_partition_key
+        or not _is_sha256_ref(contract_hash)
+        or transport_kind not in {"webhook", "websocket", "dm", "group", "thread"}
+    ):
+        raise GatewayEventContractError(
+            "feishu_inbound_idempotency_unknown",
+            "feishu inbound idempotency evidence invalid",
+        )
+    key_material = "\x1f".join(
+        (
+            canonical_event_ref,
+            _sha256_ref(route_partition_key),
+            contract_hash,
+        )
+    )
+    return _sha256_ref(key_material)
 
 
 def _apply_delivery_pending(event: Mapping[str, Any], state: dict[str, Any]) -> dict[str, Any]:
@@ -727,6 +787,16 @@ def _fnv1a64(value: str) -> str:
         digest ^= byte
         digest = (digest * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
     return f"fnv1a64:{digest:016x}"
+
+
+def _sha256_ref(value: str) -> str:
+    return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _is_sha256_ref(value: str) -> bool:
+    if not value.startswith("sha256:") or len(value) != 71:
+        return False
+    return all(char in "0123456789abcdef" for char in value[7:])
 
 
 def _state_path(state_dir: str | Path) -> Path:

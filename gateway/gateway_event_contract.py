@@ -389,17 +389,28 @@ def _validate_patch_interactive_message_descriptor(
 def _validate_inbound_admission(action: Mapping[str, Any]) -> dict[str, Any]:
     if set(action) != {"type", "decision", "duplicate", "record"}:
         raise ValueError("invalid inbound admission action keys")
-    if action.get("decision") != "continue" or not isinstance(action.get("duplicate"), bool):
+    if action.get("decision") not in {
+        "continue",
+        "feishu_inbound_duplicate",
+    } or not isinstance(action.get("duplicate"), bool):
         raise ValueError("invalid inbound admission action")
     record = action.get("record")
     if not isinstance(record, Mapping):
         raise ValueError("invalid inbound admission record")
-    if set(record) != {
+    legacy_keys = {
         "inbound_id_hash",
         "message_id_hash",
         "message_type",
         "first_seen_at",
-    }:
+    }
+    current_keys = legacy_keys | {
+        "canonical_event_ref",
+        "route_partition_hash",
+        "contract_hash",
+        "transport_kind",
+    }
+    record_keys = set(record)
+    if record_keys != legacy_keys and record_keys != current_keys:
         raise ValueError("invalid inbound admission record keys")
     if not isinstance(record.get("inbound_id_hash"), str) or not _FNV1A64_RE.fullmatch(
         record["inbound_id_hash"]
@@ -413,7 +424,27 @@ def _validate_inbound_admission(action: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("invalid message type")
     if not _is_number(record.get("first_seen_at")):
         raise ValueError("invalid first_seen_at")
-    return {"type": "inbound_admission", "decision": "continue", "duplicate": action["duplicate"], "record": dict(record)}
+    if record_keys == current_keys:
+        if not isinstance(record.get("canonical_event_ref"), str) or not _SHA256_RE.fullmatch(
+            record["canonical_event_ref"]
+        ):
+            raise ValueError("invalid canonical event ref")
+        if not isinstance(record.get("route_partition_hash"), str) or not _SHA256_RE.fullmatch(
+            record["route_partition_hash"]
+        ):
+            raise ValueError("invalid route partition hash")
+        if not isinstance(record.get("contract_hash"), str) or not _SHA256_RE.fullmatch(
+            record["contract_hash"]
+        ):
+            raise ValueError("invalid contract hash")
+        if record.get("transport_kind") not in {"webhook", "websocket", "dm", "group", "thread"}:
+            raise ValueError("invalid transport kind")
+    return {
+        "type": "inbound_admission",
+        "decision": action["decision"],
+        "duplicate": action["duplicate"],
+        "record": dict(record),
+    }
 
 
 def _validate_delivery_record_action(action: Mapping[str, Any]) -> dict[str, Any]:

@@ -4408,6 +4408,16 @@ class FeishuAdapter(BasePlatformAdapter):
             "message_type": getattr(getattr(event, "message_type", None), "value", "unknown"),
             "timestamp": timestamp,
         }
+        admission = getattr(event, "feishu_current_conversation_admission", None)
+        if isinstance(admission, dict):
+            event_payload.update(
+                {
+                    "canonical_event_ref": str(admission.get("canonical_event_ref") or ""),
+                    "route_partition_key": str(admission.get("route_partition_key") or ""),
+                    "contract_hash": str(admission.get("contract_hash") or ""),
+                    "transport_kind": str(admission.get("transport_kind") or ""),
+                }
+            )
         return await self._apply_gateway_event(event_payload)
 
     @staticmethod
@@ -4448,12 +4458,16 @@ class FeishuAdapter(BasePlatformAdapter):
                     getattr(result, "event_type", None) == "feishu_inbound"
                     and isinstance(action, dict)
                     and action.get("type") == "inbound_admission"
-                    and action.get("decision") == "continue"
                 ):
-                    if action.get("duplicate") is True:
+                    if (
+                        action.get("duplicate") is True
+                        or action.get("decision") == "feishu_inbound_duplicate"
+                    ):
                         logger.debug(
                             "[Feishu] Dropping duplicate inbound event admitted by ledger"
                         )
+                        return False
+                    if action.get("decision") != "continue":
                         return False
                     return True
                 return False
