@@ -4138,6 +4138,12 @@ class FeishuAdapter(BasePlatformAdapter):
             "thread_anchor_ref": thread_anchor,
             "canonical_event_ref": self._canonical_event_ref(event),
         }
+        if transport == "thread":
+            explicit_reply_anchor_ref = self._explicit_thread_reply_anchor_ref(event)
+            if explicit_reply_anchor_ref is not None:
+                record["explicit_thread_reply_anchor_ref"] = (
+                    explicit_reply_anchor_ref.value_hash
+                )
         return FeishuCurrentConversationAdmissionResult(ok=True, record=record)
 
     def _build_current_conversation_contract(
@@ -4241,6 +4247,8 @@ class FeishuAdapter(BasePlatformAdapter):
         raw_thread = str(getattr(raw_message, "thread_id", "") or "")
         if not raw_thread or raw_thread != source_thread:
             return "feishu_current_thread_detached"
+        if self._explicit_thread_reply_anchor_ref(event) is None:
+            return "feishu_current_reply_anchor_missing"
         if (
             expected_contract is not None
             and expected_contract.thread_anchor_ref is None
@@ -4259,17 +4267,27 @@ class FeishuAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _reply_anchor_value(event: MessageEvent) -> str | None:
-        source = getattr(event, "source", None)
-        if getattr(source, "thread_id", None):
-            anchor = getattr(event, "reply_to_message_id", None)
-        else:
-            anchor = _reply_anchor_for_event(event)
+        anchor = _reply_anchor_for_event(event)
         anchor = str(anchor or "").strip()
         return anchor or None
 
     @staticmethod
     def _reply_anchor_ref(event: MessageEvent) -> Any | None:
         anchor = FeishuAdapter._reply_anchor_value(event)
+        return feishu_hashed_ref("feishu_reply_anchor", anchor)
+
+    @staticmethod
+    def _explicit_thread_reply_anchor_ref(event: MessageEvent) -> Any | None:
+        raw_message = FeishuAdapter._raw_feishu_message(event)
+        anchor = (
+            getattr(event, "reply_to_message_id", None)
+            or getattr(raw_message, "parent_id", None)
+            or getattr(raw_message, "upper_message_id", None)
+            or getattr(raw_message, "root_id", None)
+        )
+        anchor = str(anchor or "").strip()
+        if not anchor:
+            return None
         return feishu_hashed_ref("feishu_reply_anchor", anchor)
 
     @staticmethod
@@ -6813,6 +6831,11 @@ class FeishuAdapter(BasePlatformAdapter):
             "reply_anchor_ref",
         }
         if not required.issubset(admission):
+            raise ValueError("feishu_current_reply_admission_incomplete")
+        if admission.get("transport_kind") == "thread" and not {
+            "thread_anchor_ref",
+            "explicit_thread_reply_anchor_ref",
+        }.issubset(admission):
             raise ValueError("feishu_current_reply_admission_incomplete")
         if not reply_to:
             if allow_admitted_reply_fallback:

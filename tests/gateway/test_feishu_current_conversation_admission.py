@@ -342,7 +342,7 @@ def test_non_scoped_current_contract_states_are_not_authorizable(tmp_path):
         assert denied.failure_class == "feishu_current_scope_not_authorizable"
 
 
-def test_thread_reply_preserves_thread_reply_to_anchor_and_fails_when_detached_or_ambiguous(tmp_path):
+def test_thread_reply_preserves_send_anchor_and_explicit_thread_evidence(tmp_path):
     adapter = _adapter(tmp_path)
     source = _source(chat_id="oc_fake_group", chat_type="group", thread_id="omt_thread_fake")
     contract = _contract(source, adapter)
@@ -359,8 +359,8 @@ def test_thread_reply_preserves_thread_reply_to_anchor_and_fails_when_detached_o
     parent_ref = feishu_hashed_ref("feishu_reply_anchor", "om_thread_parent_fake")
     current_ref = feishu_hashed_ref("feishu_reply_anchor", source.message_id)
     assert parent_ref is not None and current_ref is not None
-    assert result.record["reply_anchor_ref"] == parent_ref.value_hash
-    assert result.record["reply_anchor_ref"] != current_ref.value_hash
+    assert result.record["reply_anchor_ref"] == current_ref.value_hash
+    assert result.record["explicit_thread_reply_anchor_ref"] == parent_ref.value_hash
 
     detached = adapter._admit_current_conversation_event(
         _event(source, mentions_bot=True, detached_thread=True),
@@ -379,7 +379,7 @@ def test_thread_reply_preserves_thread_reply_to_anchor_and_fails_when_detached_o
     assert ambiguous.failure_class == "feishu_current_reply_anchor_missing"
 
 
-def test_thread_reply_context_metadata_preserves_admitted_explicit_reply_anchor(tmp_path):
+def test_thread_reply_context_metadata_preserves_admitted_send_and_explicit_anchors(tmp_path):
     adapter = _adapter(tmp_path)
     source = _source(chat_id="oc_fake_group", chat_type="group", thread_id="omt_thread_fake")
     contract = _contract(source, adapter)
@@ -405,8 +405,8 @@ def test_thread_reply_context_metadata_preserves_admitted_explicit_reply_anchor(
         _FEISHU_CURRENT_ADMISSION_CONTEXT.reset(token)
 
     admission = metadata["feishu_current_admission"]
-    assert admission["reply_anchor_ref"] == admitted_parent_ref.value_hash
-    assert admission["reply_anchor_ref"] != current_message_ref.value_hash
+    assert admission["reply_anchor_ref"] == current_message_ref.value_hash
+    assert admission["explicit_thread_reply_anchor_ref"] == admitted_parent_ref.value_hash
 
 
 def test_webhook_and_websocket_normalize_to_equivalent_route_binding(tmp_path):
@@ -614,6 +614,59 @@ async def test_current_admission_reaches_normal_inbound_reply_metadata(tmp_path)
     assert len(sent) == 1
     admission = sent[0]["metadata"]["feishu_current_admission"]
     assert admission["transport_kind"] == "websocket"
+
+
+@pytest.mark.asyncio
+async def test_thread_current_admission_reaches_normal_reply_send_path(tmp_path, monkeypatch):
+    adapter = _adapter(tmp_path)
+    source = _source(
+        chat_id="oc_fake_group",
+        chat_type="group",
+        thread_id="omt_thread_fake",
+        message_id="om_thread_current_fake",
+    )
+    event = _event(
+        source,
+        message_id=source.message_id,
+        mentions_bot=True,
+        reply_to_message_id="om_thread_parent_fake",
+    )
+    contract = _contract(source, adapter)
+
+    async def handler(_event: MessageEvent) -> str:
+        return "normal thread reply"
+
+    monkeypatch.setattr(adapter, "_keep_typing", AsyncMock())
+    adapter._message_handler = handler
+    adapter.handle_message = FeishuAdapter.handle_message.__get__(adapter, FeishuAdapter)
+    adapter._client = SimpleNamespace(
+        im=SimpleNamespace(
+            v1=SimpleNamespace(
+                message=SimpleNamespace(
+                    reply=Mock(return_value=SimpleNamespace(success=lambda: True)),
+                    create=Mock(return_value=SimpleNamespace(success=lambda: True)),
+                )
+            )
+        )
+    )
+    adapter._build_reply_message_body = lambda **_kwargs: object()
+    adapter._build_reply_message_request = lambda *_args: object()
+    adapter._build_create_message_body = lambda **_kwargs: object()
+    adapter._build_create_message_request = lambda *_args: object()
+
+    assert _reply_anchor_for_event(event) == source.message_id
+
+    await adapter._handle_message_with_guards(
+        event,
+        current_conversation_contract=contract,
+        transport_kind="thread",
+        mention_required=True,
+    )
+    if adapter._session_tasks:
+        await asyncio.gather(*list(adapter._session_tasks.values()))
+
+    assert adapter._client.im.v1.message.reply.call_count == 1
+    assert adapter._client.im.v1.message.create.call_count == 0
 
 
 @pytest.mark.asyncio
