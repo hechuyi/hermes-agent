@@ -1,9 +1,11 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from gateway.config import PlatformConfig
+from gateway.feishu_legacy_guard import feishu_broker_context
 import gateway.platforms.feishu as feishu_module
 from gateway.platforms.feishu import FeishuAdapter
 
@@ -117,8 +119,26 @@ def _install_event_recorder(adapter, *, fail_event_types=()):
     return calls
 
 
+def _broker_context():
+    return feishu_broker_context(
+        "broker_grant_handle:sha256:" + ("b" * 64),
+        action_id="broker_action:sha256:" + ("a" * 64),
+        contract_hash="sha256:" + ("c" * 64),
+        route_partition_key="route_snapshot:sha256:" + ("d" * 64),
+    )
+
+
 def _event_types(calls):
     return [call.get("type") for call in calls if "type" in call]
+
+
+def _assert_legacy_descriptor_denied(event, *, surface):
+    assert event["type"] == "feishu_legacy_descriptor_denied"
+    assert event["surface"] == surface
+    assert event["failure_class"] == "feishu_legacy_descriptor_requires_broker"
+    assert event["descriptor_hash"].startswith("fnv1a64:")
+    assert event["correlation_id"]
+    assert isinstance(event["timestamp"], (int, float))
 
 
 def _delivery_events(calls):
@@ -1685,6 +1705,35 @@ STATUS_CARD_INTERNALIZATION_DEFERRED = pytest.mark.skip(
 
 
 @pytest.mark.asyncio
+async def test_execute_feishu_request_descriptor_requires_broker_before_sdk_builder(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+    adapter._build_create_message_body = MagicMock(
+        wraps=adapter._build_create_message_body
+    )
+    adapter._build_create_message_request = MagicMock(
+        wraps=adapter._build_create_message_request
+    )
+
+    result = await adapter.execute_feishu_request_descriptor(
+        _create_descriptor('{"config":{"wide_screen_mode":true}}'),
+        delivery_id="delivery-card-create",
+        inbound_id="inbound-1",
+        session_id="session-a",
+        correlation_id="corr-a",
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_legacy_descriptor_requires_broker"
+    assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
+    _assert_legacy_descriptor_denied(events[0], surface="feishu.descriptor")
+    adapter._build_create_message_body.assert_not_called()
+    adapter._build_create_message_request.assert_not_called()
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
+
+
+@pytest.mark.asyncio
 async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_http(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
@@ -1692,16 +1741,17 @@ async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_htt
     descriptor_uuid = "descriptor-card-create"
     assert descriptor_uuid != delivery_id
 
-    result = await adapter.execute_feishu_request_descriptor(
-        _create_descriptor(
-            '{"config":{"wide_screen_mode":true}}',
-            uuid_value=descriptor_uuid,
-        ),
-        delivery_id=delivery_id,
-        inbound_id="inbound-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_feishu_request_descriptor(
+            _create_descriptor(
+                '{"config":{"wide_screen_mode":true}}',
+                uuid_value=descriptor_uuid,
+            ),
+            delivery_id=delivery_id,
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is True
     assert len(message_api.create_calls) == 1
@@ -1731,21 +1781,22 @@ async def test_status_card_create_action_executes_descriptor_and_writes_delivery
     descriptor_uuid = "descriptor-card-create"
     assert descriptor_uuid != delivery_id
 
-    result = await adapter.execute_status_card_action(
-        {
-            "type": "status_card",
-            "card_action": _status_card_create_action(
-                feishu_request=_create_descriptor(
-                    '{"config":{"wide_screen_mode":true}}',
-                    uuid_value=descriptor_uuid,
-                )
-            ),
-        },
-        delivery_id=delivery_id,
-        inbound_id="inbound-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_status_card_action(
+            {
+                "type": "status_card",
+                "card_action": _status_card_create_action(
+                    feishu_request=_create_descriptor(
+                        '{"config":{"wide_screen_mode":true}}',
+                        uuid_value=descriptor_uuid,
+                    )
+                ),
+            },
+            delivery_id=delivery_id,
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is True
     assert result.message_id == "om_created"
@@ -1787,13 +1838,14 @@ async def test_status_card_create_operation_matrix_uses_descriptor_create_builde
     adapter._apply_gateway_event = apply
     message_api.create = create
 
-    result = await adapter.execute_status_card_action(
-        _status_card_create_action(feishu_request=descriptor),
-        delivery_id=delivery_id,
-        inbound_id="task-1:create",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_status_card_action(
+            _status_card_create_action(feishu_request=descriptor),
+            delivery_id=delivery_id,
+            inbound_id="task-1:create",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is True
     assert result.message_id == "om_created"
@@ -1831,13 +1883,14 @@ async def test_status_card_update_action_executes_patch_descriptor(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
 
-    result = await adapter.execute_status_card_action(
-        _status_card_update_action(),
-        delivery_id="delivery-card-patch",
-        inbound_id="inbound-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_status_card_action(
+            _status_card_update_action(),
+            delivery_id="delivery-card-patch",
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is True
     assert result.message_id == "om_card"
@@ -1868,13 +1921,14 @@ async def test_status_card_patch_operation_matrix_uses_descriptor_patch_builder(
     adapter._apply_gateway_event = apply
     message_api.update = update
 
-    result = await adapter.execute_status_card_action(
-        _status_card_update_action(feishu_request=descriptor),
-        delivery_id="delivery-card-patch",
-        inbound_id="task-1:patch-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_status_card_action(
+            _status_card_update_action(feishu_request=descriptor),
+            delivery_id="delivery-card-patch",
+            inbound_id="task-1:patch-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is True
     assert result.message_id == "om_card"
@@ -1919,13 +1973,14 @@ async def test_status_card_action_without_feishu_request_returns_noop_without_de
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
 
-    result = await adapter.execute_status_card_action(
-        action,
-        delivery_id="delivery-card-noop",
-        inbound_id="inbound-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_status_card_action(
+            action,
+            delivery_id="delivery-card-noop",
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is True
     assert result.message_id is None
@@ -1950,13 +2005,14 @@ async def test_status_card_malformed_or_unsupported_action_fails_closed(tmp_path
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
 
-    result = await adapter.execute_status_card_action(
-        action,
-        delivery_id="delivery-card-bad",
-        inbound_id="inbound-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_status_card_action(
+            action,
+            delivery_id="delivery-card-bad",
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is False
     assert result.error == "invalid status_card action"
@@ -1966,17 +2022,45 @@ async def test_status_card_malformed_or_unsupported_action_fails_closed(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_descriptor_patch_interactive_uses_sdk_update_builder_and_path_message_id(tmp_path):
+async def test_status_card_requires_broker_before_action_extraction(tmp_path):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
+    validator = MagicMock(wraps=adapter._validated_status_card_action_for_send)
+    adapter._validated_status_card_action_for_send = validator
 
-    result = await adapter.execute_feishu_request_descriptor(
-        _patch_descriptor('{"config":{"wide_screen_mode":true}}'),
-        delivery_id="delivery-card-patch",
+    result = await adapter.execute_status_card_action(
+        {
+            "type": "status_card",
+            "card_action": _status_card_create_action(),
+        },
+        delivery_id="delivery-card-create",
         inbound_id="inbound-1",
         session_id="session-a",
         correlation_id="corr-a",
     )
+
+    assert result.success is False
+    assert result.error == "feishu_legacy_descriptor_requires_broker"
+    assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
+    _assert_legacy_descriptor_denied(events[0], surface="feishu.status_card")
+    validator.assert_not_called()
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_descriptor_patch_interactive_uses_sdk_update_builder_and_path_message_id(tmp_path):
+    adapter, message_api = _adapter(tmp_path)
+    events = _install_event_recorder(adapter)
+
+    with _broker_context():
+        result = await adapter.execute_feishu_request_descriptor(
+            _patch_descriptor('{"config":{"wide_screen_mode":true}}'),
+            delivery_id="delivery-card-patch",
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is True
     assert len(message_api.update_calls) == 1
@@ -1995,13 +2079,14 @@ async def test_descriptor_rejects_extra_fields_before_network(tmp_path):
     events = _install_event_recorder(adapter)
     descriptor = {**_create_descriptor("{}"), "url": "https://example.invalid"}
 
-    result = await adapter.execute_feishu_request_descriptor(
-        descriptor,
-        delivery_id="delivery-bad-descriptor",
-        inbound_id="inbound-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_feishu_request_descriptor(
+            descriptor,
+            delivery_id="delivery-bad-descriptor",
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is False
     assert _event_types(events) == ["delivery_pending", "delivery_failed"]
@@ -2032,13 +2117,14 @@ async def test_invalid_descriptor_durable_delivery_record_does_not_write_failed(
     adapter._apply_gateway_event = apply
     descriptor = {**_create_descriptor("{}"), "url": "https://example.invalid"}
 
-    result = await adapter.execute_feishu_request_descriptor(
-        descriptor,
-        delivery_id="delivery-bad-descriptor",
-        inbound_id="inbound-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_feishu_request_descriptor(
+            descriptor,
+            delivery_id="delivery-bad-descriptor",
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is False
     assert result.error == "invalid Feishu request descriptor"
@@ -2069,13 +2155,14 @@ async def test_invalid_descriptor_pending_delivery_record_still_writes_failed(tm
     adapter._apply_gateway_event = apply
     descriptor = {**_create_descriptor("{}"), "url": "https://example.invalid"}
 
-    result = await adapter.execute_feishu_request_descriptor(
-        descriptor,
-        delivery_id="delivery-bad-descriptor",
-        inbound_id="inbound-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_feishu_request_descriptor(
+            descriptor,
+            delivery_id="delivery-bad-descriptor",
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is False
     assert result.error == "invalid Feishu request descriptor"
@@ -2102,13 +2189,14 @@ async def test_invalid_descriptor_malformed_delivery_record_still_writes_failed(
     adapter._apply_gateway_event = apply
     descriptor = {**_create_descriptor("{}"), "url": "https://example.invalid"}
 
-    result = await adapter.execute_feishu_request_descriptor(
-        descriptor,
-        delivery_id="delivery-bad-descriptor",
-        inbound_id="inbound-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_feishu_request_descriptor(
+            descriptor,
+            delivery_id="delivery-bad-descriptor",
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is False
     assert result.error == "invalid Feishu request descriptor"
@@ -2141,13 +2229,14 @@ async def test_descriptor_rejects_values_looser_than_gateway_envelope_validator(
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
 
-    result = await adapter.execute_feishu_request_descriptor(
-        descriptor,
-        delivery_id="delivery-bad-descriptor-values",
-        inbound_id="inbound-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_feishu_request_descriptor(
+            descriptor,
+            delivery_id="delivery-bad-descriptor-values",
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is False
     assert _event_types(events) == ["delivery_pending", "delivery_failed"]
@@ -2162,13 +2251,14 @@ async def test_descriptor_content_is_not_double_serialized(tmp_path):
     _install_event_recorder(adapter)
     content = '{"config":{"wide_screen_mode":true}}'
 
-    result = await adapter.execute_feishu_request_descriptor(
-        _create_descriptor(content),
-        delivery_id="delivery-card-create",
-        inbound_id="inbound-1",
-        session_id="session-a",
-        correlation_id="corr-a",
-    )
+    with _broker_context():
+        result = await adapter.execute_feishu_request_descriptor(
+            _create_descriptor(content),
+            delivery_id="delivery-card-create",
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
 
     assert result.success is True
     request_content = message_api.create_calls[0].request_body.content

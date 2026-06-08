@@ -41,6 +41,7 @@ def _ensure_feishu_mocks():
 _ensure_feishu_mocks()
 
 from gateway.config import PlatformConfig
+from gateway.feishu_legacy_guard import feishu_broker_context
 import gateway.platforms.feishu as feishu_module
 from gateway.platforms.feishu import FeishuAdapter
 
@@ -77,8 +78,44 @@ def _install_event_recorder(adapter, *, fail_event_types=()):
     return calls
 
 
+def _install_sync_event_recorder(monkeypatch):
+    calls = []
+
+    def apply(event, _state_dir):
+        calls.append(event)
+        return True
+
+    monkeypatch.setattr(feishu_module.gateway_event_ledger, "apply_gateway_event", apply)
+    return calls
+
+
+def _broker_context():
+    return feishu_broker_context(
+        "broker_grant_handle:sha256:" + ("b" * 64),
+        action_id="broker_action:sha256:" + ("a" * 64),
+        contract_hash="sha256:" + ("c" * 64),
+        route_partition_key="route_snapshot:sha256:" + ("d" * 64),
+    )
+
+
 def _event_types(calls):
     return [call.get("type") for call in calls if "type" in call]
+
+
+def _assert_action_denied(event, *, action):
+    assert event["type"] == "feishu_action_denied"
+    assert event["action"] == action
+    assert event["failure_class"] == "feishu_action_requires_broker"
+    assert event["action_hash"].startswith("fnv1a64:")
+    assert event["correlation_id"]
+
+
+def _assert_legacy_descriptor_denied(event, *, surface, failure_class):
+    assert event["type"] == "feishu_legacy_descriptor_denied"
+    assert event["surface"] == surface
+    assert event["failure_class"] == failure_class
+    assert event["descriptor_hash"].startswith("fnv1a64:")
+    assert event["correlation_id"]
 
 
 def _delivery_events(calls):
@@ -1362,6 +1399,73 @@ class TestNonApprovalCardAction:
     """Non-approval card actions should still route as synthetic commands."""
 
     @pytest.mark.asyncio
+    async def test_generic_card_requires_broker_before_synthetic_command(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+        events = _install_event_recorder(adapter)
+
+        data = _make_card_action_data(
+            action_value={"custom_action": "something_else"},
+            token="tok_requires_broker",
+        )
+
+        with (
+            patch.object(
+                adapter,
+                "_resolve_sender_profile",
+                new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ) as mock_profile,
+            patch.object(
+                adapter,
+                "get_chat_info",
+                new_callable=AsyncMock,
+                return_value={"name": "Test Chat", "type": "group", "reliable": True},
+            ) as mock_chat,
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+            await adapter._handle_card_action_event(data)
+
+        assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
+        _assert_legacy_descriptor_denied(
+            events[0],
+            surface="feishu.card_action",
+            failure_class="feishu_legacy_card_action_requires_broker",
+        )
+        mock_profile.assert_not_awaited()
+        mock_chat.assert_not_awaited()
+        mock_handle.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_generic_card_with_broker_context_routes_as_synthetic_command(self, tmp_path):
+        adapter = _make_audited_adapter(tmp_path)
+
+        data = _make_card_action_data(
+            action_value={"custom_action": "something_else"},
+            token="tok_brokered_card",
+        )
+
+        with (
+            _broker_context(),
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ),
+            patch.object(
+                adapter,
+                "get_chat_info",
+                new_callable=AsyncMock,
+                return_value={"name": "Test Chat", "type": "group", "reliable": True},
+            ),
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            await adapter._handle_card_action_event(data)
+
+        mock_handle.assert_called_once()
+        event = mock_handle.call_args[0][0]
+        assert event.text.startswith("/card button")
+
+    @pytest.mark.asyncio
     async def test_routes_as_synthetic_command(self):
         adapter = _make_adapter()
 
@@ -1646,6 +1750,39 @@ class TestCardActionCallbackResponse:
         assert "Approved once" in card["header"]["title"]["content"]
         assert "Bob" in card["elements"][0]["content"]
 
+    def test_approval_requires_broker_before_scheduling_resolution(
+        self,
+        tmp_path,
+        monkeypatch,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        events = _install_sync_event_recorder(monkeypatch)
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._allowed_group_users = {"ou_user1"}
+        adapter._approval_state[1] = {
+            "session_key": "sess-1",
+            "message_id": "om_approval_1",
+            "chat_id": "oc_12345",
+            "inbound_id": "inbound-approval-1",
+            "session_id": "session-approval-1",
+            "correlation_id": "corr-approval-1",
+        }
+        data = _make_card_action_data(
+            {"hermes_action": "approve_once", "approval_id": 1},
+            open_id="ou_user1",
+        )
+
+        with patch("asyncio.run_coroutine_threadsafe") as mock_submit:
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is None
+        mock_submit.assert_not_called()
+        assert _event_types(events) == ["feishu_action_denied"]
+        _assert_action_denied(events[0], action="approval_prompt_card_action")
+
     @pytest.mark.asyncio
     async def test_approval_audited_click_restores_actionable_card_when_side_effect_fails(
         self,
@@ -1687,6 +1824,7 @@ class TestCardActionCallbackResponse:
         )
 
         with (
+            _broker_context(),
             patch("asyncio.run_coroutine_threadsafe", side_effect=_schedule_submitted_coro_on_current_loop(tasks)),
             patch("tools.approval.resolve_gateway_approval", side_effect=RuntimeError("approval store unavailable")),
         ):
@@ -1896,12 +2034,47 @@ class TestCardActionCallbackResponse:
         )
         adapter._sender_name_cache["ou_bob"] = ("Bob", 9999999999)
 
-        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro) as mock_submit:
+        with (
+            _broker_context(),
+            patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro) as mock_submit,
+        ):
             response = adapter._on_card_action_trigger(data)
 
         assert response is not None
         assert response.card is None
         mock_submit.assert_called_once()
+
+    def test_update_prompt_requires_broker_before_scheduling_resolution(
+        self,
+        tmp_path,
+        monkeypatch,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_audited_adapter(tmp_path)
+        events = _install_sync_event_recorder(monkeypatch)
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._update_prompt_state[8] = {
+            "session_key": "sess-up-8",
+            "message_id": "om_update_8",
+            "chat_id": "oc_12345",
+            "inbound_id": "inbound-up-8",
+            "session_id": "session-up-8",
+            "correlation_id": "corr-up-8",
+        }
+        data = _make_card_action_data(
+            {"hermes_update_prompt_action": "y", "update_prompt_id": 8},
+            open_id="ou_bob",
+        )
+
+        with patch("asyncio.run_coroutine_threadsafe") as mock_submit:
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is None
+        mock_submit.assert_not_called()
+        assert _event_types(events) == ["feishu_action_denied"]
+        _assert_action_denied(events[0], action="update_prompt_card_action")
 
     @pytest.mark.asyncio
     async def test_update_prompt_audited_click_restores_actionable_card_when_side_effect_fails(
@@ -1948,7 +2121,10 @@ class TestCardActionCallbackResponse:
         )
         adapter._sender_name_cache["ou_bob"] = ("Bob", 9999999999)
 
-        with patch("asyncio.run_coroutine_threadsafe", side_effect=_schedule_submitted_coro_on_current_loop(tasks)):
+        with (
+            _broker_context(),
+            patch("asyncio.run_coroutine_threadsafe", side_effect=_schedule_submitted_coro_on_current_loop(tasks)),
+        ):
             response = adapter._on_card_action_trigger(data)
             assert response is not None
             assert response.card is None

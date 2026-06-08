@@ -6,6 +6,7 @@ import time
 import pytest
 
 from gateway.config import PlatformConfig
+from gateway.feishu_legacy_guard import feishu_broker_context
 from gateway.platforms.feishu import FeishuAdapter, GatewayEventResult
 from gateway.platforms.base import MessageEvent, MessageType
 
@@ -16,6 +17,15 @@ def _adapter(tmp_path):
     )
     adapter.handle_message = AsyncMock()
     return adapter
+
+
+def _broker_context():
+    return feishu_broker_context(
+        "broker_grant_handle:sha256:" + ("b" * 64),
+        action_id="broker_action:sha256:" + ("a" * 64),
+        contract_hash="sha256:" + ("c" * 64),
+        route_partition_key="route_snapshot:sha256:" + ("d" * 64),
+    )
 
 
 def test_gateway_event_state_dir_prefers_new_config_key(tmp_path):
@@ -96,6 +106,10 @@ def _failure(event_type, failure_class):
         reason=failure_class,
         diagnostics="returncode=1 stdout_bytes=0 stderr_json=object",
     )
+
+
+def _event_types(calls):
+    return [call.get("type") for call in calls if "type" in call]
 
 
 def _reaction_adapter(tmp_path):
@@ -302,11 +316,44 @@ async def test_reaction_synthetic_inbound_id_uses_feishu_event_id_not_target_mes
         ),
     )
 
-    await adapter._handle_reaction_event("im.message.reaction.created_v1", data)
+    with _broker_context():
+        await adapter._handle_reaction_event("im.message.reaction.created_v1", data)
 
     synthetic_event = adapter._handle_message_with_guards.await_args.args[0]
     assert synthetic_event.message_id == "ev_reaction_1"
     assert synthetic_event.message_id != "om_bot_target"
+
+
+@pytest.mark.asyncio
+async def test_reaction_requires_broker_before_fetch_or_synthetic_submission(tmp_path):
+    adapter = _reaction_adapter(tmp_path)
+    events = []
+
+    async def apply(event):
+        events.append(event)
+        return True
+
+    adapter._apply_gateway_event = apply
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="ev_reaction_requires_broker"),
+        event=SimpleNamespace(
+            message_id="om_bot_target",
+            user_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+        ),
+    )
+
+    await adapter._handle_reaction_event("im.message.reaction.created_v1", data)
+
+    assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
+    event = events[0]
+    assert event["surface"] == "feishu.reaction"
+    assert event["failure_class"] == "feishu_legacy_descriptor_requires_broker"
+    assert event["descriptor_hash"].startswith("fnv1a64:")
+    adapter._build_get_message_request.assert_not_called()
+    adapter._client.im.v1.message.get.assert_not_called()
+    adapter._resolve_sender_profile.assert_not_awaited()
+    adapter._handle_message_with_guards.assert_not_awaited()
 
 
 @pytest.mark.asyncio

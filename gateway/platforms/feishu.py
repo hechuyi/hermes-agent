@@ -71,6 +71,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from gateway import hermes_tools_gateway_event
+from gateway.feishu_legacy_guard import current_feishu_broker_context
 
 try:
     from gateway import gateway_event_ledger
@@ -3066,6 +3067,111 @@ class FeishuAdapter(BasePlatformAdapter):
 
         return None
 
+    @staticmethod
+    def _feishu_broker_context_present() -> bool:
+        return current_feishu_broker_context() is not None
+
+    @staticmethod
+    def _feishu_audit_hash(value: str) -> str:
+        h = 0xCBF29CE484222325
+        for byte in str(value).encode("utf-8", "surrogatepass"):
+            h ^= byte
+            h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+        return f"fnv1a64:{h:016x}"
+
+    @staticmethod
+    def _safe_feishu_audit_correlation_id(value: Optional[str]) -> str:
+        text = str(value or "").strip()
+        if re.fullmatch(r"^[A-Za-z0-9_.:@+-]{1,256}$", text):
+            return text
+        return "feishu-legacy-denial"
+
+    def _build_feishu_legacy_descriptor_denied_event(
+        self,
+        *,
+        surface: str,
+        failure_class: str = "feishu_legacy_descriptor_requires_broker",
+        correlation_id: Optional[str] = None,
+        descriptor_seed: str = "",
+    ) -> Dict[str, Any]:
+        return {
+            "type": "feishu_legacy_descriptor_denied",
+            "timestamp": time.time(),
+            "correlation_id": self._safe_feishu_audit_correlation_id(correlation_id),
+            "descriptor_hash": self._feishu_audit_hash(
+                f"{surface}:{failure_class}:{descriptor_seed}"
+            ),
+            "surface": surface,
+            "failure_class": failure_class,
+        }
+
+    def _build_feishu_action_denied_event(
+        self,
+        *,
+        action: str,
+        correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        failure_class = "feishu_action_requires_broker"
+        return {
+            "type": "feishu_action_denied",
+            "timestamp": time.time(),
+            "correlation_id": self._safe_feishu_audit_correlation_id(correlation_id),
+            "action_hash": self._feishu_audit_hash(f"{action}:{failure_class}"),
+            "action": action,
+            "failure_class": failure_class,
+        }
+
+    async def _apply_feishu_legacy_descriptor_denied(
+        self,
+        *,
+        surface: str,
+        failure_class: str = "feishu_legacy_descriptor_requires_broker",
+        correlation_id: Optional[str] = None,
+        descriptor_seed: str = "",
+    ) -> bool:
+        if self._gateway_event_state_dir is None:
+            return False
+        return bool(
+            await self._apply_gateway_event(
+                self._build_feishu_legacy_descriptor_denied_event(
+                    surface=surface,
+                    failure_class=failure_class,
+                    correlation_id=correlation_id,
+                    descriptor_seed=descriptor_seed,
+                )
+            )
+        )
+
+    def _apply_feishu_audit_event_sync(self, event: Dict[str, Any]) -> bool:
+        if self._gateway_event_state_dir is None:
+            return False
+        try:
+            result = gateway_event_ledger.apply_gateway_event(
+                event,
+                self._gateway_event_state_dir,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Feishu] sync audit apply failed: event_type=%s failure_class=%s",
+                event.get("type") or "unknown",
+                exc.__class__.__name__,
+            )
+            return False
+        return self._gateway_event_apply_succeeded(result)
+
+    def _apply_feishu_action_denied_sync(
+        self,
+        *,
+        action: str,
+        correlation_id: Optional[str] = None,
+    ) -> bool:
+        return self._apply_feishu_audit_event_sync(
+            self._build_feishu_action_denied_event(
+                action=action,
+                correlation_id=correlation_id,
+            )
+        )
+
     def _handle_approval_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
         """Schedule approval resolution and build the synchronous callback response."""
         approval_id = action_value.get("approval_id")
@@ -3077,6 +3183,16 @@ class FeishuAdapter(BasePlatformAdapter):
             logger.debug("[Feishu] Approval %s already resolved or unknown", approval_id)
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
         choice = _APPROVAL_CHOICE_MAP.get(action_value.get("hermes_action"), "deny")
+        if self._gateway_event_state_dir is not None and not self._feishu_broker_context_present():
+            if not self._apply_feishu_action_denied_sync(
+                action="approval_prompt_card_action",
+                correlation_id=state.get("correlation_id"),
+            ):
+                logger.warning(
+                    "[Feishu] Dropping approval callback after audit failure: "
+                    "reason=feishu_action_denied_apply_failed"
+                )
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
         operator = getattr(event, "operator", None)
         open_id = str(getattr(operator, "open_id", "") or "")
@@ -3132,6 +3248,17 @@ class FeishuAdapter(BasePlatformAdapter):
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
         if prompt_id not in self._update_prompt_state:
             logger.debug("[Feishu] Update prompt %s already resolved or unknown", prompt_id)
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+        state = self._update_prompt_state[prompt_id]
+        if self._gateway_event_state_dir is not None and not self._feishu_broker_context_present():
+            if not self._apply_feishu_action_denied_sync(
+                action="update_prompt_card_action",
+                correlation_id=state.get("correlation_id"),
+            ):
+                logger.warning(
+                    "[Feishu] Dropping update prompt callback after audit failure: "
+                    "reason=feishu_action_denied_apply_failed"
+                )
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
         answer = str(action_value.get("hermes_update_prompt_action", "") or "").strip().lower()
@@ -3413,6 +3540,18 @@ class FeishuAdapter(BasePlatformAdapter):
                 bool(message_id),
             )
             return
+        if self._gateway_event_state_dir is not None and not self._feishu_broker_context_present():
+            audited = await self._apply_feishu_legacy_descriptor_denied(
+                surface="feishu.reaction",
+                correlation_id=reaction_event_id,
+                descriptor_seed=reaction_event_id,
+            )
+            if not audited:
+                logger.warning(
+                    "[Feishu] Dropping reaction after audit failure: "
+                    "reason=feishu_legacy_descriptor_denied_apply_failed"
+                )
+            return
 
         # Fetch the target message to verify it was sent by us and to obtain chat context.
         try:
@@ -3501,6 +3640,19 @@ class FeishuAdapter(BasePlatformAdapter):
             return
         if token and self._is_card_action_duplicate(token):
             logger.debug("[Feishu] Dropping duplicate card action token: %s", token)
+            return
+        if self._gateway_event_state_dir is not None and not self._feishu_broker_context_present():
+            audited = await self._apply_feishu_legacy_descriptor_denied(
+                surface="feishu.card_action",
+                failure_class="feishu_legacy_card_action_requires_broker",
+                correlation_id=token,
+                descriptor_seed=token,
+            )
+            if not audited:
+                logger.warning(
+                    "[Feishu] Dropping card action after audit failure: "
+                    "reason=feishu_legacy_descriptor_denied_apply_failed"
+                )
             return
 
         context = getattr(event, "context", None)
@@ -5353,6 +5505,21 @@ class FeishuAdapter(BasePlatformAdapter):
         correlation_id: str,
     ) -> SendResult:
         """Execute a Rust-emitted Feishu request descriptor through SDK builders."""
+        if not self._feishu_broker_context_present():
+            audited = await self._apply_feishu_legacy_descriptor_denied(
+                surface="feishu.descriptor",
+                correlation_id=correlation_id,
+                descriptor_seed=delivery_id,
+            )
+            if not audited:
+                return SendResult(
+                    success=False,
+                    error="feishu_legacy_descriptor_denied_apply_failed",
+                )
+            return SendResult(
+                success=False,
+                error="feishu_legacy_descriptor_requires_broker",
+            )
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
@@ -5452,6 +5619,22 @@ class FeishuAdapter(BasePlatformAdapter):
         correlation_id: str,
     ) -> SendResult:
         """Execute the Feishu request embedded in a validated status_card action."""
+        if not self._feishu_broker_context_present():
+            audited = await self._apply_feishu_legacy_descriptor_denied(
+                surface="feishu.status_card",
+                correlation_id=correlation_id,
+                descriptor_seed=delivery_id,
+            )
+            if not audited:
+                return SendResult(
+                    success=False,
+                    error="feishu_legacy_descriptor_denied_apply_failed",
+                )
+            return SendResult(
+                success=False,
+                error="feishu_legacy_descriptor_requires_broker",
+            )
+
         card_action = self._validated_status_card_action_for_send(action)
         if card_action is None:
             return SendResult(success=False, error="invalid status_card action")
