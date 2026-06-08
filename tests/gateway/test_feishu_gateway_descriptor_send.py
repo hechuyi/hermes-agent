@@ -141,6 +141,27 @@ def _assert_legacy_descriptor_denied(event, *, surface):
     assert isinstance(event["timestamp"], (int, float))
 
 
+def test_legacy_descriptor_denied_correlation_hashes_regex_safe_external_id():
+    adapter = FeishuAdapter(PlatformConfig(enabled=True))
+    external_id = "ev_regex_safe_callback_123"
+
+    first = adapter._build_feishu_legacy_descriptor_denied_event(
+        surface="feishu.card_action",
+        correlation_id=external_id,
+        descriptor_seed=external_id,
+    )
+    second = adapter._build_feishu_legacy_descriptor_denied_event(
+        surface="feishu.card_action",
+        correlation_id=external_id,
+        descriptor_seed=external_id,
+    )
+
+    assert first["correlation_id"] != external_id
+    assert first["correlation_id"] == second["correlation_id"]
+    assert first["correlation_id"].startswith("feishu-legacy-denial:")
+    assert first["descriptor_hash"].startswith("fnv1a64:")
+
+
 def _delivery_events(calls):
     return [call for call in calls if call.get("type") in {"delivery_pending", "delivery_sent"}]
 

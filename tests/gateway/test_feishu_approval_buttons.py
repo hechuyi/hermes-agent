@@ -1436,6 +1436,8 @@ class TestNonApprovalCardAction:
                 surface="feishu.card_action",
                 failure_class="feishu_legacy_card_action_requires_broker",
             )
+            assert event["correlation_id"] != "tok_requires_broker"
+            assert event["correlation_id"].startswith("feishu-legacy-denial:")
         assert "tok_requires_broker" not in adapter._card_action_tokens
         mock_profile.assert_not_awaited()
         mock_chat.assert_not_awaited()

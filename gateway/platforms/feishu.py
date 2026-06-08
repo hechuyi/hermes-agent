@@ -3101,8 +3101,8 @@ class FeishuAdapter(BasePlatformAdapter):
     @staticmethod
     def _safe_feishu_audit_correlation_id(value: Optional[str]) -> str:
         text = str(value or "").strip()
-        if re.fullmatch(r"^[A-Za-z0-9_.:@+-]{1,256}$", text):
-            return text
+        if text:
+            return f"feishu-legacy-denial:{FeishuAdapter._feishu_audit_hash(text)}"
         return "feishu-legacy-denial"
 
     def _build_feishu_legacy_descriptor_denied_event(

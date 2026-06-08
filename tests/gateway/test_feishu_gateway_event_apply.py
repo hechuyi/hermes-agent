@@ -174,6 +174,8 @@ def test_reaction_entrypoint_requires_broker_before_submit(tmp_path):
     assert event["surface"] == "feishu.reaction"
     assert event["failure_class"] == "feishu_legacy_descriptor_requires_broker"
     assert event["descriptor_hash"].startswith("fnv1a64:")
+    assert event["correlation_id"] != "ev_reaction_entrypoint_requires_broker"
+    assert event["correlation_id"].startswith("feishu-legacy-denial:")
 
 
 def test_reaction_entrypoint_with_broker_context_submits(tmp_path):
@@ -438,6 +440,8 @@ async def test_reaction_requires_broker_before_fetch_or_synthetic_submission(tmp
     assert event["surface"] == "feishu.reaction"
     assert event["failure_class"] == "feishu_legacy_descriptor_requires_broker"
     assert event["descriptor_hash"].startswith("fnv1a64:")
+    assert event["correlation_id"] != "ev_reaction_requires_broker"
+    assert event["correlation_id"].startswith("feishu-legacy-denial:")
     adapter._build_get_message_request.assert_not_called()
     adapter._client.im.v1.message.get.assert_not_called()
     adapter._resolve_sender_profile.assert_not_awaited()
