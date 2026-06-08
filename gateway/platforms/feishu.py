@@ -48,6 +48,7 @@ user is seen through different apps in the future.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 import hashlib
 import hmac
@@ -144,6 +145,10 @@ except ImportError:
     LARK_DOMAIN = None  # type: ignore[assignment]
 
 FEISHU_WEBSOCKET_AVAILABLE = websockets is not None
+
+_FEISHU_CURRENT_ADMISSION_CONTEXT: contextvars.ContextVar[Dict[str, Any] | None] = (
+    contextvars.ContextVar("feishu_current_admission", default=None)
+)
 FEISHU_WEBHOOK_AVAILABLE = aiohttp is not None
 
 from gateway.config import Platform, PlatformConfig
@@ -1817,6 +1822,40 @@ class FeishuAdapter(BasePlatformAdapter):
     # Outbound — send / edit / send_image / send_voice / …
     # =========================================================================
 
+    @staticmethod
+    def _metadata_with_current_admission(metadata: Any, reply_to: Optional[str]) -> Any:
+        admission = _FEISHU_CURRENT_ADMISSION_CONTEXT.get()
+        if not isinstance(admission, dict):
+            return metadata
+        if metadata is not None and not isinstance(metadata, dict):
+            return metadata
+        merged = dict(metadata or {})
+        if "feishu_current_admission" not in merged:
+            reply_admission = dict(admission)
+            reply_ref = feishu_hashed_ref("feishu_reply_anchor", reply_to)
+            if reply_ref is not None:
+                reply_admission["reply_anchor_ref"] = reply_ref.value_hash
+            merged["feishu_current_admission"] = reply_admission
+        return merged
+
+    async def _send_with_retry(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str] = None,
+        metadata: Any = None,
+        max_retries: int = 2,
+        base_delay: float = 2.0,
+    ) -> SendResult:
+        return await super()._send_with_retry(
+            chat_id=chat_id,
+            content=content,
+            reply_to=reply_to,
+            metadata=self._metadata_with_current_admission(metadata, reply_to),
+            max_retries=max_retries,
+            base_delay=base_delay,
+        )
+
     async def send(
         self,
         chat_id: str,
@@ -2641,7 +2680,7 @@ class FeishuAdapter(BasePlatformAdapter):
     # Inbound event handlers
     # =========================================================================
 
-    def _on_message_event(self, data: Any) -> None:
+    def _on_message_event(self, data: Any, transport_kind: str = "websocket") -> None:
         """Normalize Feishu inbound events into MessageEvent.
 
         Called by the lark_oapi SDK's event dispatcher on a background thread.
@@ -2649,9 +2688,10 @@ class FeishuAdapter(BasePlatformAdapter):
         during startup/restart or network-flap reconnect), the event is queued
         for replay instead of dropped.
         """
+        transport = self._normalize_inbound_transport_kind(transport_kind)
         loop = self._loop
         if not self._loop_accepts_callbacks(loop):
-            start_drainer = self._enqueue_pending_inbound_event(data)
+            start_drainer = self._enqueue_pending_inbound_event(data, transport)
             if start_drainer:
                 threading.Thread(
                     target=self._drain_pending_inbound_events,
@@ -2659,15 +2699,38 @@ class FeishuAdapter(BasePlatformAdapter):
                     daemon=True,
                 ).start()
             return
-        self._submit_on_loop(loop, self._handle_message_event_data(data))
+        self._submit_on_loop(
+            loop,
+            self._handle_message_event_data(data, transport_kind=transport),
+        )
 
-    def _enqueue_pending_inbound_event(self, data: Any) -> bool:
+    @staticmethod
+    def _normalize_inbound_transport_kind(transport_kind: str | None) -> str:
+        transport = str(transport_kind or "").strip().lower()
+        return transport if transport in {"webhook", "websocket"} else "websocket"
+
+    @staticmethod
+    def _pending_inbound_event_parts(item: Any) -> tuple[Any, str]:
+        if (
+            isinstance(item, tuple)
+            and len(item) == 2
+            and str(item[1] or "").strip().lower() in {"webhook", "websocket"}
+        ):
+            return item[0], str(item[1]).strip().lower()
+        return item, "websocket"
+
+    def _enqueue_pending_inbound_event(
+        self,
+        data: Any,
+        transport_kind: str = "websocket",
+    ) -> bool:
         """Append an event to the pending-inbound queue.
 
         Returns True if the caller should spawn a drainer thread (no drainer
         currently scheduled), False if a drainer is already running and will
         pick up the new event on its next pass.
         """
+        transport = self._normalize_inbound_transport_kind(transport_kind)
         with self._pending_inbound_lock:
             if len(self._pending_inbound_events) >= self._pending_inbound_max_depth:
                 # Queue full — drop the oldest to make room. This happens only
@@ -2675,7 +2738,8 @@ class FeishuAdapter(BasePlatformAdapter):
                 # WS keeps firing callbacks. Still better than silent drops.
                 dropped = self._pending_inbound_events.pop(0)
                 try:
-                    event = getattr(dropped, "event", None)
+                    dropped_data, _dropped_transport = self._pending_inbound_event_parts(dropped)
+                    event = getattr(dropped_data, "event", None)
                     message = getattr(event, "message", None)
                     message_id = str(getattr(message, "message_id", "") or "unknown")
                 except Exception:
@@ -2685,7 +2749,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     self._pending_inbound_max_depth,
                     message_id,
                 )
-            self._pending_inbound_events.append(data)
+            self._pending_inbound_events.append((data, transport))
             depth = len(self._pending_inbound_events)
             should_start = not self._pending_drain_scheduled
             if should_start:
@@ -2734,14 +2798,21 @@ class FeishuAdapter(BasePlatformAdapter):
                         continue
                     dispatched = 0
                     requeue: List[Any] = []
-                    for event in batch:
+                    for pending in batch:
+                        pending_data, pending_transport = self._pending_inbound_event_parts(
+                            pending
+                        )
                         if self._submit_on_loop(
-                            loop, self._handle_message_event_data(event)
+                            loop,
+                            self._handle_message_event_data(
+                                pending_data,
+                                transport_kind=pending_transport,
+                            ),
                         ):
                             dispatched += 1
                         else:
                             # Loop closed/unavailable — requeue and poll again.
-                            requeue.append(event)
+                            requeue.append(pending)
                     if requeue:
                         with self._pending_inbound_lock:
                             self._pending_inbound_events[:0] = requeue
@@ -2775,8 +2846,14 @@ class FeishuAdapter(BasePlatformAdapter):
             with self._pending_inbound_lock:
                 self._pending_drain_scheduled = False
 
-    async def _handle_message_event_data(self, data: Any) -> None:
+    async def _handle_message_event_data(
+        self,
+        data: Any,
+        *,
+        transport_kind: str = "websocket",
+    ) -> None:
         """Shared inbound message handling for websocket and webhook transports."""
+        transport = self._normalize_inbound_transport_kind(transport_kind)
         event = getattr(data, "event", None)
         message = getattr(event, "message", None)
         sender = getattr(event, "sender", None)
@@ -2808,6 +2885,7 @@ class FeishuAdapter(BasePlatformAdapter):
             chat_type=chat_type,
             message_id=message_id,
             is_bot=_is_bot_sender(sender),
+            transport_kind=transport,
         )
 
     def _on_message_read_event(self, data: P2ImMessageMessageReadV1) -> None:
@@ -3860,6 +3938,43 @@ class FeishuAdapter(BasePlatformAdapter):
         Per-chat lock ensures messages in the same chat are processed one at a
         time (matches openclaw's createChatQueue serial queue behaviour).
         """
+        if not self._admit_current_conversation_for_event(
+            event,
+            current_conversation_contract=current_conversation_contract,
+            transport_kind=transport_kind,
+            mention_required=mention_required,
+        ):
+            return
+
+        chat_id = getattr(event.source, "chat_id", "") or "" if event.source else ""
+        chat_lock = self._get_chat_lock(chat_id)
+        async with chat_lock:
+            admission_record = getattr(
+                event,
+                "feishu_current_conversation_admission",
+                None,
+            )
+            token = None
+            if isinstance(admission_record, dict):
+                token = _FEISHU_CURRENT_ADMISSION_CONTEXT.set(dict(admission_record))
+            try:
+                if not await self._apply_inbound_gateway_event(event):
+                    return
+                await self.handle_message(event)
+            except InvalidLiveSessionSource as exc:
+                logger.warning("[Feishu] Ignoring invalid live inbound source: reason=%s", exc.reason)
+            finally:
+                if token is not None:
+                    _FEISHU_CURRENT_ADMISSION_CONTEXT.reset(token)
+
+    def _admit_current_conversation_for_event(
+        self,
+        event: MessageEvent,
+        *,
+        current_conversation_contract: ConversationContract | None = None,
+        transport_kind: str | None = None,
+        mention_required: bool | None = None,
+    ) -> bool:
         if current_conversation_contract is None:
             current_conversation_contract = getattr(
                 event,
@@ -3878,35 +3993,27 @@ class FeishuAdapter(BasePlatformAdapter):
                 "feishu_current_mention_required",
                 False,
             )
-        if current_conversation_contract is not None:
-            admission = self._admit_current_conversation_event(
+        if current_conversation_contract is None:
+            return True
+        admission = self._admit_current_conversation_event(
+            event,
+            transport_kind=transport_kind or self._transport_kind_for_event(event),
+            expected_contract=current_conversation_contract,
+            mention_required=bool(mention_required),
+        )
+        if not admission.ok:
+            setattr(
                 event,
-                transport_kind=transport_kind or self._transport_kind_for_event(event),
-                expected_contract=current_conversation_contract,
-                mention_required=bool(mention_required),
+                "feishu_current_conversation_denial",
+                self._sanitized_current_conversation_denial(admission),
             )
-            if not admission.ok:
-                setattr(
-                    event,
-                    "feishu_current_conversation_denial",
-                    self._sanitized_current_conversation_denial(admission),
-                )
-                logger.warning(
-                    "[Feishu] Dropping current-conversation inbound before dispatch: failure_class=%s",
-                    admission.failure_class,
-                )
-                return
-            setattr(event, "feishu_current_conversation_admission", admission.record)
-
-        chat_id = getattr(event.source, "chat_id", "") or "" if event.source else ""
-        chat_lock = self._get_chat_lock(chat_id)
-        async with chat_lock:
-            try:
-                if not await self._apply_inbound_gateway_event(event):
-                    return
-                await self.handle_message(event)
-            except InvalidLiveSessionSource as exc:
-                logger.warning("[Feishu] Ignoring invalid live inbound source: reason=%s", exc.reason)
+            logger.warning(
+                "[Feishu] Dropping current-conversation inbound before dispatch: failure_class=%s",
+                admission.failure_class,
+            )
+            return False
+        setattr(event, "feishu_current_conversation_admission", admission.record)
+        return True
 
     def _admit_current_conversation_event(
         self,
@@ -3940,6 +4047,20 @@ class FeishuAdapter(BasePlatformAdapter):
                 "feishu_current_route_evidence_stale",
                 contract_hash=getattr(expected_contract, "contract_hash", None),
                 transport_kind=transport,
+            )
+        if (
+            expected_contract is not None
+            and expected_contract.scope_assignment_status != "scoped"
+        ):
+            return self._current_conversation_denied(
+                "feishu_current_scope_not_authorizable",
+                contract_hash=getattr(expected_contract, "contract_hash", None),
+                transport_kind=transport,
+                scope_assignment_status=getattr(
+                    expected_contract,
+                    "scope_assignment_status",
+                    None,
+                ),
             )
         if mention_required and not self._event_has_mention_evidence(event):
             return self._current_conversation_denied(
@@ -3978,6 +4099,13 @@ class FeishuAdapter(BasePlatformAdapter):
                 "feishu_current_route_evidence_stale",
                 contract_hash=observed_contract.contract_hash,
                 transport_kind=transport,
+            )
+        if observed_contract.scope_assignment_status != "scoped":
+            return self._current_conversation_denied(
+                "feishu_current_scope_not_authorizable",
+                contract_hash=observed_contract.contract_hash,
+                transport_kind=transport,
+                scope_assignment_status=observed_contract.scope_assignment_status,
             )
         if expected_contract is not None:
             mismatch = self._current_contract_mismatch(
@@ -4477,6 +4605,7 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_type: str,
         message_id: str,
         is_bot: bool = False,
+        transport_kind: str = "websocket",
     ) -> None:
         chat_id = getattr(message, "chat_id", "") or ""
         if not chat_id:
@@ -4576,7 +4705,7 @@ class FeishuAdapter(BasePlatformAdapter):
         setattr(
             normalized,
             "feishu_current_transport_kind",
-            self._transport_kind_for_event(normalized),
+            self._normalize_inbound_transport_kind(transport_kind),
         )
         setattr(
             normalized,
@@ -4587,6 +4716,8 @@ class FeishuAdapter(BasePlatformAdapter):
 
     async def _dispatch_inbound_event(self, event: MessageEvent) -> None:
         """Apply Feishu-specific burst protection before entering the base adapter."""
+        if not self._admit_current_conversation_for_event(event):
+            return
         if event.message_type == MessageType.TEXT and not event.is_command():
             await self._enqueue_text_event(event)
             return
@@ -4815,7 +4946,7 @@ class FeishuAdapter(BasePlatformAdapter):
         event_type = str((payload.get("header") or {}).get("event_type") or "")
         data = self._namespace_from_mapping(payload)
         if event_type == "im.message.receive_v1":
-            self._on_message_event(data)
+            self._on_message_event(data, transport_kind="webhook")
         elif event_type == "im.message.message_read_v1":
             self._on_message_read_event(data)
         elif event_type == "im.chat.member.bot.added_v1":
