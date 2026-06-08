@@ -303,6 +303,22 @@ def test_doc_handler_denies_before_injected_client_request_without_context(legac
     assert "doccnUnsafeToken" not in json.dumps(event)
 
 
+def test_denial_audit_correlation_id_ignores_raw_external_material(
+    monkeypatch, legacy_audit
+):
+    doc_tool = importlib.import_module("tools.feishu_doc_tool")
+    raw_correlation = "ou_raw_token_secret_material"
+    monkeypatch.setenv("HERMES_FEISHU_LEGACY_AUDIT_CORRELATION_ID", raw_correlation)
+
+    result = _tool_json(doc_tool._handle_feishu_doc_read({"doc_token": "doccnUnsafeToken"}))
+
+    assert result["failure_class"] == "feishu_legacy_tool_requires_broker"
+    event = legacy_audit[-1][0]
+    assert event["correlation_id"] != raw_correlation
+    assert raw_correlation not in json.dumps(event)
+    assert event["correlation_id"] == "feishu-legacy-denial"
+
+
 def test_doc_handler_model_supplied_grant_does_not_bypass(legacy_audit):
     doc_tool = importlib.import_module("tools.feishu_doc_tool")
     client = RecordingClient()
@@ -489,7 +505,7 @@ def test_direct_registry_dispatch_and_model_tools_call_deny_before_client_reques
         ("delete_comment_reaction", {"file_token": "fileUnsafeToken", "file_type": "docx", "reply_id": "replyUnsafe"}),
     ],
 )
-async def test_comment_reaction_paths_deny_before_client_request_without_context(
+async def test_comment_api_reaction_helpers_deny_before_client_request_without_context(
     legacy_audit, func_name, kwargs
 ):
     comment = importlib.import_module("gateway.platforms.feishu_comment")
@@ -500,6 +516,39 @@ async def test_comment_reaction_paths_deny_before_client_request_without_context
     assert result is False
     assert client.requests == []
     assert legacy_audit[-1][0]["surface"] == "comment"
+
+
+@pytest.mark.asyncio
+async def test_comment_exec_request_audit_failure_returns_typed_unavailable(
+    monkeypatch, tmp_path
+):
+    comment = importlib.import_module("gateway.platforms.feishu_comment")
+    client = RecordingClient()
+
+    def _apply(event, state_dir, **kwargs):
+        return GatewayEventResult(
+            ok=False,
+            event_type=event["type"],
+            failure_class="gateway_event_state_io_failed",
+            reason="state ledger IO failed",
+        )
+
+    monkeypatch.setenv("HERMES_GATEWAY_EVENT_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("HERMES_FEISHU_LEGACY_AUDIT_EVENT_HASH", SAFE_EVENT_HASH)
+    monkeypatch.setattr("gateway.gateway_event_ledger.apply_gateway_event", _apply)
+
+    code, msg, data = await comment._exec_request(
+        client,
+        "GET",
+        "/open-apis/drive/v1/files/:file_token/comments",
+        paths={"file_token": "fileUnsafeToken"},
+    )
+
+    assert client.requests == []
+    assert code is None
+    assert msg == "feishu_denial_audit_unavailable"
+    assert data["failure_class"] == "feishu_denial_audit_unavailable"
+    assert data["audit_failure_class"] == "gateway_event_state_io_failed"
 
 
 @pytest.mark.asyncio
@@ -601,6 +650,116 @@ async def test_handle_drive_comment_event_denies_before_comment_client_calls(mon
     assert event["tool"] == "feishu_comment.handle_drive_comment_event"
     assert event["surface"] == "comment"
     assert "fileUnsafeToken" not in json.dumps(event)
+
+
+@pytest.mark.asyncio
+async def test_comment_event_executor_preserves_broker_context_for_agent(
+    monkeypatch, legacy_audit
+):
+    comment = importlib.import_module("gateway.platforms.feishu_comment")
+    from gateway.platforms.feishu_comment_rules import ResolvedCommentRule
+
+    observations = []
+
+    class _Agent:
+        def __init__(self, *args, **kwargs):
+            allowed, reason = require_feishu_broker_context(
+                "comment", "feishu_comment._run_comment_agent"
+            )
+            observations.append(("init_context", allowed, reason))
+
+        def run_conversation(self, prompt, conversation_history=None):
+            from tools.feishu_doc_tool import get_client as get_doc_client
+            from tools.feishu_drive_tool import get_client as get_drive_client
+
+            allowed, reason = require_feishu_broker_context(
+                "comment", "feishu_comment._run_comment_agent"
+            )
+            observations.append(("run_context", allowed, reason))
+            observations.append(("doc_client_injected", get_doc_client() is client))
+            observations.append(("drive_client_injected", get_drive_client() is client))
+            return {"final_response": "NO_REPLY", "api_calls": 0, "messages": []}
+
+    client = RecordingClient()
+    data = SimpleNamespace(
+        event={
+            "event_id": "eventUnsafe",
+            "comment_id": "commentUnsafe",
+            "reply_id": "replyUnsafe",
+            "is_mentioned": True,
+            "notice_meta": {
+                "file_token": "fileUnsafeToken",
+                "file_type": "docx",
+                "notice_type": "add_reply",
+                "from_user_id": {"open_id": "ou_user"},
+                "to_user_id": {"open_id": "ou_bot"},
+            },
+        }
+    )
+    monkeypatch.setitem(sys.modules, "run_agent", types.SimpleNamespace(AIAgent=_Agent))
+    monkeypatch.setattr(
+        comment,
+        "_resolve_model_and_runtime",
+        lambda: ("test-model", {"provider": "test"}),
+    )
+    monkeypatch.setattr(
+        "gateway.platforms.feishu_comment_rules.load_config", lambda: object()
+    )
+    monkeypatch.setattr(
+        "gateway.platforms.feishu_comment_rules.resolve_rule",
+        lambda *args, **kwargs: ResolvedCommentRule(
+            True, "allowlist", frozenset({"ou_user"}), "exact:docx"
+        ),
+    )
+    monkeypatch.setattr(
+        "gateway.platforms.feishu_comment_rules.is_user_allowed",
+        lambda rule, user: True,
+    )
+    monkeypatch.setattr(
+        "gateway.platforms.feishu_comment_rules.has_wiki_keys", lambda cfg: False
+    )
+    async def _noop_comment_api(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(comment, "add_comment_reaction", _noop_comment_api)
+    monkeypatch.setattr(comment, "delete_comment_reaction", _noop_comment_api)
+
+    async def _query_meta(*args, **kwargs):
+        return {"title": "Doc", "url": ""}
+
+    async def _batch_comment(*args, **kwargs):
+        return {"is_whole": False, "quote": "quoted"}
+
+    async def _list_replies(*args, **kwargs):
+        return [
+            {
+                "reply_id": "replyUnsafe",
+                "user_id": "ou_user",
+                "content": {
+                    "elements": [
+                        {"type": "text_run", "text_run": {"text": "hello"}}
+                    ]
+                },
+            }
+        ]
+
+    monkeypatch.setattr(comment, "query_document_meta", _query_meta)
+    monkeypatch.setattr(comment, "batch_query_comment", _batch_comment)
+    monkeypatch.setattr(comment, "list_comment_replies", _list_replies)
+
+    with feishu_broker_context(
+        GRANT_HANDLE,
+        action_id=ACTION_ID,
+        contract_hash=CONTRACT_HASH,
+        route_partition_key=ROUTE_PARTITION_KEY,
+    ):
+        await comment.handle_drive_comment_event(client, data, self_open_id="ou_bot")
+
+    assert ("init_context", True, "") in observations
+    assert ("run_context", True, "") in observations
+    assert ("doc_client_injected", True) in observations
+    assert ("drive_client_injected", True) in observations
+    assert legacy_audit == []
 
 
 def test_denial_audit_write_failure_returns_typed_failure(monkeypatch, tmp_path):

@@ -142,9 +142,6 @@ def _legacy_audit_state_dir() -> Path | None:
 
 
 def _legacy_audit_correlation_id() -> str:
-    value = os.getenv("HERMES_FEISHU_LEGACY_AUDIT_CORRELATION_ID", "")
-    if re.fullmatch(r"^[A-Za-z0-9_.:@+-]{1,256}$", value):
-        return value
     return "feishu-legacy-denial"
 
 

@@ -23,6 +23,7 @@ Flow:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,9 +37,10 @@ logger = logging.getLogger(__name__)
 
 
 _LEGACY_DENIAL_REASON = "feishu_legacy_tool_requires_broker"
+_AUDIT_UNAVAILABLE_REASON = "feishu_denial_audit_unavailable"
 
 
-def _deny_legacy_comment_tool(tool: str) -> bool:
+def _audit_legacy_comment_denial(tool: str):
     audit_result = audit_feishu_legacy_tool_denial(surface="comment", tool=tool)
     if not audit_result.ok:
         logger.error(
@@ -46,9 +48,9 @@ def _deny_legacy_comment_tool(tool: str) -> bool:
             tool,
             audit_result.failure_class or "gateway_event_apply_failed",
         )
-        return False
+        return audit_result
     logger.warning("[Feishu-Comment] Legacy comment surface denied without broker: tool=%s", tool)
-    return True
+    return audit_result
 
 
 def _comment_broker_allowed(tool: str) -> bool:
@@ -59,8 +61,18 @@ def _comment_broker_allowed(tool: str) -> bool:
 def _guard_legacy_comment_tool(tool: str) -> bool:
     if _comment_broker_allowed(tool):
         return True
-    _deny_legacy_comment_tool(tool)
+    _audit_legacy_comment_denial(tool)
     return False
+
+
+def _comment_denial_data(audit_result) -> tuple[str, dict]:
+    if not audit_result.ok:
+        return _AUDIT_UNAVAILABLE_REASON, {
+            "failure_class": _AUDIT_UNAVAILABLE_REASON,
+            "audit_failure_class": audit_result.failure_class or "gateway_event_apply_failed",
+            "audit_event": "feishu_legacy_tool_denied",
+        }
+    return _LEGACY_DENIAL_REASON, {"failure_class": _LEGACY_DENIAL_REASON}
 
 # ---------------------------------------------------------------------------
 # Lark SDK helpers (lazy-imported)
@@ -92,8 +104,11 @@ def _build_request(method: str, uri: str, paths=None, queries=None, body=None):
 
 async def _exec_request(client, method, uri, paths=None, queries=None, body=None):
     """Execute a lark API request and return (code, msg, data_dict)."""
-    if not _guard_legacy_comment_tool("feishu_comment._exec_request"):
-        return None, _LEGACY_DENIAL_REASON, {"failure_class": _LEGACY_DENIAL_REASON}
+    if not _comment_broker_allowed("feishu_comment._exec_request"):
+        reason, data = _comment_denial_data(
+            _audit_legacy_comment_denial("feishu_comment._exec_request")
+        )
+        return None, reason, data
 
     logger.info("[Feishu-Comment] API >>> %s %s paths=%s queries=%s body=%s",
                  method, uri, paths, queries,
@@ -1425,8 +1440,9 @@ async def handle_drive_comment_event(
     # Session key groups all comment cards on the same document
     sess_key = _session_key(file_type, file_token)
     loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
     response = await loop.run_in_executor(
-        None, _run_comment_agent, prompt, client, sess_key,
+        None, context.run, _run_comment_agent, prompt, client, sess_key,
     )
 
     if not response or _NO_REPLY_SENTINEL in response:
