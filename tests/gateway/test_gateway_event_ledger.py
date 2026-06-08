@@ -10,7 +10,11 @@ from gateway.gateway_event_contract import (
     validate_gateway_event,
 )
 from gateway import gateway_event_ledger
-from gateway.gateway_event_ledger import LEDGER_FILENAME, LOCK_FILENAME
+from gateway.gateway_event_ledger import (
+    LEDGER_FILENAME,
+    LOCK_FILENAME,
+    feishu_audit_events_for_readiness,
+)
 from gateway.hermes_tools_gateway_event import (
     _validated_feishu_request,
     apply_gateway_event,
@@ -494,6 +498,32 @@ def test_feishu_audit_events_are_append_only_without_rolling_truncation(tmp_path
     assert len(state["feishu_audit_events"]) == 1001
     assert state["feishu_audit_events"][0]["correlation_id"] == "corr-0"
     assert state["feishu_audit_events"][-1]["correlation_id"] == "corr-1000"
+
+
+def test_feishu_audit_events_for_readiness_is_read_only_and_uses_sanitized_audit_section(
+    tmp_path,
+):
+    event = _feishu_audit_event(
+        "feishu_contract_observed",
+        event_hash="sha256:" + ("0" * 64),
+        contract_hash="fnv1a64:fedcba9876543210",
+        route_snapshot_hash="fnv1a64:0123456789abcdef",
+        scope="conversation",
+    )
+    result = apply_gateway_event(event, tmp_path)
+    assert result.ok is True
+    before = (tmp_path / LEDGER_FILENAME).read_text(encoding="utf-8")
+
+    readiness_events = feishu_audit_events_for_readiness(tmp_path)
+
+    after = (tmp_path / LEDGER_FILENAME).read_text(encoding="utf-8")
+    assert readiness_events == (event,)
+    assert before == after
+    with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    assert state["feishu_audit_events"] == [event]
+    assert state["deliveries"] == {}
+    assert state["inbounds"] == {}
 
 
 @pytest.mark.parametrize(

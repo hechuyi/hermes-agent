@@ -143,6 +143,19 @@ def preflight_gateway_event(
     )
 
 
+def feishu_audit_events_for_readiness(
+    state_dir: str | Path,
+    *,
+    timeout_seconds: int | float = 10,
+) -> tuple[dict[str, Any], ...]:
+    """Return sanitized Feishu audit records already persisted in the ledger."""
+
+    lock_timeout = _lock_timeout_seconds(timeout_seconds)
+    with _state_lock(state_dir, lock_timeout):
+        state = _read_state(_state_path(state_dir))
+    return tuple(dict(event) for event in state["feishu_audit_events"])
+
+
 def _apply_validated_event(
     event_type: str, event: Mapping[str, Any], state: dict[str, Any]
 ) -> dict[str, Any]:
