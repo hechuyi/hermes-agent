@@ -533,23 +533,23 @@ def test_none_metadata_is_canonicalized_to_empty_mapping():
 
 def test_external_metadata_mutation_cannot_change_constructed_contracts():
     metadata = {
-        "label": "approve",
+        "format": "feishu_post",
         "nested": {"intent_hash": "sha256:" + "c" * 64},
-        "tags": ["primary"],
+        "profiles": [{"render_profile": "compact"}],
     }
     action = _action(metadata=metadata)
     part = _part("post", metadata=metadata)
     action_hash = action.contract_hash
     part_hash = part.part_hash
 
-    metadata["label"] = "mutated"
+    metadata["format"] = "mutated"
     metadata["nested"]["intent_hash"] = "raw"
-    metadata["tags"].append("mutated")
+    metadata["profiles"][0]["render_profile"] = "mutated"
 
-    assert action.metadata["label"] == "approve"
+    assert action.metadata["format"] == "feishu_post"
     assert action.metadata["nested"]["intent_hash"] == "sha256:" + "c" * 64
-    assert action.metadata["tags"] == ("primary",)
-    assert part.metadata["label"] == "approve"
+    assert action.metadata["profiles"][0]["render_profile"] == "compact"
+    assert part.metadata["format"] == "feishu_post"
     assert validate_action_contract(action) == (True, None)
     assert validate_render_part(part) == (True, None)
     assert action.contract_hash == action_hash
@@ -611,3 +611,68 @@ def test_card_button_action_kind_must_match_part_type(part_type, action_kind):
         lambda: _part(part_type, action_contract=_action(action_kind=action_kind)),
         "feishu_action_kind_mismatch",
     )
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "id",
+        "object_id",
+        "attachment_id",
+        "image_id",
+        "local_path",
+        "object_path",
+    ],
+)
+def test_broad_raw_id_and_path_metadata_keys_are_rejected(key):
+    metadata = {"outer": [{key: "raw"}]}
+
+    _assert_raises_failure(
+        lambda: _action(metadata=metadata),
+        "feishu_action_sensitive_metadata",
+    )
+    _assert_raises_failure(
+        lambda: _part("post", metadata=metadata),
+        "feishu_action_sensitive_metadata",
+    )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"label": "ou_raw"},
+        {"label": "/tmp/raw-file"},
+        {"label": {"value": "/open-apis/im/v1/messages"}},
+        {"label": "raw document text"},
+    ],
+)
+def test_innocuous_metadata_keys_cannot_carry_raw_values(metadata):
+    _assert_raises_failure(
+        lambda: _action(metadata=metadata),
+        "feishu_action_metadata_value_invalid",
+    )
+    _assert_raises_failure(
+        lambda: _part("post", metadata=metadata),
+        "feishu_action_metadata_value_invalid",
+    )
+
+
+def test_safe_metadata_schema_examples_still_pass():
+    metadata = {
+        "format": "feishu_post",
+        "language": "python",
+        "chunk_role": "first",
+        "fallback_profile": "preserve",
+        "intent_hash": "sha256:" + "c" * 64,
+        "nested": {
+            "render_profile": "compact",
+            "capability": "preview",
+        },
+        "profiles": [{"source_type": "generated"}],
+    }
+
+    action = _action(metadata=metadata)
+    part = _part("post", metadata=metadata)
+
+    assert validate_action_contract(action) == (True, None)
+    assert validate_render_part(part) == (True, None)

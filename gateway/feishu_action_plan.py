@@ -78,8 +78,45 @@ _SENSITIVE_METADATA_MARKERS = frozenset(
         "httpmethod",
         "requestbody",
         "content",
+        "id",
+        "path",
+        "object",
+        "attachment",
+        "image",
     }
 )
+_METADATA_CONTAINER_KEYS = frozenset({"nested", "profiles", "metadata"})
+_METADATA_HASH_KEYS = frozenset(
+    {
+        "contenthash",
+        "payloadhash",
+        "provenancehash",
+        "routesnapshothash",
+        "actiondigest",
+        "planhash",
+        "objectrefhash",
+        "targetrefhash",
+        "correlationhash",
+        "intenthash",
+        "columnshash",
+        "hrefhash",
+    }
+)
+_METADATA_ENUM_VALUES = {
+    "format": frozenset({"feishu_post", "commonmark", "text"}),
+    "language": frozenset({"python"}),
+    "chunkrole": frozenset({"first", "second"}),
+    "fallbackprofile": frozenset({"preserve", "replace", "drop"}),
+    "renderprofile": frozenset({"compact"}),
+    "sourceclass": _ATTACHMENT_SOURCE_CLASSES,
+    "sourcetype": frozenset({"upload", "generated", "cached", "object_store"}),
+    "policyversion": frozenset({"policy:v1"}),
+    "capability": frozenset({"preview"}),
+    "scopeclass": frozenset({"same_operator"}),
+    "chunkprofile": frozenset({"ordered"}),
+    "formatversion": frozenset({"v1"}),
+}
+_METADATA_INT_KEYS = frozenset({"schemaversion"})
 
 
 @dataclass(frozen=True)
@@ -211,6 +248,8 @@ def _validate_render_part_fields(part: RenderPlanPart) -> tuple[bool, str | None
         return False, "feishu_action_metadata_hash_invalid"
     if _contains_sensitive_metadata_key(part.metadata):
         return False, "feishu_action_sensitive_metadata"
+    if not _metadata_values_are_sanitized(part.metadata):
+        return False, "feishu_action_metadata_value_invalid"
     if not _chunk_is_coherent(part):
         return False, "feishu_render_chunk_invalid"
     if part.part_type in _ATTACHMENT_PART_TYPES:
@@ -247,6 +286,8 @@ def _validate_action_contract_fields(
         return False, "feishu_action_metadata_hash_invalid"
     if _contains_sensitive_metadata_key(contract.metadata):
         return False, "feishu_action_sensitive_metadata"
+    if not _metadata_values_are_sanitized(contract.metadata):
+        return False, "feishu_action_metadata_value_invalid"
     if contract.action_digest is None:
         return False, "feishu_action_digest_missing"
     if not _is_hash(contract.action_digest):
@@ -424,6 +465,36 @@ def _contains_invalid_metadata_hash(value: Any) -> bool:
         return False
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
         return any(_contains_invalid_metadata_hash(item) for item in value)
+    return False
+
+
+def _metadata_values_are_sanitized(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                return False
+            if not _metadata_entry_is_sanitized(key, item):
+                return False
+        return True
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        return all(_metadata_values_are_sanitized(item) for item in value)
+    return False
+
+
+def _metadata_entry_is_sanitized(key: str, value: Any) -> bool:
+    comparable = _normalized_key(key)
+    if comparable in _METADATA_HASH_KEYS:
+        return _is_hash(value)
+    if comparable in _METADATA_ENUM_VALUES:
+        return isinstance(value, str) and value in _METADATA_ENUM_VALUES[comparable]
+    if comparable in _METADATA_INT_KEYS:
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+    if comparable in _METADATA_CONTAINER_KEYS:
+        if isinstance(value, Mapping):
+            return _metadata_values_are_sanitized(value)
+        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+            return all(_metadata_values_are_sanitized(item) for item in value)
+        return False
     return False
 
 
