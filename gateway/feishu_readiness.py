@@ -33,7 +33,6 @@ class FeishuReadinessEvidence:
     legacy_denial_reasons: tuple[str, ...] = ()
     checked_legacy_surfaces: tuple[str, ...] = ()
     denial_audit_available: bool = True
-    audit_events: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -52,6 +51,9 @@ def classify_feishu_package_a_readiness(
 
     if not evidence.contract_hash:
         blockers.append("feishu_contract_missing")
+
+    if not evidence.expected_route_snapshot_hash:
+        blockers.append("feishu_expected_route_snapshot_missing")
 
     if _route_snapshot_mismatch(evidence):
         blockers.append("feishu_route_snapshot_mismatch")
@@ -108,9 +110,8 @@ def summarize_feishu_audit_readiness(
     delivery_state: str | None = "known"
     redaction_failure = False
     legacy_denial_reasons: list[str] = []
-    audit_events = tuple(events)
 
-    for event in audit_events:
+    for event in events:
         event_type = event.get("type")
         if event_type == "feishu_contract_observed":
             contract_hash = _optional_string(event.get("contract_hash")) or contract_hash
@@ -148,7 +149,6 @@ def summarize_feishu_audit_readiness(
         legacy_denial_reasons=tuple(_stable_unique(legacy_denial_reasons)),
         checked_legacy_surfaces=checked_legacy_surfaces,
         denial_audit_available=denial_audit_available,
-        audit_events=audit_events,
     )
 
 

@@ -139,6 +139,74 @@ def test_complete_evidence_is_ready():
     assert result.warnings == ()
 
 
+def test_missing_expected_route_snapshot_fails_closed():
+    evidence = summarize_feishu_audit_readiness(
+        (
+            {
+                "type": "feishu_contract_observed",
+                "timestamp": 1,
+                "correlation_id": "corr-readiness-1",
+                "event_hash": EVENT_HASH,
+                "contract_hash": HASH_A,
+                "route_snapshot_hash": HASH_A,
+                "surface": "comment",
+            },
+            {
+                "type": "feishu_action_requested",
+                "timestamp": 2,
+                "correlation_id": "corr-readiness-1",
+                "event_hash": EVENT_HASH,
+                "action_hash": HASH_A,
+                "action": "reply",
+                "surface": "comment",
+            },
+            {
+                "type": "feishu_capability_granted",
+                "timestamp": 3,
+                "correlation_id": "corr-readiness-1",
+                "event_hash": EVENT_HASH,
+                "capability_hash": HASH_A,
+                "capability": "comment",
+                "surface": "comment",
+            },
+        ),
+        checked_legacy_surfaces=FEISHU_PACKAGE_A_LEGACY_SURFACES,
+    )
+
+    result = classify_feishu_package_a_readiness(evidence)
+
+    assert result.status == "not_ready"
+    assert result.failure_class == "feishu_expected_route_snapshot_missing"
+    assert result.blockers == ("feishu_expected_route_snapshot_missing",)
+
+
+def test_audit_summary_does_not_retain_raw_input_event_mappings():
+    raw_value = "tenant-access-token"
+    evidence = summarize_feishu_audit_readiness(
+        (
+            {
+                "type": "feishu_contract_observed",
+                "timestamp": 1,
+                "correlation_id": "corr-readiness-1",
+                "event_hash": EVENT_HASH,
+                "contract_hash": HASH_A,
+                "route_snapshot_hash": HASH_A,
+                "token": raw_value,
+                "file_path": "/tmp/raw-file",
+                "content": "raw document text",
+            },
+        ),
+        expected_route_snapshot_hash=HASH_A,
+        checked_legacy_surfaces=FEISHU_PACKAGE_A_LEGACY_SURFACES,
+    )
+    result = classify_feishu_package_a_readiness(evidence)
+
+    assert raw_value not in repr(evidence)
+    assert "/tmp/raw-file" not in repr(evidence)
+    assert "raw document text" not in repr(evidence)
+    assert raw_value not in repr(result)
+
+
 def test_audit_events_summarize_into_readiness_without_business_event_fakes():
     events = (
         {
