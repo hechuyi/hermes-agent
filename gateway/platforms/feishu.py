@@ -7373,7 +7373,7 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> Optional[str]:
         provenance_hash = (metadata or {}).get("feishu_attachment_provenance_hash")
         if not self._is_sha256_ref_text(provenance_hash):
-            return "feishu_attachment_provenance_missing"
+            return "feishu_arbitrary_local_upload_denied"
         if self._gateway_event_state_dir is None:
             return "feishu_attachment_provenance_missing"
         reader = getattr(
@@ -7452,18 +7452,38 @@ class FeishuAdapter(BasePlatformAdapter):
                 content_hash=content_hash,
             )
         if record.get("provenance_kind") == "inbound_user_attachment":
-            if not self._is_sha256_ref_text(record.get("source_event_hash")):
-                return "feishu_attachment_provenance_mismatch"
-            if not self._is_sha256_ref_text(record.get("file_key_hash")):
-                return "feishu_attachment_provenance_mismatch"
-            if record.get("retention_class") not in {
-                "ephemeral",
-                "session",
-                "retained",
-            }:
-                return "feishu_attachment_provenance_mismatch"
-            return None
+            return self._inbound_attachment_provenance_failure(
+                record=record,
+                metadata=metadata,
+            )
         return "feishu_attachment_provenance_mismatch"
+
+    def _inbound_attachment_provenance_failure(
+        self,
+        *,
+        record: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        source_event_hash = record.get("source_event_hash")
+        file_key_hash = record.get("file_key_hash")
+        if not self._is_sha256_ref_text(source_event_hash):
+            return "feishu_attachment_provenance_mismatch"
+        if not self._is_sha256_ref_text(file_key_hash):
+            return "feishu_attachment_provenance_mismatch"
+        if record.get("retention_class") not in {
+            "ephemeral",
+            "session",
+            "retained",
+        }:
+            return "feishu_attachment_provenance_mismatch"
+        admission = (metadata or {}).get("feishu_current_admission")
+        if not isinstance(admission, dict) or admission.get("evidence_state") != "current":
+            return "feishu_attachment_provenance_mismatch"
+        if (metadata or {}).get("feishu_attachment_source_event_hash") != source_event_hash:
+            return "feishu_attachment_provenance_mismatch"
+        if (metadata or {}).get("feishu_attachment_file_key_hash") != file_key_hash:
+            return "feishu_attachment_provenance_mismatch"
+        return None
 
     def _attachment_route_evidence(
         self,

@@ -246,6 +246,8 @@ def _validate_render_part_fields(part: RenderPlanPart) -> tuple[bool, str | None
         return False, "feishu_render_part_type_invalid"
     if part.fallback_action not in _FALLBACK_ACTIONS:
         return False, "feishu_render_fallback_invalid"
+    if _is_attachment_arbitrary_local_upload_attempt(part):
+        return False, "feishu_arbitrary_local_upload_denied"
     if _contains_raw_tool_material(part.metadata):
         return False, "feishu_action_raw_tool_material"
     if _contains_invalid_metadata_hash(part.metadata):
@@ -331,6 +333,45 @@ def _validate_attachment_part(part: RenderPlanPart) -> tuple[bool, str | None]:
     if not _is_hash(part.provenance_hash):
         return False, "feishu_render_attachment_provenance_invalid"
     return True, None
+
+
+def _is_attachment_arbitrary_local_upload_attempt(part: RenderPlanPart) -> bool:
+    if part.part_type not in _ATTACHMENT_PART_TYPES:
+        return False
+    if _is_hash(part.provenance_hash):
+        return False
+    if part.part_type == "local_path":
+        return True
+    return _metadata_contains_local_path_signal(part.metadata)
+
+
+def _metadata_contains_local_path_signal(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized_key = _normalized_key(key)
+            if normalized_key in {"filepath", "localpath", "sourcepath"}:
+                return True
+            if _metadata_contains_local_path_signal(item):
+                return True
+        return False
+    if isinstance(value, str):
+        return _looks_like_local_path(value)
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+        return any(_metadata_contains_local_path_signal(item) for item in value)
+    return False
+
+
+def _looks_like_local_path(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    return (
+        text.startswith("/")
+        or text.startswith("~/")
+        or text.startswith("../")
+        or text.startswith("./")
+        or "/../" in text
+    )
 
 
 def _validate_render_part_hash_fields(
