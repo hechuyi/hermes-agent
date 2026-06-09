@@ -75,6 +75,15 @@ FEISHU_AUDIT_FAILURE_EVENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
+FEISHU_DELIVERY_LIFECYCLE_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "feishu_delivery_attempted",
+        "feishu_delivery_sent",
+        "feishu_delivery_ack_unknown",
+        "feishu_delivery_failed",
+    }
+)
+
 PREFLIGHT_CHECK_NAMES: tuple[str, ...] = (
     "state_dir_writable",
     "feishu_inbound",
@@ -127,6 +136,28 @@ _FEISHU_AUDIT_HASH_FIELDS = frozenset(
         "legacy_tool_hash",
         "descriptor_hash",
     }
+)
+_FEISHU_DELIVERY_LIFECYCLE_HASH_FIELDS = frozenset(
+    {
+        "delivery_hash",
+        "target_ref_hash",
+        "message_ref_hash",
+        "route_partition_hash",
+        "route_snapshot_hash",
+        "contract_hash",
+        "original_delivery_hash",
+        "bot_ownership_hash",
+    }
+)
+_FEISHU_DELIVERY_LIFECYCLE_ATOM_FIELDS = frozenset(
+    {
+        "action",
+        "evidence_state",
+    }
+)
+_FEISHU_DELIVERY_ACTIONS = frozenset({"send", "edit"})
+_FEISHU_DELIVERY_EVIDENCE_STATES = frozenset(
+    {"current", "missing", "stale", "unknown", "denied"}
 )
 _FEISHU_AUDIT_ATOM_FIELDS = frozenset(
     {
@@ -224,6 +255,9 @@ def validate_gateway_event(event: Mapping[str, Any]) -> str:
     required = EVENT_REQUIREMENTS.get(event_type)
     if required is None and event_type in FEISHU_AUDIT_EVENT_TYPES:
         _validate_feishu_audit_event(event_type, event)
+        return event_type
+    if required is None and event_type in FEISHU_DELIVERY_LIFECYCLE_EVENT_TYPES:
+        _validate_feishu_delivery_lifecycle_event(event_type, event)
         return event_type
     if required is None:
         raise GatewayEventContractError(
@@ -633,10 +667,15 @@ def _validate_feishu_audit_event_record_action(action: Mapping[str, Any]) -> dic
     if not isinstance(record, Mapping):
         raise ValueError("invalid feishu audit record")
     event_type = event_type_from(record)
-    if event_type is None or event_type not in FEISHU_AUDIT_EVENT_TYPES:
+    if event_type is None or event_type not in (
+        FEISHU_AUDIT_EVENT_TYPES | FEISHU_DELIVERY_LIFECYCLE_EVENT_TYPES
+    ):
         raise ValueError("invalid feishu audit event type")
     try:
-        _validate_feishu_audit_event(event_type, record)
+        if event_type in FEISHU_AUDIT_EVENT_TYPES:
+            _validate_feishu_audit_event(event_type, record)
+        else:
+            _validate_feishu_delivery_lifecycle_event(event_type, record)
     except GatewayEventContractError as exc:
         raise ValueError("invalid feishu audit record") from exc
     return {"type": "feishu_audit_event_record", "record": dict(record)}
@@ -684,6 +723,80 @@ def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> N
         require_failure_class(event.get("failure_class"))
     elif "failure_class" in event:
         require_failure_class(event.get("failure_class"))
+
+
+def _validate_feishu_delivery_lifecycle_event(
+    event_type: str, event: Mapping[str, Any]
+) -> None:
+    allowed_fields = (
+        _FEISHU_AUDIT_COMMON_FIELDS
+        | _FEISHU_DELIVERY_LIFECYCLE_HASH_FIELDS
+        | _FEISHU_DELIVERY_LIFECYCLE_ATOM_FIELDS
+    )
+    for field, value in event.items():
+        if not isinstance(field, str) or field not in allowed_fields:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "feishu delivery lifecycle event contains unsupported field",
+            )
+        if _is_feishu_audit_raw_field(field):
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "feishu delivery lifecycle event contains raw field",
+            )
+        if field in _FEISHU_DELIVERY_LIFECYCLE_HASH_FIELDS:
+            _require_sanitized_hash_value(value, field)
+
+    for field in (
+        "timestamp",
+        "correlation_id",
+        "delivery_hash",
+        "target_ref_hash",
+        "action",
+        "evidence_state",
+    ):
+        if field not in event:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                f"missing required field: {field}",
+            )
+    _require_number(event, "timestamp")
+    _require_session_route_value(event, "correlation_id")
+    if event.get("action") not in _FEISHU_DELIVERY_ACTIONS:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu delivery lifecycle action",
+        )
+    if event.get("evidence_state") not in _FEISHU_DELIVERY_EVIDENCE_STATES:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu delivery lifecycle evidence state",
+        )
+    if event_type in {"feishu_delivery_failed", "feishu_delivery_ack_unknown"}:
+        require_failure_class(event.get("failure_class"))
+    elif "failure_class" in event:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "successful Feishu delivery lifecycle event cannot have failure_class",
+        )
+    if event_type in {"feishu_delivery_sent", "feishu_delivery_ack_unknown"}:
+        for field in ("message_ref_hash", "route_partition_hash", "contract_hash"):
+            if field not in event:
+                raise GatewayEventContractError(
+                    "invalid_gateway_event_contract",
+                    f"missing required field: {field}",
+                )
+    if event_type == "feishu_delivery_sent" and "bot_ownership_hash" not in event:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "missing required field: bot_ownership_hash",
+        )
+    if event.get("action") == "edit" and event_type == "feishu_delivery_sent":
+        if "original_delivery_hash" not in event:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "missing required field: original_delivery_hash",
+            )
 
 
 def _feishu_audit_event_requires_failure_class(

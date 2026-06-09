@@ -16,6 +16,7 @@ from typing import Any, Mapping
 
 from gateway.gateway_event_contract import (
     FEISHU_AUDIT_EVENT_TYPES,
+    FEISHU_DELIVERY_LIFECYCLE_EVENT_TYPES,
     GatewayEventContractError,
     GatewayEventResult,
     PREFLIGHT_CHECK_NAMES,
@@ -37,7 +38,11 @@ _STATE_DICT_SECTIONS: tuple[str, ...] = (
     "ack_event_index",
     "session_routes",
 )
-_STATE_LIST_SECTIONS: tuple[str, ...] = ("compression_rejections", "feishu_audit_events")
+_STATE_LIST_SECTIONS: tuple[str, ...] = (
+    "compression_rejections",
+    "feishu_audit_events",
+    "feishu_delivery_lifecycle",
+)
 _IS_WINDOWS = os.name == "nt"
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.Lock] = {}
@@ -157,6 +162,19 @@ def feishu_audit_events_for_readiness(
     return tuple(dict(event) for event in state["feishu_audit_events"])
 
 
+def feishu_delivery_lifecycle_events_for_readiness(
+    state_dir: str | Path,
+    *,
+    timeout_seconds: int | float = 10,
+) -> tuple[dict[str, Any], ...]:
+    """Return sanitized Feishu delivery lifecycle records already persisted."""
+
+    lock_timeout = _lock_timeout_seconds(timeout_seconds)
+    with _state_lock(state_dir, lock_timeout):
+        state = _read_state(_state_path(state_dir))
+    return tuple(dict(event) for event in state["feishu_delivery_lifecycle"])
+
+
 def _apply_validated_event(
     event_type: str, event: Mapping[str, Any], state: dict[str, Any]
 ) -> dict[str, Any]:
@@ -180,6 +198,8 @@ def _apply_validated_event(
         return _apply_compression_result(event, state)
     if event_type in FEISHU_AUDIT_EVENT_TYPES:
         return _apply_feishu_audit_event(event, state)
+    if event_type in FEISHU_DELIVERY_LIFECYCLE_EVENT_TYPES:
+        return _apply_feishu_delivery_lifecycle_event(event, state)
     raise GatewayEventContractError(
         "unsupported_gateway_event_type", "unsupported gateway event type"
     )
@@ -398,16 +418,23 @@ def _apply_delivery_sent(event: Mapping[str, Any], state: dict[str, Any]) -> dic
         raise GatewayEventContractError(
             "invalid_delivery_state_transition", "invalid delivery state transition"
         )
+    edit_existing_message = record.get("target") == f"feishu:message:{message_id}"
     indexed_delivery = state["feishu_message_index"].get(message_id)
-    if indexed_delivery is not None and indexed_delivery != delivery_id:
+    if (
+        indexed_delivery is not None
+        and indexed_delivery != delivery_id
+        and not edit_existing_message
+    ):
         raise GatewayEventContractError(
             "delivery_message_id_conflict", "delivery message id conflict"
         )
     record["status"] = "sent"
     record["updated_at"] = event["timestamp"]
-    record["feishu_message_id"] = message_id
+    if not edit_existing_message:
+        record["feishu_message_id"] = message_id
     record["failure_class"] = None
-    state["feishu_message_index"][message_id] = delivery_id
+    if not edit_existing_message:
+        state["feishu_message_index"][message_id] = delivery_id
     return {"type": "delivery_record", "record": dict(record)}
 
 
@@ -582,6 +609,15 @@ def _apply_feishu_audit_event(
     return {"type": "feishu_audit_event_record", "record": record}
 
 
+def _apply_feishu_delivery_lifecycle_event(
+    event: Mapping[str, Any], state: dict[str, Any]
+) -> dict[str, Any]:
+    record = dict(event)
+    lifecycle = state["feishu_delivery_lifecycle"]
+    lifecycle.append(record)
+    return {"type": "feishu_audit_event_record", "record": record}
+
+
 def _read_state(state_path: Path) -> dict[str, Any]:
     if not state_path.exists():
         return _empty_state()
@@ -596,7 +632,11 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     required_keys = {
         "version",
         *_STATE_DICT_SECTIONS,
-        *tuple(key for key in _STATE_LIST_SECTIONS if key != "feishu_audit_events"),
+        *tuple(
+            key
+            for key in _STATE_LIST_SECTIONS
+            if key not in {"feishu_audit_events", "feishu_delivery_lifecycle"}
+        ),
     }
     if not required_keys.issubset(raw):
         raise _state_schema_error()
@@ -616,11 +656,18 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     if not isinstance(feishu_audit_events, list):
         raise _state_schema_error()
     state["feishu_audit_events"] = feishu_audit_events
+    feishu_delivery_lifecycle = raw.get("feishu_delivery_lifecycle", [])
+    if not isinstance(feishu_delivery_lifecycle, list):
+        raise _state_schema_error()
+    state["feishu_delivery_lifecycle"] = feishu_delivery_lifecycle
     _validate_persisted_inbound_records(state["inbounds"])
     _validate_persisted_delivery_records(state["deliveries"])
     _validate_persisted_session_routes(state["session_routes"])
     _validate_persisted_compression_rejections(state["compression_rejections"])
     _validate_persisted_feishu_audit_events(state["feishu_audit_events"])
+    _validate_persisted_feishu_delivery_lifecycle(
+        state["feishu_delivery_lifecycle"]
+    )
     _reconcile_persisted_indexes(state)
     return state
 
@@ -663,6 +710,7 @@ def _empty_state() -> dict[str, Any]:
         "session_routes": {},
         "compression_rejections": [],
         "feishu_audit_events": [],
+        "feishu_delivery_lifecycle": [],
     }
 
 
@@ -745,6 +793,17 @@ def _validate_persisted_feishu_audit_events(events: list[Any]) -> None:
                 {"type": "feishu_audit_event_record", "record": event}
             )
         except ValueError as exc:
+            raise _state_schema_error() from exc
+
+
+def _validate_persisted_feishu_delivery_lifecycle(events: list[Any]) -> None:
+    for event in events:
+        try:
+            validate_gateway_event(event)
+            validate_gateway_action(
+                {"type": "feishu_audit_event_record", "record": event}
+            )
+        except (GatewayEventContractError, ValueError) as exc:
             raise _state_schema_error() from exc
 
 

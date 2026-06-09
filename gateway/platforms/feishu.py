@@ -1909,6 +1909,7 @@ class FeishuAdapter(BasePlatformAdapter):
                         delivery_id=delivery_id,
                         operation=operation,
                         target=f"feishu:chat:{chat_id}",
+                        metadata=chunk_metadata,
                         inbound_id=self._delivery_metadata(
                             chunk_metadata, "inbound_id", reply_to or chat_id
                         ),
@@ -1955,6 +1956,7 @@ class FeishuAdapter(BasePlatformAdapter):
                                 ),
                                 operation=f"{operation}_text_fallback",
                                 target=f"feishu:chat:{chat_id}",
+                                metadata=chunk_metadata,
                                 inbound_id=self._delivery_metadata(
                                     chunk_metadata, "inbound_id", reply_to or chat_id
                                 ),
@@ -2060,10 +2062,27 @@ class FeishuAdapter(BasePlatformAdapter):
                     metadata=metadata,
                     parts=[chat_id, message_id, msg_type, payload],
                 )
+                ownership_proof, proof_failure = self._current_edit_ownership_proof(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    metadata=metadata,
+                )
+                if proof_failure is not None:
+                    await self._apply_feishu_delivery_lifecycle_failed(
+                        delivery_id=delivery_id,
+                        action="edit",
+                        target=f"feishu:message:{message_id}",
+                        metadata=metadata,
+                        failure_class=proof_failure,
+                        message_id=message_id,
+                        original_proof=ownership_proof,
+                    )
+                    return SendResult(success=False, error=proof_failure)
                 response_or_result = await self._audited_delivery(
                     delivery_id=delivery_id,
                     operation="message_edit",
                     target=f"feishu:message:{message_id}",
+                    metadata=metadata,
                     inbound_id=self._delivery_metadata(metadata, "inbound_id", message_id),
                     session_id=self._delivery_metadata(metadata, "session_id", "session"),
                     correlation_id=self._delivery_metadata(
@@ -2074,6 +2093,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     ),
                     require_returned_message_id=False,
                     existing_message_id=message_id,
+                    current_delivery_proof=ownership_proof,
                     terminal_exception_matcher=(
                         self._is_post_content_invalid_exception
                         if msg_type == "post"
@@ -2106,6 +2126,7 @@ class FeishuAdapter(BasePlatformAdapter):
                         ),
                         operation="message_edit_text_fallback",
                         target=f"feishu:message:{message_id}",
+                        metadata=metadata,
                         inbound_id=self._delivery_metadata(
                             metadata, "inbound_id", message_id
                         ),
@@ -2120,6 +2141,7 @@ class FeishuAdapter(BasePlatformAdapter):
                         ),
                         require_returned_message_id=False,
                         existing_message_id=message_id,
+                        current_delivery_proof=ownership_proof,
                     )
                     if isinstance(response_or_result, SendResult):
                         return response_or_result
@@ -6129,6 +6151,7 @@ class FeishuAdapter(BasePlatformAdapter):
             delivery_id=delivery_id,
             operation=operation,
             target=f"feishu:chat:{chat_id}",
+            metadata=metadata,
             inbound_id=self._delivery_metadata(metadata, "inbound_id", reply_to or chat_id),
             session_id=self._delivery_metadata(metadata, "session_id", "session"),
             correlation_id=self._delivery_metadata(metadata, "correlation_id", delivery_id),
@@ -6318,6 +6341,251 @@ class FeishuAdapter(BasePlatformAdapter):
         )
 
     @staticmethod
+    def _sha256_ref_text(value: str) -> str:
+        return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+    @classmethod
+    def _delivery_ref_hash(cls, kind: str, value: Any) -> str:
+        return cls._sha256_ref_text(f"{kind}\x1f{value}")
+
+    @staticmethod
+    def _is_sha256_ref_text(value: Any) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == 71
+            and value.startswith("sha256:")
+            and all(char in "0123456789abcdef" for char in value[7:])
+        )
+
+    @classmethod
+    def _delivery_action_for_operation(cls, operation: str) -> str:
+        lowered = str(operation or "").lower()
+        return "edit" if "edit" in lowered or "patch" in lowered else "send"
+
+    def _current_delivery_lifecycle_context(
+        self,
+        *,
+        delivery_id: str,
+        action: str,
+        target: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, str]]:
+        admission = (metadata or {}).get("feishu_current_admission")
+        if not isinstance(admission, dict):
+            return None
+        contract_hash = admission.get("contract_hash")
+        route_partition_key = admission.get("route_partition_key")
+        route_snapshot = admission.get("route_session_key_snapshot")
+        if (
+            not self._is_sha256_ref_text(contract_hash)
+            or not isinstance(route_partition_key, str)
+            or not route_partition_key
+            or not isinstance(route_snapshot, str)
+            or not route_snapshot
+        ):
+            return None
+        evidence_state = str(admission.get("evidence_state") or "current")
+        if evidence_state not in {"current", "missing", "stale", "unknown", "denied"}:
+            evidence_state = "unknown"
+        return {
+            "delivery_hash": self._delivery_ref_hash("feishu_delivery", delivery_id),
+            "action": action,
+            "target_ref_hash": self._delivery_ref_hash("feishu_target", target),
+            "route_partition_hash": self._delivery_ref_hash(
+                "feishu_route_partition", route_partition_key
+            ),
+            "route_snapshot_hash": self._delivery_ref_hash(
+                "feishu_route_snapshot", route_snapshot
+            ),
+            "contract_hash": str(contract_hash),
+            "evidence_state": evidence_state,
+            "correlation_id": self._delivery_metadata(
+                metadata, "correlation_id", delivery_id
+            ),
+        }
+
+    def _minimal_delivery_lifecycle_context(
+        self,
+        *,
+        delivery_id: str,
+        action: str,
+        target: str,
+        metadata: Optional[Dict[str, Any]],
+        evidence_state: str,
+    ) -> Dict[str, str]:
+        return {
+            "delivery_hash": self._delivery_ref_hash("feishu_delivery", delivery_id),
+            "action": action,
+            "target_ref_hash": self._delivery_ref_hash("feishu_target", target),
+            "evidence_state": evidence_state,
+            "correlation_id": self._delivery_metadata(
+                metadata, "correlation_id", delivery_id
+            ),
+        }
+
+    def _bot_ownership_hash(
+        self,
+        *,
+        delivery_hash: str,
+        message_ref_hash: str,
+        route_partition_hash: str,
+        contract_hash: str,
+    ) -> str:
+        return self._sha256_ref_text(
+            "\x1f".join(
+                (
+                    "feishu_bot_ownership",
+                    delivery_hash,
+                    message_ref_hash,
+                    route_partition_hash,
+                    contract_hash,
+                )
+            )
+        )
+
+    async def _apply_feishu_delivery_lifecycle_event(
+        self,
+        event_type: str,
+        context: Dict[str, str],
+        *,
+        message_id: Optional[str] = None,
+        failure_class: Optional[str] = None,
+        original_proof: Optional[Dict[str, Any]] = None,
+        bot_ownership_hash: Optional[str] = None,
+    ) -> bool:
+        event: Dict[str, Any] = {
+            "type": event_type,
+            "timestamp": int(time.time()),
+            "delivery_hash": context["delivery_hash"],
+            "action": context["action"],
+            "target_ref_hash": context["target_ref_hash"],
+            "evidence_state": context["evidence_state"],
+            "correlation_id": context["correlation_id"],
+        }
+        for field in ("route_partition_hash", "route_snapshot_hash", "contract_hash"):
+            if field in context:
+                event[field] = context[field]
+        if message_id:
+            event["message_ref_hash"] = self._delivery_ref_hash(
+                "feishu_message", message_id
+            )
+        if failure_class is not None:
+            event["failure_class"] = self._stable_failure_class(failure_class)
+        if original_proof is not None:
+            original_delivery_hash = original_proof.get("delivery_hash")
+            original_ownership_hash = original_proof.get("bot_ownership_hash")
+            if isinstance(original_delivery_hash, str):
+                event["original_delivery_hash"] = original_delivery_hash
+            if bot_ownership_hash is None and isinstance(original_ownership_hash, str):
+                bot_ownership_hash = original_ownership_hash
+        if bot_ownership_hash is not None:
+            event["bot_ownership_hash"] = bot_ownership_hash
+        return bool(await self._apply_gateway_event(event))
+
+    async def _apply_feishu_delivery_lifecycle_failed(
+        self,
+        *,
+        delivery_id: str,
+        action: str,
+        target: str,
+        metadata: Optional[Dict[str, Any]],
+        failure_class: str,
+        message_id: Optional[str] = None,
+        original_proof: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        context = self._current_delivery_lifecycle_context(
+            delivery_id=delivery_id,
+            action=action,
+            target=target,
+            metadata=metadata,
+        )
+        if context is None:
+            evidence_state = "missing"
+            admission = (metadata or {}).get("feishu_current_admission")
+            if isinstance(admission, dict) and admission.get("evidence_state") == "stale":
+                evidence_state = "stale"
+            context = self._minimal_delivery_lifecycle_context(
+                delivery_id=delivery_id,
+                action=action,
+                target=target,
+                metadata=metadata,
+                evidence_state=evidence_state,
+            )
+        elif failure_class == "feishu_current_route_evidence_stale":
+            context = {**context, "evidence_state": "stale"}
+        elif context.get("evidence_state") != "current":
+            context = {**context, "evidence_state": context.get("evidence_state", "unknown")}
+        return await self._apply_feishu_delivery_lifecycle_event(
+            "feishu_delivery_failed",
+            context,
+            message_id=message_id,
+            failure_class=failure_class,
+            original_proof=original_proof,
+        )
+
+    def _current_edit_ownership_proof(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        metadata: Optional[Dict[str, Any]],
+    ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+        context = self._current_delivery_lifecycle_context(
+            delivery_id=self._delivery_metadata(metadata, "delivery_id", "message_edit"),
+            action="edit",
+            target=f"feishu:message:{message_id}",
+            metadata=metadata,
+        )
+        admission = (metadata or {}).get("feishu_current_admission")
+        if not isinstance(admission, dict):
+            return None, "feishu_current_reply_admission_missing"
+        if admission.get("evidence_state") == "stale":
+            return None, "feishu_current_route_evidence_stale"
+        if context is None:
+            return None, "feishu_current_reply_admission_incomplete"
+        message_ref_hash = self._delivery_ref_hash("feishu_message", message_id)
+        proof = self._bot_owned_delivery_proof(message_ref_hash)
+        if proof is None:
+            return None, "feishu_delivery_bot_ownership_missing"
+        expected_chat_ref = self._delivery_ref_hash(
+            "feishu_target", f"feishu:chat:{chat_id}"
+        )
+        if proof.get("target_ref_hash") != expected_chat_ref:
+            return proof, "feishu_current_route_mismatch"
+        for field in ("route_partition_hash", "route_snapshot_hash", "contract_hash"):
+            if proof.get(field) != context.get(field):
+                return proof, "feishu_current_route_mismatch"
+        return proof, None
+
+    def _bot_owned_delivery_proof(
+        self,
+        message_ref_hash: str,
+    ) -> Optional[Dict[str, Any]]:
+        state_dir = self._gateway_event_state_dir
+        reader = getattr(
+            gateway_event_ledger,
+            "feishu_delivery_lifecycle_events_for_readiness",
+            None,
+        )
+        if state_dir is None or not callable(reader):
+            return None
+        try:
+            events = reader(state_dir)
+        except Exception:
+            return None
+        for event in reversed(events):
+            if (
+                isinstance(event, dict)
+                and event.get("type") == "feishu_delivery_sent"
+                and event.get("action") == "send"
+                and event.get("message_ref_hash") == message_ref_hash
+                and event.get("evidence_state") == "current"
+                and isinstance(event.get("bot_ownership_hash"), str)
+            ):
+                return dict(event)
+        return None
+
+    @staticmethod
     def _validated_status_card_action_for_send(
         action: Any,
     ) -> Optional[Dict[str, Any]]:
@@ -6345,7 +6613,9 @@ class FeishuAdapter(BasePlatformAdapter):
         correlation_id: str,
         network_call: Any,
         require_returned_message_id: bool,
+        metadata: Optional[Dict[str, Any]] = None,
         existing_message_id: Optional[str] = None,
+        current_delivery_proof: Optional[Dict[str, Any]] = None,
         terminal_exception_matcher: Any = None,
     ) -> Any | SendResult:
         pending_result = await self._apply_delivery_pending(
@@ -6372,6 +6642,40 @@ class FeishuAdapter(BasePlatformAdapter):
                 error="delivery_pending apply failed",
             )
 
+        lifecycle_action = self._delivery_action_for_operation(operation)
+        lifecycle_context = self._current_delivery_lifecycle_context(
+            delivery_id=delivery_id,
+            action=lifecycle_action,
+            target=target,
+            metadata=metadata,
+        )
+        if lifecycle_context is not None:
+            if lifecycle_context.get("evidence_state") != "current":
+                await self._apply_feishu_delivery_lifecycle_failed(
+                    delivery_id=delivery_id,
+                    action=lifecycle_action,
+                    target=target,
+                    metadata=metadata,
+                    failure_class="feishu_current_route_evidence_stale",
+                    message_id=existing_message_id,
+                    original_proof=current_delivery_proof,
+                )
+                return SendResult(
+                    success=False,
+                    error="feishu_current_route_evidence_stale",
+                )
+            attempted_ok = await self._apply_feishu_delivery_lifecycle_event(
+                "feishu_delivery_attempted",
+                lifecycle_context,
+                message_id=existing_message_id,
+                original_proof=current_delivery_proof,
+            )
+            if not attempted_ok:
+                return SendResult(
+                    success=False,
+                    error="feishu_delivery_lifecycle_apply_failed",
+                )
+
         try:
             response = await network_call(self._idempotency_key_for_delivery(delivery_id))
         except Exception as exc:
@@ -6388,6 +6692,16 @@ class FeishuAdapter(BasePlatformAdapter):
                     success=False,
                     error="content format of the post type is incorrect",
                 )
+            if lifecycle_context is not None:
+                await self._apply_feishu_delivery_lifecycle_failed(
+                    delivery_id=delivery_id,
+                    action=lifecycle_action,
+                    target=target,
+                    metadata=metadata,
+                    failure_class="sdk_exception_after_admission",
+                    message_id=existing_message_id,
+                    original_proof=current_delivery_proof,
+                )
             await self._apply_unknown_delivery_state(
                 delivery_id,
                 "sdk_exception_after_admission",
@@ -6396,6 +6710,16 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=exc.__class__.__name__)
 
         if self._response_is_ambiguous_non_acceptance(response):
+            if lifecycle_context is not None:
+                await self._apply_feishu_delivery_lifecycle_failed(
+                    delivery_id=delivery_id,
+                    action=lifecycle_action,
+                    target=target,
+                    metadata=metadata,
+                    failure_class="retryable_non_acceptance_after_admission",
+                    message_id=existing_message_id,
+                    original_proof=current_delivery_proof,
+                )
             await self._apply_unknown_delivery_state(
                 delivery_id,
                 "retryable_non_acceptance_after_admission",
@@ -6415,6 +6739,16 @@ class FeishuAdapter(BasePlatformAdapter):
                 return SendResult(
                     success=False,
                     error="delivery_failed apply failed",
+                )
+            if lifecycle_context is not None:
+                await self._apply_feishu_delivery_lifecycle_failed(
+                    delivery_id=delivery_id,
+                    action=lifecycle_action,
+                    target=target,
+                    metadata=metadata,
+                    failure_class="feishu_terminal_non_acceptance",
+                    message_id=existing_message_id,
+                    original_proof=current_delivery_proof,
                 )
             return self._response_error_result(
                 response,
@@ -6439,6 +6773,16 @@ class FeishuAdapter(BasePlatformAdapter):
             )
 
         if not await self._apply_delivery_sent(delivery_id, str(message_id), operation):
+            if lifecycle_context is not None:
+                await self._apply_feishu_delivery_lifecycle_failed(
+                    delivery_id=delivery_id,
+                    action=lifecycle_action,
+                    target=target,
+                    metadata=metadata,
+                    failure_class="delivery_sent_apply_failed",
+                    message_id=str(message_id),
+                    original_proof=current_delivery_proof,
+                )
             await self._apply_unknown_delivery_state(
                 delivery_id,
                 "delivery_sent_apply_failed",
@@ -6449,6 +6793,44 @@ class FeishuAdapter(BasePlatformAdapter):
                 error="delivery_sent apply failed",
                 raw_response=response,
             )
+
+        if lifecycle_context is not None:
+            message_ref_hash = self._delivery_ref_hash("feishu_message", str(message_id))
+            bot_ownership_hash = None
+            if lifecycle_action == "send":
+                bot_ownership_hash = self._bot_ownership_hash(
+                    delivery_hash=lifecycle_context["delivery_hash"],
+                    message_ref_hash=message_ref_hash,
+                    route_partition_hash=lifecycle_context["route_partition_hash"],
+                    contract_hash=lifecycle_context["contract_hash"],
+                )
+            sent_ok = await self._apply_feishu_delivery_lifecycle_event(
+                "feishu_delivery_sent",
+                lifecycle_context,
+                message_id=str(message_id),
+                original_proof=current_delivery_proof,
+                bot_ownership_hash=bot_ownership_hash,
+            )
+            if not sent_ok:
+                return SendResult(
+                    success=False,
+                    error="feishu_delivery_lifecycle_apply_failed",
+                    raw_response=response,
+                )
+            ack_unknown_ok = await self._apply_feishu_delivery_lifecycle_event(
+                "feishu_delivery_ack_unknown",
+                lifecycle_context,
+                message_id=str(message_id),
+                failure_class="feishu_delivery_ack_unobservable",
+                original_proof=current_delivery_proof,
+                bot_ownership_hash=bot_ownership_hash,
+            )
+            if not ack_unknown_ok:
+                return SendResult(
+                    success=False,
+                    error="feishu_delivery_ack_unknown_apply_failed",
+                    raw_response=response,
+                )
 
         return response
 
