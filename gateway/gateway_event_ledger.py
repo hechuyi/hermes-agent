@@ -671,6 +671,11 @@ def _validate_persisted_delivery_records(deliveries: Mapping[str, Any]) -> None:
 
 def _validate_persisted_inbound_records(inbounds: Mapping[str, Any]) -> None:
     for record in inbounds.values():
+        if isinstance(record, Mapping):
+            try:
+                _feishu_current_inbound_key_from_record(record)
+            except _GatewayEventPersistedFailure as exc:
+                raise GatewayEventContractError(exc.failure_class, exc.reason) from exc
         try:
             validate_gateway_action(
                 {

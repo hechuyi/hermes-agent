@@ -400,6 +400,31 @@ def test_current_inbound_persisted_equivalent_record_under_wrong_key_fails_close
     assert list(state["inbounds"]) == [wrong_key]
 
 
+def test_current_inbound_with_incomplete_persisted_evidence_fails_closed_as_idempotency_unknown(
+    tmp_path,
+):
+    event = _inbound_event(
+        canonical_event_id="evt_incomplete_persisted_evidence_fake",
+        message_id="om_incomplete_persisted_evidence_fake",
+    )
+    first = apply_gateway_event(event, tmp_path)
+    assert first.ok is True
+    state = _ledger_state(tmp_path)
+    assert len(state["inbounds"]) == 1
+    persisted_key, persisted_record = next(iter(state["inbounds"].items()))
+    persisted_record.pop("route_partition_hash")
+    _write_ledger_state(tmp_path, state)
+    before_replay = _ledger_state(tmp_path)
+
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "feishu_inbound_idempotency_unknown"
+    after_replay = _ledger_state(tmp_path)
+    assert after_replay == before_replay
+    assert list(after_replay["inbounds"]) == [persisted_key]
+
+
 @pytest.mark.asyncio
 async def test_missing_current_admission_evidence_fails_before_batching_or_dispatch(
     tmp_path,
