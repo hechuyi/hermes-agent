@@ -87,7 +87,10 @@ from gateway.feishu_action_plan import (
     RenderPlanPart,
     validate_render_plan,
 )
-from gateway.feishu_legacy_guard import current_feishu_broker_context
+from gateway.feishu_legacy_guard import (
+    current_feishu_broker_context,
+    feishu_broker_context,
+)
 
 try:
     from gateway import gateway_event_ledger
@@ -3705,6 +3708,466 @@ class FeishuAdapter(BasePlatformAdapter):
         if text:
             return f"feishu-legacy-denial:{FeishuAdapter._feishu_audit_hash(text)}"
         return "feishu-legacy-denial"
+
+    @classmethod
+    def _is_broker_action_id(cls, value: Any) -> bool:
+        return (
+            isinstance(value, str)
+            and re.fullmatch(r"broker_action:sha256:[a-f0-9]{64}", value) is not None
+        )
+
+    @classmethod
+    def _is_broker_grant_handle(cls, value: Any) -> bool:
+        return (
+            isinstance(value, str)
+            and re.fullmatch(r"broker_grant_handle:sha256:[a-f0-9]{64}", value)
+            is not None
+        )
+
+    @staticmethod
+    def _broker_context_route_key(route_partition_hash: str) -> str:
+        return f"route_snapshot:{route_partition_hash}"
+
+    def _new_broker_action_id(self, action_kind: str) -> str:
+        factory = getattr(self, "_feishu_broker_action_id_factory", None)
+        if callable(factory):
+            value = factory(action_kind)
+            if self._is_broker_action_id(value):
+                return value
+        return "broker_action:" + self._sha256_ref_text(
+            f"feishu_broker_action\x1f{action_kind}\x1f{uuid.uuid4().hex}"
+        )
+
+    def _new_broker_grant_handle(self, action_id: str) -> str:
+        factory = getattr(self, "_feishu_broker_grant_factory", None)
+        if callable(factory):
+            value = factory(action_id)
+            if self._is_broker_grant_handle(value):
+                return value
+        return "broker_grant_handle:" + self._sha256_ref_text(
+            f"feishu_broker_grant\x1f{action_id}\x1f{uuid.uuid4().hex}"
+        )
+
+    def create_brokered_clarification_card(self, **kwargs: Any) -> Dict[str, Any]:
+        return self._create_brokered_current_card("clarification", **kwargs)
+
+    def create_brokered_confirmation_card(self, **kwargs: Any) -> Dict[str, Any]:
+        return self._create_brokered_current_card("confirmation", **kwargs)
+
+    def _create_brokered_current_card(
+        self,
+        action_kind: str,
+        *,
+        route_partition_hash: str,
+        route_snapshot_hash: str,
+        operator_hash: str,
+        contract_hash: str,
+        payload: Dict[str, Any],
+        expires_at: int | float,
+        idempotency_key: str,
+    ) -> Dict[str, Any]:
+        if self._gateway_event_state_dir is None:
+            return {"ok": False, "failure_class": "feishu_broker_action_audit_state_missing"}
+        payload_hash = payload.get("payload_hash") if isinstance(payload, dict) else None
+        if not (
+            action_kind in {"clarification", "confirmation"}
+            and self._is_sha256_ref_text(route_partition_hash)
+            and self._is_sha256_ref_text(route_snapshot_hash)
+            and self._is_sha256_ref_text(operator_hash)
+            and self._is_sha256_ref_text(contract_hash)
+            and self._is_sha256_ref_text(payload_hash)
+            and isinstance(expires_at, (int, float))
+            and not isinstance(expires_at, bool)
+        ):
+            return {"ok": False, "failure_class": "feishu_broker_action_binding_invalid"}
+        action_id = self._new_broker_action_id(action_kind)
+        grant_handle = self._new_broker_grant_handle(action_id)
+        idempotency_key_hash = self._sha256_ref_text(str(idempotency_key))
+        event = {
+            "type": "feishu_broker_action_created",
+            "timestamp": int(time.time()),
+            "action_id": action_id,
+            "grant_handle": grant_handle,
+            "action_kind": action_kind,
+            "route_partition_hash": route_partition_hash,
+            "route_snapshot_hash": route_snapshot_hash,
+            "operator_hash": operator_hash,
+            "contract_hash": contract_hash,
+            "payload_hash": payload_hash,
+            "expires_at": expires_at,
+            "idempotency_key_hash": idempotency_key_hash,
+        }
+        result = gateway_event_ledger.apply_gateway_event(
+            event,
+            self._gateway_event_state_dir,
+        )
+        if not self._gateway_event_apply_succeeded(result):
+            return {
+                "ok": False,
+                "failure_class": getattr(result, "failure_class", None)
+                or "feishu_broker_action_create_failed",
+            }
+        return {
+            "ok": True,
+            "action_id": action_id,
+            "grant_handle": grant_handle,
+            "action_kind": action_kind,
+            "payload_hash": payload_hash,
+            "card": {
+                "type": action_kind,
+                "value": {
+                    "action_id": action_id,
+                    "payload_hash": payload_hash,
+                },
+            },
+        }
+
+    async def resolve_brokered_card_callback(
+        self,
+        *,
+        action_value: Any,
+        route_partition_hash: str,
+        route_snapshot_hash: str,
+        operator_hash: str,
+        contract_hash: str,
+        now: int | float | None = None,
+        on_resolved: Any = None,
+    ) -> Dict[str, Any]:
+        callback_hash = self._sha256_ref_text(
+            json.dumps(
+                self._sanitize_broker_callback_for_hash(action_value),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        if not isinstance(action_value, dict):
+            return await self._deny_brokered_card_callback(
+                failure_class="feishu_broker_action_callback_material_invalid",
+                callback_hash=callback_hash,
+            )
+        action_id = action_value.get("action_id")
+        payload_hash = action_value.get("payload_hash")
+        if self._broker_callback_contains_raw_or_grant_material(action_value):
+            return await self._deny_brokered_card_callback(
+                failure_class="feishu_broker_action_callback_material_invalid",
+                callback_hash=callback_hash,
+                action_id=action_id,
+                payload_hash=payload_hash,
+                route_partition_hash=route_partition_hash,
+                route_snapshot_hash=route_snapshot_hash,
+                operator_hash=operator_hash,
+                contract_hash=contract_hash,
+            )
+        if not self._is_broker_action_id(action_id):
+            return await self._deny_brokered_card_callback(
+                failure_class="feishu_broker_action_unknown",
+                callback_hash=callback_hash,
+                payload_hash=payload_hash,
+                route_partition_hash=route_partition_hash,
+                route_snapshot_hash=route_snapshot_hash,
+                operator_hash=operator_hash,
+                contract_hash=contract_hash,
+            )
+        record = await self._broker_action_record(str(action_id))
+        if record is None:
+            return await self._deny_brokered_card_callback(
+                failure_class="feishu_broker_action_unknown",
+                callback_hash=callback_hash,
+                action_id=action_id,
+                payload_hash=payload_hash,
+                route_partition_hash=route_partition_hash,
+                route_snapshot_hash=route_snapshot_hash,
+                operator_hash=operator_hash,
+                contract_hash=contract_hash,
+            )
+        failure_class = self._broker_callback_binding_failure(
+            record=record,
+            route_partition_hash=route_partition_hash,
+            route_snapshot_hash=route_snapshot_hash,
+            operator_hash=operator_hash,
+            contract_hash=contract_hash,
+            payload_hash=payload_hash,
+            now=now,
+        )
+        if failure_class is not None:
+            return await self._deny_brokered_card_callback(
+                failure_class=failure_class,
+                callback_hash=callback_hash,
+                action_id=action_id,
+                action_kind=record.get("action_kind"),
+                payload_hash=payload_hash if self._is_sha256_ref_text(payload_hash) else record.get("payload_hash"),
+                route_partition_hash=route_partition_hash,
+                route_snapshot_hash=route_snapshot_hash,
+                operator_hash=operator_hash,
+                contract_hash=contract_hash,
+            )
+        action_event = self._broker_action_resolution_event(
+            "feishu_broker_action_accepted",
+            record=record,
+            callback_hash=callback_hash,
+            choice_hash=action_value.get("choice_hash"),
+        )
+        accepted = await gateway_event_ledger.apply_gateway_event_async(
+            action_event,
+            self._gateway_event_state_dir,
+        )
+        if not self._gateway_event_apply_succeeded(accepted):
+            return {
+                "ok": False,
+                "failure_class": getattr(accepted, "failure_class", None)
+                or "feishu_broker_action_accept_failed",
+            }
+        accepted_action = getattr(accepted, "action", None)
+        if isinstance(accepted_action, dict) and accepted_action.get("outcome") == "duplicate":
+            return await self._record_brokered_card_replay(
+                record=record,
+                callback_hash=callback_hash,
+                choice_hash=action_value.get("choice_hash"),
+            )
+        try:
+            with feishu_broker_context(
+                str(record["grant_handle"]),
+                action_id=str(record["action_id"]),
+                contract_hash=str(record["contract_hash"]),
+                route_partition_key=self._broker_context_route_key(
+                    str(record["route_partition_hash"])
+                ),
+            ):
+                if on_resolved is not None:
+                    maybe_result = on_resolved(dict(record))
+                    if asyncio.iscoroutine(maybe_result):
+                        await maybe_result
+        except Exception:
+            await self._deny_brokered_card_callback(
+                failure_class="feishu_broker_action_side_effect_failed",
+                callback_hash=callback_hash,
+                action_id=action_id,
+                action_kind=record.get("action_kind"),
+                payload_hash=record.get("payload_hash"),
+                route_partition_hash=route_partition_hash,
+                route_snapshot_hash=route_snapshot_hash,
+                operator_hash=operator_hash,
+                contract_hash=contract_hash,
+            )
+            return {"ok": False, "failure_class": "feishu_broker_action_side_effect_failed"}
+        resolved_event = self._broker_action_resolution_event(
+            "feishu_broker_action_resolved",
+            record=record,
+            callback_hash=callback_hash,
+            choice_hash=action_value.get("choice_hash"),
+        )
+        resolved = await gateway_event_ledger.apply_gateway_event_async(
+            resolved_event,
+            self._gateway_event_state_dir,
+        )
+        if not self._gateway_event_apply_succeeded(resolved):
+            return {
+                "ok": False,
+                "failure_class": getattr(resolved, "failure_class", None)
+                or "feishu_broker_action_resolve_failed",
+            }
+        return {
+            "ok": True,
+            "action_id": str(record["action_id"]),
+            "action_kind": str(record["action_kind"]),
+            "payload_hash": str(record["payload_hash"]),
+        }
+
+    @classmethod
+    def _sanitize_broker_callback_for_hash(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            sanitized: Dict[str, Any] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                normalized = re.sub(r"[^a-z0-9]+", "", key_text.lower())
+                if normalized in {
+                    "body",
+                    "content",
+                    "path",
+                    "rawbody",
+                    "rawpayloadpath",
+                    "sdkrequest",
+                    "feishubrokergrant",
+                }:
+                    sanitized[key_text] = cls._sha256_ref_text(f"redacted:{normalized}")
+                else:
+                    sanitized[key_text] = cls._sanitize_broker_callback_for_hash(item)
+            return sanitized
+        if isinstance(value, list):
+            return [cls._sanitize_broker_callback_for_hash(item) for item in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return cls._sha256_ref_text(type(value).__name__)
+
+    @classmethod
+    def _broker_callback_contains_raw_or_grant_material(cls, value: Any) -> bool:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized = re.sub(r"[^a-z0-9]+", "", str(key).lower())
+                if normalized in {
+                    "body",
+                    "method",
+                    "path",
+                    "rawbody",
+                    "rawpayloadpath",
+                    "sdkrequest",
+                    "feishubrokergrant",
+                }:
+                    return True
+                if cls._broker_callback_contains_raw_or_grant_material(item):
+                    return True
+            return False
+        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+            return any(cls._broker_callback_contains_raw_or_grant_material(item) for item in value)
+        return False
+
+    async def _broker_action_record(self, action_id: str) -> Optional[Dict[str, Any]]:
+        if self._gateway_event_state_dir is None:
+            return None
+        try:
+            return await asyncio.to_thread(
+                gateway_event_ledger.feishu_broker_action_record,
+                self._gateway_event_state_dir,
+                action_id,
+            )
+        except Exception:
+            return None
+
+    def _broker_callback_binding_failure(
+        self,
+        *,
+        record: Dict[str, Any],
+        route_partition_hash: str,
+        route_snapshot_hash: str,
+        operator_hash: str,
+        contract_hash: str,
+        payload_hash: Any,
+        now: int | float | None,
+    ) -> Optional[str]:
+        if route_partition_hash != record.get("route_partition_hash"):
+            return "feishu_broker_action_route_mismatch"
+        if route_snapshot_hash != record.get("route_snapshot_hash"):
+            return "feishu_broker_action_route_mismatch"
+        if operator_hash != record.get("operator_hash"):
+            return "feishu_broker_action_operator_mismatch"
+        if contract_hash != record.get("contract_hash"):
+            return "feishu_broker_action_contract_mismatch"
+        if payload_hash != record.get("payload_hash"):
+            return "feishu_broker_action_payload_mismatch"
+        try:
+            observed_now = float(now if now is not None else time.time())
+            expires_at = float(record.get("expires_at"))
+        except (TypeError, ValueError):
+            return "feishu_broker_action_expiry_invalid"
+        if observed_now > expires_at:
+            return "feishu_broker_action_expired"
+        return None
+
+    def _broker_action_resolution_event(
+        self,
+        event_type: str,
+        *,
+        record: Dict[str, Any],
+        callback_hash: str,
+        choice_hash: Any,
+    ) -> Dict[str, Any]:
+        event = {
+            "type": event_type,
+            "timestamp": int(time.time()),
+            "action_id": str(record["action_id"]),
+            "action_kind": str(record["action_kind"]),
+            "route_partition_hash": str(record["route_partition_hash"]),
+            "route_snapshot_hash": str(record["route_snapshot_hash"]),
+            "operator_hash": str(record["operator_hash"]),
+            "contract_hash": str(record["contract_hash"]),
+            "payload_hash": str(record["payload_hash"]),
+            "callback_hash": callback_hash,
+        }
+        if event_type in {"feishu_broker_action_resolved", "feishu_broker_action_replayed"}:
+            event["choice_hash"] = (
+                str(choice_hash)
+                if self._is_sha256_ref_text(choice_hash)
+                else self._sha256_ref_text("choice:missing")
+            )
+        return event
+
+    async def _record_brokered_card_replay(
+        self,
+        *,
+        record: Dict[str, Any],
+        callback_hash: str,
+        choice_hash: Any,
+    ) -> Dict[str, Any]:
+        replay_event = self._broker_action_resolution_event(
+            "feishu_broker_action_replayed",
+            record=record,
+            callback_hash=callback_hash,
+            choice_hash=choice_hash,
+        )
+        replay_event["failure_class"] = "feishu_broker_action_duplicate"
+        replayed = await gateway_event_ledger.apply_gateway_event_async(
+            replay_event,
+            self._gateway_event_state_dir,
+        )
+        if not self._gateway_event_apply_succeeded(replayed):
+            return {
+                "ok": False,
+                "failure_class": getattr(replayed, "failure_class", None)
+                or "feishu_broker_action_replay_audit_failed",
+            }
+        return {
+            "ok": False,
+            "failure_class": "feishu_broker_action_duplicate",
+            "replayed": True,
+        }
+
+    async def _deny_brokered_card_callback(
+        self,
+        *,
+        failure_class: str,
+        callback_hash: str,
+        action_id: Any = None,
+        action_kind: Any = None,
+        payload_hash: Any = None,
+        route_partition_hash: Any = None,
+        route_snapshot_hash: Any = None,
+        operator_hash: Any = None,
+        contract_hash: Any = None,
+    ) -> Dict[str, Any]:
+        event: Dict[str, Any] = {
+            "type": "feishu_broker_action_denied",
+            "timestamp": int(time.time()),
+            "callback_hash": callback_hash,
+            "failure_class": failure_class,
+        }
+        if self._is_broker_action_id(action_id):
+            event["action_id"] = str(action_id)
+        if action_kind in {"clarification", "confirmation"}:
+            event["action_kind"] = str(action_kind)
+        for field, value in (
+            ("payload_hash", payload_hash),
+            ("route_partition_hash", route_partition_hash),
+            ("route_snapshot_hash", route_snapshot_hash),
+            ("operator_hash", operator_hash),
+            ("contract_hash", contract_hash),
+        ):
+            if self._is_sha256_ref_text(value):
+                event[field] = str(value)
+        if self._gateway_event_state_dir is None:
+            return {
+                "ok": False,
+                "failure_class": "feishu_broker_action_denial_audit_failed",
+            }
+        denied = await gateway_event_ledger.apply_gateway_event_async(
+            event,
+            self._gateway_event_state_dir,
+        )
+        if not self._gateway_event_apply_succeeded(denied):
+            return {
+                "ok": False,
+                "failure_class": "feishu_broker_action_denial_audit_failed",
+            }
+        return {"ok": False, "failure_class": failure_class}
 
     def _build_feishu_legacy_descriptor_denied_event(
         self,

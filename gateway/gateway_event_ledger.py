@@ -16,6 +16,7 @@ from typing import Any, Mapping
 
 from gateway.gateway_event_contract import (
     FEISHU_AUDIT_EVENT_TYPES,
+    FEISHU_BROKER_ACTION_LIFECYCLE_EVENT_TYPES,
     FEISHU_DELIVERY_LIFECYCLE_EVENT_TYPES,
     GatewayEventContractError,
     GatewayEventResult,
@@ -37,11 +38,13 @@ _STATE_DICT_SECTIONS: tuple[str, ...] = (
     "feishu_message_index",
     "ack_event_index",
     "session_routes",
+    "feishu_broker_actions",
 )
 _STATE_LIST_SECTIONS: tuple[str, ...] = (
     "compression_rejections",
     "feishu_audit_events",
     "feishu_delivery_lifecycle",
+    "feishu_broker_action_lifecycle",
 )
 _IS_WINDOWS = os.name == "nt"
 _LOCKS_GUARD = threading.Lock()
@@ -175,6 +178,21 @@ def feishu_delivery_lifecycle_events_for_readiness(
     return tuple(dict(event) for event in state["feishu_delivery_lifecycle"])
 
 
+def feishu_broker_action_record(
+    state_dir: str | Path,
+    action_id: str,
+    *,
+    timeout_seconds: int | float = 10,
+) -> dict[str, Any] | None:
+    """Return one sanitized broker-action projection by opaque action ID."""
+
+    lock_timeout = _lock_timeout_seconds(timeout_seconds)
+    with _state_lock(state_dir, lock_timeout):
+        state = _read_state(_state_path(state_dir))
+    record = state["feishu_broker_actions"].get(action_id)
+    return dict(record) if isinstance(record, Mapping) else None
+
+
 def _apply_validated_event(
     event_type: str, event: Mapping[str, Any], state: dict[str, Any]
 ) -> dict[str, Any]:
@@ -200,6 +218,8 @@ def _apply_validated_event(
         return _apply_feishu_audit_event(event, state)
     if event_type in FEISHU_DELIVERY_LIFECYCLE_EVENT_TYPES:
         return _apply_feishu_delivery_lifecycle_event(event, state)
+    if event_type in FEISHU_BROKER_ACTION_LIFECYCLE_EVENT_TYPES:
+        return _apply_feishu_broker_action_lifecycle_event(event, state)
     raise GatewayEventContractError(
         "unsupported_gateway_event_type", "unsupported gateway event type"
     )
@@ -618,6 +638,186 @@ def _apply_feishu_delivery_lifecycle_event(
     return {"type": "feishu_audit_event_record", "record": record}
 
 
+def _apply_feishu_broker_action_lifecycle_event(
+    event: Mapping[str, Any], state: dict[str, Any]
+) -> dict[str, Any]:
+    event_type = str(event["type"])
+    if event_type == "feishu_broker_action_created":
+        return _apply_feishu_broker_action_created(event, state)
+    if event_type == "feishu_broker_action_accepted":
+        return _apply_feishu_broker_action_accepted(event, state)
+    if event_type == "feishu_broker_action_resolved":
+        return _apply_feishu_broker_action_resolved(event, state)
+    if event_type == "feishu_broker_action_replayed":
+        return _apply_feishu_broker_action_replayed(event, state)
+    if event_type == "feishu_broker_action_denied":
+        record = _minimal_broker_denial_record(event)
+        state["feishu_broker_action_lifecycle"].append(dict(event))
+        return {
+            "type": "feishu_broker_action_record",
+            "record": record,
+            "outcome": "denied",
+        }
+    raise GatewayEventContractError(
+        "unsupported_gateway_event_type", "unsupported gateway event type"
+    )
+
+
+def _apply_feishu_broker_action_created(
+    event: Mapping[str, Any], state: dict[str, Any]
+) -> dict[str, Any]:
+    action_id = str(event["action_id"])
+    actions = state["feishu_broker_actions"]
+    existing = actions.get(action_id)
+    if existing is not None:
+        if _broker_record_matches_created_event(existing, event):
+            return {
+                "type": "feishu_broker_action_record",
+                "record": dict(existing),
+                "outcome": "created",
+            }
+        raise GatewayEventContractError(
+            "feishu_broker_action_conflict",
+            "broker action id already has different binding",
+        )
+    record = {
+        "action_id": action_id,
+        "grant_handle": str(event["grant_handle"]),
+        "action_kind": str(event["action_kind"]),
+        "route_partition_hash": str(event["route_partition_hash"]),
+        "route_snapshot_hash": str(event["route_snapshot_hash"]),
+        "operator_hash": str(event["operator_hash"]),
+        "contract_hash": str(event["contract_hash"]),
+        "payload_hash": str(event["payload_hash"]),
+        "expires_at": event["expires_at"],
+        "idempotency_key_hash": str(event["idempotency_key_hash"]),
+        "status": "created",
+        "created_at": event["timestamp"],
+        "accepted_at": None,
+        "resolved_at": None,
+        "replayed_at": None,
+    }
+    actions[action_id] = record
+    state["feishu_broker_action_lifecycle"].append(dict(event))
+    return {"type": "feishu_broker_action_record", "record": dict(record), "outcome": "created"}
+
+
+def _apply_feishu_broker_action_accepted(
+    event: Mapping[str, Any], state: dict[str, Any]
+) -> dict[str, Any]:
+    record = _broker_action_record_for_event(event, state)
+    if record["status"] == "resolved":
+        return {
+            "type": "feishu_broker_action_record",
+            "record": dict(record),
+            "outcome": "duplicate",
+        }
+    record["status"] = "accepted"
+    record["accepted_at"] = event["timestamp"]
+    state["feishu_broker_action_lifecycle"].append(dict(event))
+    return {"type": "feishu_broker_action_record", "record": dict(record), "outcome": "accepted"}
+
+
+def _apply_feishu_broker_action_resolved(
+    event: Mapping[str, Any], state: dict[str, Any]
+) -> dict[str, Any]:
+    record = _broker_action_record_for_event(event, state)
+    if record["status"] == "resolved":
+        return {
+            "type": "feishu_broker_action_record",
+            "record": dict(record),
+            "outcome": "duplicate",
+        }
+    if record["status"] != "accepted":
+        raise GatewayEventContractError(
+            "feishu_broker_action_state_invalid",
+            "broker action was not accepted",
+        )
+    record["status"] = "resolved"
+    record["resolved_at"] = event["timestamp"]
+    state["feishu_broker_action_lifecycle"].append(dict(event))
+    return {"type": "feishu_broker_action_record", "record": dict(record), "outcome": "resolved"}
+
+
+def _apply_feishu_broker_action_replayed(
+    event: Mapping[str, Any], state: dict[str, Any]
+) -> dict[str, Any]:
+    record = _broker_action_record_for_event(event, state)
+    if record["replayed_at"] is None:
+        record["replayed_at"] = event["timestamp"]
+        state["feishu_broker_action_lifecycle"].append(dict(event))
+    return {"type": "feishu_broker_action_record", "record": dict(record), "outcome": "replayed"}
+
+
+def _broker_action_record_for_event(
+    event: Mapping[str, Any], state: dict[str, Any]
+) -> dict[str, Any]:
+    action_id = str(event["action_id"])
+    record = state["feishu_broker_actions"].get(action_id)
+    if not isinstance(record, dict):
+        raise GatewayEventContractError(
+            "feishu_broker_action_unknown",
+            "unknown broker action id",
+        )
+    for field in (
+        "action_kind",
+        "route_partition_hash",
+        "route_snapshot_hash",
+        "operator_hash",
+        "contract_hash",
+        "payload_hash",
+    ):
+        if record.get(field) != event.get(field):
+            raise GatewayEventContractError(
+                "feishu_broker_action_binding_mismatch",
+                "broker action binding mismatch",
+            )
+    return record
+
+
+def _broker_record_matches_created_event(
+    record: Mapping[str, Any], event: Mapping[str, Any]
+) -> bool:
+    fields = (
+        "action_id",
+        "grant_handle",
+        "action_kind",
+        "route_partition_hash",
+        "route_snapshot_hash",
+        "operator_hash",
+        "contract_hash",
+        "payload_hash",
+        "expires_at",
+        "idempotency_key_hash",
+    )
+    return all(record.get(field) == event.get(field) for field in fields)
+
+
+def _minimal_broker_denial_record(event: Mapping[str, Any]) -> dict[str, Any]:
+    action_id = str(event.get("action_id") or _sha256_ref(str(event.get("callback_hash"))))
+    if not action_id.startswith("broker_action:"):
+        action_id = f"broker_action:{_sha256_ref(action_id)}"
+    grant_handle = str(event.get("grant_handle") or f"broker_grant_handle:{_sha256_ref(action_id)}")
+    action_kind = str(event.get("action_kind") or "clarification")
+    return {
+        "action_id": action_id,
+        "grant_handle": grant_handle,
+        "action_kind": action_kind if action_kind in {"clarification", "confirmation"} else "clarification",
+        "route_partition_hash": str(event.get("route_partition_hash") or _sha256_ref("missing")),
+        "route_snapshot_hash": str(event.get("route_snapshot_hash") or _sha256_ref("missing")),
+        "operator_hash": str(event.get("operator_hash") or _sha256_ref("missing")),
+        "contract_hash": str(event.get("contract_hash") or _sha256_ref("missing")),
+        "payload_hash": str(event.get("payload_hash") or _sha256_ref("missing")),
+        "expires_at": 0,
+        "idempotency_key_hash": _sha256_ref(str(event.get("callback_hash"))),
+        "status": "created",
+        "created_at": event["timestamp"],
+        "accepted_at": None,
+        "resolved_at": None,
+        "replayed_at": None,
+    }
+
+
 def _read_state(state_path: Path) -> dict[str, Any]:
     if not state_path.exists():
         return _empty_state()
@@ -635,13 +835,19 @@ def _read_state(state_path: Path) -> dict[str, Any]:
         *tuple(
             key
             for key in _STATE_LIST_SECTIONS
-            if key not in {"feishu_audit_events", "feishu_delivery_lifecycle"}
+            if key
+            not in {
+                "feishu_audit_events",
+                "feishu_delivery_lifecycle",
+                "feishu_broker_action_lifecycle",
+            }
         ),
     }
+    required_keys.discard("feishu_broker_actions")
     if not required_keys.issubset(raw):
         raise _state_schema_error()
     for key in _STATE_DICT_SECTIONS:
-        value = raw[key]
+        value = raw.get(key, {})
         if not isinstance(value, dict):
             raise _state_schema_error()
         state[key] = value
@@ -660,6 +866,10 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     if not isinstance(feishu_delivery_lifecycle, list):
         raise _state_schema_error()
     state["feishu_delivery_lifecycle"] = feishu_delivery_lifecycle
+    feishu_broker_action_lifecycle = raw.get("feishu_broker_action_lifecycle", [])
+    if not isinstance(feishu_broker_action_lifecycle, list):
+        raise _state_schema_error()
+    state["feishu_broker_action_lifecycle"] = feishu_broker_action_lifecycle
     _validate_persisted_inbound_records(state["inbounds"])
     _validate_persisted_delivery_records(state["deliveries"])
     _validate_persisted_session_routes(state["session_routes"])
@@ -667,6 +877,10 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     _validate_persisted_feishu_audit_events(state["feishu_audit_events"])
     _validate_persisted_feishu_delivery_lifecycle(
         state["feishu_delivery_lifecycle"]
+    )
+    _validate_persisted_feishu_broker_actions(
+        state["feishu_broker_actions"],
+        state["feishu_broker_action_lifecycle"],
     )
     _reconcile_persisted_indexes(state)
     return state
@@ -711,6 +925,8 @@ def _empty_state() -> dict[str, Any]:
         "compression_rejections": [],
         "feishu_audit_events": [],
         "feishu_delivery_lifecycle": [],
+        "feishu_broker_actions": {},
+        "feishu_broker_action_lifecycle": [],
     }
 
 
@@ -804,6 +1020,31 @@ def _validate_persisted_feishu_delivery_lifecycle(events: list[Any]) -> None:
                 {"type": "feishu_audit_event_record", "record": event}
             )
         except (GatewayEventContractError, ValueError) as exc:
+            raise _state_schema_error() from exc
+
+
+def _validate_persisted_feishu_broker_actions(
+    actions: Mapping[str, Any], lifecycle: list[Any]
+) -> None:
+    for action_id, record in actions.items():
+        if not isinstance(action_id, str):
+            raise _state_schema_error()
+        try:
+            validated = validate_gateway_action(
+                {
+                    "type": "feishu_broker_action_record",
+                    "record": record,
+                    "outcome": "created",
+                }
+            )
+        except (GatewayEventContractError, ValueError) as exc:
+            raise _state_schema_error() from exc
+        if validated["record"]["action_id"] != action_id:
+            raise _state_schema_error()
+    for event in lifecycle:
+        try:
+            validate_gateway_event(event)
+        except GatewayEventContractError as exc:
             raise _state_schema_error() from exc
 
 

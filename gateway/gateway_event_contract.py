@@ -84,6 +84,16 @@ FEISHU_DELIVERY_LIFECYCLE_EVENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
+FEISHU_BROKER_ACTION_LIFECYCLE_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "feishu_broker_action_created",
+        "feishu_broker_action_accepted",
+        "feishu_broker_action_resolved",
+        "feishu_broker_action_denied",
+        "feishu_broker_action_replayed",
+    }
+)
+
 PREFLIGHT_CHECK_NAMES: tuple[str, ...] = (
     "state_dir_writable",
     "feishu_inbound",
@@ -97,6 +107,8 @@ _SAFE_EVENT_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
 _SAFE_FAILURE_CLASS_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _FNV1A64_RE = re.compile(r"^fnv1a64:[a-f0-9]{16}$")
 _SHA256_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+_BROKER_ACTION_ID_RE = re.compile(r"^broker_action:sha256:[a-f0-9]{64}$")
+_BROKER_GRANT_HANDLE_RE = re.compile(r"^broker_grant_handle:sha256:[a-f0-9]{64}$")
 _SAFE_AUDIT_ATOM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _RAW_FEISHU_ID_VALUE_RE = re.compile(
     r"^(?:ou|oc|on|om|user|open|union|chat|doccn|file|fld|boxcn|wikcn)[a-z0-9_.:-]*$"
@@ -162,6 +174,29 @@ _FEISHU_DELIVERY_LIFECYCLE_COMMON_FIELDS = frozenset(
 _FEISHU_DELIVERY_ACTIONS = frozenset({"send", "edit"})
 _FEISHU_DELIVERY_EVIDENCE_STATES = frozenset(
     {"current", "missing", "stale", "unknown", "denied"}
+)
+_FEISHU_BROKER_ACTION_KINDS = frozenset({"clarification", "confirmation"})
+_FEISHU_BROKER_ACTION_HASH_FIELDS = frozenset(
+    {
+        "route_partition_hash",
+        "route_snapshot_hash",
+        "operator_hash",
+        "contract_hash",
+        "payload_hash",
+        "choice_hash",
+        "callback_hash",
+        "idempotency_key_hash",
+    }
+)
+_FEISHU_BROKER_ACTION_ATOM_FIELDS = frozenset(
+    {
+        "action_id",
+        "grant_handle",
+        "action_kind",
+    }
+)
+_FEISHU_BROKER_ACTION_COMMON_FIELDS = frozenset(
+    {"type", "timestamp", "expires_at", "failure_class"}
 )
 _FEISHU_AUDIT_ATOM_FIELDS = frozenset(
     {
@@ -263,6 +298,9 @@ def validate_gateway_event(event: Mapping[str, Any]) -> str:
     if required is None and event_type in FEISHU_DELIVERY_LIFECYCLE_EVENT_TYPES:
         _validate_feishu_delivery_lifecycle_event(event_type, event)
         return event_type
+    if required is None and event_type in FEISHU_BROKER_ACTION_LIFECYCLE_EVENT_TYPES:
+        _validate_feishu_broker_action_lifecycle_event(event_type, event)
+        return event_type
     if required is None:
         raise GatewayEventContractError(
             "unsupported_gateway_event_type",
@@ -337,6 +375,8 @@ def validate_gateway_action(action: Mapping[str, Any]) -> dict[str, Any]:
         return _validate_preflight_action(action)
     if action_type == "feishu_audit_event_record":
         return _validate_feishu_audit_event_record_action(action)
+    if action_type == "feishu_broker_action_record":
+        return _validate_feishu_broker_action_record_action(action)
     raise ValueError("unsupported gateway action type")
 
 
@@ -351,6 +391,94 @@ def validate_feishu_request_descriptor(
     if operation == "patch_interactive_message":
         return _validate_patch_interactive_message_descriptor(descriptor)
     return None
+
+
+def _validate_feishu_broker_action_lifecycle_event(
+    event_type: str, event: Mapping[str, Any]
+) -> None:
+    allowed_fields = (
+        _FEISHU_BROKER_ACTION_COMMON_FIELDS
+        | _FEISHU_BROKER_ACTION_HASH_FIELDS
+        | _FEISHU_BROKER_ACTION_ATOM_FIELDS
+    )
+    for field, value in event.items():
+        if not isinstance(field, str) or field not in allowed_fields:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "feishu broker action lifecycle event contains unsupported field",
+            )
+        if _is_feishu_audit_raw_field(field):
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "feishu broker action lifecycle event contains raw field",
+            )
+        if field in _FEISHU_BROKER_ACTION_HASH_FIELDS:
+            _require_sanitized_hash_value(value, field)
+        elif field == "action_id":
+            _require_broker_action_id(value)
+        elif field == "grant_handle":
+            _require_broker_grant_handle(value)
+        elif field == "action_kind" and value not in _FEISHU_BROKER_ACTION_KINDS:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "invalid Feishu broker action kind",
+            )
+
+    if "timestamp" not in event:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "missing required field: timestamp",
+        )
+    _require_number(event, "timestamp")
+
+    if event_type == "feishu_broker_action_created":
+        required_fields = (
+            "action_id",
+            "grant_handle",
+            "action_kind",
+            "route_partition_hash",
+            "route_snapshot_hash",
+            "operator_hash",
+            "contract_hash",
+            "payload_hash",
+            "expires_at",
+            "idempotency_key_hash",
+        )
+    elif event_type in {
+        "feishu_broker_action_accepted",
+        "feishu_broker_action_resolved",
+        "feishu_broker_action_replayed",
+    }:
+        required_fields = (
+            "action_id",
+            "action_kind",
+            "route_partition_hash",
+            "route_snapshot_hash",
+            "operator_hash",
+            "contract_hash",
+            "payload_hash",
+            "callback_hash",
+        )
+    else:
+        required_fields = ("callback_hash", "failure_class")
+
+    for field in required_fields:
+        if field not in event:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                f"missing required field: {field}",
+            )
+    if event_type == "feishu_broker_action_resolved" and "choice_hash" not in event:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "missing required field: choice_hash",
+        )
+    if event_type == "feishu_broker_action_denied":
+        require_failure_class(event.get("failure_class"))
+    elif "failure_class" in event:
+        require_failure_class(event.get("failure_class"))
+    if "expires_at" in event:
+        _require_number(event, "expires_at", minimum=0)
 
 
 def _validate_send_interactive_message_descriptor(
@@ -549,6 +677,75 @@ def _validate_delivery_record(value: Any) -> dict[str, Any]:
             raise ValueError(f"invalid {field}")
     if failure_class is not None:
         require_failure_class(failure_class)
+    return dict(value)
+
+
+def _validate_feishu_broker_action_record_action(
+    action: Mapping[str, Any]
+) -> dict[str, Any]:
+    if set(action) != {"type", "record", "outcome"}:
+        raise ValueError("invalid Feishu broker action record action keys")
+    record = _validate_feishu_broker_action_record(action.get("record"))
+    outcome = action.get("outcome")
+    if outcome not in {
+        "created",
+        "accepted",
+        "resolved",
+        "denied",
+        "replayed",
+        "duplicate",
+    }:
+        raise ValueError("invalid Feishu broker action outcome")
+    return {
+        "type": "feishu_broker_action_record",
+        "record": record,
+        "outcome": outcome,
+    }
+
+
+def _validate_feishu_broker_action_record(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid Feishu broker action record")
+    required_keys = {
+        "action_id",
+        "grant_handle",
+        "action_kind",
+        "route_partition_hash",
+        "route_snapshot_hash",
+        "operator_hash",
+        "contract_hash",
+        "payload_hash",
+        "expires_at",
+        "idempotency_key_hash",
+        "status",
+        "created_at",
+        "accepted_at",
+        "resolved_at",
+        "replayed_at",
+    }
+    if set(value) != required_keys:
+        raise ValueError("invalid Feishu broker action record keys")
+    _require_broker_action_id(value.get("action_id"))
+    _require_broker_grant_handle(value.get("grant_handle"))
+    if value.get("action_kind") not in _FEISHU_BROKER_ACTION_KINDS:
+        raise ValueError("invalid Feishu broker action kind")
+    for field in (
+        "route_partition_hash",
+        "route_snapshot_hash",
+        "operator_hash",
+        "contract_hash",
+        "payload_hash",
+        "idempotency_key_hash",
+    ):
+        _require_sanitized_hash_value(value.get(field), field)
+    if value.get("status") not in {"created", "accepted", "resolved"}:
+        raise ValueError("invalid Feishu broker action status")
+    for field in ("expires_at", "created_at"):
+        if not _is_number(value.get(field)):
+            raise ValueError(f"invalid Feishu broker action {field}")
+    for field in ("accepted_at", "resolved_at", "replayed_at"):
+        if value.get(field) is not None and not _is_number(value.get(field)):
+            raise ValueError(f"invalid Feishu broker action {field}")
     return dict(value)
 
 
@@ -830,6 +1027,24 @@ def _require_sanitized_hash_value(value: Any, field: str) -> str:
         raise GatewayEventContractError(
             "invalid_gateway_event_contract",
             f"{field} is missing or invalid",
+        )
+    return value
+
+
+def _require_broker_action_id(value: Any) -> str:
+    if not isinstance(value, str) or _BROKER_ACTION_ID_RE.fullmatch(value) is None:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "action_id is missing or invalid",
+        )
+    return value
+
+
+def _require_broker_grant_handle(value: Any) -> str:
+    if not isinstance(value, str) or _BROKER_GRANT_HANDLE_RE.fullmatch(value) is None:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "grant_handle is missing or invalid",
         )
     return value
 
