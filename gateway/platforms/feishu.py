@@ -7383,7 +7383,7 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> Optional[str]:
         del file_path
         if self._gateway_event_state_dir is None:
-            return None
+            return "feishu_arbitrary_local_upload_denied"
         provenance_hash = (metadata or {}).get("feishu_attachment_provenance_hash")
         if not self._is_sha256_ref_text(provenance_hash):
             return "feishu_arbitrary_local_upload_denied"
@@ -7800,7 +7800,7 @@ class FeishuAdapter(BasePlatformAdapter):
         session_id: str,
         correlation_id: str,
     ) -> SendResult:
-        """Execute a Rust-emitted Feishu request descriptor through SDK builders."""
+        """Deny raw Feishu request descriptors before SDK builders can run."""
         if not self._feishu_broker_context_present():
             audited = await self._apply_feishu_legacy_descriptor_denied(
                 surface="feishu.descriptor",
@@ -7857,62 +7857,21 @@ class FeishuAdapter(BasePlatformAdapter):
                 success=False,
                 error="invalid Feishu request descriptor",
             )
-
-        operation = validated["operation"]
-        body = validated["body"]
-        if operation == "send_interactive_message":
-            receive_id = body["receive_id"]
-            receive_id_type = validated["params"]["receive_id_type"]
-            uuid_value = body.get("uuid") or delivery_id
-            request_body = self._build_create_message_body(
-                receive_id=receive_id,
-                msg_type="interactive",
-                content=body["content"],
-                uuid_value=uuid_value,
+        audited = await self._apply_feishu_legacy_descriptor_denied(
+            surface="feishu.descriptor",
+            failure_class="feishu_raw_descriptor_execution_denied",
+            correlation_id=correlation_id,
+            descriptor_seed=delivery_id,
+        )
+        if not audited:
+            return SendResult(
+                success=False,
+                error="feishu_raw_descriptor_denial_apply_failed",
             )
-            request = self._build_create_message_request(receive_id_type, request_body)
-            response_or_result = await self._audited_delivery(
-                delivery_id=delivery_id,
-                operation="feishu_interactive_send",
-                target=f"feishu:chat:{receive_id}",
-                inbound_id=inbound_id,
-                session_id=session_id,
-                correlation_id=correlation_id,
-                network_call=lambda _uuid_value: asyncio.to_thread(
-                    self._client.im.v1.message.create, request
-                ),
-                require_returned_message_id=True,
-            )
-        else:
-            message_id = validated["message_id"]
-            request_body = self._build_update_message_body(
-                msg_type="interactive",
-                content=body["content"],
-            )
-            request = self._build_update_message_request(
-                message_id=message_id,
-                request_body=request_body,
-            )
-            response_or_result = await self._audited_delivery(
-                delivery_id=delivery_id,
-                operation="feishu_interactive_patch",
-                target=f"feishu:message:{message_id}",
-                inbound_id=inbound_id,
-                session_id=session_id,
-                correlation_id=correlation_id,
-                network_call=lambda _uuid_value: asyncio.to_thread(
-                    self._client.im.v1.message.update, request
-                ),
-                require_returned_message_id=False,
-                existing_message_id=message_id,
-            )
-
-        if isinstance(response_or_result, SendResult):
-            return response_or_result
-        result = self._finalize_send_result(response_or_result, "descriptor request failed")
-        if operation == "patch_interactive_message" and result.success:
-            result.message_id = validated["message_id"]
-        return result
+        return SendResult(
+            success=False,
+            error="feishu_raw_descriptor_execution_denied",
+        )
 
     async def execute_status_card_action(
         self,

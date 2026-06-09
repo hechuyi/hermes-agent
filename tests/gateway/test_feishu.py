@@ -2240,15 +2240,16 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertEqual(sleeps, [])
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_send_document_reply_uses_thread_flag(self):
+    def test_send_document_reply_denies_legacy_local_upload_before_thread_send(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
 
         adapter = FeishuAdapter(PlatformConfig())
-        captured = {}
+        captured = {"upload_calls": 0, "reply_calls": 0}
 
         class _FileAPI:
             def create(self, request):
+                captured["upload_calls"] += 1
                 return SimpleNamespace(
                     success=lambda: True,
                     data=SimpleNamespace(file_key="file_123"),
@@ -2256,6 +2257,7 @@ class TestAdapterBehavior(unittest.TestCase):
 
         class _MessageAPI:
             def reply(self, request):
+                captured["reply_calls"] += 1
                 captured["request"] = request
                 return SimpleNamespace(
                     success=lambda: True,
@@ -2291,19 +2293,22 @@ class TestAdapterBehavior(unittest.TestCase):
         finally:
             os.unlink(file_path)
 
-        self.assertTrue(result.success)
-        self.assertTrue(captured["request"].request_body.reply_in_thread)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "feishu_arbitrary_local_upload_denied")
+        self.assertEqual(captured["upload_calls"], 0)
+        self.assertEqual(captured["reply_calls"], 0)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_send_document_uploads_file_and_sends_file_message(self):
+    def test_send_document_denies_legacy_local_upload_before_sdk_calls(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
 
         adapter = FeishuAdapter(PlatformConfig())
-        captured = {}
+        captured = {"upload_calls": 0, "message_calls": 0}
 
         class _FileAPI:
             def create(self, request):
+                captured["upload_calls"] += 1
                 captured["upload_request"] = request
                 return SimpleNamespace(
                     success=lambda: True,
@@ -2312,6 +2317,7 @@ class TestAdapterBehavior(unittest.TestCase):
 
         class _MessageAPI:
             def create(self, request):
+                captured["message_calls"] += 1
                 captured["message_request"] = request
                 return SimpleNamespace(
                     success=lambda: True,
@@ -2340,24 +2346,22 @@ class TestAdapterBehavior(unittest.TestCase):
         finally:
             os.unlink(file_path)
 
-        self.assertTrue(result.success)
-        self.assertEqual(result.message_id, "om_file_msg")
-        self.assertEqual(captured["upload_request"].request_body.file_type, "pdf")
-        self.assertEqual(
-            captured["message_request"].request_body.content,
-            '{"file_key": "file_123"}',
-        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "feishu_arbitrary_local_upload_denied")
+        self.assertEqual(captured["upload_calls"], 0)
+        self.assertEqual(captured["message_calls"], 0)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_send_document_with_caption_uses_single_post_message(self):
+    def test_send_document_with_caption_denies_legacy_local_upload_before_sdk_calls(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
 
         adapter = FeishuAdapter(PlatformConfig())
-        captured = {}
+        captured = {"upload_calls": 0, "message_calls": 0}
 
         class _FileAPI:
             def create(self, request):
+                captured["upload_calls"] += 1
                 return SimpleNamespace(
                     success=lambda: True,
                     data=SimpleNamespace(file_key="file_123"),
@@ -2365,6 +2369,7 @@ class TestAdapterBehavior(unittest.TestCase):
 
         class _MessageAPI:
             def create(self, request):
+                captured["message_calls"] += 1
                 captured["message_request"] = request
                 return SimpleNamespace(
                     success=lambda: True,
@@ -2395,22 +2400,22 @@ class TestAdapterBehavior(unittest.TestCase):
         finally:
             os.unlink(file_path)
 
-        self.assertTrue(result.success)
-        self.assertEqual(captured["message_request"].request_body.msg_type, "post")
-        self.assertIn('"tag": "media"', captured["message_request"].request_body.content)
-        self.assertIn('"file_key": "file_123"', captured["message_request"].request_body.content)
-        self.assertIn("报告请看", captured["message_request"].request_body.content)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "feishu_arbitrary_local_upload_denied")
+        self.assertEqual(captured["upload_calls"], 0)
+        self.assertEqual(captured["message_calls"], 0)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_send_image_file_uploads_image_and_sends_image_message(self):
+    def test_send_image_file_denies_legacy_local_upload_before_sdk_calls(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
 
         adapter = FeishuAdapter(PlatformConfig())
-        captured = {}
+        captured = {"upload_calls": 0, "message_calls": 0}
 
         class _ImageAPI:
             def create(self, request):
+                captured["upload_calls"] += 1
                 captured["upload_request"] = request
                 return SimpleNamespace(
                     success=lambda: True,
@@ -2419,6 +2424,7 @@ class TestAdapterBehavior(unittest.TestCase):
 
         class _MessageAPI:
             def create(self, request):
+                captured["message_calls"] += 1
                 captured["message_request"] = request
                 return SimpleNamespace(
                     success=lambda: True,
@@ -2447,24 +2453,22 @@ class TestAdapterBehavior(unittest.TestCase):
         finally:
             os.unlink(image_path)
 
-        self.assertTrue(result.success)
-        self.assertEqual(result.message_id, "om_image_msg")
-        self.assertEqual(captured["upload_request"].request_body.image_type, "message")
-        self.assertEqual(
-            captured["message_request"].request_body.content,
-            '{"image_key": "img_123"}',
-        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "feishu_arbitrary_local_upload_denied")
+        self.assertEqual(captured["upload_calls"], 0)
+        self.assertEqual(captured["message_calls"], 0)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_send_image_file_with_caption_uses_single_post_message(self):
+    def test_send_image_file_with_caption_denies_legacy_local_upload_before_sdk_calls(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
 
         adapter = FeishuAdapter(PlatformConfig())
-        captured = {}
+        captured = {"upload_calls": 0, "message_calls": 0}
 
         class _ImageAPI:
             def create(self, request):
+                captured["upload_calls"] += 1
                 return SimpleNamespace(
                     success=lambda: True,
                     data=SimpleNamespace(image_key="img_123"),
@@ -2472,6 +2476,7 @@ class TestAdapterBehavior(unittest.TestCase):
 
         class _MessageAPI:
             def create(self, request):
+                captured["message_calls"] += 1
                 captured["message_request"] = request
                 return SimpleNamespace(
                     success=lambda: True,
@@ -2502,22 +2507,22 @@ class TestAdapterBehavior(unittest.TestCase):
         finally:
             os.unlink(image_path)
 
-        self.assertTrue(result.success)
-        self.assertEqual(captured["message_request"].request_body.msg_type, "post")
-        self.assertIn('"tag": "img"', captured["message_request"].request_body.content)
-        self.assertIn('"image_key": "img_123"', captured["message_request"].request_body.content)
-        self.assertIn("截图说明", captured["message_request"].request_body.content)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "feishu_arbitrary_local_upload_denied")
+        self.assertEqual(captured["upload_calls"], 0)
+        self.assertEqual(captured["message_calls"], 0)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_send_video_uploads_file_and_sends_media_message(self):
+    def test_send_video_denies_legacy_local_upload_before_sdk_calls(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
 
         adapter = FeishuAdapter(PlatformConfig())
-        captured = {}
+        captured = {"upload_calls": 0, "message_calls": 0}
 
         class _FileAPI:
             def create(self, request):
+                captured["upload_calls"] += 1
                 captured["upload_request"] = request
                 return SimpleNamespace(
                     success=lambda: True,
@@ -2526,6 +2531,7 @@ class TestAdapterBehavior(unittest.TestCase):
 
         class _MessageAPI:
             def create(self, request):
+                captured["message_calls"] += 1
                 captured["message_request"] = request
                 return SimpleNamespace(
                     success=lambda: True,
@@ -2554,21 +2560,22 @@ class TestAdapterBehavior(unittest.TestCase):
         finally:
             os.unlink(video_path)
 
-        self.assertTrue(result.success)
-        self.assertEqual(captured["upload_request"].request_body.file_type, "mp4")
-        self.assertEqual(captured["message_request"].request_body.msg_type, "media")
-        self.assertEqual(captured["message_request"].request_body.content, '{"file_key": "file_video_123"}')
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "feishu_arbitrary_local_upload_denied")
+        self.assertEqual(captured["upload_calls"], 0)
+        self.assertEqual(captured["message_calls"], 0)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_send_voice_uploads_opus_and_sends_audio_message(self):
+    def test_send_voice_denies_legacy_local_upload_before_sdk_calls(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
 
         adapter = FeishuAdapter(PlatformConfig())
-        captured = {}
+        captured = {"upload_calls": 0, "message_calls": 0}
 
         class _FileAPI:
             def create(self, request):
+                captured["upload_calls"] += 1
                 captured["upload_request"] = request
                 return SimpleNamespace(
                     success=lambda: True,
@@ -2577,6 +2584,7 @@ class TestAdapterBehavior(unittest.TestCase):
 
         class _MessageAPI:
             def create(self, request):
+                captured["message_calls"] += 1
                 captured["message_request"] = request
                 return SimpleNamespace(
                     success=lambda: True,
@@ -2605,10 +2613,10 @@ class TestAdapterBehavior(unittest.TestCase):
         finally:
             os.unlink(audio_path)
 
-        self.assertTrue(result.success)
-        self.assertEqual(captured["upload_request"].request_body.file_type, "opus")
-        self.assertEqual(captured["message_request"].request_body.msg_type, "audio")
-        self.assertEqual(captured["message_request"].request_body.content, '{"file_key": "file_audio_123"}')
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "feishu_arbitrary_local_upload_denied")
+        self.assertEqual(captured["upload_calls"], 0)
+        self.assertEqual(captured["message_calls"], 0)
 
     @patch.dict(os.environ, {}, clear=True)
     def test_build_post_payload_extracts_title_and_links(self):

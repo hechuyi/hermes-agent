@@ -105,6 +105,18 @@ def _legacy_adapter():
             )
         )
     )
+    adapter._build_image_upload_body = Mock(
+        wraps=adapter._build_image_upload_body
+    )
+    adapter._build_image_upload_request = Mock(
+        wraps=adapter._build_image_upload_request
+    )
+    adapter._build_file_upload_body = Mock(
+        wraps=adapter._build_file_upload_body
+    )
+    adapter._build_file_upload_request = Mock(
+        wraps=adapter._build_file_upload_request
+    )
     return adapter, image_api, file_api, message_api
 
 
@@ -575,22 +587,71 @@ async def test_invalid_route_provenance_denies_before_local_path_probe(
 
 
 @pytest.mark.asyncio
-async def test_legacy_no_state_native_image_upload_compatibility(tmp_path):
-    image_path = tmp_path / "legacy-b7.png"
-    image_path.write_bytes(_CONTENT_BYTES)
+async def test_legacy_no_state_native_image_upload_denies_before_local_probe(
+    tmp_path,
+    monkeypatch,
+):
+    image_path = "/tmp/legacy-b7.png"
     adapter, image_api, file_api, message_api = _legacy_adapter()
+    original_exists = __import__("os").path.exists
+
+    def guarded_exists(path):
+        if path == image_path:
+            pytest.fail(f"local path was probed before denial: {path!r}")
+        return original_exists(path)
+
+    monkeypatch.setattr(
+        "gateway.platforms.feishu.os.path.exists",
+        guarded_exists,
+    )
 
     result = await adapter.send_image_file(
         chat_id="oc_b7_chat",
-        image_path=str(image_path),
+        image_path=image_path,
     )
 
-    assert result.success is True
-    assert result.message_id == "om_b7_message"
-    assert len(image_api.create_calls) == 1
-    assert len(file_api.create_calls) == 0
-    assert len(message_api.create_calls) == 1
-    assert len(message_api.reply_calls) == 0
+    assert result.success is False
+    assert result.error == "feishu_arbitrary_local_upload_denied"
+    _assert_no_upload_side_effects(adapter, image_api, file_api, message_api)
+
+
+@pytest.mark.asyncio
+async def test_legacy_no_state_document_upload_denies_before_local_probe(
+    tmp_path,
+    monkeypatch,
+):
+    file_path = "/tmp/legacy-b7.pdf"
+    adapter, image_api, file_api, message_api = _legacy_adapter()
+    original_exists = __import__("os").path.exists
+    original_stat = __import__("os").stat
+
+    def guarded_exists(path):
+        if path == file_path:
+            pytest.fail(f"local path was probed before denial: {path!r}")
+        return original_exists(path)
+
+    def guarded_stat(path, *args, **kwargs):
+        if path == file_path:
+            pytest.fail(f"local stat was attempted before denial: {path!r}")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "gateway.platforms.feishu.os.path.exists",
+        guarded_exists,
+    )
+    monkeypatch.setattr(
+        "gateway.platforms.feishu.os.stat",
+        guarded_stat,
+    )
+
+    result = await adapter.send_document(
+        chat_id="oc_b7_chat",
+        file_path=file_path,
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_arbitrary_local_upload_denied"
+    _assert_no_upload_side_effects(adapter, image_api, file_api, message_api)
 
 
 @pytest.mark.asyncio

@@ -261,10 +261,15 @@ def _delivery_audit_event_types(calls):
     ]
 
 
-def _assert_legacy_descriptor_denied(event, *, surface):
+def _assert_legacy_descriptor_denied(
+    event,
+    *,
+    surface,
+    failure_class="feishu_legacy_descriptor_requires_broker",
+):
     assert event["type"] == "feishu_legacy_descriptor_denied"
     assert event["surface"] == surface
-    assert event["failure_class"] == "feishu_legacy_descriptor_requires_broker"
+    assert event["failure_class"] == failure_class
     assert event["descriptor_hash"].startswith("fnv1a64:")
     assert event["correlation_id"]
     assert isinstance(event["timestamp"], (int, float))
@@ -2007,9 +2012,17 @@ async def test_execute_feishu_request_descriptor_requires_audit_state_before_sdk
 
 
 @pytest.mark.asyncio
-async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_http(tmp_path):
+async def test_descriptor_create_interactive_denies_raw_descriptor_before_sdk_builder(
+    tmp_path,
+):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
+    adapter._build_create_message_body = MagicMock(
+        wraps=adapter._build_create_message_body
+    )
+    adapter._build_create_message_request = MagicMock(
+        wraps=adapter._build_create_message_request
+    )
     delivery_id = "delivery-card-create"
     descriptor_uuid = "descriptor-card-create"
     assert descriptor_uuid != delivery_id
@@ -2026,21 +2039,18 @@ async def test_descriptor_create_interactive_uses_sdk_create_builder_not_raw_htt
             correlation_id="corr-a",
         )
 
-    assert result.success is True
-    assert len(message_api.create_calls) == 1
-    request = message_api.create_calls[0]
-    assert request.receive_id_type == "chat_id"
-    assert request.request_body.receive_id == "oc_chat"
-    assert request.request_body.msg_type == "interactive"
-    assert request.request_body.uuid == adapter._idempotency_key_for_delivery(
-        descriptor_uuid
+    assert result.success is False
+    assert result.error == "feishu_raw_descriptor_execution_denied"
+    assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
+    _assert_legacy_descriptor_denied(
+        events[0],
+        surface="feishu.descriptor",
+        failure_class="feishu_raw_descriptor_execution_denied",
     )
-    assert events[0]["delivery_id"] == delivery_id
-    assert events[0]["operation"] == "feishu_interactive_send"
-    assert events[-1]["type"] == "delivery_sent"
-    assert events[-1]["delivery_id"] == delivery_id
-    assert events[-1]["operation"] == "feishu_interactive_send"
-    assert events[-1]["message_id"] == "om_created"
+    adapter._build_create_message_body.assert_not_called()
+    adapter._build_create_message_request.assert_not_called()
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
 
 
 @STATUS_CARD_INTERNALIZATION_DEFERRED
@@ -2322,9 +2332,17 @@ async def test_status_card_requires_broker_before_action_extraction(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_descriptor_patch_interactive_uses_sdk_update_builder_and_path_message_id(tmp_path):
+async def test_descriptor_patch_interactive_denies_raw_descriptor_before_sdk_builder(
+    tmp_path,
+):
     adapter, message_api = _adapter(tmp_path)
     events = _install_event_recorder(adapter)
+    adapter._build_update_message_body = MagicMock(
+        wraps=adapter._build_update_message_body
+    )
+    adapter._build_update_message_request = MagicMock(
+        wraps=adapter._build_update_message_request
+    )
 
     with _broker_context():
         result = await adapter.execute_feishu_request_descriptor(
@@ -2335,15 +2353,18 @@ async def test_descriptor_patch_interactive_uses_sdk_update_builder_and_path_mes
             correlation_id="corr-a",
         )
 
-    assert result.success is True
-    assert len(message_api.update_calls) == 1
-    request = message_api.update_calls[0]
-    assert request.message_id == "om_card"
-    assert request.request_body.msg_type == "interactive"
-    assert events[0]["operation"] == "feishu_interactive_patch"
-    assert events[-1]["type"] == "delivery_sent"
-    assert events[-1]["operation"] == "feishu_interactive_patch"
-    assert events[-1]["message_id"] == "om_card"
+    assert result.success is False
+    assert result.error == "feishu_raw_descriptor_execution_denied"
+    assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
+    _assert_legacy_descriptor_denied(
+        events[0],
+        surface="feishu.descriptor",
+        failure_class="feishu_raw_descriptor_execution_denied",
+    )
+    adapter._build_update_message_body.assert_not_called()
+    adapter._build_update_message_request.assert_not_called()
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
 
 
 @pytest.mark.asyncio
@@ -2519,9 +2540,12 @@ async def test_descriptor_rejects_values_looser_than_gateway_envelope_validator(
 
 
 @pytest.mark.asyncio
-async def test_descriptor_content_is_not_double_serialized(tmp_path):
+async def test_descriptor_content_denial_does_not_build_or_send_sdk_request(tmp_path):
     adapter, message_api = _adapter(tmp_path)
-    _install_event_recorder(adapter)
+    events = _install_event_recorder(adapter)
+    adapter._build_create_message_body = MagicMock(
+        wraps=adapter._build_create_message_body
+    )
     content = '{"config":{"wide_screen_mode":true}}'
 
     with _broker_context():
@@ -2533,7 +2557,9 @@ async def test_descriptor_content_is_not_double_serialized(tmp_path):
             correlation_id="corr-a",
         )
 
-    assert result.success is True
-    request_content = message_api.create_calls[0].request_body.content
-    assert request_content == content
-    assert isinstance(json.loads(request_content), dict)
+    assert result.success is False
+    assert result.error == "feishu_raw_descriptor_execution_denied"
+    assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
+    adapter._build_create_message_body.assert_not_called()
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
