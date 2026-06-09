@@ -465,7 +465,7 @@ async def test_oversized_render_content_is_chunked_not_silently_truncated(tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("part_type", ["image", "file", "attachment", "local_path"])
+@pytest.mark.parametrize("part_type", ["image", "file", "attachment"])
 async def test_attachment_parts_are_denied_before_upload_until_provenance_gate_exists(
     tmp_path,
     part_type,
@@ -493,6 +493,18 @@ async def test_attachment_parts_are_denied_before_upload_until_provenance_gate_e
     assert adapter._client.im.v1.message.reply.call_count == 0
     assert adapter._client.im.v1.message.create.call_count == 0
     _assert_no_success_lifecycle(tmp_path)
+
+
+def test_local_path_render_part_is_denied_at_contract_boundary():
+    with pytest.raises(FeishuContractError) as exc_info:
+        _part(
+            "local_path",
+            "local_path",
+            source_class="generated",
+            provenance_hash=_PROVENANCE_HASH,
+        )
+
+    assert exc_info.value.failure_class == "feishu_arbitrary_local_upload_denied"
 
 
 @pytest.mark.asyncio

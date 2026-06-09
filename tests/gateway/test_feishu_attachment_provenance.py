@@ -213,6 +213,22 @@ def _assert_attachment_failure_state_is_terminal_and_sanitized(
         assert forbidden not in state_json
 
 
+def _assert_attachment_denial_is_sanitized(
+    tmp_path,
+    *,
+    expected_failure_class,
+    forbidden_values,
+):
+    state = _state(tmp_path)
+    denials = state.get("feishu_attachment_denials", [])
+    assert denials
+    assert denials[-1]["failure_class"] == expected_failure_class
+    state_json = json.dumps(state, sort_keys=True)
+    assert "feishu:chat:" not in state_json
+    for forbidden in forbidden_values:
+        assert forbidden not in state_json
+
+
 def test_inbound_user_attachment_provenance_records_sanitized_closure(tmp_path):
     result = apply_gateway_event(_inbound_event(), tmp_path)
 
@@ -268,7 +284,7 @@ def test_attachment_render_parts_without_provenance_fail_with_b6_failure_class()
 
 
 @pytest.mark.asyncio
-async def test_generated_attachment_upload_requires_complete_matching_provenance(tmp_path):
+async def test_generated_attachment_bare_path_denies_despite_matching_provenance(tmp_path):
     provenance = apply_gateway_event(_generated_event(), tmp_path).action["record"]
     adapter, image_api, file_api, message_api = _adapter(tmp_path)
     image_path = tmp_path / "generated.png"
@@ -285,15 +301,21 @@ async def test_generated_attachment_upload_requires_complete_matching_provenance
         ),
     )
 
-    assert result.success is True
-    assert len(image_api.create_calls) == 1
+    assert result.success is False
+    assert result.error == "feishu_arbitrary_local_upload_denied"
+    assert len(image_api.create_calls) == 0
     assert len(file_api.create_calls) == 0
     assert len(message_api.create_calls) == 0
-    assert len(message_api.reply_calls) == 1
+    assert len(message_api.reply_calls) == 0
+    _assert_attachment_denial_is_sanitized(
+        tmp_path,
+        expected_failure_class="feishu_arbitrary_local_upload_denied",
+        forbidden_values=("oc_chat", str(image_path), image_path.name),
+    )
 
 
 @pytest.mark.asyncio
-async def test_generated_attachment_upload_reservation_persists_only_sanitized_refs(
+async def test_generated_attachment_denial_persists_only_sanitized_refs(
     tmp_path,
 ):
     provenance = apply_gateway_event(_generated_event(), tmp_path).action["record"]
@@ -318,15 +340,15 @@ async def test_generated_attachment_upload_reservation_persists_only_sanitized_r
         ),
     )
 
-    assert result.success is True
-    assert len(image_api.create_calls) == 1
+    assert result.success is False
+    assert result.error == "feishu_arbitrary_local_upload_denied"
+    assert len(image_api.create_calls) == 0
     assert len(file_api.create_calls) == 0
     assert len(message_api.create_calls) == 0
-    assert len(message_api.reply_calls) == 1
+    assert len(message_api.reply_calls) == 0
 
     state = _state(tmp_path)
-    assert state["deliveries"]
-    assert state["delivery_identity_index"]
+    assert state.get("feishu_attachment_denials")
     state_json = json.dumps(state, sort_keys=True)
     assert "feishu:chat:" not in state_json
     for raw_value in (
@@ -444,13 +466,15 @@ async def test_attachment_provenance_survives_replay_without_duplicate_upload(tm
         metadata=metadata,
     )
 
-    assert first.success is True
-    assert second.success is True
-    assert first.message_id == _RAW_MESSAGE_ID
+    assert first.success is False
+    assert second.success is False
+    assert first.error == "feishu_arbitrary_local_upload_denied"
+    assert second.error == "feishu_arbitrary_local_upload_denied"
+    assert first.message_id is None
     assert second.message_id is None
-    assert len(image_api.create_calls) == 1
+    assert len(image_api.create_calls) == 0
     assert len(message_api.create_calls) == 0
-    assert len(message_api.reply_calls) == 1
+    assert len(message_api.reply_calls) == 0
     assert len(replay_image_api.create_calls) == 0
     assert len(replay_message_api.create_calls) == 0
     assert len(replay_message_api.reply_calls) == 0
@@ -461,7 +485,7 @@ async def test_attachment_provenance_survives_replay_without_duplicate_upload(tm
 
 
 @pytest.mark.asyncio
-async def test_attachment_image_missing_local_file_terminalizes_reservation_with_sanitized_failure(
+async def test_attachment_image_missing_local_file_denies_before_missing_file_probe(
     tmp_path,
 ):
     provenance = apply_gateway_event(_generated_event(), tmp_path).action["record"]
@@ -486,14 +510,14 @@ async def test_attachment_image_missing_local_file_terminalizes_reservation_with
     )
 
     assert result.success is False
-    assert result.error == "Image file not found"
+    assert result.error == "feishu_arbitrary_local_upload_denied"
     assert len(image_api.create_calls) == 0
     assert len(file_api.create_calls) == 0
     assert len(message_api.create_calls) == 0
     assert len(message_api.reply_calls) == 0
-    _assert_attachment_failure_state_is_terminal_and_sanitized(
+    _assert_attachment_denial_is_sanitized(
         tmp_path,
-        expected_failure_class="feishu_attachment_local_file_missing",
+        expected_failure_class="feishu_arbitrary_local_upload_denied",
         forbidden_values=(
             _RAW_CHAT_ID,
             _RAW_MESSAGE_ID,
@@ -510,7 +534,7 @@ async def test_attachment_image_missing_local_file_terminalizes_reservation_with
 
 
 @pytest.mark.asyncio
-async def test_attachment_image_upload_missing_key_terminalizes_reservation_with_sanitized_failure(
+async def test_attachment_image_upload_missing_key_is_not_reached_for_bare_path(
     tmp_path,
 ):
     provenance = apply_gateway_event(_generated_event(), tmp_path).action["record"]
@@ -541,15 +565,15 @@ async def test_attachment_image_upload_missing_key_terminalizes_reservation_with
     )
 
     assert result.success is False
-    assert result.error == "Feishu image upload missing image_key"
+    assert result.error == "feishu_arbitrary_local_upload_denied"
     assert result.raw_response is None
-    assert len(image_api.create_calls) == 1
+    assert len(image_api.create_calls) == 0
     assert len(file_api.create_calls) == 0
     assert len(message_api.create_calls) == 0
     assert len(message_api.reply_calls) == 0
-    _assert_attachment_failure_state_is_terminal_and_sanitized(
+    _assert_attachment_denial_is_sanitized(
         tmp_path,
-        expected_failure_class="feishu_image_upload_missing_image_key",
+        expected_failure_class="feishu_arbitrary_local_upload_denied",
         forbidden_values=(
             _RAW_CHAT_ID,
             _RAW_MESSAGE_ID,
@@ -566,7 +590,7 @@ async def test_attachment_image_upload_missing_key_terminalizes_reservation_with
 
 
 @pytest.mark.asyncio
-async def test_attachment_file_upload_missing_key_terminalizes_reservation_with_sanitized_failure(
+async def test_attachment_file_upload_missing_key_is_not_reached_for_bare_path(
     tmp_path,
 ):
     provenance = apply_gateway_event(
@@ -601,15 +625,15 @@ async def test_attachment_file_upload_missing_key_terminalizes_reservation_with_
     )
 
     assert result.success is False
-    assert result.error == "Feishu file upload missing file_key"
+    assert result.error == "feishu_arbitrary_local_upload_denied"
     assert result.raw_response is None
     assert len(image_api.create_calls) == 0
-    assert len(file_api.create_calls) == 1
+    assert len(file_api.create_calls) == 0
     assert len(message_api.create_calls) == 0
     assert len(message_api.reply_calls) == 0
-    _assert_attachment_failure_state_is_terminal_and_sanitized(
+    _assert_attachment_denial_is_sanitized(
         tmp_path,
-        expected_failure_class="feishu_file_upload_missing_file_key",
+        expected_failure_class="feishu_arbitrary_local_upload_denied",
         forbidden_values=(
             _RAW_CHAT_ID,
             _RAW_MESSAGE_ID,

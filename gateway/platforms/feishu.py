@@ -7371,11 +7371,12 @@ class FeishuAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]],
         declared_mime_class: str,
     ) -> Optional[str]:
+        del file_path
+        if self._gateway_event_state_dir is None:
+            return None
         provenance_hash = (metadata or {}).get("feishu_attachment_provenance_hash")
         if not self._is_sha256_ref_text(provenance_hash):
             return "feishu_arbitrary_local_upload_denied"
-        if self._gateway_event_state_dir is None:
-            return "feishu_attachment_provenance_missing"
         reader = getattr(
             gateway_event_ledger,
             "feishu_attachment_provenance_record",
@@ -7389,22 +7390,16 @@ class FeishuAdapter(BasePlatformAdapter):
             return "feishu_attachment_provenance_mismatch"
         if not isinstance(record, dict):
             return "feishu_attachment_provenance_mismatch"
-        if not os.path.exists(file_path):
-            return None
-        try:
-            stat_result = os.stat(file_path)
-            with open(file_path, "rb") as handle:
-                content_hash = self._sha256_ref_bytes(handle.read())
-        except OSError:
-            return "feishu_attachment_provenance_mismatch"
-        expected_size_class = self._attachment_size_class(stat_result.st_size)
-        return self._attachment_provenance_record_failure(
+        failure_class = self._attachment_provenance_record_failure(
             record=record,
             metadata=metadata,
             declared_mime_class=declared_mime_class,
-            size_class=expected_size_class,
-            content_hash=content_hash,
+            size_class=(metadata or {}).get("feishu_attachment_size_class"),
+            content_hash=(metadata or {}).get("feishu_attachment_content_hash"),
         )
+        if failure_class is not None:
+            return failure_class
+        return "feishu_arbitrary_local_upload_denied"
 
     def _attachment_provenance_record_failure(
         self,
@@ -7412,8 +7407,8 @@ class FeishuAdapter(BasePlatformAdapter):
         record: Dict[str, Any],
         metadata: Optional[Dict[str, Any]],
         declared_mime_class: str,
-        size_class: str,
-        content_hash: str,
+        size_class: Any,
+        content_hash: Any,
     ) -> Optional[str]:
         route_evidence = self._attachment_route_evidence(metadata)
         if route_evidence is None:

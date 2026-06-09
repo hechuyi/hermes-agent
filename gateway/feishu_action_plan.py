@@ -338,8 +338,6 @@ def _validate_attachment_part(part: RenderPlanPart) -> tuple[bool, str | None]:
 def _is_attachment_arbitrary_local_upload_attempt(part: RenderPlanPart) -> bool:
     if part.part_type not in _ATTACHMENT_PART_TYPES:
         return False
-    if _is_hash(part.provenance_hash):
-        return False
     if part.part_type == "local_path":
         return True
     return _metadata_contains_local_path_signal(part.metadata)
@@ -365,12 +363,18 @@ def _looks_like_local_path(value: str) -> bool:
     text = value.strip()
     if not text:
         return False
+    normalized = text.replace("\\", "/")
+    if text.startswith("\\\\"):
+        return True
+    if re.match(r"^[A-Za-z]:[\\/]", text):
+        return True
     return (
-        text.startswith("/")
-        or text.startswith("~/")
-        or text.startswith("../")
-        or text.startswith("./")
-        or "/../" in text
+        normalized.startswith("/")
+        or normalized.startswith("~/")
+        or normalized.startswith("../")
+        or normalized.startswith("./")
+        or normalized.startswith("workspace/")
+        or "/../" in normalized
     )
 
 

@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from gateway.config import PlatformConfig
-from gateway.feishu_action_plan import RenderPlanPart
+from gateway.feishu_action_plan import RenderPlanPart, _looks_like_local_path
 from gateway.feishu_contracts import FeishuContractError, feishu_hashed_ref
 from gateway.gateway_event_ledger import apply_gateway_event
 from gateway.platforms.feishu import FeishuAdapter
@@ -87,6 +87,23 @@ def _adapter(tmp_path):
     )
     adapter._build_file_upload_request = Mock(
         wraps=adapter._build_file_upload_request
+    )
+    return adapter, image_api, file_api, message_api
+
+
+def _legacy_adapter():
+    adapter = FeishuAdapter(PlatformConfig(extra={}))
+    message_api = _FakeMessageApi()
+    image_api = _FakeUploadApi("image_key", "img_b7_file_key")
+    file_api = _FakeUploadApi("file_key", "file_b7_file_key")
+    adapter._client = SimpleNamespace(
+        im=SimpleNamespace(
+            v1=SimpleNamespace(
+                message=message_api,
+                image=image_api,
+                file=file_api,
+            )
+        )
     )
     return adapter, image_api, file_api, message_api
 
@@ -205,14 +222,19 @@ def _assert_no_upload_side_effects(adapter, image_api, file_api, message_api):
     assert adapter._build_file_upload_request.call_count == 0
 
 
-def _assert_only_sanitized_denial(tmp_path, *, forbidden_values):
+def _assert_only_sanitized_denial(
+    tmp_path,
+    *,
+    forbidden_values,
+    expected_failure_class="feishu_arbitrary_local_upload_denied",
+):
     state = _state(tmp_path)
     assert state.get("deliveries", {}) == {}
     assert state.get("delivery_identity_index", {}) == {}
     assert state.get("message_id_index", {}) == {}
     denials = state.get("feishu_attachment_denials", [])
     assert len(denials) == 1
-    assert denials[0]["failure_class"] == "feishu_arbitrary_local_upload_denied"
+    assert denials[0]["failure_class"] == expected_failure_class
     state_json = json.dumps(state, sort_keys=True)
     assert "delivery_sent" not in state_json
     assert "feishu:chat:" not in state_json
@@ -233,6 +255,44 @@ def test_render_plan_local_path_part_without_provenance_is_arbitrary_upload_deni
         )
 
     assert exc_info.value.failure_class == "feishu_arbitrary_local_upload_denied"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"source_ref_hash": "sha256:" + "d" * 64, "display_ref": "C:\\Users\\ops\\secret.png"},
+        {"source_ref_hash": "sha256:" + "d" * 64, "display_ref": "\\\\server\\share\\secret.pdf"},
+        {"source_ref_hash": "sha256:" + "d" * 64, "display_ref": "reports\\..\\private\\secret.pdf"},
+        {"source_ref_hash": "sha256:" + "d" * 64, "display_ref": "workspace/reports/secret.pdf"},
+    ],
+)
+def test_render_plan_attachment_metadata_local_path_signals_denied_with_provenance(
+    metadata,
+):
+    with pytest.raises(FeishuContractError) as exc_info:
+        RenderPlanPart(
+            part_type="image",
+            content_hash=_CONTENT_HASH,
+            payload_hash="sha256:" + "d" * 64,
+            provenance_hash="sha256:" + "e" * 64,
+            fallback_action="drop",
+            source_class="generated",
+            metadata=metadata,
+        )
+
+    assert exc_info.value.failure_class == "feishu_arbitrary_local_upload_denied"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "sha256:" + "f" * 64,
+        "broker_grant_handle:sha256:" + "f" * 64,
+        "feishu_attachment_target:" + "f" * 40,
+    ],
+)
+def test_render_plan_attachment_metadata_sanitized_refs_are_not_local_paths(value):
+    assert _looks_like_local_path(value) is False
 
 
 @pytest.mark.asyncio
@@ -325,13 +385,42 @@ async def test_image_upload_without_provenance_denies_before_upload_request_crea
 
 
 @pytest.mark.asyncio
-async def test_generated_attachment_with_matching_provenance_and_content_hash_uploads(
+async def test_generated_bare_local_path_with_matching_provenance_is_denied_before_probe(
     tmp_path,
+    monkeypatch,
 ):
     provenance = apply_gateway_event(_generated_event(), tmp_path).action["record"]
     image_path = tmp_path / "generated-b7.png"
     image_path.write_bytes(_CONTENT_BYTES)
     adapter, image_api, file_api, message_api = _adapter(tmp_path)
+    original_exists = __import__("os").path.exists
+    original_stat = __import__("os").stat
+    original_basename = __import__("os").path.basename
+
+    def guarded_exists(path):
+        if path == str(image_path):
+            pytest.fail(f"local path was probed before denial: {path!r}")
+        return original_exists(path)
+
+    def guarded_stat(path, *args, **kwargs):
+        if path == str(image_path):
+            pytest.fail(f"local stat was attempted before denial: {path!r}")
+        return original_stat(path, *args, **kwargs)
+
+    def guarded_open(path, *args, **kwargs):
+        if path == str(image_path):
+            pytest.fail(f"local file was opened before denial: {path!r}")
+        return open(path, *args, **kwargs)
+
+    def guarded_basename(path):
+        if path == str(image_path):
+            pytest.fail(f"local basename was read before denial: {path!r}")
+        return original_basename(path)
+
+    monkeypatch.setattr("gateway.platforms.feishu.os.path.exists", guarded_exists)
+    monkeypatch.setattr("gateway.platforms.feishu.os.stat", guarded_stat)
+    monkeypatch.setattr("gateway.platforms.feishu.open", guarded_open, raising=False)
+    monkeypatch.setattr("gateway.platforms.feishu.os.path.basename", guarded_basename)
 
     result = await adapter.send_image_file(
         chat_id="oc_b7_chat",
@@ -340,15 +429,17 @@ async def test_generated_attachment_with_matching_provenance_and_content_hash_up
         metadata=_generated_metadata(provenance["provenance_hash"]),
     )
 
-    assert result.success is True
-    assert len(image_api.create_calls) == 1
-    assert len(file_api.create_calls) == 0
-    assert len(message_api.create_calls) == 0
-    assert len(message_api.reply_calls) == 1
+    assert result.success is False
+    assert result.error == "feishu_arbitrary_local_upload_denied"
+    _assert_no_upload_side_effects(adapter, image_api, file_api, message_api)
+    _assert_only_sanitized_denial(
+        tmp_path,
+        forbidden_values=(str(image_path), image_path.name, "oc_b7_chat"),
+    )
 
 
 @pytest.mark.asyncio
-async def test_generated_attachment_with_content_hash_mismatch_denies_without_upload(
+async def test_generated_bare_local_path_with_different_file_bytes_still_denies_without_hashing(
     tmp_path,
 ):
     provenance = apply_gateway_event(_generated_event(), tmp_path).action["record"]
@@ -364,18 +455,34 @@ async def test_generated_attachment_with_content_hash_mismatch_denies_without_up
     )
 
     assert result.success is False
-    assert result.error == "feishu_attachment_provenance_mismatch"
+    assert result.error == "feishu_arbitrary_local_upload_denied"
     _assert_no_upload_side_effects(adapter, image_api, file_api, message_api)
 
 
 @pytest.mark.asyncio
-async def test_inbound_attachment_echo_uploads_only_with_current_event_provenance(
+async def test_inbound_bare_local_path_echo_is_denied_despite_current_event_hashes(
     tmp_path,
+    monkeypatch,
 ):
     provenance = apply_gateway_event(_inbound_event(), tmp_path).action["record"]
     image_path = tmp_path / "inbound-echo-b7.png"
     image_path.write_bytes(_CONTENT_BYTES)
     adapter, image_api, file_api, message_api = _adapter(tmp_path)
+    original_exists = __import__("os").path.exists
+    original_stat = __import__("os").stat
+
+    def guarded_exists(path):
+        if path == str(image_path):
+            pytest.fail(f"local path was probed before denial: {path!r}")
+        return original_exists(path)
+
+    def guarded_stat(path, *args, **kwargs):
+        if path == str(image_path):
+            pytest.fail(f"local stat was attempted before denial: {path!r}")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr("gateway.platforms.feishu.os.path.exists", guarded_exists)
+    monkeypatch.setattr("gateway.platforms.feishu.os.stat", guarded_stat)
 
     result = await adapter.send_image_file(
         chat_id="oc_b7_chat",
@@ -384,11 +491,75 @@ async def test_inbound_attachment_echo_uploads_only_with_current_event_provenanc
         metadata=_inbound_metadata(provenance["provenance_hash"]),
     )
 
+    assert result.success is False
+    assert result.error == "feishu_arbitrary_local_upload_denied"
+    _assert_no_upload_side_effects(adapter, image_api, file_api, message_api)
+    _assert_only_sanitized_denial(
+        tmp_path,
+        forbidden_values=(str(image_path), image_path.name, "oc_b7_chat"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_invalid_route_provenance_denies_before_local_path_probe(
+    tmp_path,
+    monkeypatch,
+):
+    provenance = apply_gateway_event(_generated_event(), tmp_path).action["record"]
+    image_path = tmp_path / "invalid-route-b7.png"
+    image_path.write_bytes(_CONTENT_BYTES)
+    adapter, image_api, file_api, message_api = _adapter(tmp_path)
+    original_exists = __import__("os").path.exists
+
+    def guarded_exists(path):
+        if path == str(image_path):
+            pytest.fail(f"local path was probed before provenance denial: {path!r}")
+        return original_exists(path)
+
+    monkeypatch.setattr("gateway.platforms.feishu.os.path.exists", guarded_exists)
+
+    result = await adapter.send_image_file(
+        chat_id="oc_b7_chat",
+        image_path=str(image_path),
+        reply_to=_REPLY_TO,
+        metadata=_generated_metadata(
+            provenance["provenance_hash"],
+            feishu_current_admission={
+                "evidence_state": "current",
+                "route_partition_hash": "sha256:" + "0" * 64,
+                "route_snapshot_hash": "sha256:" + "0" * 64,
+                "contract_hash": _CONTRACT_HASH,
+            },
+        ),
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_attachment_provenance_mismatch"
+    _assert_no_upload_side_effects(adapter, image_api, file_api, message_api)
+    _assert_only_sanitized_denial(
+        tmp_path,
+        forbidden_values=(str(image_path), image_path.name, "oc_b7_chat"),
+        expected_failure_class="feishu_attachment_provenance_mismatch",
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_no_state_native_image_upload_compatibility(tmp_path):
+    image_path = tmp_path / "legacy-b7.png"
+    image_path.write_bytes(_CONTENT_BYTES)
+    adapter, image_api, file_api, message_api = _legacy_adapter()
+
+    result = await adapter.send_image_file(
+        chat_id="oc_b7_chat",
+        image_path=str(image_path),
+    )
+
     assert result.success is True
+    assert result.message_id == "om_b7_message"
     assert len(image_api.create_calls) == 1
     assert len(file_api.create_calls) == 0
-    assert len(message_api.create_calls) == 0
-    assert len(message_api.reply_calls) == 1
+    assert len(message_api.create_calls) == 1
+    assert len(message_api.reply_calls) == 0
 
 
 @pytest.mark.asyncio

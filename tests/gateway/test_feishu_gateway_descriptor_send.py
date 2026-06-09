@@ -286,6 +286,21 @@ def _assert_attachment_pending_sanitized(
     assert chat_id not in event_json
 
 
+def _assert_attachment_upload_denied_sanitized(
+    event,
+    *,
+    declared_mime_class,
+    forbidden_values=(),
+):
+    assert event["type"] == "feishu_attachment_upload_denied"
+    assert event["failure_class"] == "feishu_arbitrary_local_upload_denied"
+    assert event["declared_mime_class"] == declared_mime_class
+    event_json = json.dumps(event, sort_keys=True)
+    assert "feishu:chat:" not in event_json
+    for forbidden in forbidden_values:
+        assert forbidden not in event_json
+
+
 def _assert_sent_matrix_events(
     events,
     *,
@@ -419,43 +434,17 @@ async def test_audited_image_file_records_pending_and_sent_after_upload(tmp_path
         metadata=metadata,
     )
 
-    assert result.success is True
-    assert result.message_id == "om_image_msg"
-    assert [kind for kind, _ in ordered] == [
-        "event",
-        "image_upload",
-        "event",
-        "sdk_create",
-        "event",
-    ]
-    preflight_pending = ordered[0][1]
-    pending = ordered[2][1]
-    sent = ordered[4][1]
-    request = ordered[3][1]
-    _assert_attachment_pending_sanitized(
-        adapter,
-        preflight_pending,
-        chat_id="oc_chat",
-        metadata=metadata,
-        delivery_id="delivery-image",
-        operation="normal_final_reply",
+    assert result.success is False
+    assert result.error == "feishu_arbitrary_local_upload_denied"
+    assert [kind for kind, _ in ordered] == ["event"]
+    assert image_api.create_calls == []
+    assert message_api.create_calls == []
+    assert message_api.reply_calls == []
+    _assert_attachment_upload_denied_sanitized(
+        ordered[0][1],
         declared_mime_class="image",
+        forbidden_values=("oc_chat", str(image_path), image_path.name),
     )
-    _assert_attachment_pending_sanitized(
-        adapter,
-        pending,
-        chat_id="oc_chat",
-        metadata=metadata,
-        delivery_id="delivery-image",
-        operation="normal_final_reply",
-        declared_mime_class="image",
-    )
-    assert request.request_body.msg_type == "image"
-    assert request.request_body.uuid == "delivery-image"
-    assert sent["type"] == "delivery_sent"
-    assert sent["operation"] == "normal_final_reply"
-    assert sent["delivery_id"] == "delivery-image"
-    assert sent["message_id"] == adapter._attachment_upload_ledger_message_id("om_image_msg")
 
 
 @pytest.mark.asyncio
@@ -496,42 +485,17 @@ async def test_audited_uploaded_file_records_pending_and_sent_after_upload(tmp_p
         metadata=metadata,
     )
 
-    assert result.success is True
-    assert result.message_id == "om_file_msg"
-    assert [kind for kind, _ in ordered] == [
-        "event",
-        "file_upload",
-        "event",
-        "sdk_create",
-        "event",
-    ]
-    preflight_pending = ordered[0][1]
-    pending = ordered[2][1]
-    request = ordered[3][1]
-    sent = ordered[4][1]
-    _assert_attachment_pending_sanitized(
-        adapter,
-        preflight_pending,
-        chat_id="oc_chat",
-        metadata=metadata,
-        delivery_id="delivery-file",
-        operation="normal_final_reply",
+    assert result.success is False
+    assert result.error == "feishu_arbitrary_local_upload_denied"
+    assert [kind for kind, _ in ordered] == ["event"]
+    assert file_api.create_calls == []
+    assert message_api.create_calls == []
+    assert message_api.reply_calls == []
+    _assert_attachment_upload_denied_sanitized(
+        ordered[0][1],
         declared_mime_class="file",
+        forbidden_values=("oc_chat", str(file_path), file_path.name),
     )
-    _assert_attachment_pending_sanitized(
-        adapter,
-        pending,
-        chat_id="oc_chat",
-        metadata=metadata,
-        delivery_id="delivery-file",
-        operation="normal_final_reply",
-        declared_mime_class="file",
-    )
-    assert request.request_body.msg_type == "file"
-    assert request.request_body.uuid == "delivery-file"
-    assert sent["type"] == "delivery_sent"
-    assert sent["operation"] == "normal_final_reply"
-    assert sent["message_id"] == adapter._attachment_upload_ledger_message_id("om_file_msg")
 
 
 @pytest.mark.asyncio
@@ -557,35 +521,17 @@ async def test_audited_image_file_reply_records_reply_operation_after_upload(tmp
         metadata=metadata,
     )
 
-    assert result.success is True
-    assert result.message_id == "om_reply"
-    assert len(image_api.create_calls) == 1
+    assert result.success is False
+    assert result.error == "feishu_arbitrary_local_upload_denied"
+    assert len(image_api.create_calls) == 0
     assert message_api.create_calls == []
-    assert len(message_api.reply_calls) == 1
-    assert _event_types(events) == ["delivery_pending", "delivery_pending", "delivery_sent"]
-    _assert_attachment_pending_sanitized(
-        adapter,
+    assert len(message_api.reply_calls) == 0
+    assert _event_types(events) == ["feishu_attachment_upload_denied"]
+    _assert_attachment_upload_denied_sanitized(
         events[0],
-        chat_id="oc_chat",
-        reply_to="om_parent",
-        metadata=metadata,
-        delivery_id="delivery-image-reply",
-        operation="reply",
         declared_mime_class="image",
+        forbidden_values=("oc_chat", "om_parent", str(image_path), image_path.name),
     )
-    _assert_attachment_pending_sanitized(
-        adapter,
-        events[1],
-        chat_id="oc_chat",
-        reply_to="om_parent",
-        metadata=metadata,
-        delivery_id="delivery-image-reply",
-        operation="reply",
-        declared_mime_class="image",
-    )
-    assert events[2]["operation"] == "reply"
-    assert events[2]["delivery_id"] == "delivery-image-reply"
-    assert events[2]["message_id"] == adapter._attachment_upload_ledger_message_id("om_reply")
 
 
 @pytest.mark.asyncio
@@ -611,35 +557,17 @@ async def test_audited_uploaded_file_reply_records_reply_operation_after_upload(
         metadata=metadata,
     )
 
-    assert result.success is True
-    assert result.message_id == "om_reply"
-    assert len(file_api.create_calls) == 1
+    assert result.success is False
+    assert result.error == "feishu_arbitrary_local_upload_denied"
+    assert len(file_api.create_calls) == 0
     assert message_api.create_calls == []
-    assert len(message_api.reply_calls) == 1
-    assert _event_types(events) == ["delivery_pending", "delivery_pending", "delivery_sent"]
-    _assert_attachment_pending_sanitized(
-        adapter,
+    assert len(message_api.reply_calls) == 0
+    assert _event_types(events) == ["feishu_attachment_upload_denied"]
+    _assert_attachment_upload_denied_sanitized(
         events[0],
-        chat_id="oc_chat",
-        reply_to="om_parent",
-        metadata=metadata,
-        delivery_id="delivery-file-reply",
-        operation="reply",
         declared_mime_class="file",
+        forbidden_values=("oc_chat", "om_parent", str(file_path), file_path.name),
     )
-    _assert_attachment_pending_sanitized(
-        adapter,
-        events[1],
-        chat_id="oc_chat",
-        reply_to="om_parent",
-        metadata=metadata,
-        delivery_id="delivery-file-reply",
-        operation="reply",
-        declared_mime_class="file",
-    )
-    assert events[2]["operation"] == "reply"
-    assert events[2]["delivery_id"] == "delivery-file-reply"
-    assert events[2]["message_id"] == adapter._attachment_upload_ledger_message_id("om_reply")
 
 
 @pytest.mark.asyncio
@@ -664,11 +592,16 @@ async def test_audited_image_pending_apply_failure_aborts_message_send_after_upl
     )
 
     assert result.success is False
-    assert result.error == "delivery_pending apply failed"
+    assert result.error == "feishu_arbitrary_local_upload_denied"
     assert len(image_api.create_calls) == 0
     assert message_api.create_calls == []
     assert message_api.reply_calls == []
-    assert _event_types(events) == ["delivery_pending"]
+    assert _event_types(events) == ["feishu_attachment_upload_denied"]
+    _assert_attachment_upload_denied_sanitized(
+        events[0],
+        declared_mime_class="image",
+        forbidden_values=("oc_chat", str(image_path), image_path.name),
+    )
 
 
 @pytest.mark.asyncio
@@ -695,16 +628,15 @@ async def test_audited_uploaded_file_sent_apply_failure_records_unknown_with_mes
     )
 
     assert result.success is False
-    assert len(file_api.create_calls) == 1
-    assert len(message_api.create_calls) == 1
-    assert _event_types(events) == [
-        "delivery_pending",
-        "delivery_pending",
-        "delivery_sent",
-        "unknown_delivery_state",
-    ]
-    assert events[-1]["failure_class"] == "delivery_sent_apply_failed"
-    assert events[-1]["message_id"] == adapter._attachment_upload_ledger_message_id("om_file_msg")
+    assert result.error == "feishu_arbitrary_local_upload_denied"
+    assert len(file_api.create_calls) == 0
+    assert len(message_api.create_calls) == 0
+    assert _event_types(events) == ["feishu_attachment_upload_denied"]
+    _assert_attachment_upload_denied_sanitized(
+        events[0],
+        declared_mime_class="file",
+        forbidden_values=("oc_chat", str(file_path), file_path.name),
+    )
 
 
 @pytest.mark.asyncio
