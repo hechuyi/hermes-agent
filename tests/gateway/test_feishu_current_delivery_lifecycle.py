@@ -188,6 +188,38 @@ async def test_sdk_failure_records_feishu_delivery_failed_without_success_event(
 
 
 @pytest.mark.asyncio
+async def test_terminal_post_exception_records_feishu_delivery_failed_without_success_event(tmp_path):
+    adapter = _adapter(tmp_path)
+
+    async def raise_terminal_exception(_uuid_value):
+        raise ValueError("content format of the post type is incorrect")
+
+    result = await adapter._audited_delivery(
+        delivery_id="delivery-terminal-exception",
+        operation="reply",
+        target="feishu:chat:oc_current_chat",
+        inbound_id="inbound-current-1",
+        session_id="session-current-1",
+        correlation_id="corr-current-1",
+        network_call=raise_terminal_exception,
+        require_returned_message_id=True,
+        metadata=_metadata(delivery_id="delivery-terminal-exception"),
+        terminal_exception_matcher=adapter._is_post_content_invalid_exception,
+    )
+
+    assert result.success is False
+    assert _event_types(tmp_path) == [
+        "feishu_delivery_attempted",
+        "feishu_delivery_failed",
+    ]
+    failed = _lifecycle_events(tmp_path, "feishu_delivery_failed")[0]
+    assert failed["failure_class"] == "feishu_terminal_non_acceptance"
+    assert failed["action"] == "send"
+    assert _lifecycle_events(tmp_path, "feishu_delivery_failed")[1:] == []
+    _assert_no_raw_platform_context(_lifecycle_events(tmp_path))
+
+
+@pytest.mark.asyncio
 async def test_unknown_ack_support_records_ack_unknown_not_ack_success(tmp_path):
     adapter = _adapter(tmp_path)
 

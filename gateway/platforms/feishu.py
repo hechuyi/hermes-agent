@@ -6688,6 +6688,21 @@ class FeishuAdapter(BasePlatformAdapter):
                         success=False,
                         error="delivery_failed apply failed",
                     )
+                if lifecycle_context is not None:
+                    lifecycle_failed_ok = await self._apply_feishu_delivery_lifecycle_failed(
+                        delivery_id=delivery_id,
+                        action=lifecycle_action,
+                        target=target,
+                        metadata=metadata,
+                        failure_class="feishu_terminal_non_acceptance",
+                        message_id=existing_message_id,
+                        original_proof=current_delivery_proof,
+                    )
+                    if not lifecycle_failed_ok:
+                        return SendResult(
+                            success=False,
+                            error="feishu_delivery_lifecycle_apply_failed",
+                        )
                 return SendResult(
                     success=False,
                     error="content format of the post type is incorrect",
