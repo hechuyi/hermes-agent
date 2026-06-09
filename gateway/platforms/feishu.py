@@ -82,6 +82,11 @@ from gateway.feishu_contracts import (
     build_feishu_conversation_contract,
     feishu_hashed_ref,
 )
+from gateway.feishu_action_plan import (
+    RenderPlan,
+    RenderPlanPart,
+    validate_render_plan,
+)
 from gateway.feishu_legacy_guard import current_feishu_broker_context
 
 try:
@@ -1855,6 +1860,425 @@ class FeishuAdapter(BasePlatformAdapter):
             metadata=self._metadata_with_current_admission(metadata, reply_to),
             max_retries=max_retries,
             base_delay=base_delay,
+        )
+
+    _RENDER_PLAN_NATIVE_PART_TYPES = frozenset(
+        {"plain_text", "post", "markdown", "code_block", "table", "link"}
+    )
+    _RENDER_PLAN_ATTACHMENT_PART_TYPES = frozenset(
+        {"image", "file", "attachment", "local_path"}
+    )
+    _RENDER_PLAN_FALLBACK_PART_TYPES = frozenset({"card", "button"})
+    _RENDER_PLAN_RAW_DESCRIPTOR_KEYS = frozenset(
+        {
+            "body",
+            "method",
+            "openapidescriptor",
+            "path",
+            "rawbody",
+            "rawpath",
+            "requestbody",
+            "sdkrequest",
+        }
+    )
+
+    @classmethod
+    def _rendered_part_contains_raw_descriptor(cls, value: Any) -> bool:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if (
+                    isinstance(key, str)
+                    and re.sub(r"[^a-z0-9]+", "", key.lower())
+                    in cls._RENDER_PLAN_RAW_DESCRIPTOR_KEYS
+                ):
+                    return True
+                if cls._rendered_part_contains_raw_descriptor(item):
+                    return True
+            return False
+        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
+            return any(cls._rendered_part_contains_raw_descriptor(item) for item in value)
+        return False
+
+    def _render_plan_delivery_id(
+        self,
+        *,
+        metadata: Optional[Dict[str, Any]],
+        plan: RenderPlan,
+        part_index: int,
+        part: Optional[RenderPlanPart],
+        message_index: int,
+        message_count: int,
+    ) -> str:
+        explicit = (metadata or {}).get("delivery_id")
+        if isinstance(explicit, str) and re.fullmatch(r"^[A-Za-z0-9_.:-]{1,127}$", explicit):
+            if part is None:
+                return self._derived_delivery_id(explicit, "render_plan_probe")
+            suffix = f"render_plan_part_{part_index + 1}_of_{len(plan.parts)}"
+            if message_count > 1:
+                suffix = (
+                    f"{suffix}_message_{message_index + 1}_of_{message_count}"
+                )
+            return self._derived_delivery_id(explicit, suffix)
+        return self._delivery_id_for(
+            "render_plan_send",
+            metadata=metadata,
+            parts=[
+                plan.plan_hash,
+                part.part_hash if part is not None else "route-probe",
+                part_index,
+                message_index,
+                message_count,
+            ],
+        )
+
+    def _metadata_for_render_plan_part(
+        self,
+        *,
+        metadata: Optional[Dict[str, Any]],
+        plan: RenderPlan,
+        part: RenderPlanPart,
+        part_index: int,
+        message_index: int,
+        message_count: int,
+    ) -> Optional[Dict[str, Any]]:
+        if metadata is None:
+            return None
+        chunk_metadata = dict(metadata)
+        chunk_metadata["delivery_id"] = self._render_plan_delivery_id(
+            metadata=metadata,
+            plan=plan,
+            part_index=part_index,
+            part=part,
+            message_index=message_index,
+            message_count=message_count,
+        )
+        chunk_metadata["correlation_id"] = chunk_metadata["delivery_id"]
+        chunk_metadata["feishu_render_plan"] = {
+            "plan_hash": plan.plan_hash,
+            "part_hash": part.part_hash,
+            "part_index": part_index,
+            "part_count": len(plan.parts),
+            "part_type": part.part_type,
+            "message_index": message_index,
+            "message_count": message_count,
+            "chunk_group_hash": part.chunk_group,
+            "chunk_index": part.chunk_index,
+            "chunk_count": part.chunk_count,
+            "fallback_action": part.fallback_action,
+        }
+        return chunk_metadata
+
+    @classmethod
+    def _render_plan_failure_class(cls, result: SendResult) -> str:
+        if result.error and result.error.startswith("["):
+            return "feishu_terminal_non_acceptance"
+        if result.error:
+            return cls._stable_failure_class(result.error)
+        return "feishu_render_part_send_failed"
+
+    def _render_plan_part_messages(
+        self,
+        *,
+        part: RenderPlanPart,
+        rendered: Any,
+        part_index: int,
+        fallback_events: list[dict[str, Any]],
+    ) -> tuple[list[tuple[str, str]], Optional[str]]:
+        if part.part_type in self._RENDER_PLAN_ATTACHMENT_PART_TYPES:
+            return [], "feishu_render_attachment_provenance_required"
+        if part.part_type in self._RENDER_PLAN_FALLBACK_PART_TYPES:
+            return self._render_plan_fallback_messages(
+                part=part,
+                rendered=rendered,
+                part_index=part_index,
+                fallback_events=fallback_events,
+            )
+        if part.part_type not in self._RENDER_PLAN_NATIVE_PART_TYPES:
+            return [], "feishu_render_part_type_invalid"
+
+        msg_type, text, failure = self._render_plan_native_message_text(part, rendered)
+        if failure is not None:
+            return [], failure
+        chunks = self.truncate_message(text, self.MAX_MESSAGE_LENGTH)
+        messages: list[tuple[str, str]] = []
+        for chunk in chunks:
+            if len(chunk) > self.MAX_MESSAGE_LENGTH:
+                return [], "feishu_render_part_too_large"
+            messages.append((msg_type, self._render_plan_payload(msg_type, chunk)))
+        return messages, None
+
+    def _render_plan_fallback_messages(
+        self,
+        *,
+        part: RenderPlanPart,
+        rendered: Any,
+        part_index: int,
+        fallback_events: list[dict[str, Any]],
+    ) -> tuple[list[tuple[str, str]], Optional[str]]:
+        event = {
+            "part_hash": part.part_hash,
+            "part_index": part_index,
+            "part_type": part.part_type,
+            "fallback_action": part.fallback_action,
+        }
+        if part.fallback_action == "drop":
+            fallback_events.append({**event, "outcome": "dropped"})
+            return [], None
+        if isinstance(rendered, str):
+            text = rendered
+        elif isinstance(rendered, dict):
+            key = (
+                "preserve_text"
+                if part.fallback_action == "preserve"
+                else "replacement_text"
+            )
+            text = rendered.get(key)
+        else:
+            text = None
+        if not isinstance(text, str):
+            return [], "feishu_render_fallback_content_missing"
+        chunks = self.truncate_message(text, self.MAX_MESSAGE_LENGTH)
+        messages = [("text", self._render_plan_payload("text", chunk)) for chunk in chunks]
+        fallback_events.append({**event, "outcome": "sent"})
+        return messages, None
+
+    def _render_plan_native_message_text(
+        self,
+        part: RenderPlanPart,
+        rendered: Any,
+    ) -> tuple[str, str, Optional[str]]:
+        if part.part_type == "plain_text":
+            if not isinstance(rendered, str):
+                return "text", "", "feishu_render_part_content_invalid"
+            return "text", rendered, None
+        if part.part_type in {"post", "markdown"}:
+            if not isinstance(rendered, str):
+                return "post", "", "feishu_render_part_content_invalid"
+            return "post", rendered, None
+        if part.part_type == "code_block":
+            if isinstance(rendered, str):
+                return "post", f"```\n{rendered}\n```", None
+            if not isinstance(rendered, dict) or not isinstance(rendered.get("code"), str):
+                return "post", "", "feishu_render_part_content_invalid"
+            language = rendered.get("language")
+            if not isinstance(language, str):
+                language = ""
+            return "post", f"```{language}\n{rendered['code']}\n```", None
+        if part.part_type == "table":
+            return self._render_plan_table_text(rendered)
+        if part.part_type == "link":
+            return self._render_plan_link_text(rendered)
+        return "text", "", "feishu_render_part_type_invalid"
+
+    @staticmethod
+    def _render_plan_table_text(rendered: Any) -> tuple[str, str, Optional[str]]:
+        if not isinstance(rendered, dict):
+            return "text", "", "feishu_render_part_content_invalid"
+        headers = rendered.get("headers")
+        rows = rendered.get("rows")
+        if (
+            not isinstance(headers, Sequence)
+            or isinstance(headers, (bytes, bytearray, str))
+            or not all(isinstance(item, str) for item in headers)
+            or not isinstance(rows, Sequence)
+            or isinstance(rows, (bytes, bytearray, str))
+        ):
+            return "text", "", "feishu_render_part_content_invalid"
+        rendered_rows: list[list[str]] = []
+        for row in rows:
+            if (
+                not isinstance(row, Sequence)
+                or isinstance(row, (bytes, bytearray, str))
+                or not all(isinstance(item, str) for item in row)
+            ):
+                return "text", "", "feishu_render_part_content_invalid"
+            rendered_rows.append(list(row))
+        header_line = "| " + " | ".join(headers) + " |"
+        separator = "| " + " | ".join("---" for _ in headers) + " |"
+        body = ["| " + " | ".join(row) + " |" for row in rendered_rows]
+        return "text", "\n".join([header_line, separator, *body]), None
+
+    @staticmethod
+    def _render_plan_link_text(rendered: Any) -> tuple[str, str, Optional[str]]:
+        if not isinstance(rendered, dict):
+            return "post", "", "feishu_render_part_content_invalid"
+        label = rendered.get("label")
+        href = rendered.get("href")
+        if not isinstance(label, str) or not isinstance(href, str):
+            return "post", "", "feishu_render_part_content_invalid"
+        return "post", f"[{label}]({href})", None
+
+    @staticmethod
+    def _render_plan_payload(msg_type: str, text: str) -> str:
+        if msg_type == "post":
+            return _build_markdown_post_payload(text)
+        return json.dumps({"text": text}, ensure_ascii=False)
+
+    async def send_render_plan(
+        self,
+        *,
+        chat_id: str,
+        plan: RenderPlan,
+        rendered_parts: Dict[str, Any],
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+        if self._gateway_event_state_dir is None:
+            return SendResult(
+                success=False,
+                error="feishu_render_plan_audit_state_missing",
+            )
+
+        valid, failure_class = validate_render_plan(plan)
+        if not valid:
+            return SendResult(
+                success=False,
+                error=failure_class or "feishu_render_plan_invalid",
+            )
+        if not isinstance(rendered_parts, dict):
+            return SendResult(
+                success=False,
+                error="feishu_render_part_content_missing",
+            )
+        if self._rendered_part_contains_raw_descriptor(rendered_parts):
+            return SendResult(
+                success=False,
+                error="feishu_action_raw_tool_material",
+            )
+
+        route_probe_id = self._render_plan_delivery_id(
+            metadata=metadata,
+            plan=plan,
+            part_index=0,
+            part=None,
+            message_index=0,
+            message_count=1,
+        )
+        lifecycle_context = self._current_delivery_lifecycle_context(
+            delivery_id=route_probe_id,
+            action="send",
+            target=f"feishu:chat:{chat_id}",
+            metadata=metadata,
+        )
+        if lifecycle_context is None:
+            return SendResult(
+                success=False,
+                error="feishu_current_reply_admission_missing",
+            )
+
+        message_ids: list[str] = []
+        fallback_events: list[dict[str, Any]] = []
+        sent_part_count = 0
+        for part_index, part in enumerate(plan.parts):
+            rendered = rendered_parts.get(part.part_hash)
+            if rendered is None:
+                return SendResult(
+                    success=False,
+                    error="feishu_render_part_content_missing",
+                    raw_response={
+                        "failed_part_index": part_index,
+                        "part_hash": part.part_hash,
+                    },
+                )
+            messages, render_failure = self._render_plan_part_messages(
+                part=part,
+                rendered=rendered,
+                part_index=part_index,
+                fallback_events=fallback_events,
+            )
+            if render_failure is not None:
+                return SendResult(
+                    success=False,
+                    error=render_failure,
+                    raw_response={
+                        "failed_part_index": part_index,
+                        "part_hash": part.part_hash,
+                        "part_type": part.part_type,
+                    },
+                )
+            for message_index, (msg_type, payload) in enumerate(messages):
+                chunk_metadata = self._metadata_for_render_plan_part(
+                    metadata=metadata,
+                    plan=plan,
+                    part=part,
+                    part_index=part_index,
+                    message_index=message_index,
+                    message_count=len(messages),
+                )
+                delivery_id = self._render_plan_delivery_id(
+                    metadata=chunk_metadata,
+                    plan=plan,
+                    part_index=part_index,
+                    part=part,
+                    message_index=message_index,
+                    message_count=len(messages),
+                )
+                response_or_result = await self._audited_delivery(
+                    delivery_id=delivery_id,
+                    operation="render_plan_send",
+                    target=f"feishu:chat:{chat_id}",
+                    metadata=chunk_metadata,
+                    inbound_id=self._delivery_metadata(
+                        chunk_metadata, "inbound_id", reply_to or chat_id
+                    ),
+                    session_id=self._delivery_metadata(
+                        chunk_metadata, "session_id", "session"
+                    ),
+                    correlation_id=self._delivery_metadata(
+                        chunk_metadata, "correlation_id", delivery_id
+                    ),
+                    network_call=lambda uuid_value, msg_type=msg_type, payload=payload, chunk_metadata=chunk_metadata: self._send_raw_message(
+                        chat_id=chat_id,
+                        msg_type=msg_type,
+                        payload=payload,
+                        reply_to=reply_to,
+                        metadata=chunk_metadata,
+                        uuid_value=uuid_value,
+                    ),
+                    require_returned_message_id=True,
+                    terminal_exception_matcher=(
+                        self._is_post_content_invalid_exception
+                        if msg_type == "post"
+                        else None
+                    ),
+                )
+                result = (
+                    response_or_result
+                    if isinstance(response_or_result, SendResult)
+                    else self._finalize_send_result(
+                        response_or_result,
+                        "render plan send failed",
+                    )
+                )
+                if not result.success:
+                    failure = self._render_plan_failure_class(result)
+                    return SendResult(
+                        success=False,
+                        error=failure,
+                        raw_response={
+                            "failure_class": failure,
+                            "failed_part_index": part_index,
+                            "failed_chunk_index": part.chunk_index,
+                            "chunk_count": part.chunk_count,
+                            "chunk_group_hash": part.chunk_group,
+                            "sent_part_count": sent_part_count,
+                        },
+                    )
+                if result.message_id:
+                    message_ids.append(str(result.message_id))
+            if messages:
+                sent_part_count += 1
+
+        return SendResult(
+            success=True,
+            message_id=message_ids[-1] if message_ids else None,
+            continuation_message_ids=tuple(message_ids) if len(message_ids) > 1 else (),
+            raw_response={
+                "fallback_events": fallback_events,
+                "sent_part_count": sent_part_count,
+            },
         )
 
     async def send(

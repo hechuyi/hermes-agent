@@ -28,13 +28,15 @@ _SUPPORTED_PART_TYPES = frozenset(
         "link",
         "image",
         "file",
+        "attachment",
+        "local_path",
         "card",
         "button",
     }
 )
 _ACTION_PART_TYPES = frozenset({"card", "button"})
 _ACTION_KINDS = frozenset({"card", "button"})
-_ATTACHMENT_PART_TYPES = frozenset({"image", "file"})
+_ATTACHMENT_PART_TYPES = frozenset({"image", "file", "attachment", "local_path"})
 _RENDER_MODES = frozenset({"offline_snapshot"})
 _ATTACHMENT_SOURCE_CLASSES = frozenset(
     {"upload", "generated", "cached", "object_store", "sanitized_reference"}
@@ -47,10 +49,12 @@ _RAW_TOOL_KEYS = frozenset(
         "body",
         "method",
         "path",
+        "openapidescriptor",
         "rawargs",
         "rawarguments",
         "rawbody",
         "rawpath",
+        "sdkrequest",
         "rawtoolarguments",
         "toolargs",
         "toolarguments",
