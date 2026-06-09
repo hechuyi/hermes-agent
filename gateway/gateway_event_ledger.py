@@ -449,7 +449,7 @@ def _apply_delivery_sent(event: Mapping[str, Any], state: dict[str, Any]) -> dic
     if record is None:
         raise GatewayEventContractError("unknown_delivery_id", "unknown delivery id")
     _reject_timestamp_regression(event, record)
-    message_id = str(event["message_id"])
+    message_id = _feishu_message_ref(str(event["message_id"]))
     existing_message_id = record.get("feishu_message_id")
     if existing_message_id is not None and existing_message_id != message_id:
         raise GatewayEventContractError(
@@ -459,7 +459,9 @@ def _apply_delivery_sent(event: Mapping[str, Any], state: dict[str, Any]) -> dic
         raise GatewayEventContractError(
             "invalid_delivery_state_transition", "invalid delivery state transition"
         )
-    edit_existing_message = record.get("target") == f"feishu:message:{message_id}"
+    edit_existing_message = record.get("target") == _delivery_identity_ref(
+        "target", f"feishu:message:{event['message_id']}"
+    )
     indexed_delivery = state["feishu_message_index"].get(message_id)
     if (
         indexed_delivery is not None
@@ -514,8 +516,7 @@ def _apply_unknown_delivery_state(event: Mapping[str, Any], state: dict[str, Any
         )
     message_id = None
     if "message_id" in event:
-        raw_message_id = event["message_id"]
-        message_id = raw_message_id
+        message_id = _feishu_message_ref(str(event["message_id"]))
         existing_message_id = record.get("feishu_message_id")
         if existing_message_id is not None and existing_message_id != message_id:
             raise GatewayEventContractError(
@@ -536,7 +537,7 @@ def _apply_unknown_delivery_state(event: Mapping[str, Any], state: dict[str, Any
 
 
 def _apply_feishu_ack(event: Mapping[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-    message_id = str(event["message_id"])
+    message_id = _feishu_message_ref(str(event["message_id"]))
     delivery_id = state["feishu_message_index"].get(message_id)
     if delivery_id is None:
         raise GatewayEventContractError("unknown_feishu_message_id", "unknown feishu message id")
@@ -546,7 +547,7 @@ def _apply_feishu_ack(event: Mapping[str, Any], state: dict[str, Any]) -> dict[s
             "invalid_delivery_state_transition", "invalid delivery state transition"
         )
     _reject_timestamp_regression(event, record)
-    ack_event_id = str(event["ack_event_id"])
+    ack_event_id = _feishu_ack_ref(str(event["ack_event_id"]))
     indexed_message_id = state["ack_event_index"].get(ack_event_id)
     if indexed_message_id is not None and indexed_message_id != message_id:
         raise GatewayEventContractError("ack_event_id_conflict", "ack event id conflict")
@@ -582,9 +583,9 @@ def _apply_stale_pending_scan(event: Mapping[str, Any], state: dict[str, Any]) -
 
 
 def _apply_session_locked(event: Mapping[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-    session_key = str(event["session_key"])
-    session_id = str(event["session_id"])
-    correlation_id = str(event["correlation_id"])
+    session_key = _session_route_ref("session_key", str(event["session_key"]))
+    session_id = _session_route_ref("session_id", str(event["session_id"]))
+    correlation_id = _session_route_ref("correlation_id", str(event["correlation_id"]))
     routes = state["session_routes"]
     existing = routes.get(session_key)
     if existing is not None:
@@ -605,9 +606,11 @@ def _apply_session_locked(event: Mapping[str, Any], state: dict[str, Any]) -> di
 def _apply_compression_result(
     event: Mapping[str, Any], state: dict[str, Any]
 ) -> dict[str, Any]:
-    session_key = str(event["session_key"])
-    observed_session_id = str(event["observed_session_id"])
-    correlation_id = str(event["correlation_id"])
+    session_key = _session_route_ref("session_key", str(event["session_key"]))
+    observed_session_id = _session_route_ref(
+        "session_id", str(event["observed_session_id"])
+    )
+    correlation_id = _session_route_ref("correlation_id", str(event["correlation_id"]))
     route = state["session_routes"].get(session_key)
     if route is None:
         raise GatewayEventContractError(
@@ -1079,6 +1082,9 @@ def _validate_persisted_session_routes(routes: Mapping[str, Any]) -> None:
             raise _state_schema_error() from exc
         if not isinstance(route_key, str) or validated["record"]["session_key"] != route_key:
             raise _state_schema_error()
+        for field in ("session_key", "session_id", "correlation_id"):
+            if not _is_sha256_ref(validated["record"][field]):
+                raise _state_schema_error()
 
 
 def _validate_persisted_compression_rejections(rejections: list[Any]) -> None:
@@ -1094,7 +1100,7 @@ def _validate_persisted_compression_rejections(rejections: list[Any]) -> None:
         }:
             raise _state_schema_error()
         try:
-            validate_gateway_action(
+            validated = validate_gateway_action(
                 {
                     "type": "compression_record",
                     "record": {
@@ -1109,6 +1115,14 @@ def _validate_persisted_compression_rejections(rejections: list[Any]) -> None:
             )
         except (GatewayEventContractError, ValueError) as exc:
             raise _state_schema_error() from exc
+        for field in (
+            "session_key",
+            "locked_session_id",
+            "observed_session_id",
+            "correlation_id",
+        ):
+            if not _is_sha256_ref(validated["record"][field]):
+                raise _state_schema_error()
 
 
 def _validate_persisted_feishu_audit_events(events: list[Any]) -> None:
@@ -1209,6 +1223,8 @@ def _reconcile_persisted_indexes(state: dict[str, Any]) -> None:
             for field in ("inbound_id", "target", "session_id", "correlation_id")
         ]
         if all(isinstance(value, str) and value for value in identity_values):
+            if any(not _is_sha256_ref(value) for value in identity_values):
+                raise _state_schema_error()
             identity_key = _identity_key(_delivery_identity_from_record(record))
             existing_delivery_id = expected_identity_index.get(identity_key)
             if existing_delivery_id is not None and existing_delivery_id != delivery_id:
@@ -1219,6 +1235,8 @@ def _reconcile_persisted_indexes(state: dict[str, Any]) -> None:
 
         message_id = record.get("feishu_message_id")
         if isinstance(message_id, str):
+            if not _is_sha256_ref(message_id):
+                raise _state_schema_error()
             existing_delivery_id = expected_message_index.get(message_id)
             if existing_delivery_id is not None and existing_delivery_id != delivery_id:
                 raise _state_schema_error()
@@ -1226,6 +1244,8 @@ def _reconcile_persisted_indexes(state: dict[str, Any]) -> None:
 
         ack_event_id = record.get("ack_event_id")
         if isinstance(ack_event_id, str):
+            if not _is_sha256_ref(ack_event_id):
+                raise _state_schema_error()
             if not isinstance(message_id, str):
                 raise _state_schema_error()
             indexed_message_id = expected_ack_index.get(ack_event_id)
@@ -1290,10 +1310,8 @@ def _minimal_delivery_record(delivery_id: str, timestamp: int | float) -> dict[s
 
 def _delivery_identity_from_event(event: Mapping[str, Any]) -> dict[str, str]:
     return {
-        "inbound_id": str(event["inbound_id"]),
-        "target": str(event["target"]),
-        "session_id": str(event["session_id"]),
-        "correlation_id": str(event["correlation_id"]),
+        field: _delivery_identity_ref(field, str(event[field]))
+        for field in ("inbound_id", "target", "session_id", "correlation_id")
     }
 
 
@@ -1307,10 +1325,11 @@ def _delivery_identity_from_record(record: Mapping[str, Any]) -> dict[str, str |
 
 
 def _identity_key(identity: Mapping[str, Any]) -> str:
-    return "\x1f".join(
+    material = "\x1f".join(
         str(identity[field])
         for field in ("inbound_id", "target", "session_id", "correlation_id")
     )
+    return _sha256_ref(f"delivery_identity\x1f{material}")
 
 
 def _reject_timestamp_regression(
@@ -1340,6 +1359,22 @@ def _fnv1a64(value: str) -> str:
 
 def _sha256_ref(value: str) -> str:
     return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _delivery_identity_ref(field: str, value: str) -> str:
+    return _sha256_ref(f"delivery_identity.{field}\x1f{value}")
+
+
+def _feishu_message_ref(message_id: str) -> str:
+    return _sha256_ref(f"feishu_message\x1f{message_id}")
+
+
+def _feishu_ack_ref(ack_event_id: str) -> str:
+    return _sha256_ref(f"feishu_ack_event\x1f{ack_event_id}")
+
+
+def _session_route_ref(field: str, value: str) -> str:
+    return _sha256_ref(f"session_route.{field}\x1f{value}")
 
 
 def _feishu_attachment_provenance_hash(record: Mapping[str, Any]) -> str:

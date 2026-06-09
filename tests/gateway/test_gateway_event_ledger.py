@@ -1,3 +1,4 @@
+import hashlib
 import importlib
 import json
 import multiprocessing
@@ -20,6 +21,23 @@ from gateway.hermes_tools_gateway_event import (
     apply_gateway_event,
     preflight_gateway_event,
 )
+
+
+def _sha256_ref(domain: str, value: str) -> str:
+    material = domain + "\x1f" + value
+    return f"sha256:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
+
+
+def _assert_sha256_ref(value: object) -> None:
+    assert isinstance(value, str)
+    assert value.startswith("sha256:")
+    assert len(value) == 71
+
+
+def _assert_raw_values_absent(value: object, *raw_values: str) -> None:
+    rendered = json.dumps(value, sort_keys=True)
+    for raw_value in raw_values:
+        assert raw_value not in rendered
 
 
 def _delivery_pending(delivery_id: str, timestamp: int = 1) -> dict[str, object]:
@@ -238,6 +256,82 @@ def test_feishu_inbound_admission_hashes_raw_ids(tmp_path):
     assert duplicate.action["record"] == record
 
 
+def test_delivery_pending_persists_hashed_identity_and_preserves_replay_conflict_semantics(
+    tmp_path,
+):
+    raw_inbound_id = "ou_raw_open_user_1"
+    raw_target = "feishu:chat:oc_raw_chat_1"
+    raw_session_id = "oc_raw_session_1"
+    raw_correlation_id = "om_raw_correlation_1"
+    event = {
+        "type": "delivery_pending",
+        "delivery_id": "delivery-1",
+        "inbound_id": raw_inbound_id,
+        "target": raw_target,
+        "session_id": raw_session_id,
+        "correlation_id": raw_correlation_id,
+        "timestamp": 1,
+    }
+
+    result = apply_gateway_event(event, tmp_path)
+    replay = apply_gateway_event(event, tmp_path)
+    conflicting_identity = dict(event, delivery_id="delivery-2", timestamp=2)
+    conflict = apply_gateway_event(conflicting_identity, tmp_path)
+    conflicting_record = dict(event, correlation_id="om_raw_correlation_2", timestamp=2)
+    same_delivery_conflict = apply_gateway_event(conflicting_record, tmp_path)
+
+    assert result.ok is True
+    assert replay.ok is True
+    assert conflict.ok is False
+    assert conflict.failure_class == "delivery_identity_conflict"
+    assert same_delivery_conflict.ok is False
+    assert same_delivery_conflict.failure_class == "delivery_identity_conflict"
+    assert result.action is not None
+    record = result.action["record"]
+    assert replay.action is not None
+    assert replay.action["record"] == record
+    for field in ("inbound_id", "target", "session_id", "correlation_id"):
+        _assert_sha256_ref(record[field])
+    _assert_raw_values_absent(
+        result.action,
+        raw_inbound_id,
+        raw_target,
+        raw_session_id,
+        raw_correlation_id,
+    )
+    with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    assert state["deliveries"]["delivery-1"] == record
+    assert list(state["delivery_identity_index"].values()) == ["delivery-1"]
+    identity_key = next(iter(state["delivery_identity_index"]))
+    _assert_sha256_ref(identity_key)
+    _assert_raw_values_absent(
+        state,
+        raw_inbound_id,
+        raw_target,
+        raw_session_id,
+        raw_correlation_id,
+    )
+
+
+def test_delivery_sent_persists_hashed_message_ref(tmp_path):
+    raw_message_id = "om_message_1"
+    assert apply_gateway_event(_delivery_pending("delivery-1"), tmp_path).ok is True
+
+    result = apply_gateway_event(_delivery_sent("delivery-1", raw_message_id), tmp_path)
+
+    assert result.ok is True
+    assert result.action is not None
+    message_ref = _sha256_ref("feishu_message", raw_message_id)
+    assert result.action["record"]["feishu_message_id"] == message_ref
+    _assert_raw_values_absent(result.action, raw_message_id)
+    with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    assert state["feishu_message_index"] == {message_ref: "delivery-1"}
+    assert state["deliveries"]["delivery-1"]["feishu_message_id"] == message_ref
+    _assert_raw_values_absent(state, raw_message_id)
+
+
 def test_late_delivery_failed_does_not_override_acked_or_enter_stale_scan(tmp_path):
     assert apply_gateway_event(_delivery_pending("delivery-1"), tmp_path).ok is True
     assert apply_gateway_event(_delivery_sent("delivery-1", "om_message_1"), tmp_path).ok is True
@@ -311,6 +405,9 @@ def test_ack_event_id_is_global_and_rejects_different_message_conflict(tmp_path)
 
     assert conflicting.ok is False
     assert conflicting.failure_class == "ack_event_id_conflict"
+    with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    _assert_raw_values_absent(state, "om_message_1", "om_message_2", "ev_read_same")
     assert apply_gateway_event(_feishu_ack("om_message_2", "ev_read_different", 5), tmp_path).ok is True
 
 
@@ -319,15 +416,20 @@ def test_ack_event_id_repeat_for_same_message_is_idempotent(tmp_path):
     assert apply_gateway_event(_delivery_sent("delivery-1", "om_message_1"), tmp_path).ok is True
     first = apply_gateway_event(_feishu_ack("om_message_1", "ev_read_same"), tmp_path)
     repeat = apply_gateway_event(_feishu_ack("om_message_1", "ev_read_same", timestamp=4), tmp_path)
+    message_ref = _sha256_ref("feishu_message", "om_message_1")
+    ack_ref = _sha256_ref("feishu_ack_event", "ev_read_same")
 
     assert first.ok is True
     assert repeat.ok is True
     assert repeat.action is not None
     assert repeat.action["record"]["status"] == "acked"
-    assert repeat.action["record"]["ack_event_id"] == "ev_read_same"
+    assert repeat.action["record"]["feishu_message_id"] == message_ref
+    assert repeat.action["record"]["ack_event_id"] == ack_ref
+    _assert_raw_values_absent(repeat.action, "om_message_1", "ev_read_same")
     with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
         state = json.load(handle)
-    assert state["ack_event_index"] == {"ev_read_same": "om_message_1"}
+    assert state["ack_event_index"] == {ack_ref: message_ref}
+    _assert_raw_values_absent(state, "om_message_1", "ev_read_same")
 
 
 def test_corrupted_non_mapping_delivery_record_fails_closed_on_stale_scan(tmp_path):
@@ -722,6 +824,45 @@ def test_conflicting_persisted_message_index_fails_with_schema_class(tmp_path):
     assert result.diagnostics == ""
 
 
+def test_raw_legacy_delivery_identity_and_message_state_fails_closed_without_overwrite(
+    tmp_path,
+):
+    ledger = {
+        "version": 1,
+        "inbounds": {},
+        "deliveries": {
+            "delivery-1": {
+                "delivery_id": "delivery-1",
+                "inbound_id": "ou_raw_open_user_1",
+                "target": "feishu:chat:oc_raw_chat_1",
+                "session_id": "oc_raw_session_1",
+                "correlation_id": "om_raw_correlation_1",
+                "status": "sent",
+                "created_at": 1,
+                "updated_at": 2,
+                "feishu_message_id": "om_message_1",
+                "failure_class": None,
+                "ack_event_id": None,
+            }
+        },
+        "delivery_identity_index": {
+            "ou_raw_open_user_1\x1ffeishu:chat:oc_raw_chat_1\x1foc_raw_session_1\x1fom_raw_correlation_1": "delivery-1"
+        },
+        "feishu_message_index": {"om_message_1": "delivery-1"},
+        "ack_event_index": {},
+    }
+    ledger_path = tmp_path / LEDGER_FILENAME
+    original_text = json.dumps(ledger)
+    ledger_path.write_text(original_text, encoding="utf-8")
+
+    result = apply_gateway_event(_feishu_ack("om_message_1", "ev_read"), tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "gateway_event_state_schema_invalid"
+    assert result.diagnostics == ""
+    assert ledger_path.read_text(encoding="utf-8") == original_text
+
+
 def test_persisted_failed_delivery_without_failure_class_fails_with_schema_class(tmp_path):
     ledger = {
         "version": 1,
@@ -1073,6 +1214,7 @@ def test_invalid_event_type_is_not_echoed_in_result_or_diagnostics(tmp_path):
 def test_unknown_delivery_state_with_message_id_preserves_evidence_and_skips_stale_scan(
     tmp_path,
 ):
+    raw_message_id = "om_message_unknown"
     assert apply_gateway_event(_delivery_pending("delivery-1", timestamp=1), tmp_path).ok is True
 
     result = apply_gateway_event(
@@ -1080,7 +1222,7 @@ def test_unknown_delivery_state_with_message_id_preserves_evidence_and_skips_sta
             "type": "unknown_delivery_state",
             "delivery_id": "delivery-1",
             "failure_class": "provider_state_unknown",
-            "message_id": "om_message_unknown",
+            "message_id": raw_message_id,
             "timestamp": 2,
         },
         tmp_path,
@@ -1089,10 +1231,13 @@ def test_unknown_delivery_state_with_message_id_preserves_evidence_and_skips_sta
     assert result.ok is True
     assert result.action is not None
     assert result.action["record"]["status"] == "unknown"
-    assert result.action["record"]["feishu_message_id"] == "om_message_unknown"
+    message_ref = _sha256_ref("feishu_message", raw_message_id)
+    assert result.action["record"]["feishu_message_id"] == message_ref
+    _assert_raw_values_absent(result.action, raw_message_id)
     with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
         state = json.load(handle)
-    assert state["feishu_message_index"] == {"om_message_unknown": "delivery-1"}
+    assert state["feishu_message_index"] == {message_ref: "delivery-1"}
+    _assert_raw_values_absent(state, raw_message_id)
     scan = apply_gateway_event(_stale_pending_scan(now=10, max_age_seconds=1), tmp_path)
     assert scan.ok is True
     assert scan.action is not None
@@ -1120,7 +1265,9 @@ def test_unknown_delivery_state_message_id_conflict_fails_closed(tmp_path):
     with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
         state = json.load(handle)
     assert state["deliveries"]["delivery-2"]["feishu_message_id"] is None
-    assert state["feishu_message_index"] == {"om_message_1": "delivery-1"}
+    message_ref = _sha256_ref("feishu_message", "om_message_1")
+    assert state["feishu_message_index"] == {message_ref: "delivery-1"}
+    _assert_raw_values_absent(state, "om_message_1")
 
 
 def test_session_locked_persists_route(tmp_path):
@@ -1130,14 +1277,19 @@ def test_session_locked_persists_route(tmp_path):
     assert result.event_type == "session_locked"
     assert result.action is not None
     assert result.action["type"] == "session_route"
+    session_key_ref = _sha256_ref("session_route.session_key", "feishu:chat:oc_1")
+    session_id_ref = _sha256_ref("session_route.session_id", "session-a")
+    correlation_ref = _sha256_ref("session_route.correlation_id", "corr-1")
     assert result.action["record"] == {
-        "session_key": "feishu:chat:oc_1",
-        "session_id": "session-a",
-        "correlation_id": "corr-1",
+        "session_key": session_key_ref,
+        "session_id": session_id_ref,
+        "correlation_id": correlation_ref,
     }
+    _assert_raw_values_absent(result.action, "feishu:chat:oc_1", "session-a", "corr-1")
     with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
         state = json.load(handle)
-    assert state["session_routes"]["feishu:chat:oc_1"]["session_id"] == "session-a"
+    assert state["session_routes"][session_key_ref]["session_id"] == session_id_ref
+    _assert_raw_values_absent(state, "feishu:chat:oc_1", "session-a", "corr-1")
 
 
 def test_session_locked_same_key_same_session_is_idempotent(tmp_path):
@@ -1147,8 +1299,12 @@ def test_session_locked_same_key_same_session_is_idempotent(tmp_path):
     assert first.ok is True
     assert repeat.ok is True
     assert repeat.action is not None
-    assert repeat.action["record"]["session_id"] == "session-a"
-    assert repeat.action["record"]["correlation_id"] == "corr-1"
+    assert repeat.action["record"]["session_id"] == _sha256_ref(
+        "session_route.session_id", "session-a"
+    )
+    assert repeat.action["record"]["correlation_id"] == _sha256_ref(
+        "session_route.correlation_id", "corr-1"
+    )
 
 
 def test_session_locked_same_key_different_session_conflicts(tmp_path):
@@ -1171,14 +1327,18 @@ def test_compression_result_matching_locked_session_succeeds(tmp_path):
     assert result.event_type == "compression_result"
     assert result.action is not None
     assert result.action["type"] == "compression_record"
+    session_key_ref = _sha256_ref("session_route.session_key", "feishu:chat:oc_1")
+    session_id_ref = _sha256_ref("session_route.session_id", "session-a")
+    correlation_ref = _sha256_ref("session_route.correlation_id", "corr-1")
     assert result.action["record"] == {
-        "session_key": "feishu:chat:oc_1",
-        "locked_session_id": "session-a",
-        "observed_session_id": "session-a",
-        "correlation_id": "corr-1",
+        "session_key": session_key_ref,
+        "locked_session_id": session_id_ref,
+        "observed_session_id": session_id_ref,
+        "correlation_id": correlation_ref,
         "status": "accepted",
         "failure_class": None,
     }
+    _assert_raw_values_absent(result.action, "feishu:chat:oc_1", "session-a", "corr-1")
 
 
 def test_compression_result_mismatch_fails_closed_and_persists_audit(tmp_path):
@@ -1193,16 +1353,21 @@ def test_compression_result_mismatch_fails_closed_and_persists_audit(tmp_path):
     assert result.action is None
     with (tmp_path / LEDGER_FILENAME).open(encoding="utf-8") as handle:
         state = json.load(handle)
-    assert state["session_routes"]["feishu:chat:oc_1"]["session_id"] == "session-a"
+    session_key_ref = _sha256_ref("session_route.session_key", "feishu:chat:oc_1")
+    locked_session_ref = _sha256_ref("session_route.session_id", "session-a")
+    observed_session_ref = _sha256_ref("session_route.session_id", "session-b")
+    correlation_ref = _sha256_ref("session_route.correlation_id", "corr-1")
+    assert state["session_routes"][session_key_ref]["session_id"] == locked_session_ref
     assert state["compression_rejections"] == [
         {
-            "session_key": "feishu:chat:oc_1",
-            "locked_session_id": "session-a",
-            "observed_session_id": "session-b",
-            "correlation_id": "corr-1",
+            "session_key": session_key_ref,
+            "locked_session_id": locked_session_ref,
+            "observed_session_id": observed_session_ref,
+            "correlation_id": correlation_ref,
             "failure_class": "implicit_session_switch",
         }
     ]
+    _assert_raw_values_absent(state, "feishu:chat:oc_1", "session-a", "session-b", "corr-1")
 
 
 def test_preflight_checks_exclude_status_card_descriptor(tmp_path):
@@ -1222,6 +1387,43 @@ def test_preflight_checks_exclude_status_card_descriptor(tmp_path):
     }
     assert "status_card_request_descriptor" not in names
     assert "feishu_request" not in result.action
+
+
+def test_preflight_probe_state_omits_raw_feishu_delivery_ids(monkeypatch, tmp_path):
+    probe_dir = tmp_path / "preflight-probe"
+
+    class PersistentTemporaryDirectory:
+        def __init__(self, *, dir):
+            assert dir == tmp_path
+
+        def __enter__(self):
+            probe_dir.mkdir()
+            return str(probe_dir)
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        gateway_event_ledger.tempfile,
+        "TemporaryDirectory",
+        PersistentTemporaryDirectory,
+    )
+
+    result = preflight_gateway_event(tmp_path)
+
+    assert result.ok is True
+    with (probe_dir / LEDGER_FILENAME).open(encoding="utf-8") as handle:
+        state = json.load(handle)
+    _assert_raw_values_absent(
+        state,
+        "preflight-message",
+        "preflight_feishu_message",
+        "preflight-ack",
+        "preflight-session-key",
+        "preflight-session-a",
+        "preflight-session-b",
+        "preflight-correlation",
+    )
 
 
 def test_preflight_fails_closed_when_live_ledger_schema_is_invalid(tmp_path):

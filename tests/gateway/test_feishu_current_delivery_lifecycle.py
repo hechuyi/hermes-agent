@@ -617,9 +617,11 @@ async def test_limited_edit_requires_bot_owned_current_delivery_and_matching_rou
     assert edit_event["bot_ownership_hash"] == sent_events[0]["bot_ownership_hash"]
     state = _state(tmp_path)
     assert state["deliveries"]["delivery-edit-1"]["feishu_message_id"] is None
+    message_ref = _sha("feishu_message\x1fom_bot_current_1")
     assert state["feishu_message_index"] == {
-        "om_bot_current_1": "delivery-edit-source"
+        message_ref: "delivery-edit-source"
     }
+    assert "om_bot_current_1" not in json.dumps(state, sort_keys=True)
     _assert_no_raw_platform_context(_lifecycle_events(tmp_path))
 
 

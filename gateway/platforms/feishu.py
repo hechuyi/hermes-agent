@@ -8595,18 +8595,30 @@ class FeishuAdapter(BasePlatformAdapter):
             return False
         message_id = record.get("feishu_message_id")
         return (
-            record.get("delivery_id") == delivery_id
-            and record.get("inbound_id") == inbound_id
-            and record.get("target") == target
-            and record.get("session_id") == session_id
-            and record.get("correlation_id") == correlation_id
+            self._delivery_record_identity_matches(
+                record,
+                delivery_id=delivery_id,
+                inbound_id=inbound_id,
+                target=target,
+                session_id=session_id,
+                correlation_id=correlation_id,
+            )
             and record.get("status") in {"sent", "acked"}
-            and bool(message_id)
-            and self._valid_feishu_message_id(str(message_id))
+            and isinstance(message_id, str)
+            and (
+                self._valid_feishu_message_id(message_id)
+                or self._is_sha256_ref_text(message_id)
+                or self._is_attachment_upload_ledger_message_id(message_id)
+            )
         )
 
-    @staticmethod
+    @classmethod
+    def _delivery_identity_ref(cls, field: str, value: str) -> str:
+        return cls._delivery_ref_hash(f"delivery_identity.{field}", value)
+
+    @classmethod
     def _delivery_record_identity_matches(
+        cls,
         record: Dict[str, Any],
         *,
         delivery_id: str,
@@ -8615,12 +8627,20 @@ class FeishuAdapter(BasePlatformAdapter):
         session_id: str,
         correlation_id: str,
     ) -> bool:
+        projected = {
+            "inbound_id": cls._delivery_identity_ref("inbound_id", inbound_id),
+            "target": cls._delivery_identity_ref("target", target),
+            "session_id": cls._delivery_identity_ref("session_id", session_id),
+            "correlation_id": cls._delivery_identity_ref(
+                "correlation_id", correlation_id
+            ),
+        }
         return (
             record.get("delivery_id") == delivery_id
-            and record.get("inbound_id") == inbound_id
-            and record.get("target") == target
-            and record.get("session_id") == session_id
-            and record.get("correlation_id") == correlation_id
+            and record.get("inbound_id") == projected["inbound_id"]
+            and record.get("target") == projected["target"]
+            and record.get("session_id") == projected["session_id"]
+            and record.get("correlation_id") == projected["correlation_id"]
         )
 
     @staticmethod
@@ -8642,6 +8662,8 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> Optional[str]:
         message_id = record.get("feishu_message_id")
         message_id_text = str(message_id or "")
+        if self._is_sha256_ref_text(message_id_text):
+            return None
         if self._is_attachment_upload_ledger_message_id(message_id_text):
             return None
         if (
