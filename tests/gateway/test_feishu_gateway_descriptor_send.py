@@ -254,6 +254,38 @@ def _assert_sent_event_payload(event, *, operation, delivery_id, message_id):
     assert isinstance(event["timestamp"], int)
 
 
+def _assert_attachment_pending_sanitized(
+    adapter,
+    event,
+    *,
+    chat_id,
+    reply_to=None,
+    metadata,
+    delivery_id,
+    operation,
+    declared_mime_class,
+):
+    refs = adapter._attachment_upload_reservation_refs(
+        chat_id=chat_id,
+        reply_to=reply_to,
+        metadata=metadata,
+        delivery_id=delivery_id,
+        declared_mime_class=declared_mime_class,
+    )
+    _assert_pending_event_payload(
+        event,
+        operation=operation,
+        delivery_id=delivery_id,
+        target=refs["target"],
+        inbound_id=refs["inbound_id"],
+        session_id=refs["session_id"],
+        correlation_id=refs["correlation_id"],
+    )
+    event_json = json.dumps(event, sort_keys=True)
+    assert "feishu:chat:" not in event_json
+    assert chat_id not in event_json
+
+
 def _assert_sent_matrix_events(
     events,
     *,
@@ -375,15 +407,16 @@ async def test_audited_image_file_records_pending_and_sent_after_upload(tmp_path
     image_payload = b"\x89PNG\r\n\x1a\n"
     image_path.write_bytes(image_payload)
 
+    metadata = _metadata_with_attachment_provenance(
+        tmp_path,
+        image_payload,
+        delivery_id="delivery-image",
+        mime_class="image",
+    )
     result = await adapter.send_image_file(
         chat_id="oc_chat",
         image_path=str(image_path),
-        metadata=_metadata_with_attachment_provenance(
-            tmp_path,
-            image_payload,
-            delivery_id="delivery-image",
-            mime_class="image",
-        ),
+        metadata=metadata,
     )
 
     assert result.success is True
@@ -399,16 +432,30 @@ async def test_audited_image_file_records_pending_and_sent_after_upload(tmp_path
     pending = ordered[2][1]
     sent = ordered[4][1]
     request = ordered[3][1]
-    assert preflight_pending["type"] == "delivery_pending"
-    assert pending["type"] == "delivery_pending"
-    assert pending["operation"] == "normal_final_reply"
-    assert pending["target"] == "feishu:chat:oc_chat"
+    _assert_attachment_pending_sanitized(
+        adapter,
+        preflight_pending,
+        chat_id="oc_chat",
+        metadata=metadata,
+        delivery_id="delivery-image",
+        operation="normal_final_reply",
+        declared_mime_class="image",
+    )
+    _assert_attachment_pending_sanitized(
+        adapter,
+        pending,
+        chat_id="oc_chat",
+        metadata=metadata,
+        delivery_id="delivery-image",
+        operation="normal_final_reply",
+        declared_mime_class="image",
+    )
     assert request.request_body.msg_type == "image"
     assert request.request_body.uuid == "delivery-image"
     assert sent["type"] == "delivery_sent"
     assert sent["operation"] == "normal_final_reply"
     assert sent["delivery_id"] == "delivery-image"
-    assert sent["message_id"] == "om_image_msg"
+    assert sent["message_id"] == adapter._attachment_upload_ledger_message_id("om_image_msg")
 
 
 @pytest.mark.asyncio
@@ -437,15 +484,16 @@ async def test_audited_uploaded_file_records_pending_and_sent_after_upload(tmp_p
     file_payload = b"%PDF-1.4 test"
     file_path.write_bytes(file_payload)
 
+    metadata = _metadata_with_attachment_provenance(
+        tmp_path,
+        file_payload,
+        delivery_id="delivery-file",
+        mime_class="file",
+    )
     result = await adapter.send_document(
         chat_id="oc_chat",
         file_path=str(file_path),
-        metadata=_metadata_with_attachment_provenance(
-            tmp_path,
-            file_payload,
-            delivery_id="delivery-file",
-            mime_class="file",
-        ),
+        metadata=metadata,
     )
 
     assert result.success is True
@@ -461,15 +509,29 @@ async def test_audited_uploaded_file_records_pending_and_sent_after_upload(tmp_p
     pending = ordered[2][1]
     request = ordered[3][1]
     sent = ordered[4][1]
-    assert preflight_pending["type"] == "delivery_pending"
-    assert pending["type"] == "delivery_pending"
-    assert pending["operation"] == "normal_final_reply"
-    assert pending["target"] == "feishu:chat:oc_chat"
+    _assert_attachment_pending_sanitized(
+        adapter,
+        preflight_pending,
+        chat_id="oc_chat",
+        metadata=metadata,
+        delivery_id="delivery-file",
+        operation="normal_final_reply",
+        declared_mime_class="file",
+    )
+    _assert_attachment_pending_sanitized(
+        adapter,
+        pending,
+        chat_id="oc_chat",
+        metadata=metadata,
+        delivery_id="delivery-file",
+        operation="normal_final_reply",
+        declared_mime_class="file",
+    )
     assert request.request_body.msg_type == "file"
     assert request.request_body.uuid == "delivery-file"
     assert sent["type"] == "delivery_sent"
     assert sent["operation"] == "normal_final_reply"
-    assert sent["message_id"] == "om_file_msg"
+    assert sent["message_id"] == adapter._attachment_upload_ledger_message_id("om_file_msg")
 
 
 @pytest.mark.asyncio
@@ -482,16 +544,17 @@ async def test_audited_image_file_reply_records_reply_operation_after_upload(tmp
     image_payload = b"\x89PNG\r\n\x1a\n"
     image_path.write_bytes(image_payload)
 
+    metadata = _metadata_with_attachment_provenance(
+        tmp_path,
+        image_payload,
+        delivery_id="delivery-image-reply",
+        mime_class="image",
+    )
     result = await adapter.send_image_file(
         chat_id="oc_chat",
         image_path=str(image_path),
         reply_to="om_parent",
-        metadata=_metadata_with_attachment_provenance(
-            tmp_path,
-            image_payload,
-            delivery_id="delivery-image-reply",
-            mime_class="image",
-        ),
+        metadata=metadata,
     )
 
     assert result.success is True
@@ -500,11 +563,29 @@ async def test_audited_image_file_reply_records_reply_operation_after_upload(tmp
     assert message_api.create_calls == []
     assert len(message_api.reply_calls) == 1
     assert _event_types(events) == ["delivery_pending", "delivery_pending", "delivery_sent"]
-    assert events[0]["operation"] == "reply"
-    assert events[1]["operation"] == "reply"
+    _assert_attachment_pending_sanitized(
+        adapter,
+        events[0],
+        chat_id="oc_chat",
+        reply_to="om_parent",
+        metadata=metadata,
+        delivery_id="delivery-image-reply",
+        operation="reply",
+        declared_mime_class="image",
+    )
+    _assert_attachment_pending_sanitized(
+        adapter,
+        events[1],
+        chat_id="oc_chat",
+        reply_to="om_parent",
+        metadata=metadata,
+        delivery_id="delivery-image-reply",
+        operation="reply",
+        declared_mime_class="image",
+    )
     assert events[2]["operation"] == "reply"
     assert events[2]["delivery_id"] == "delivery-image-reply"
-    assert events[2]["message_id"] == "om_reply"
+    assert events[2]["message_id"] == adapter._attachment_upload_ledger_message_id("om_reply")
 
 
 @pytest.mark.asyncio
@@ -517,16 +598,17 @@ async def test_audited_uploaded_file_reply_records_reply_operation_after_upload(
     file_payload = b"%PDF-1.4 test"
     file_path.write_bytes(file_payload)
 
+    metadata = _metadata_with_attachment_provenance(
+        tmp_path,
+        file_payload,
+        delivery_id="delivery-file-reply",
+        mime_class="file",
+    )
     result = await adapter.send_document(
         chat_id="oc_chat",
         file_path=str(file_path),
         reply_to="om_parent",
-        metadata=_metadata_with_attachment_provenance(
-            tmp_path,
-            file_payload,
-            delivery_id="delivery-file-reply",
-            mime_class="file",
-        ),
+        metadata=metadata,
     )
 
     assert result.success is True
@@ -535,11 +617,29 @@ async def test_audited_uploaded_file_reply_records_reply_operation_after_upload(
     assert message_api.create_calls == []
     assert len(message_api.reply_calls) == 1
     assert _event_types(events) == ["delivery_pending", "delivery_pending", "delivery_sent"]
-    assert events[0]["operation"] == "reply"
-    assert events[1]["operation"] == "reply"
+    _assert_attachment_pending_sanitized(
+        adapter,
+        events[0],
+        chat_id="oc_chat",
+        reply_to="om_parent",
+        metadata=metadata,
+        delivery_id="delivery-file-reply",
+        operation="reply",
+        declared_mime_class="file",
+    )
+    _assert_attachment_pending_sanitized(
+        adapter,
+        events[1],
+        chat_id="oc_chat",
+        reply_to="om_parent",
+        metadata=metadata,
+        delivery_id="delivery-file-reply",
+        operation="reply",
+        declared_mime_class="file",
+    )
     assert events[2]["operation"] == "reply"
     assert events[2]["delivery_id"] == "delivery-file-reply"
-    assert events[2]["message_id"] == "om_reply"
+    assert events[2]["message_id"] == adapter._attachment_upload_ledger_message_id("om_reply")
 
 
 @pytest.mark.asyncio
@@ -582,15 +682,16 @@ async def test_audited_uploaded_file_sent_apply_failure_records_unknown_with_mes
     file_payload = b"%PDF-1.4 test"
     file_path.write_bytes(file_payload)
 
+    metadata = _metadata_with_attachment_provenance(
+        tmp_path,
+        file_payload,
+        delivery_id="delivery-file-sent-fail",
+        mime_class="file",
+    )
     result = await adapter.send_document(
         chat_id="oc_chat",
         file_path=str(file_path),
-        metadata=_metadata_with_attachment_provenance(
-            tmp_path,
-            file_payload,
-            delivery_id="delivery-file-sent-fail",
-            mime_class="file",
-        ),
+        metadata=metadata,
     )
 
     assert result.success is False
@@ -603,7 +704,7 @@ async def test_audited_uploaded_file_sent_apply_failure_records_unknown_with_mes
         "unknown_delivery_state",
     ]
     assert events[-1]["failure_class"] == "delivery_sent_apply_failed"
-    assert events[-1]["message_id"] == "om_file_msg"
+    assert events[-1]["message_id"] == adapter._attachment_upload_ledger_message_id("om_file_msg")
 
 
 @pytest.mark.asyncio

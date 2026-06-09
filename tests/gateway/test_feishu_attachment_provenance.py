@@ -28,6 +28,11 @@ _GRANT_HANDLE = "broker_grant_handle:sha256:" + "9" * 64
 _PROVENANCE_HASH_RE = r"^sha256:[a-f0-9]{64}$"
 _REPLY_TO = "om_parent"
 _REPLY_REF = feishu_hashed_ref("feishu_reply_anchor", _REPLY_TO).value_hash
+_RAW_CHAT_ID = "oc_raw_b6_chat"
+_RAW_MESSAGE_ID = "om_raw_b6_message"
+_RAW_FILE_KEY = "img_raw_b6_file_key"
+_RAW_SDK_BODY = "raw_b6_sdk_body"
+_RAW_CONTENT = "raw_b6_content"
 
 
 class _FakeResponse:
@@ -44,7 +49,7 @@ class _FakeMessageApi:
     def __init__(self):
         self.create_calls = []
         self.reply_calls = []
-        self.create_response = _FakeResponse(message_id="om_created")
+        self.create_response = _FakeResponse(message_id=_RAW_MESSAGE_ID)
 
     def create(self, request):
         self.create_calls.append(request)
@@ -52,7 +57,7 @@ class _FakeMessageApi:
 
     def reply(self, request):
         self.reply_calls.append(request)
-        return _FakeResponse(message_id="om_reply")
+        return _FakeResponse(message_id=_RAW_MESSAGE_ID)
 
 
 class _FakeImageApi:
@@ -60,7 +65,7 @@ class _FakeImageApi:
         self.create_calls = []
         self.create_response = SimpleNamespace(
             success=lambda: True,
-            data=SimpleNamespace(image_key="img_uploaded"),
+            data=SimpleNamespace(image_key=_RAW_FILE_KEY),
         )
 
     def create(self, request):
@@ -73,7 +78,7 @@ class _FakeFileApi:
         self.create_calls = []
         self.create_response = SimpleNamespace(
             success=lambda: True,
-            data=SimpleNamespace(file_key="file_uploaded"),
+            data=SimpleNamespace(file_key=_RAW_FILE_KEY),
         )
 
     def create(self, request):
@@ -261,6 +266,61 @@ async def test_generated_attachment_upload_requires_complete_matching_provenance
     assert len(file_api.create_calls) == 0
     assert len(message_api.create_calls) == 0
     assert len(message_api.reply_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_generated_attachment_upload_reservation_persists_only_sanitized_refs(
+    tmp_path,
+):
+    provenance = apply_gateway_event(_generated_event(), tmp_path).action["record"]
+    adapter, image_api, file_api, message_api = _adapter(tmp_path)
+    image_path = tmp_path / "raw_b6_local_path.png"
+    image_path.write_bytes(_CONTENT_BYTES)
+
+    result = await adapter.send_image_file(
+        chat_id=_RAW_CHAT_ID,
+        image_path=str(image_path),
+        reply_to=_REPLY_TO,
+        metadata=_metadata(
+            provenance["provenance_hash"],
+            feishu_attachment_producing_tool_action_hash=_TOOL_ACTION_HASH,
+            feishu_attachment_safe_output_root_proof_hash=_ROOT_PROOF_HASH,
+            delivery_id="delivery-raw-b6-reservation",
+            inbound_id="inbound-raw-b6-message",
+            session_id="session-raw-b6-chat",
+            correlation_id="correlation-raw-b6-sdk-body",
+            raw_sdk_body=_RAW_SDK_BODY,
+            raw_content=_RAW_CONTENT,
+        ),
+    )
+
+    assert result.success is True
+    assert len(image_api.create_calls) == 1
+    assert len(file_api.create_calls) == 0
+    assert len(message_api.create_calls) == 0
+    assert len(message_api.reply_calls) == 1
+
+    state = _state(tmp_path)
+    assert state["deliveries"]
+    assert state["delivery_identity_index"]
+    state_json = json.dumps(state, sort_keys=True)
+    assert "feishu:chat:" not in state_json
+    for raw_value in (
+        _RAW_CHAT_ID,
+        _RAW_MESSAGE_ID,
+        _RAW_FILE_KEY,
+        str(image_path),
+        image_path.name,
+        _RAW_SDK_BODY,
+        _RAW_CONTENT,
+        "inbound-raw-b6-message",
+        "session-raw-b6-chat",
+        "correlation-raw-b6-sdk-body",
+    ):
+        assert raw_value not in state_json
+    assert provenance["provenance_hash"] in state_json
+    assert _ROUTE_HASH in state_json
+    assert _CONTRACT_HASH in state_json
 
 
 @pytest.mark.asyncio

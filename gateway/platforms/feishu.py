@@ -7207,27 +7207,99 @@ class FeishuAdapter(BasePlatformAdapter):
             metadata=metadata,
             parts=[chat_id, reply_to or "", declared_mime_class],
         )
+        reservation_refs = self._attachment_upload_reservation_refs(
+            chat_id=chat_id,
+            reply_to=reply_to,
+            metadata=metadata,
+            delivery_id=delivery_id,
+            declared_mime_class=declared_mime_class,
+        )
         pending_result = await self._apply_delivery_pending(
             delivery_id=delivery_id,
             operation=operation,
-            inbound_id=self._delivery_metadata(metadata, "inbound_id", reply_to or chat_id),
-            target=f"feishu:chat:{chat_id}",
-            session_id=self._delivery_metadata(metadata, "session_id", "session"),
-            correlation_id=self._delivery_metadata(metadata, "correlation_id", delivery_id),
+            inbound_id=reservation_refs["inbound_id"],
+            target=reservation_refs["target"],
+            session_id=reservation_refs["session_id"],
+            correlation_id=reservation_refs["correlation_id"],
         )
         replay = self._send_result_from_delivery_record_apply(
             pending_result,
             delivery_id=delivery_id,
-            inbound_id=self._delivery_metadata(metadata, "inbound_id", reply_to or chat_id),
-            target=f"feishu:chat:{chat_id}",
-            session_id=self._delivery_metadata(metadata, "session_id", "session"),
-            correlation_id=self._delivery_metadata(metadata, "correlation_id", delivery_id),
+            inbound_id=reservation_refs["inbound_id"],
+            target=reservation_refs["target"],
+            session_id=reservation_refs["session_id"],
+            correlation_id=reservation_refs["correlation_id"],
         )
         if replay is not None:
             return replay
         if not self._gateway_event_apply_succeeded(pending_result):
             return SendResult(success=False, error="delivery_pending apply failed")
         return None
+
+    def _attachment_upload_reservation_refs(
+        self,
+        *,
+        chat_id: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        delivery_id: str,
+        declared_mime_class: Optional[str] = None,
+    ) -> Dict[str, str]:
+        provenance_hash = (metadata or {}).get("feishu_attachment_provenance_hash")
+        if not self._is_sha256_ref_text(provenance_hash):
+            return {
+                "inbound_id": self._delivery_metadata(
+                    metadata, "inbound_id", reply_to or chat_id
+                ),
+                "target": f"feishu:chat:{chat_id}",
+                "session_id": self._delivery_metadata(metadata, "session_id", "session"),
+                "correlation_id": self._delivery_metadata(
+                    metadata, "correlation_id", delivery_id
+                ),
+            }
+        route_evidence = self._attachment_route_evidence(metadata) or {}
+        route_partition_hash = route_evidence.get("route_partition_hash")
+        if not self._is_sha256_ref_text(route_partition_hash):
+            route_partition_hash = self._delivery_ref_hash(
+                "feishu_attachment_route_partition", "missing"
+            )
+        contract_hash = route_evidence.get("contract_hash")
+        if not self._is_sha256_ref_text(contract_hash):
+            contract_hash = self._delivery_ref_hash(
+                "feishu_attachment_contract", "missing"
+            )
+        target_ref_hash = self._delivery_ref_hash(
+            "feishu_target",
+            f"feishu:chat:{chat_id}",
+        )
+        reply_ref_hash = self._delivery_ref_hash(
+            "feishu_reply_anchor",
+            reply_to or "none",
+        )
+        reservation_hash = self._sha256_ref_text(
+            "\x1f".join(
+                (
+                    "feishu_attachment_upload_reservation",
+                    delivery_id,
+                    str(provenance_hash),
+                    target_ref_hash,
+                    str(route_partition_hash),
+                    str(contract_hash),
+                    reply_ref_hash,
+                    str(declared_mime_class or "attachment"),
+                )
+            )
+        )
+        return {
+            "inbound_id": f"feishu_attachment_inbound:{reservation_hash[7:47]}",
+            "target": f"feishu_attachment_target:{target_ref_hash[7:47]}",
+            "session_id": f"feishu_attachment_route:{str(route_partition_hash)[7:47]}",
+            "correlation_id": f"feishu_attachment_contract:{str(contract_hash)[7:47]}",
+        }
+
+    def _attachment_upload_ledger_message_id(self, message_id: str) -> str:
+        digest = self._delivery_ref_hash("feishu_message", message_id)[7:47]
+        return f"om_attachment_{digest}"
 
     def _attachment_provenance_failure(
         self,
@@ -7552,6 +7624,18 @@ class FeishuAdapter(BasePlatformAdapter):
             metadata=metadata,
             parts=[chat_id, reply_to or "", msg_type, payload],
         )
+        attachment_reservation_refs = self._attachment_upload_reservation_refs(
+            chat_id=chat_id,
+            reply_to=reply_to,
+            metadata=metadata,
+            delivery_id=delivery_id,
+            declared_mime_class=(metadata or {}).get(
+                "feishu_attachment_declared_mime_class"
+            ),
+        )
+        use_attachment_reservation_refs = self._is_sha256_ref_text(
+            (metadata or {}).get("feishu_attachment_provenance_hash")
+        )
         response_or_result = await self._audited_delivery(
             delivery_id=delivery_id,
             operation=operation,
@@ -7560,6 +7644,18 @@ class FeishuAdapter(BasePlatformAdapter):
             inbound_id=self._delivery_metadata(metadata, "inbound_id", reply_to or chat_id),
             session_id=self._delivery_metadata(metadata, "session_id", "session"),
             correlation_id=self._delivery_metadata(metadata, "correlation_id", delivery_id),
+            ledger_target=attachment_reservation_refs["target"]
+            if use_attachment_reservation_refs
+            else None,
+            ledger_inbound_id=attachment_reservation_refs["inbound_id"]
+            if use_attachment_reservation_refs
+            else None,
+            ledger_session_id=attachment_reservation_refs["session_id"]
+            if use_attachment_reservation_refs
+            else None,
+            ledger_correlation_id=attachment_reservation_refs["correlation_id"]
+            if use_attachment_reservation_refs
+            else None,
             network_call=lambda uuid_value: self._send_raw_message(
                 chat_id=chat_id,
                 msg_type=msg_type,
@@ -8272,7 +8368,16 @@ class FeishuAdapter(BasePlatformAdapter):
                 raw_response=response,
             )
 
-        delivery_record_message_id = ledger_message_id or str(message_id)
+        if ledger_message_id:
+            delivery_record_message_id = ledger_message_id
+        elif self._is_sha256_ref_text(
+            (metadata or {}).get("feishu_attachment_provenance_hash")
+        ):
+            delivery_record_message_id = self._attachment_upload_ledger_message_id(
+                str(message_id)
+            )
+        else:
+            delivery_record_message_id = str(message_id)
         if not await self._apply_delivery_sent(
             delivery_id,
             delivery_record_message_id,
