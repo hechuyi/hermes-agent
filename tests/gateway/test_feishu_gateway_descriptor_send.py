@@ -1,3 +1,4 @@
+import hashlib
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -6,8 +7,17 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.feishu_legacy_guard import feishu_broker_context
+from gateway.gateway_event_ledger import apply_gateway_event
 import gateway.platforms.feishu as feishu_module
 from gateway.platforms.feishu import FeishuAdapter
+
+
+_ROUTE_HASH = "sha256:" + "3" * 64
+_CONTRACT_HASH = "sha256:" + "4" * 64
+_PLAN_HASH = "sha256:" + "6" * 64
+_ROOT_PROOF_HASH = "sha256:" + "7" * 64
+_TOOL_ACTION_HASH = "sha256:" + "8" * 64
+_GRANT_HANDLE = "broker_grant_handle:sha256:" + "9" * 64
 
 
 class _FakeResponse:
@@ -105,6 +115,54 @@ def _metadata(delivery_id="delivery-create"):
         "session_id": "session-a",
         "correlation_id": "corr-a",
     }
+
+
+def _metadata_with_attachment_provenance(
+    tmp_path,
+    payload: bytes,
+    *,
+    delivery_id="delivery-create",
+    mime_class="image",
+):
+    content_hash = "sha256:" + hashlib.sha256(payload).hexdigest()
+    event = {
+        "type": "feishu_attachment_provenance_recorded",
+        "provenance_kind": "generated",
+        "safe_output_root_proof_hash": _ROOT_PROOF_HASH,
+        "producing_tool_action_hash": _TOOL_ACTION_HASH,
+        "content_hash": content_hash,
+        "declared_mime_class": mime_class,
+        "size_class": "small",
+        "route_partition_hash": _ROUTE_HASH,
+        "route_snapshot_hash": _ROUTE_HASH,
+        "contract_hash": _CONTRACT_HASH,
+        "delivery_plan_hash": _PLAN_HASH,
+        "sensitivity_classification": "internal",
+        "sensitivity_state": "current",
+        "redaction_state": "redacted",
+        "retention_policy": "ephemeral",
+        "retention_state": "current",
+        "generator_state": "complete",
+        "source_grant_handles": [_GRANT_HANDLE],
+        "timestamp": 1_718_000_000,
+    }
+    provenance = apply_gateway_event(event, tmp_path).action["record"]
+    metadata = _metadata(delivery_id)
+    metadata.update(
+        {
+            "feishu_attachment_provenance_hash": provenance["provenance_hash"],
+            "feishu_attachment_declared_mime_class": mime_class,
+            "feishu_attachment_size_class": "small",
+            "feishu_attachment_content_hash": content_hash,
+            "feishu_attachment_safe_output_root_proof_hash": _ROOT_PROOF_HASH,
+            "feishu_attachment_producing_tool_action_hash": _TOOL_ACTION_HASH,
+            "feishu_attachment_source_grant_handles": (_GRANT_HANDLE,),
+            "feishu_attachment_route_partition_hash": _ROUTE_HASH,
+            "feishu_attachment_route_snapshot_hash": _ROUTE_HASH,
+            "feishu_attachment_contract_hash": _CONTRACT_HASH,
+        }
+    )
+    return metadata
 
 
 def _install_event_recorder(adapter, *, fail_event_types=()):
@@ -314,25 +372,34 @@ async def test_audited_image_file_records_pending_and_sent_after_upload(tmp_path
     image_api.create = upload
     message_api.create = create
     image_path = tmp_path / "audit.png"
-    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    image_payload = b"\x89PNG\r\n\x1a\n"
+    image_path.write_bytes(image_payload)
 
     result = await adapter.send_image_file(
         chat_id="oc_chat",
         image_path=str(image_path),
-        metadata=_metadata("delivery-image"),
+        metadata=_metadata_with_attachment_provenance(
+            tmp_path,
+            image_payload,
+            delivery_id="delivery-image",
+            mime_class="image",
+        ),
     )
 
     assert result.success is True
     assert result.message_id == "om_image_msg"
     assert [kind for kind, _ in ordered] == [
+        "event",
         "image_upload",
         "event",
         "sdk_create",
         "event",
     ]
-    pending = ordered[1][1]
-    sent = ordered[3][1]
-    request = ordered[2][1]
+    preflight_pending = ordered[0][1]
+    pending = ordered[2][1]
+    sent = ordered[4][1]
+    request = ordered[3][1]
+    assert preflight_pending["type"] == "delivery_pending"
     assert pending["type"] == "delivery_pending"
     assert pending["operation"] == "normal_final_reply"
     assert pending["target"] == "feishu:chat:oc_chat"
@@ -367,25 +434,34 @@ async def test_audited_uploaded_file_records_pending_and_sent_after_upload(tmp_p
     file_api.create = upload
     message_api.create = create
     file_path = tmp_path / "audit.pdf"
-    file_path.write_bytes(b"%PDF-1.4 test")
+    file_payload = b"%PDF-1.4 test"
+    file_path.write_bytes(file_payload)
 
     result = await adapter.send_document(
         chat_id="oc_chat",
         file_path=str(file_path),
-        metadata=_metadata("delivery-file"),
+        metadata=_metadata_with_attachment_provenance(
+            tmp_path,
+            file_payload,
+            delivery_id="delivery-file",
+            mime_class="file",
+        ),
     )
 
     assert result.success is True
     assert result.message_id == "om_file_msg"
     assert [kind for kind, _ in ordered] == [
+        "event",
         "file_upload",
         "event",
         "sdk_create",
         "event",
     ]
-    pending = ordered[1][1]
-    request = ordered[2][1]
-    sent = ordered[3][1]
+    preflight_pending = ordered[0][1]
+    pending = ordered[2][1]
+    request = ordered[3][1]
+    sent = ordered[4][1]
+    assert preflight_pending["type"] == "delivery_pending"
     assert pending["type"] == "delivery_pending"
     assert pending["operation"] == "normal_final_reply"
     assert pending["target"] == "feishu:chat:oc_chat"
@@ -403,13 +479,19 @@ async def test_audited_image_file_reply_records_reply_operation_after_upload(tmp
     events = _install_event_recorder(adapter)
     adapter._client.im.v1.image = image_api
     image_path = tmp_path / "reply.png"
-    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    image_payload = b"\x89PNG\r\n\x1a\n"
+    image_path.write_bytes(image_payload)
 
     result = await adapter.send_image_file(
         chat_id="oc_chat",
         image_path=str(image_path),
         reply_to="om_parent",
-        metadata=_metadata("delivery-image-reply"),
+        metadata=_metadata_with_attachment_provenance(
+            tmp_path,
+            image_payload,
+            delivery_id="delivery-image-reply",
+            mime_class="image",
+        ),
     )
 
     assert result.success is True
@@ -417,11 +499,12 @@ async def test_audited_image_file_reply_records_reply_operation_after_upload(tmp
     assert len(image_api.create_calls) == 1
     assert message_api.create_calls == []
     assert len(message_api.reply_calls) == 1
-    assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert _event_types(events) == ["delivery_pending", "delivery_pending", "delivery_sent"]
     assert events[0]["operation"] == "reply"
     assert events[1]["operation"] == "reply"
-    assert events[1]["delivery_id"] == "delivery-image-reply"
-    assert events[1]["message_id"] == "om_reply"
+    assert events[2]["operation"] == "reply"
+    assert events[2]["delivery_id"] == "delivery-image-reply"
+    assert events[2]["message_id"] == "om_reply"
 
 
 @pytest.mark.asyncio
@@ -431,13 +514,19 @@ async def test_audited_uploaded_file_reply_records_reply_operation_after_upload(
     events = _install_event_recorder(adapter)
     adapter._client.im.v1.file = file_api
     file_path = tmp_path / "reply.pdf"
-    file_path.write_bytes(b"%PDF-1.4 test")
+    file_payload = b"%PDF-1.4 test"
+    file_path.write_bytes(file_payload)
 
     result = await adapter.send_document(
         chat_id="oc_chat",
         file_path=str(file_path),
         reply_to="om_parent",
-        metadata=_metadata("delivery-file-reply"),
+        metadata=_metadata_with_attachment_provenance(
+            tmp_path,
+            file_payload,
+            delivery_id="delivery-file-reply",
+            mime_class="file",
+        ),
     )
 
     assert result.success is True
@@ -445,11 +534,12 @@ async def test_audited_uploaded_file_reply_records_reply_operation_after_upload(
     assert len(file_api.create_calls) == 1
     assert message_api.create_calls == []
     assert len(message_api.reply_calls) == 1
-    assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert _event_types(events) == ["delivery_pending", "delivery_pending", "delivery_sent"]
     assert events[0]["operation"] == "reply"
     assert events[1]["operation"] == "reply"
-    assert events[1]["delivery_id"] == "delivery-file-reply"
-    assert events[1]["message_id"] == "om_reply"
+    assert events[2]["operation"] == "reply"
+    assert events[2]["delivery_id"] == "delivery-file-reply"
+    assert events[2]["message_id"] == "om_reply"
 
 
 @pytest.mark.asyncio
@@ -459,17 +549,23 @@ async def test_audited_image_pending_apply_failure_aborts_message_send_after_upl
     events = _install_event_recorder(adapter, fail_event_types={"delivery_pending"})
     adapter._client.im.v1.image = image_api
     image_path = tmp_path / "audit.png"
-    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    image_payload = b"\x89PNG\r\n\x1a\n"
+    image_path.write_bytes(image_payload)
 
     result = await adapter.send_image_file(
         chat_id="oc_chat",
         image_path=str(image_path),
-        metadata=_metadata("delivery-image-pending-fail"),
+        metadata=_metadata_with_attachment_provenance(
+            tmp_path,
+            image_payload,
+            delivery_id="delivery-image-pending-fail",
+            mime_class="image",
+        ),
     )
 
     assert result.success is False
     assert result.error == "delivery_pending apply failed"
-    assert len(image_api.create_calls) == 1
+    assert len(image_api.create_calls) == 0
     assert message_api.create_calls == []
     assert message_api.reply_calls == []
     assert _event_types(events) == ["delivery_pending"]
@@ -483,18 +579,25 @@ async def test_audited_uploaded_file_sent_apply_failure_records_unknown_with_mes
     adapter._client.im.v1.file = file_api
     message_api.create_response = _FakeResponse(message_id="om_file_msg")
     file_path = tmp_path / "audit.pdf"
-    file_path.write_bytes(b"%PDF-1.4 test")
+    file_payload = b"%PDF-1.4 test"
+    file_path.write_bytes(file_payload)
 
     result = await adapter.send_document(
         chat_id="oc_chat",
         file_path=str(file_path),
-        metadata=_metadata("delivery-file-sent-fail"),
+        metadata=_metadata_with_attachment_provenance(
+            tmp_path,
+            file_payload,
+            delivery_id="delivery-file-sent-fail",
+            mime_class="file",
+        ),
     )
 
     assert result.success is False
     assert len(file_api.create_calls) == 1
     assert len(message_api.create_calls) == 1
     assert _event_types(events) == [
+        "delivery_pending",
         "delivery_pending",
         "delivery_sent",
         "unknown_delivery_state",

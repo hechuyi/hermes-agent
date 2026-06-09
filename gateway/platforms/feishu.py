@@ -3025,8 +3025,18 @@ class FeishuAdapter(BasePlatformAdapter):
         """Send a local image file to Feishu."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
+        preflight = await self._preflight_attachment_upload(
+            chat_id=chat_id,
+            file_path=image_path,
+            reply_to=reply_to,
+            metadata=metadata,
+            declared_mime_class="image",
+            upload_kind="image",
+        )
+        if preflight is not None:
+            return preflight
         if not os.path.exists(image_path):
-            return SendResult(success=False, error=f"Image file not found: {image_path}")
+            return SendResult(success=False, error="Image file not found")
 
         try:
             import io as _io
@@ -3071,7 +3081,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 default_message="image send failed",
             )
         except Exception as exc:
-            logger.error("[Feishu] Failed to send image %s: %s", image_path, exc, exc_info=True)
+            logger.error("[Feishu] Failed to send image attachment: %s", exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
@@ -7141,6 +7151,300 @@ class FeishuAdapter(BasePlatformAdapter):
         text_payload = {"text": content}
         return "text", json.dumps(text_payload, ensure_ascii=False)
 
+    @staticmethod
+    def _attachment_mime_class_for_message_type(message_type: str) -> str:
+        if message_type == "audio":
+            return "audio"
+        if message_type == "media":
+            return "media"
+        return "file"
+
+    async def _preflight_attachment_upload(
+        self,
+        *,
+        chat_id: str,
+        file_path: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        declared_mime_class: str,
+        upload_kind: str,
+    ) -> Optional[SendResult]:
+        del upload_kind
+        failure_class = self._attachment_provenance_failure(
+            file_path=file_path,
+            metadata=metadata,
+            declared_mime_class=declared_mime_class,
+        )
+        if failure_class is not None:
+            await self._record_attachment_upload_denial(
+                metadata=metadata,
+                failure_class=failure_class,
+                declared_mime_class=declared_mime_class,
+            )
+            return SendResult(success=False, error=failure_class)
+
+        if self._gateway_event_state_dir is None:
+            return None
+        operation, operation_error = self._send_delivery_operation(
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+        if operation_error is not None:
+            return SendResult(success=False, error=operation_error)
+        explicit_delivery_id = (metadata or {}).get("delivery_id")
+        if not isinstance(explicit_delivery_id, str) or not explicit_delivery_id:
+            await self._record_attachment_upload_denial(
+                metadata=metadata,
+                failure_class="feishu_attachment_provenance_mismatch",
+                declared_mime_class=declared_mime_class,
+            )
+            return SendResult(
+                success=False,
+                error="feishu_attachment_provenance_mismatch",
+            )
+        delivery_id = self._delivery_id_for(
+            operation,
+            metadata=metadata,
+            parts=[chat_id, reply_to or "", declared_mime_class],
+        )
+        pending_result = await self._apply_delivery_pending(
+            delivery_id=delivery_id,
+            operation=operation,
+            inbound_id=self._delivery_metadata(metadata, "inbound_id", reply_to or chat_id),
+            target=f"feishu:chat:{chat_id}",
+            session_id=self._delivery_metadata(metadata, "session_id", "session"),
+            correlation_id=self._delivery_metadata(metadata, "correlation_id", delivery_id),
+        )
+        replay = self._send_result_from_delivery_record_apply(
+            pending_result,
+            delivery_id=delivery_id,
+            inbound_id=self._delivery_metadata(metadata, "inbound_id", reply_to or chat_id),
+            target=f"feishu:chat:{chat_id}",
+            session_id=self._delivery_metadata(metadata, "session_id", "session"),
+            correlation_id=self._delivery_metadata(metadata, "correlation_id", delivery_id),
+        )
+        if replay is not None:
+            return replay
+        if not self._gateway_event_apply_succeeded(pending_result):
+            return SendResult(success=False, error="delivery_pending apply failed")
+        return None
+
+    def _attachment_provenance_failure(
+        self,
+        *,
+        file_path: str,
+        metadata: Optional[Dict[str, Any]],
+        declared_mime_class: str,
+    ) -> Optional[str]:
+        provenance_hash = (metadata or {}).get("feishu_attachment_provenance_hash")
+        if not self._is_sha256_ref_text(provenance_hash):
+            return "feishu_attachment_provenance_missing"
+        if self._gateway_event_state_dir is None:
+            return "feishu_attachment_provenance_missing"
+        reader = getattr(
+            gateway_event_ledger,
+            "feishu_attachment_provenance_record",
+            None,
+        )
+        if not callable(reader):
+            return "feishu_attachment_provenance_missing"
+        try:
+            record = reader(self._gateway_event_state_dir, str(provenance_hash))
+        except Exception:
+            return "feishu_attachment_provenance_mismatch"
+        if not isinstance(record, dict):
+            return "feishu_attachment_provenance_mismatch"
+        if not os.path.exists(file_path):
+            return None
+        try:
+            stat_result = os.stat(file_path)
+            with open(file_path, "rb") as handle:
+                content_hash = self._sha256_ref_bytes(handle.read())
+        except OSError:
+            return "feishu_attachment_provenance_mismatch"
+        expected_size_class = self._attachment_size_class(stat_result.st_size)
+        return self._attachment_provenance_record_failure(
+            record=record,
+            metadata=metadata,
+            declared_mime_class=declared_mime_class,
+            size_class=expected_size_class,
+            content_hash=content_hash,
+        )
+
+    def _attachment_provenance_record_failure(
+        self,
+        *,
+        record: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]],
+        declared_mime_class: str,
+        size_class: str,
+        content_hash: str,
+    ) -> Optional[str]:
+        route_evidence = self._attachment_route_evidence(metadata)
+        if route_evidence is None:
+            return "feishu_attachment_provenance_mismatch"
+        route_hash = route_evidence["route_partition_hash"]
+        route_snapshot_hash = route_evidence["route_snapshot_hash"]
+        contract_hash = route_evidence["contract_hash"]
+        required_matches = (
+            (record.get("declared_mime_class"), declared_mime_class),
+            (record.get("size_class"), size_class),
+            (record.get("route_partition_hash"), route_hash),
+            (record.get("route_snapshot_hash"), route_snapshot_hash),
+            (record.get("contract_hash"), contract_hash),
+            (
+                record.get("declared_mime_class"),
+                (metadata or {}).get("feishu_attachment_declared_mime_class"),
+            ),
+            (
+                record.get("size_class"),
+                (metadata or {}).get("feishu_attachment_size_class"),
+            ),
+        )
+        for actual, expected in required_matches:
+            if actual != expected:
+                return "feishu_attachment_provenance_mismatch"
+        if record.get("sensitivity_state") != "current":
+            return "feishu_attachment_provenance_mismatch"
+        if record.get("retention_state") != "current":
+            return "feishu_attachment_provenance_mismatch"
+        if record.get("redaction_state") not in {"redacted", "not_required"}:
+            return "feishu_attachment_provenance_mismatch"
+        if record.get("provenance_kind") == "generated":
+            return self._generated_attachment_provenance_failure(
+                record=record,
+                metadata=metadata,
+                content_hash=content_hash,
+            )
+        if record.get("provenance_kind") == "inbound_user_attachment":
+            if not self._is_sha256_ref_text(record.get("source_event_hash")):
+                return "feishu_attachment_provenance_mismatch"
+            if not self._is_sha256_ref_text(record.get("file_key_hash")):
+                return "feishu_attachment_provenance_mismatch"
+            if record.get("retention_class") not in {
+                "ephemeral",
+                "session",
+                "retained",
+            }:
+                return "feishu_attachment_provenance_mismatch"
+            return None
+        return "feishu_attachment_provenance_mismatch"
+
+    def _attachment_route_evidence(
+        self,
+        metadata: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, str]]:
+        values = metadata or {}
+        admission = values.get("feishu_current_admission")
+        if isinstance(admission, dict):
+            route_partition_hash = admission.get("route_partition_hash")
+            route_snapshot_hash = admission.get("route_snapshot_hash", route_partition_hash)
+            contract_hash = admission.get("contract_hash")
+        else:
+            route_partition_hash = values.get("feishu_attachment_route_partition_hash")
+            route_snapshot_hash = values.get(
+                "feishu_attachment_route_snapshot_hash",
+                route_partition_hash,
+            )
+            contract_hash = values.get("feishu_attachment_contract_hash")
+        if (
+            not self._is_sha256_ref_text(route_partition_hash)
+            or not self._is_sha256_ref_text(route_snapshot_hash)
+            or not self._is_sha256_ref_text(contract_hash)
+        ):
+            return None
+        return {
+            "route_partition_hash": str(route_partition_hash),
+            "route_snapshot_hash": str(route_snapshot_hash),
+            "contract_hash": str(contract_hash),
+        }
+
+    def _generated_attachment_provenance_failure(
+        self,
+        *,
+        record: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]],
+        content_hash: str,
+    ) -> Optional[str]:
+        if record.get("safe_output_root_state", "current") != "current":
+            return "feishu_attachment_provenance_mismatch"
+        if record.get("source_grant_state", "current") != "current":
+            return "feishu_attachment_provenance_mismatch"
+        if record.get("generator_state") != "complete":
+            return "feishu_attachment_provenance_mismatch"
+        if record.get("retention_policy") not in {"ephemeral", "session", "retained"}:
+            return "feishu_attachment_provenance_mismatch"
+        if record.get("content_hash") != content_hash:
+            return "feishu_attachment_provenance_mismatch"
+        if record.get("content_hash") != (metadata or {}).get("feishu_attachment_content_hash"):
+            return "feishu_attachment_provenance_mismatch"
+        if record.get("safe_output_root_proof_hash") != (metadata or {}).get(
+            "feishu_attachment_safe_output_root_proof_hash"
+        ):
+            return "feishu_attachment_provenance_mismatch"
+        if record.get("producing_tool_action_hash") != (metadata or {}).get(
+            "feishu_attachment_producing_tool_action_hash"
+        ):
+            return "feishu_attachment_provenance_mismatch"
+        source_grants = record.get("source_grant_handles")
+        metadata_grants = (metadata or {}).get("feishu_attachment_source_grant_handles")
+        if isinstance(metadata_grants, tuple):
+            metadata_grants = list(metadata_grants)
+        if not isinstance(source_grants, list) or not source_grants:
+            return "feishu_attachment_provenance_mismatch"
+        if source_grants != metadata_grants:
+            return "feishu_attachment_provenance_mismatch"
+        return None
+
+    @staticmethod
+    def _attachment_size_class(size: int) -> str:
+        if size <= 10 * 1024 * 1024:
+            return "small"
+        if size <= 100 * 1024 * 1024:
+            return "medium"
+        return "large"
+
+    @staticmethod
+    def _sha256_ref_bytes(value: bytes) -> str:
+        return f"sha256:{hashlib.sha256(value).hexdigest()}"
+
+    async def _record_attachment_upload_denial(
+        self,
+        *,
+        metadata: Optional[Dict[str, Any]],
+        failure_class: str,
+        declared_mime_class: str,
+    ) -> None:
+        if self._gateway_event_state_dir is None:
+            return
+        route_evidence = self._attachment_route_evidence(metadata) or {}
+        event = {
+            "type": "feishu_attachment_upload_denied",
+            "provenance_hash": (
+                metadata or {}
+            ).get("feishu_attachment_provenance_hash")
+            if self._is_sha256_ref_text(
+                (metadata or {}).get("feishu_attachment_provenance_hash")
+            )
+            else self._delivery_ref_hash("feishu_attachment_provenance", "missing"),
+            "failure_class": self._stable_failure_class(failure_class),
+            "route_partition_hash": route_evidence.get("route_partition_hash")
+            if self._is_sha256_ref_text(route_evidence.get("route_partition_hash"))
+            else self._delivery_ref_hash("feishu_route_partition", "missing"),
+            "contract_hash": route_evidence.get("contract_hash")
+            if self._is_sha256_ref_text(route_evidence.get("contract_hash"))
+            else self._delivery_ref_hash("feishu_contract", "missing"),
+            "declared_mime_class": declared_mime_class
+            if declared_mime_class in {"image", "file", "audio", "media", "document"}
+            else "file",
+            "size_class": (metadata or {}).get("feishu_attachment_size_class")
+            if (metadata or {}).get("feishu_attachment_size_class")
+            in {"small", "medium", "large"}
+            else "small",
+            "timestamp": int(time.time()),
+        }
+        await self._apply_gateway_event(event)
+
     async def _send_uploaded_file_message(
         self,
         *,
@@ -7154,8 +7458,20 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> SendResult:
         if not self._client:
             return SendResult(success=False, error="Not connected")
+        preflight = await self._preflight_attachment_upload(
+            chat_id=chat_id,
+            file_path=file_path,
+            reply_to=reply_to,
+            metadata=metadata,
+            declared_mime_class=self._attachment_mime_class_for_message_type(
+                outbound_message_type
+            ),
+            upload_kind="file",
+        )
+        if preflight is not None:
+            return preflight
         if not os.path.exists(file_path):
-            return SendResult(success=False, error=f"File not found: {file_path}")
+            return SendResult(success=False, error="File not found")
 
         display_name = file_name or os.path.basename(file_path)
         upload_file_type, resolved_message_type = self._resolve_outbound_file_routing(
@@ -7202,7 +7518,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 default_message="file send failed",
             )
         except Exception as exc:
-            logger.error("[Feishu] Failed to send file %s: %s", file_path, exc, exc_info=True)
+            logger.error("[Feishu] Failed to send file attachment: %s", exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
 
     async def _send_audited_or_legacy_message(

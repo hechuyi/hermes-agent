@@ -339,7 +339,7 @@ def test_attachment_parts_require_source_class_and_provenance_hash(part_type):
     )
     _assert_raises_failure(
         lambda: _part(part_type, source_class="generated"),
-        "feishu_render_attachment_provenance_missing",
+        "feishu_attachment_provenance_missing",
     )
     _assert_raises_failure(
         lambda: _part(

@@ -327,7 +327,7 @@ def _validate_attachment_part(part: RenderPlanPart) -> tuple[bool, str | None]:
     if part.source_class not in _ATTACHMENT_SOURCE_CLASSES:
         return False, "feishu_render_attachment_source_invalid"
     if part.provenance_hash is None:
-        return False, "feishu_render_attachment_provenance_missing"
+        return False, "feishu_attachment_provenance_missing"
     if not _is_hash(part.provenance_hash):
         return False, "feishu_render_attachment_provenance_invalid"
     return True, None

@@ -94,6 +94,13 @@ FEISHU_BROKER_ACTION_LIFECYCLE_EVENT_TYPES: frozenset[str] = frozenset(
     }
 )
 
+FEISHU_ATTACHMENT_PROVENANCE_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "feishu_attachment_provenance_recorded",
+        "feishu_attachment_upload_denied",
+    }
+)
+
 PREFLIGHT_CHECK_NAMES: tuple[str, ...] = (
     "state_dir_writable",
     "feishu_inbound",
@@ -198,6 +205,56 @@ _FEISHU_BROKER_ACTION_ATOM_FIELDS = frozenset(
 _FEISHU_BROKER_ACTION_COMMON_FIELDS = frozenset(
     {"type", "timestamp", "expires_at", "failure_class"}
 )
+_FEISHU_ATTACHMENT_HASH_FIELDS = frozenset(
+    {
+        "provenance_hash",
+        "source_event_hash",
+        "file_key_hash",
+        "route_partition_hash",
+        "route_snapshot_hash",
+        "contract_hash",
+        "safe_output_root_proof_hash",
+        "producing_tool_action_hash",
+        "content_hash",
+        "delivery_plan_hash",
+    }
+)
+_FEISHU_ATTACHMENT_ATOM_FIELDS = frozenset(
+    {
+        "provenance_kind",
+        "declared_mime_class",
+        "size_class",
+        "retention_class",
+        "retention_state",
+        "sensitivity_classification",
+        "sensitivity_state",
+        "redaction_state",
+        "retention_policy",
+        "generator_state",
+        "source_grant_state",
+        "safe_output_root_state",
+    }
+)
+_FEISHU_ATTACHMENT_COMMON_FIELDS = frozenset(
+    {"type", "timestamp", "failure_class", "source_grant_handles"}
+)
+_FEISHU_ATTACHMENT_PROVENANCE_KINDS = frozenset(
+    {"inbound_user_attachment", "generated"}
+)
+_FEISHU_ATTACHMENT_MIME_CLASSES = frozenset(
+    {"image", "file", "audio", "media", "document"}
+)
+_FEISHU_ATTACHMENT_SIZE_CLASSES = frozenset({"small", "medium", "large"})
+_FEISHU_ATTACHMENT_RETENTION_CLASSES = frozenset({"ephemeral", "session", "retained"})
+_FEISHU_ATTACHMENT_STATES = frozenset({"current", "missing", "stale"})
+_FEISHU_ATTACHMENT_REDACTION_STATES = frozenset({"redacted", "not_required"})
+_FEISHU_ATTACHMENT_SENSITIVITY_CLASSES = frozenset(
+    {"public", "internal", "confidential", "restricted"}
+)
+_FEISHU_ATTACHMENT_RETENTION_POLICIES = frozenset(
+    {"ephemeral", "session", "retained"}
+)
+_FEISHU_ATTACHMENT_GENERATOR_STATES = frozenset({"complete"})
 _FEISHU_AUDIT_ATOM_FIELDS = frozenset(
     {
         "surface",
@@ -301,6 +358,9 @@ def validate_gateway_event(event: Mapping[str, Any]) -> str:
     if required is None and event_type in FEISHU_BROKER_ACTION_LIFECYCLE_EVENT_TYPES:
         _validate_feishu_broker_action_lifecycle_event(event_type, event)
         return event_type
+    if required is None and event_type in FEISHU_ATTACHMENT_PROVENANCE_EVENT_TYPES:
+        _validate_feishu_attachment_provenance_event(event_type, event)
+        return event_type
     if required is None:
         raise GatewayEventContractError(
             "unsupported_gateway_event_type",
@@ -377,6 +437,10 @@ def validate_gateway_action(action: Mapping[str, Any]) -> dict[str, Any]:
         return _validate_feishu_audit_event_record_action(action)
     if action_type == "feishu_broker_action_record":
         return _validate_feishu_broker_action_record_action(action)
+    if action_type == "feishu_attachment_provenance_record":
+        return _validate_feishu_attachment_provenance_record_action(action)
+    if action_type == "feishu_attachment_denial_record":
+        return _validate_feishu_attachment_denial_record_action(action)
     raise ValueError("unsupported gateway action type")
 
 
@@ -749,6 +813,63 @@ def _validate_feishu_broker_action_record(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
+def _validate_feishu_attachment_provenance_record_action(
+    action: Mapping[str, Any]
+) -> dict[str, Any]:
+    if set(action) != {"type", "record"}:
+        raise ValueError("invalid Feishu attachment provenance action keys")
+    record = _validate_feishu_attachment_provenance_record(action.get("record"))
+    return {"type": "feishu_attachment_provenance_record", "record": record}
+
+
+def _validate_feishu_attachment_denial_record_action(
+    action: Mapping[str, Any]
+) -> dict[str, Any]:
+    if set(action) != {"type", "record"}:
+        raise ValueError("invalid Feishu attachment denial action keys")
+    record = action.get("record")
+    if not isinstance(record, Mapping):
+        raise ValueError("invalid Feishu attachment denial record")
+    if set(record) != {
+        "provenance_hash",
+        "failure_class",
+        "route_partition_hash",
+        "contract_hash",
+        "declared_mime_class",
+        "size_class",
+        "timestamp",
+    }:
+        raise ValueError("invalid Feishu attachment denial record keys")
+    _require_sanitized_hash_value(record.get("provenance_hash"), "provenance_hash")
+    require_failure_class(record.get("failure_class"))
+    _require_sanitized_hash_value(
+        record.get("route_partition_hash"), "route_partition_hash"
+    )
+    _require_sanitized_hash_value(record.get("contract_hash"), "contract_hash")
+    if record.get("declared_mime_class") not in _FEISHU_ATTACHMENT_MIME_CLASSES:
+        raise ValueError("invalid Feishu attachment denial MIME class")
+    if record.get("size_class") not in _FEISHU_ATTACHMENT_SIZE_CLASSES:
+        raise ValueError("invalid Feishu attachment denial size class")
+    if not _is_number(record.get("timestamp")):
+        raise ValueError("invalid Feishu attachment denial timestamp")
+    return {"type": "feishu_attachment_denial_record", "record": dict(record)}
+
+
+def _validate_feishu_attachment_provenance_record(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError("invalid Feishu attachment provenance record")
+    event_type = event_type_from(value)
+    if event_type != "feishu_attachment_provenance_recorded":
+        raise ValueError("invalid Feishu attachment provenance record type")
+    try:
+        _validate_feishu_attachment_provenance_event(event_type, value)
+    except GatewayEventContractError as exc:
+        raise ValueError("invalid Feishu attachment provenance record") from exc
+    if "provenance_hash" not in value:
+        raise ValueError("missing Feishu attachment provenance hash")
+    return dict(value)
+
+
 def _validate_stale_pending_alert(action: Mapping[str, Any]) -> dict[str, Any]:
     if set(action) != {"type", "alert_required", "resend_permitted", "count", "records"}:
         raise ValueError("invalid stale pending action keys")
@@ -880,6 +1001,162 @@ def _validate_feishu_audit_event_record_action(action: Mapping[str, Any]) -> dic
     except GatewayEventContractError as exc:
         raise ValueError("invalid feishu audit record") from exc
     return {"type": "feishu_audit_event_record", "record": dict(record)}
+
+
+def _validate_feishu_attachment_provenance_event(
+    event_type: str, event: Mapping[str, Any]
+) -> None:
+    allowed_fields = (
+        _FEISHU_ATTACHMENT_COMMON_FIELDS
+        | _FEISHU_ATTACHMENT_HASH_FIELDS
+        | _FEISHU_ATTACHMENT_ATOM_FIELDS
+    )
+    for field, value in event.items():
+        if not isinstance(field, str) or field not in allowed_fields:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "feishu attachment provenance event contains unsupported field",
+            )
+        if _is_feishu_audit_raw_field(field):
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "feishu attachment provenance event contains raw field",
+            )
+        if field in _FEISHU_ATTACHMENT_HASH_FIELDS:
+            _require_sanitized_hash_value(value, field)
+
+    _require_number(event, "timestamp")
+    if event_type == "feishu_attachment_upload_denied":
+        for field in (
+            "provenance_hash",
+            "failure_class",
+            "route_partition_hash",
+            "contract_hash",
+            "declared_mime_class",
+            "size_class",
+        ):
+            if field not in event:
+                raise GatewayEventContractError(
+                    "invalid_gateway_event_contract",
+                    f"missing required field: {field}",
+                )
+        require_failure_class(event.get("failure_class"))
+        if event.get("declared_mime_class") not in _FEISHU_ATTACHMENT_MIME_CLASSES:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "invalid Feishu attachment MIME class",
+            )
+        if event.get("size_class") not in _FEISHU_ATTACHMENT_SIZE_CLASSES:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "invalid Feishu attachment size class",
+            )
+        return
+
+    if event.get("provenance_kind") not in _FEISHU_ATTACHMENT_PROVENANCE_KINDS:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu attachment provenance kind",
+        )
+    for field in (
+        "declared_mime_class",
+        "size_class",
+        "route_partition_hash",
+        "route_snapshot_hash",
+        "contract_hash",
+        "sensitivity_classification",
+        "sensitivity_state",
+        "redaction_state",
+        "retention_state",
+    ):
+        if field not in event:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                f"missing required field: {field}",
+            )
+    if event.get("declared_mime_class") not in _FEISHU_ATTACHMENT_MIME_CLASSES:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu attachment MIME class",
+        )
+    if event.get("size_class") not in _FEISHU_ATTACHMENT_SIZE_CLASSES:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu attachment size class",
+        )
+    if event.get("retention_state") not in _FEISHU_ATTACHMENT_STATES:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu attachment retention state",
+        )
+    if event.get("sensitivity_state") not in _FEISHU_ATTACHMENT_STATES:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu attachment sensitivity state",
+        )
+    if (
+        event.get("sensitivity_classification")
+        not in _FEISHU_ATTACHMENT_SENSITIVITY_CLASSES
+    ):
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu attachment sensitivity classification",
+        )
+    if event.get("redaction_state") not in _FEISHU_ATTACHMENT_REDACTION_STATES:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu attachment redaction state",
+        )
+
+    if event.get("provenance_kind") == "inbound_user_attachment":
+        for field in ("source_event_hash", "file_key_hash", "retention_class"):
+            if field not in event:
+                raise GatewayEventContractError(
+                    "invalid_gateway_event_contract",
+                    f"missing required field: {field}",
+                )
+        if event.get("retention_class") not in _FEISHU_ATTACHMENT_RETENTION_CLASSES:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "invalid Feishu attachment retention class",
+            )
+        return
+
+    for field in (
+        "safe_output_root_proof_hash",
+        "producing_tool_action_hash",
+        "content_hash",
+        "delivery_plan_hash",
+        "retention_policy",
+        "generator_state",
+        "source_grant_handles",
+    ):
+        if field not in event:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                f"missing required field: {field}",
+            )
+    if "safe_output_root_state" in event and event.get("safe_output_root_state") not in _FEISHU_ATTACHMENT_STATES:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu attachment safe-root state",
+        )
+    if "source_grant_state" in event and event.get("source_grant_state") not in _FEISHU_ATTACHMENT_STATES:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu attachment source grant state",
+        )
+    if event.get("retention_policy") not in _FEISHU_ATTACHMENT_RETENTION_POLICIES:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu attachment retention policy",
+        )
+    if event.get("generator_state") not in _FEISHU_ATTACHMENT_GENERATOR_STATES:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "invalid Feishu attachment generator state",
+        )
+    _require_broker_grant_handle_list(event.get("source_grant_handles"))
 
 
 def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> None:
@@ -1047,6 +1324,18 @@ def _require_broker_grant_handle(value: Any) -> str:
             "grant_handle is missing or invalid",
         )
     return value
+
+
+def _require_broker_grant_handle_list(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            "source_grant_handles is missing or invalid",
+        )
+    handles = []
+    for item in value:
+        handles.append(_require_broker_grant_handle(item))
+    return tuple(handles)
 
 
 def _require_safe_audit_atom(value: Any, field: str) -> str:

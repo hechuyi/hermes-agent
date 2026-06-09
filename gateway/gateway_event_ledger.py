@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from gateway.gateway_event_contract import (
+    FEISHU_ATTACHMENT_PROVENANCE_EVENT_TYPES,
     FEISHU_AUDIT_EVENT_TYPES,
     FEISHU_BROKER_ACTION_LIFECYCLE_EVENT_TYPES,
     FEISHU_DELIVERY_LIFECYCLE_EVENT_TYPES,
@@ -40,12 +41,14 @@ _STATE_DICT_SECTIONS: tuple[str, ...] = (
     "session_routes",
     "feishu_broker_actions",
     "feishu_broker_action_idempotency_index",
+    "feishu_attachment_provenance",
 )
 _STATE_LIST_SECTIONS: tuple[str, ...] = (
     "compression_rejections",
     "feishu_audit_events",
     "feishu_delivery_lifecycle",
     "feishu_broker_action_lifecycle",
+    "feishu_attachment_denials",
 )
 _IS_WINDOWS = os.name == "nt"
 _LOCKS_GUARD = threading.Lock()
@@ -194,6 +197,21 @@ def feishu_broker_action_record(
     return dict(record) if isinstance(record, Mapping) else None
 
 
+def feishu_attachment_provenance_record(
+    state_dir: str | Path,
+    provenance_hash: str,
+    *,
+    timeout_seconds: int | float = 10,
+) -> dict[str, Any] | None:
+    """Return one sanitized Feishu attachment provenance projection."""
+
+    lock_timeout = _lock_timeout_seconds(timeout_seconds)
+    with _state_lock(state_dir, lock_timeout):
+        state = _read_state(_state_path(state_dir))
+    record = state["feishu_attachment_provenance"].get(provenance_hash)
+    return dict(record) if isinstance(record, Mapping) else None
+
+
 def _apply_validated_event(
     event_type: str, event: Mapping[str, Any], state: dict[str, Any]
 ) -> dict[str, Any]:
@@ -221,6 +239,8 @@ def _apply_validated_event(
         return _apply_feishu_delivery_lifecycle_event(event, state)
     if event_type in FEISHU_BROKER_ACTION_LIFECYCLE_EVENT_TYPES:
         return _apply_feishu_broker_action_lifecycle_event(event, state)
+    if event_type in FEISHU_ATTACHMENT_PROVENANCE_EVENT_TYPES:
+        return _apply_feishu_attachment_provenance_event(event, state)
     raise GatewayEventContractError(
         "unsupported_gateway_event_type", "unsupported gateway event type"
     )
@@ -664,6 +684,39 @@ def _apply_feishu_broker_action_lifecycle_event(
     )
 
 
+def _apply_feishu_attachment_provenance_event(
+    event: Mapping[str, Any], state: dict[str, Any]
+) -> dict[str, Any]:
+    event_type = str(event["type"])
+    if event_type == "feishu_attachment_upload_denied":
+        record = {
+            "provenance_hash": str(event["provenance_hash"]),
+            "failure_class": str(event["failure_class"]),
+            "route_partition_hash": str(event["route_partition_hash"]),
+            "contract_hash": str(event["contract_hash"]),
+            "declared_mime_class": str(event["declared_mime_class"]),
+            "size_class": str(event["size_class"]),
+            "timestamp": event["timestamp"],
+        }
+        state["feishu_attachment_denials"].append(record)
+        return {"type": "feishu_attachment_denial_record", "record": record}
+
+    record = dict(event)
+    provenance_hash = _feishu_attachment_provenance_hash(record)
+    record["provenance_hash"] = provenance_hash
+    provenance = state["feishu_attachment_provenance"]
+    existing = provenance.get(provenance_hash)
+    if existing is not None:
+        if existing != record:
+            raise GatewayEventContractError(
+                "feishu_attachment_provenance_conflict",
+                "Feishu attachment provenance hash conflict",
+            )
+        return {"type": "feishu_attachment_provenance_record", "record": dict(existing)}
+    provenance[provenance_hash] = record
+    return {"type": "feishu_attachment_provenance_record", "record": record}
+
+
 def _apply_feishu_broker_action_created(
     event: Mapping[str, Any], state: dict[str, Any]
 ) -> dict[str, Any]:
@@ -884,6 +937,8 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     }
     required_keys.discard("feishu_broker_actions")
     required_keys.discard("feishu_broker_action_idempotency_index")
+    required_keys.discard("feishu_attachment_provenance")
+    required_keys.discard("feishu_attachment_denials")
     if not required_keys.issubset(raw):
         raise _state_schema_error()
     for key in _STATE_DICT_SECTIONS:
@@ -895,9 +950,8 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     if not isinstance(compression_rejections, list):
         raise _state_schema_error()
     state["compression_rejections"] = compression_rejections
-    # `feishu_audit_events` is the only v1-compatible additive section. Missing
-    # legacy ledgers are deterministically backfilled; all other missing
-    # sections remain fail-closed through the required_keys check above.
+    # Additive Feishu audit/provenance sections are deterministically
+    # backfilled; non-additive legacy sections remain fail-closed above.
     feishu_audit_events = raw.get("feishu_audit_events", [])
     if not isinstance(feishu_audit_events, list):
         raise _state_schema_error()
@@ -910,6 +964,14 @@ def _read_state(state_path: Path) -> dict[str, Any]:
     if not isinstance(feishu_broker_action_lifecycle, list):
         raise _state_schema_error()
     state["feishu_broker_action_lifecycle"] = feishu_broker_action_lifecycle
+    feishu_attachment_provenance = raw.get("feishu_attachment_provenance", {})
+    if not isinstance(feishu_attachment_provenance, dict):
+        raise _state_schema_error()
+    state["feishu_attachment_provenance"] = feishu_attachment_provenance
+    feishu_attachment_denials = raw.get("feishu_attachment_denials", [])
+    if not isinstance(feishu_attachment_denials, list):
+        raise _state_schema_error()
+    state["feishu_attachment_denials"] = feishu_attachment_denials
     _validate_persisted_inbound_records(state["inbounds"])
     _validate_persisted_delivery_records(state["deliveries"])
     _validate_persisted_session_routes(state["session_routes"])
@@ -922,6 +984,10 @@ def _read_state(state_path: Path) -> dict[str, Any]:
         state["feishu_broker_actions"],
         state["feishu_broker_action_lifecycle"],
     )
+    _validate_persisted_feishu_attachment_provenance(
+        state["feishu_attachment_provenance"]
+    )
+    _validate_persisted_feishu_attachment_denials(state["feishu_attachment_denials"])
     _reconcile_persisted_indexes(state)
     return state
 
@@ -968,6 +1034,8 @@ def _empty_state() -> dict[str, Any]:
         "feishu_broker_actions": {},
         "feishu_broker_action_idempotency_index": {},
         "feishu_broker_action_lifecycle": [],
+        "feishu_attachment_provenance": {},
+        "feishu_attachment_denials": [],
     }
 
 
@@ -1092,6 +1160,35 @@ def _validate_persisted_feishu_broker_actions(
         try:
             validate_gateway_event(event)
         except GatewayEventContractError as exc:
+            raise _state_schema_error() from exc
+
+
+def _validate_persisted_feishu_attachment_provenance(
+    provenance: Mapping[str, Any]
+) -> None:
+    for provenance_hash, record in provenance.items():
+        if not isinstance(provenance_hash, str):
+            raise _state_schema_error()
+        try:
+            validated = validate_gateway_action(
+                {"type": "feishu_attachment_provenance_record", "record": record}
+            )
+        except (GatewayEventContractError, ValueError) as exc:
+            raise _state_schema_error() from exc
+        if validated["record"].get("provenance_hash") != provenance_hash:
+            raise _state_schema_error()
+        expected_hash = _feishu_attachment_provenance_hash(validated["record"])
+        if expected_hash != provenance_hash:
+            raise _state_schema_error()
+
+
+def _validate_persisted_feishu_attachment_denials(denials: list[Any]) -> None:
+    for record in denials:
+        try:
+            validate_gateway_action(
+                {"type": "feishu_attachment_denial_record", "record": record}
+            )
+        except (GatewayEventContractError, ValueError) as exc:
             raise _state_schema_error() from exc
 
 
@@ -1243,6 +1340,21 @@ def _fnv1a64(value: str) -> str:
 
 def _sha256_ref(value: str) -> str:
     return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _feishu_attachment_provenance_hash(record: Mapping[str, Any]) -> str:
+    payload = {
+        key: record[key]
+        for key in sorted(record)
+        if key not in {"provenance_hash", "timestamp"}
+    }
+    material = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return _sha256_ref(f"feishu_attachment_provenance\x1f{material}")
 
 
 def _is_sha256_ref(value: str) -> bool:
