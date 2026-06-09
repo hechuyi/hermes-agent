@@ -209,6 +209,8 @@ def _apply_feishu_inbound(event: Mapping[str, Any], state: dict[str, Any]) -> di
             }
         )
     inbounds = state["inbounds"]
+    if current_key is not None:
+        _prove_persisted_current_inbound_keys(inbounds)
     duplicate = key in inbounds
     if duplicate:
         record = dict(inbounds[key])
@@ -276,6 +278,65 @@ def _feishu_inbound_requires_current_evidence(event: Mapping[str, Any]) -> bool:
         "current_admitted",
         "current_required",
     }
+
+
+def _prove_persisted_current_inbound_keys(inbounds: Mapping[str, Any]) -> None:
+    for persisted_key, record in inbounds.items():
+        if not isinstance(record, Mapping):
+            raise _GatewayEventPersistedFailure(
+                "feishu_inbound_idempotency_unknown",
+                "feishu inbound persisted evidence invalid",
+            )
+        expected_key = _feishu_current_inbound_key_from_record(record)
+        if expected_key is None:
+            continue
+        if not isinstance(persisted_key, str) or persisted_key != expected_key:
+            raise _GatewayEventPersistedFailure(
+                "feishu_inbound_idempotency_unknown",
+                "feishu inbound persisted key mismatch",
+            )
+
+
+def _feishu_current_inbound_key_from_record(record: Mapping[str, Any]) -> str | None:
+    current_fields = {
+        "canonical_event_ref",
+        "route_partition_hash",
+        "contract_hash",
+        "transport_kind",
+    }
+    present = {field for field in current_fields if field in record}
+    if not present:
+        return None
+    if present != current_fields:
+        raise _GatewayEventPersistedFailure(
+            "feishu_inbound_idempotency_unknown",
+            "feishu inbound persisted evidence incomplete",
+        )
+    canonical_event_ref = record.get("canonical_event_ref")
+    route_partition_hash = record.get("route_partition_hash")
+    contract_hash = record.get("contract_hash")
+    transport_kind = record.get("transport_kind")
+    if (
+        not isinstance(canonical_event_ref, str)
+        or not _is_sha256_ref(canonical_event_ref)
+        or not isinstance(route_partition_hash, str)
+        or not _is_sha256_ref(route_partition_hash)
+        or not isinstance(contract_hash, str)
+        or not _is_sha256_ref(contract_hash)
+        or transport_kind not in {"webhook", "websocket", "dm", "group", "thread"}
+    ):
+        raise _GatewayEventPersistedFailure(
+            "feishu_inbound_idempotency_unknown",
+            "feishu inbound persisted evidence invalid",
+        )
+    key_material = "\x1f".join(
+        (
+            canonical_event_ref,
+            route_partition_hash,
+            contract_hash,
+        )
+    )
+    return _sha256_ref(key_material)
 
 
 def _apply_delivery_pending(event: Mapping[str, Any], state: dict[str, Any]) -> dict[str, Any]:

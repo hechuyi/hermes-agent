@@ -4128,6 +4128,14 @@ class FeishuAdapter(BasePlatformAdapter):
             if contract.thread_anchor_ref is not None
             else None
         )
+        canonical_event_ref = self._canonical_event_ref(event)
+        if not canonical_event_ref:
+            return self._current_conversation_denied(
+                "feishu_inbound_idempotency_unknown",
+                event_identity_state="missing",
+                transport_kind=transport,
+            )
+
         record = {
             "contract_hash": contract.contract_hash,
             "route_partition_key": contract.route_partition_key,
@@ -4137,7 +4145,7 @@ class FeishuAdapter(BasePlatformAdapter):
             "transport_kind": transport,
             "reply_anchor_ref": reply_anchor_ref.value_hash,
             "thread_anchor_ref": thread_anchor,
-            "canonical_event_ref": self._canonical_event_ref(event),
+            "canonical_event_ref": canonical_event_ref,
         }
         if transport == "thread":
             explicit_reply_anchor_ref = self._explicit_thread_reply_anchor_ref(event)
@@ -4300,7 +4308,7 @@ class FeishuAdapter(BasePlatformAdapter):
     def _canonical_event_ref(self, event: MessageEvent) -> str:
         event_id = self._feishu_event_id(getattr(event, "raw_message", None))
         if not event_id:
-            event_id = str(getattr(event, "message_id", "") or "")
+            return ""
         ref = feishu_hashed_ref("feishu_event", event_id)
         return ref.value_hash if ref is not None else ""
 

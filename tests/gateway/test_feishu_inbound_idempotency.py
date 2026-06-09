@@ -129,6 +129,11 @@ def _ledger_state(tmp_path) -> dict:
     return json.loads(ledger_path.read_text(encoding="utf-8"))
 
 
+def _write_ledger_state(tmp_path, state: dict) -> None:
+    ledger_path = tmp_path / LEDGER_FILENAME
+    ledger_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+
 async def _flush_all_batches(adapter: FeishuAdapter) -> None:
     for key in list(adapter._pending_text_batches):
         await adapter._flush_text_batch_now(key)
@@ -313,6 +318,30 @@ async def test_legacy_non_brokered_callback_replay_fails_closed_without_dispatch
     assert _ledger_state(tmp_path) == before
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message_id",
+    ["om_missing_event_identity_fake", "msg_missing_event_identity_fake"],
+)
+async def test_current_event_missing_platform_event_identity_fails_closed_without_dispatch_or_state(
+    tmp_path,
+    message_id: str,
+):
+    adapter = _adapter(tmp_path)
+    data = _raw_message_data(event_id="", message_id=message_id)
+    before = _ledger_state(tmp_path)
+
+    await adapter._handle_message_event_data(data, transport_kind="websocket")
+    await _flush_all_batches(adapter)
+
+    adapter.handle_message.assert_not_awaited()
+    assert len(adapter._pending_text_batches) == 0
+    assert len(adapter._pending_text_batch_tasks) == 0
+    assert len(adapter._pending_media_batches) == 0
+    assert len(adapter._pending_media_batch_tasks) == 0
+    assert _ledger_state(tmp_path) == before
+
+
 def test_idempotency_unknown_fails_closed_without_persistent_success_state(tmp_path):
     event = _inbound_event(canonical_event_id="", message_id="om_unknown_fake")
     event["canonical_event_ref"] = ""
@@ -342,6 +371,33 @@ def test_current_inbound_without_any_idempotency_evidence_fails_closed(tmp_path)
     assert result.ok is False
     assert result.failure_class == "feishu_inbound_idempotency_unknown"
     assert _ledger_state(tmp_path) == before
+
+
+def test_current_inbound_persisted_equivalent_record_under_wrong_key_fails_closed_without_second_inbound(
+    tmp_path,
+):
+    event = _inbound_event(
+        canonical_event_id="evt_wrong_key_fake",
+        message_id="om_wrong_key_fake",
+    )
+    first = apply_gateway_event(event, tmp_path)
+    assert first.ok is True
+    state = _ledger_state(tmp_path)
+    assert len(state["inbounds"]) == 1
+    correct_key, record = next(iter(state["inbounds"].items()))
+    wrong_key = (
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    )
+    assert wrong_key != correct_key
+    state["inbounds"] = {wrong_key: record}
+    _write_ledger_state(tmp_path, state)
+
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "feishu_inbound_idempotency_unknown"
+    state = _ledger_state(tmp_path)
+    assert list(state["inbounds"]) == [wrong_key]
 
 
 @pytest.mark.asyncio
