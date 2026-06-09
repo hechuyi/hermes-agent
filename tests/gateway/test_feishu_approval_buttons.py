@@ -1919,7 +1919,7 @@ class TestCardActionCallbackResponse:
             failure_class="feishu_legacy_card_action_requires_broker",
         )
 
-    def test_generic_card_entrypoint_with_broker_context_submits(
+    def test_generic_card_entrypoint_with_broker_context_fails_closed(
         self,
         tmp_path,
         _patch_callback_card_types,
@@ -1927,7 +1927,9 @@ class TestCardActionCallbackResponse:
         adapter = _make_audited_adapter(tmp_path)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
+        events = []
         submit_calls = []
+        adapter._apply_feishu_audit_event_sync = lambda event: events.append(event) or True
 
         def fake_submit(loop, coro):
             submit_calls.append((loop, coro))
@@ -1944,7 +1946,13 @@ class TestCardActionCallbackResponse:
             response = adapter._on_card_action_trigger(data)
 
         assert response is not None
-        assert len(submit_calls) == 1
+        assert submit_calls == []
+        assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
+        _assert_legacy_descriptor_denied(
+            events[0],
+            surface="feishu.card_action",
+            failure_class="feishu_legacy_card_action_requires_broker",
+        )
 
     def test_generic_card_entrypoint_requires_audit_state_before_submit(
         self,

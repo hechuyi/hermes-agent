@@ -3539,6 +3539,12 @@ class FeishuAdapter(BasePlatformAdapter):
             if isinstance(action_value, dict) else None
         )
 
+        if self._is_brokered_card_action_value(action_value):
+            return self._handle_brokered_card_action_trigger(
+                event=event,
+                action_value=action_value,
+                loop=loop,
+            )
         if hermes_action:
             return self._handle_approval_card_action(event=event, action_value=action_value, loop=loop)
         if update_prompt_action:
@@ -3549,16 +3555,41 @@ class FeishuAdapter(BasePlatformAdapter):
             )
 
         token = str(getattr(event, "token", "") or "")
-        if not self._feishu_legacy_descriptor_entry_gate_sync(
+        if self._gateway_event_state_dir is None:
+            logger.warning(
+                "[Feishu] Dropping card action before submit: "
+                "reason=feishu_legacy_descriptor_audit_state_missing surface=feishu.card_action "
+                "failure_class=feishu_legacy_card_action_requires_broker"
+            )
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+        audited = self._apply_feishu_legacy_descriptor_denied_sync(
             surface="feishu.card_action",
             failure_class="feishu_legacy_card_action_requires_broker",
             correlation_id=token,
             descriptor_seed=token,
-            drop_label="card action",
-        ):
+        )
+        if not audited:
+            logger.warning(
+                "[Feishu] Dropping card action before submit after audit failure: "
+                "reason=feishu_legacy_descriptor_denied_apply_failed surface=feishu.card_action "
+                "failure_class=feishu_legacy_card_action_requires_broker"
+            )
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+        if P2CardActionTriggerResponse is None:
+            return None
+        return P2CardActionTriggerResponse()
 
-        self._submit_on_loop(loop, self._handle_card_action_event(data))
+    def _handle_brokered_card_action_trigger(
+        self,
+        *,
+        event: Any,
+        action_value: Dict[str, Any],
+        loop: Any,
+    ) -> Any:
+        self._submit_on_loop(
+            loop,
+            self._resolve_brokered_card_action_trigger(event=event, action_value=action_value),
+        )
         if P2CardActionTriggerResponse is None:
             return None
         return P2CardActionTriggerResponse()
@@ -3710,6 +3741,10 @@ class FeishuAdapter(BasePlatformAdapter):
         return "feishu-legacy-denial"
 
     @classmethod
+    def _is_brokered_card_action_value(cls, value: Any) -> bool:
+        return isinstance(value, dict) and cls._is_broker_action_id(value.get("action_id"))
+
+    @classmethod
     def _is_broker_action_id(cls, value: Any) -> bool:
         return (
             isinstance(value, str)
@@ -3747,6 +3782,105 @@ class FeishuAdapter(BasePlatformAdapter):
         return "broker_grant_handle:" + self._sha256_ref_text(
             f"feishu_broker_grant\x1f{action_id}\x1f{uuid.uuid4().hex}"
         )
+
+    async def _resolve_brokered_card_action_trigger(
+        self,
+        *,
+        event: Any,
+        action_value: Dict[str, Any],
+    ) -> None:
+        action_id = action_value.get("action_id")
+        route_partition_hash = self._broker_card_route_partition_hash(event)
+        route_snapshot_hash = self._broker_card_route_snapshot_hash(event)
+        operator_hash = self._broker_card_operator_hash(event)
+        record = (
+            await self._broker_action_record(str(action_id))
+            if self._is_broker_action_id(action_id)
+            else None
+        )
+        contract_hash = (
+            str(record.get("contract_hash"))
+            if isinstance(record, dict) and self._is_sha256_ref_text(record.get("contract_hash"))
+            else self._sha256_ref_text("feishu_broker_contract\x1fmissing")
+        )
+        if self._broker_card_callback_entrypoint_material_invalid(action_value):
+            callback_hash = self._sha256_ref_text(
+                json.dumps(
+                    self._sanitize_broker_callback_for_hash(action_value),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            await self._deny_brokered_card_callback(
+                failure_class="feishu_broker_action_callback_material_invalid",
+                callback_hash=callback_hash,
+                action_id=action_id,
+                payload_hash=action_value.get("payload_hash"),
+                route_partition_hash=route_partition_hash,
+                route_snapshot_hash=route_snapshot_hash,
+                operator_hash=operator_hash,
+                contract_hash=contract_hash,
+            )
+            return
+        await self.resolve_brokered_card_callback(
+            action_value=action_value,
+            route_partition_hash=route_partition_hash,
+            route_snapshot_hash=route_snapshot_hash,
+            operator_hash=operator_hash,
+            contract_hash=contract_hash,
+            on_resolved=self._handle_brokered_card_callback_resolution,
+        )
+
+    @classmethod
+    def _broker_card_callback_entrypoint_material_invalid(cls, value: Dict[str, Any]) -> bool:
+        allowed_keys = {"action_id", "payload_hash", "choice_hash"}
+        for key, item in value.items():
+            if str(key) not in allowed_keys:
+                return True
+            if key != "action_id" and not cls._is_sha256_ref_text(item):
+                return True
+        return False
+
+    async def _handle_brokered_card_callback_resolution(self, record: Dict[str, Any]) -> None:
+        """Hook for brokered card callback business resolution under broker context."""
+        return None
+
+    @classmethod
+    def _broker_card_operator_hash(cls, event: Any) -> str:
+        operator = getattr(event, "operator", None)
+        for field in ("open_id", "user_id", "union_id"):
+            value = str(getattr(operator, field, "") or "").strip()
+            if value:
+                return cls._sha256_ref_text(f"feishu_broker_operator\x1f{field}\x1f{value}")
+        return cls._sha256_ref_text("feishu_broker_operator\x1fmissing")
+
+    @classmethod
+    def _broker_card_route_partition_hash(cls, event: Any) -> str:
+        context = getattr(event, "context", None)
+        chat_id = str(getattr(context, "open_chat_id", "") or "").strip()
+        if chat_id:
+            return cls._sha256_ref_text(
+                f"feishu_broker_route_partition\x1fopen_chat_id\x1f{chat_id}"
+            )
+        return cls._sha256_ref_text("feishu_broker_route_partition\x1fmissing")
+
+    @classmethod
+    def _broker_card_route_snapshot_hash(cls, event: Any) -> str:
+        context = getattr(event, "context", None)
+        chat_id = str(getattr(context, "open_chat_id", "") or "").strip()
+        thread_id = (
+            getattr(context, "thread_id", None)
+            or getattr(context, "root_id", None)
+            or getattr(context, "parent_id", None)
+            or getattr(context, "upper_message_id", None)
+            or ""
+        )
+        if chat_id:
+            return cls._sha256_ref_text(
+                "feishu_broker_route_snapshot\x1fopen_chat_id\x1f"
+                f"{chat_id}\x1fthread_id\x1f{str(thread_id or '').strip()}"
+            )
+        return cls._sha256_ref_text("feishu_broker_route_snapshot\x1fmissing")
 
     def create_brokered_clarification_card(self, **kwargs: Any) -> Dict[str, Any]:
         return self._create_brokered_current_card("clarification", **kwargs)

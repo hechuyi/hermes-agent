@@ -9,7 +9,7 @@ import pytest
 
 from gateway import gateway_event_ledger
 from gateway.config import PlatformConfig
-from gateway.feishu_legacy_guard import current_feishu_broker_context
+from gateway.feishu_legacy_guard import current_feishu_broker_context, feishu_broker_context
 from gateway.gateway_event_ledger import LEDGER_FILENAME
 from gateway.platforms.feishu import FeishuAdapter
 
@@ -32,6 +32,27 @@ def _idempotency(seed: str) -> str:
     return "broker_idempotency:" + _sha(f"idempotency:{seed}")
 
 
+def _entrypoint_operator_hash(open_id: str = "ou_operator_alpha") -> str:
+    return _sha("feishu_broker_operator\x1fopen_id\x1f" + open_id)
+
+
+def _entrypoint_route_partition_hash(chat_id: str = "oc_route_alpha") -> str:
+    return _sha("feishu_broker_route_partition\x1fopen_chat_id\x1f" + chat_id)
+
+
+def _entrypoint_route_snapshot_hash(
+    chat_id: str = "oc_route_alpha",
+    *,
+    thread_id: str = "omt_route_alpha",
+) -> str:
+    return _sha(
+        "feishu_broker_route_snapshot\x1fopen_chat_id\x1f"
+        + chat_id
+        + "\x1fthread_id\x1f"
+        + thread_id
+    )
+
+
 def _adapter(tmp_path, *, action_seed: str = "alpha") -> FeishuAdapter:
     adapter = FeishuAdapter(
         PlatformConfig(
@@ -51,7 +72,7 @@ def _adapter(tmp_path, *, action_seed: str = "alpha") -> FeishuAdapter:
     return adapter
 
 
-def _binding(seed: str = "alpha", **overrides) -> dict[str, object]:
+def _binding(seed: str = "alpha", *, entrypoint: bool = False, **overrides) -> dict[str, object]:
     values: dict[str, object] = {
         "route_partition_hash": _sha(f"route:{seed}"),
         "route_snapshot_hash": _sha(f"route-snapshot:{seed}"),
@@ -61,6 +82,14 @@ def _binding(seed: str = "alpha", **overrides) -> dict[str, object]:
         "idempotency_key": _idempotency(seed),
         "payload": {"payload_hash": _sha(f"payload:{seed}")},
     }
+    if entrypoint:
+        values.update(
+            {
+                "route_partition_hash": _entrypoint_route_partition_hash(),
+                "route_snapshot_hash": _entrypoint_route_snapshot_hash(),
+                "operator_hash": _entrypoint_operator_hash(),
+            }
+        )
     values.update(overrides)
     return values
 
@@ -78,6 +107,40 @@ def _create(
     if kind == "confirmation":
         return adapter.create_brokered_confirmation_card(**kwargs)
     raise AssertionError(kind)
+
+
+def _card_action_data(
+    action_value: dict[str, object],
+    *,
+    chat_id: str = "oc_route_alpha",
+    open_id: str = "ou_operator_alpha",
+    token: str = "tok_brokered_entrypoint",
+    thread_id: str | None = "omt_route_alpha",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        event=SimpleNamespace(
+            token=token,
+            context=SimpleNamespace(open_chat_id=chat_id, thread_id=thread_id),
+            operator=SimpleNamespace(open_id=open_id),
+            action=SimpleNamespace(tag="button", value=action_value),
+        )
+    )
+
+
+async def _invoke_card_action_entrypoint(adapter: FeishuAdapter, data: SimpleNamespace) -> object:
+    tasks: list[asyncio.Task] = []
+    adapter._loop = asyncio.get_running_loop()
+
+    def submit(_loop, coro):
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return True
+
+    adapter._submit_on_loop = submit
+    response = adapter._on_card_action_trigger(data)
+    if tasks:
+        await asyncio.gather(*tasks)
+    return response
 
 
 def _state(tmp_path) -> dict:
@@ -584,3 +647,136 @@ async def test_denial_audit_write_failure_fails_closed_without_side_effects(
     }
     assert side_effect.await_count == 0
     assert _broker_events(tmp_path, "feishu_broker_action_denied") == []
+
+
+@pytest.mark.asyncio
+async def test_sdk_card_action_entrypoint_routes_brokered_callback_to_state_machine(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    created = _create(adapter, kind="confirmation", entrypoint=True)
+    side_effect = AsyncMock()
+    adapter._handle_brokered_card_callback_resolution = side_effect
+
+    response = await _invoke_card_action_entrypoint(
+        adapter,
+        _card_action_data(_callback(created)),
+    )
+
+    assert response is not None
+    assert side_effect.await_count == 1
+    assert side_effect.await_args.args[0]["action_id"] == _action_id("alpha")
+    assert [event["type"] for event in _broker_events(tmp_path)] == [
+        "feishu_broker_action_created",
+        "feishu_broker_action_accepted",
+        "feishu_broker_action_resolved",
+    ]
+    assert adapter.handle_message.await_count == 0
+    assert adapter._handle_message_with_guards.await_count == 0
+    _assert_no_raw_material(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_sdk_card_action_entrypoint_replay_does_not_repeat_business_processing(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    created = _create(adapter, entrypoint=True)
+    side_effect = AsyncMock()
+    adapter._handle_brokered_card_callback_resolution = side_effect
+    data = _card_action_data(_callback(created))
+
+    await _invoke_card_action_entrypoint(adapter, data)
+    await _invoke_card_action_entrypoint(adapter, data)
+
+    assert side_effect.await_count == 1
+    assert len(_broker_events(tmp_path, "feishu_broker_action_accepted")) == 1
+    assert len(_broker_events(tmp_path, "feishu_broker_action_resolved")) == 1
+    assert len(_broker_events(tmp_path, "feishu_broker_action_replayed")) == 1
+    assert adapter.handle_message.await_count == 0
+    assert adapter._handle_message_with_guards.await_count == 0
+    _assert_no_raw_material(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("label", "callback_overrides", "event_overrides", "expected_failure"),
+    [
+        (
+            "wrong_operator",
+            {},
+            {"open_id": "ou_operator_other"},
+            "feishu_broker_action_operator_mismatch",
+        ),
+        (
+            "wrong_route",
+            {},
+            {"chat_id": "oc_route_other"},
+            "feishu_broker_action_route_mismatch",
+        ),
+        (
+            "payload_mismatch",
+            {"payload_hash": _sha("payload:other")},
+            {},
+            "feishu_broker_action_payload_mismatch",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_sdk_card_action_entrypoint_denies_mismatch_before_side_effects(
+    tmp_path,
+    label,
+    callback_overrides,
+    event_overrides,
+    expected_failure,
+):
+    del label
+    adapter = _adapter(tmp_path)
+    created = _create(adapter, entrypoint=True)
+    side_effect = AsyncMock()
+    adapter._handle_brokered_card_callback_resolution = side_effect
+
+    await _invoke_card_action_entrypoint(
+        adapter,
+        _card_action_data(_callback(created, **callback_overrides), **event_overrides),
+    )
+
+    assert side_effect.await_count == 0
+    assert _broker_events(tmp_path, "feishu_broker_action_accepted") == []
+    assert _broker_events(tmp_path, "feishu_broker_action_resolved") == []
+    denied = _broker_events(tmp_path, "feishu_broker_action_denied")
+    assert len(denied) == 1
+    assert denied[0]["failure_class"] == expected_failure
+    assert adapter.handle_message.await_count == 0
+    assert adapter._handle_message_with_guards.await_count == 0
+    _assert_no_raw_material(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_sdk_card_action_entrypoint_generic_card_still_fails_closed_with_broker_context(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    adapter._resolve_sender_profile = AsyncMock(
+        return_value={"user_id": "ou_operator_alpha", "user_name": "operator", "user_id_alt": None}
+    )
+    adapter.get_chat_info = AsyncMock(
+        return_value={"name": "Broker Route", "type": "group", "reliable": True}
+    )
+    data = _card_action_data(
+        {"custom_action": "legacy_generic"},
+        token="tok_generic_entrypoint_broker_context",
+    )
+
+    with feishu_broker_context(
+        _grant_handle("context"),
+        action_id=_action_id("context"),
+        contract_hash=_sha("contract:context"),
+        route_partition_key="route_snapshot:" + _sha("route:context"),
+    ):
+        await _invoke_card_action_entrypoint(adapter, data)
+
+    assert adapter.handle_message.await_count == 0
+    assert adapter._handle_message_with_guards.await_count == 0
+    assert _broker_events(tmp_path, "feishu_broker_action_accepted") == []
+    assert _broker_events(tmp_path, "feishu_broker_action_resolved") == []
+    _assert_no_raw_material(tmp_path)
