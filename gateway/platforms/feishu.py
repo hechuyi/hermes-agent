@@ -2068,15 +2068,19 @@ class FeishuAdapter(BasePlatformAdapter):
                     metadata=metadata,
                 )
                 if proof_failure is not None:
-                    await self._apply_feishu_delivery_lifecycle_failed(
-                        delivery_id=delivery_id,
-                        action="edit",
-                        target=f"feishu:message:{message_id}",
-                        metadata=metadata,
-                        failure_class=proof_failure,
-                        message_id=message_id,
-                        original_proof=ownership_proof,
+                    lifecycle_gap_result = (
+                        await self._fail_if_lifecycle_failed_append_missing(
+                            delivery_id=delivery_id,
+                            action="edit",
+                            target=f"feishu:message:{message_id}",
+                            metadata=metadata,
+                            failure_class=proof_failure,
+                            message_id=message_id,
+                            original_proof=ownership_proof,
+                        )
                     )
+                    if lifecycle_gap_result is not None:
+                        return lifecycle_gap_result
                     return SendResult(success=False, error=proof_failure)
                 response_or_result = await self._audited_delivery(
                     delivery_id=delivery_id,
@@ -6523,6 +6527,33 @@ class FeishuAdapter(BasePlatformAdapter):
             original_proof=original_proof,
         )
 
+    async def _fail_if_lifecycle_failed_append_missing(
+        self,
+        *,
+        delivery_id: str,
+        action: str,
+        target: str,
+        metadata: Optional[Dict[str, Any]],
+        failure_class: str,
+        message_id: Optional[str] = None,
+        original_proof: Optional[Dict[str, Any]] = None,
+    ) -> Optional[SendResult]:
+        lifecycle_failed_ok = await self._apply_feishu_delivery_lifecycle_failed(
+            delivery_id=delivery_id,
+            action=action,
+            target=target,
+            metadata=metadata,
+            failure_class=failure_class,
+            message_id=message_id,
+            original_proof=original_proof,
+        )
+        if lifecycle_failed_ok:
+            return None
+        return SendResult(
+            success=False,
+            error="feishu_delivery_lifecycle_apply_failed",
+        )
+
     def _current_edit_ownership_proof(
         self,
         *,
@@ -6651,7 +6682,7 @@ class FeishuAdapter(BasePlatformAdapter):
         )
         if lifecycle_context is not None:
             if lifecycle_context.get("evidence_state") != "current":
-                await self._apply_feishu_delivery_lifecycle_failed(
+                lifecycle_gap_result = await self._fail_if_lifecycle_failed_append_missing(
                     delivery_id=delivery_id,
                     action=lifecycle_action,
                     target=target,
@@ -6660,6 +6691,8 @@ class FeishuAdapter(BasePlatformAdapter):
                     message_id=existing_message_id,
                     original_proof=current_delivery_proof,
                 )
+                if lifecycle_gap_result is not None:
+                    return lifecycle_gap_result
                 return SendResult(
                     success=False,
                     error="feishu_current_route_evidence_stale",
@@ -6708,7 +6741,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     error="content format of the post type is incorrect",
                 )
             if lifecycle_context is not None:
-                await self._apply_feishu_delivery_lifecycle_failed(
+                lifecycle_gap_result = await self._fail_if_lifecycle_failed_append_missing(
                     delivery_id=delivery_id,
                     action=lifecycle_action,
                     target=target,
@@ -6717,6 +6750,8 @@ class FeishuAdapter(BasePlatformAdapter):
                     message_id=existing_message_id,
                     original_proof=current_delivery_proof,
                 )
+                if lifecycle_gap_result is not None:
+                    return lifecycle_gap_result
             await self._apply_unknown_delivery_state(
                 delivery_id,
                 "sdk_exception_after_admission",
@@ -6726,7 +6761,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
         if self._response_is_ambiguous_non_acceptance(response):
             if lifecycle_context is not None:
-                await self._apply_feishu_delivery_lifecycle_failed(
+                lifecycle_gap_result = await self._fail_if_lifecycle_failed_append_missing(
                     delivery_id=delivery_id,
                     action=lifecycle_action,
                     target=target,
@@ -6735,6 +6770,8 @@ class FeishuAdapter(BasePlatformAdapter):
                     message_id=existing_message_id,
                     original_proof=current_delivery_proof,
                 )
+                if lifecycle_gap_result is not None:
+                    return lifecycle_gap_result
             await self._apply_unknown_delivery_state(
                 delivery_id,
                 "retryable_non_acceptance_after_admission",
@@ -6756,7 +6793,7 @@ class FeishuAdapter(BasePlatformAdapter):
                     error="delivery_failed apply failed",
                 )
             if lifecycle_context is not None:
-                await self._apply_feishu_delivery_lifecycle_failed(
+                lifecycle_gap_result = await self._fail_if_lifecycle_failed_append_missing(
                     delivery_id=delivery_id,
                     action=lifecycle_action,
                     target=target,
@@ -6765,6 +6802,8 @@ class FeishuAdapter(BasePlatformAdapter):
                     message_id=existing_message_id,
                     original_proof=current_delivery_proof,
                 )
+                if lifecycle_gap_result is not None:
+                    return lifecycle_gap_result
             return self._response_error_result(
                 response,
                 default_message=f"{operation} failed",
@@ -6789,7 +6828,7 @@ class FeishuAdapter(BasePlatformAdapter):
 
         if not await self._apply_delivery_sent(delivery_id, str(message_id), operation):
             if lifecycle_context is not None:
-                await self._apply_feishu_delivery_lifecycle_failed(
+                lifecycle_gap_result = await self._fail_if_lifecycle_failed_append_missing(
                     delivery_id=delivery_id,
                     action=lifecycle_action,
                     target=target,
@@ -6798,6 +6837,8 @@ class FeishuAdapter(BasePlatformAdapter):
                     message_id=str(message_id),
                     original_proof=current_delivery_proof,
                 )
+                if lifecycle_gap_result is not None:
+                    return lifecycle_gap_result
             await self._apply_unknown_delivery_state(
                 delivery_id,
                 "delivery_sent_apply_failed",

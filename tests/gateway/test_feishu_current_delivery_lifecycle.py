@@ -131,6 +131,10 @@ def _assert_no_raw_platform_context(value) -> None:
         assert raw not in rendered
 
 
+async def _lifecycle_failed_append_missing(**_kwargs) -> bool:
+    return False
+
+
 @pytest.mark.asyncio
 async def test_current_reply_send_records_attempt_sent_and_ack_unknown_with_sanitized_refs(tmp_path):
     adapter = _adapter(tmp_path)
@@ -188,6 +192,31 @@ async def test_sdk_failure_records_feishu_delivery_failed_without_success_event(
 
 
 @pytest.mark.asyncio
+async def test_sdk_failure_fails_closed_when_lifecycle_failed_append_missing(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(
+        tmp_path,
+        reply_response=_FakeResponse(ok=False, message_id=None, code=190001, msg="denied"),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_apply_feishu_delivery_lifecycle_failed",
+        _lifecycle_failed_append_missing,
+    )
+
+    result = await adapter.send(
+        "oc_current_chat",
+        "hello current",
+        reply_to="om_user_anchor_1",
+        metadata=_metadata(delivery_id="delivery-sdk-lifecycle-gap"),
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_delivery_lifecycle_apply_failed"
+
+
+@pytest.mark.asyncio
 async def test_terminal_post_exception_records_feishu_delivery_failed_without_success_event(tmp_path):
     adapter = _adapter(tmp_path)
 
@@ -217,6 +246,103 @@ async def test_terminal_post_exception_records_feishu_delivery_failed_without_su
     assert failed["action"] == "send"
     assert _lifecycle_events(tmp_path, "feishu_delivery_failed")[1:] == []
     _assert_no_raw_platform_context(_lifecycle_events(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_non_terminal_sdk_exception_fails_closed_when_lifecycle_failed_append_missing(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(tmp_path)
+    monkeypatch.setattr(
+        adapter,
+        "_apply_feishu_delivery_lifecycle_failed",
+        _lifecycle_failed_append_missing,
+    )
+
+    async def raise_non_terminal_exception(_uuid_value):
+        raise RuntimeError("sdk transport failed")
+
+    result = await adapter._audited_delivery(
+        delivery_id="delivery-exception-lifecycle-gap",
+        operation="reply",
+        target="feishu:chat:oc_current_chat",
+        inbound_id="inbound-current-1",
+        session_id="session-current-1",
+        correlation_id="corr-current-1",
+        network_call=raise_non_terminal_exception,
+        require_returned_message_id=True,
+        metadata=_metadata(delivery_id="delivery-exception-lifecycle-gap"),
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_delivery_lifecycle_apply_failed"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_non_acceptance_fails_closed_when_lifecycle_failed_append_missing(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(tmp_path)
+    monkeypatch.setattr(
+        adapter,
+        "_apply_feishu_delivery_lifecycle_failed",
+        _lifecycle_failed_append_missing,
+    )
+
+    async def return_ambiguous_response(_uuid_value):
+        response = _FakeResponse(ok=False, message_id=None, code=999999, msg="retry")
+        response.retryable = True
+        return response
+
+    result = await adapter._audited_delivery(
+        delivery_id="delivery-ambiguous-lifecycle-gap",
+        operation="reply",
+        target="feishu:chat:oc_current_chat",
+        inbound_id="inbound-current-1",
+        session_id="session-current-1",
+        correlation_id="corr-current-1",
+        network_call=return_ambiguous_response,
+        require_returned_message_id=True,
+        metadata=_metadata(delivery_id="delivery-ambiguous-lifecycle-gap"),
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_delivery_lifecycle_apply_failed"
+
+
+@pytest.mark.asyncio
+async def test_delivery_sent_apply_failure_fails_closed_when_lifecycle_failed_append_missing(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(tmp_path)
+    monkeypatch.setattr(
+        adapter,
+        "_apply_feishu_delivery_lifecycle_failed",
+        _lifecycle_failed_append_missing,
+    )
+
+    async def delivery_sent_missing(*_args, **_kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(adapter, "_apply_delivery_sent", delivery_sent_missing)
+
+    async def return_success_response(_uuid_value):
+        return _FakeResponse(ok=True, message_id="om_bot_current_1")
+
+    result = await adapter._audited_delivery(
+        delivery_id="delivery-sent-lifecycle-gap",
+        operation="reply",
+        target="feishu:chat:oc_current_chat",
+        inbound_id="inbound-current-1",
+        session_id="session-current-1",
+        correlation_id="corr-current-1",
+        network_call=return_success_response,
+        require_returned_message_id=True,
+        metadata=_metadata(delivery_id="delivery-sent-lifecycle-gap"),
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_delivery_lifecycle_apply_failed"
 
 
 @pytest.mark.asyncio
@@ -355,6 +481,29 @@ async def test_edit_denials_happen_before_sdk_and_append_only_sanitized_failure_
     assert failed["action"] == "edit"
     assert failed["failure_class"] == expected_failure
     _assert_no_raw_platform_context(failed)
+
+
+@pytest.mark.asyncio
+async def test_edit_pre_sdk_denial_fails_closed_when_lifecycle_failed_append_missing(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(tmp_path)
+    monkeypatch.setattr(
+        adapter,
+        "_apply_feishu_delivery_lifecycle_failed",
+        _lifecycle_failed_append_missing,
+    )
+
+    result = await adapter.edit_message(
+        "oc_current_chat",
+        "om_user_message_1",
+        "edited current",
+        metadata=_metadata(delivery_id="edit-denial-lifecycle-gap"),
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_delivery_lifecycle_apply_failed"
+    adapter._client.im.v1.message.update.assert_not_called()
 
 
 @pytest.mark.asyncio
