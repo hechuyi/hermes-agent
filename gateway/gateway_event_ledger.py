@@ -287,7 +287,7 @@ def _prove_persisted_current_inbound_keys(inbounds: Mapping[str, Any]) -> None:
                 "feishu_inbound_idempotency_unknown",
                 "feishu inbound persisted evidence invalid",
             )
-        expected_key = _feishu_current_inbound_key_from_record(record)
+        expected_key = _feishu_current_inbound_key_from_record(record, persisted_key)
         if expected_key is None:
             continue
         if not isinstance(persisted_key, str) or persisted_key != expected_key:
@@ -297,7 +297,9 @@ def _prove_persisted_current_inbound_keys(inbounds: Mapping[str, Any]) -> None:
             )
 
 
-def _feishu_current_inbound_key_from_record(record: Mapping[str, Any]) -> str | None:
+def _feishu_current_inbound_key_from_record(
+    record: Mapping[str, Any], persisted_key: Any = None
+) -> str | None:
     current_fields = {
         "canonical_event_ref",
         "route_partition_hash",
@@ -306,6 +308,11 @@ def _feishu_current_inbound_key_from_record(record: Mapping[str, Any]) -> str | 
     }
     present = {field for field in current_fields if field in record}
     if not present:
+        if isinstance(persisted_key, str) and _is_sha256_ref(persisted_key):
+            raise _GatewayEventPersistedFailure(
+                "feishu_inbound_idempotency_unknown",
+                "feishu inbound persisted evidence missing",
+            )
         return None
     if present != current_fields:
         raise _GatewayEventPersistedFailure(
@@ -670,10 +677,10 @@ def _validate_persisted_delivery_records(deliveries: Mapping[str, Any]) -> None:
 
 
 def _validate_persisted_inbound_records(inbounds: Mapping[str, Any]) -> None:
-    for record in inbounds.values():
+    for persisted_key, record in inbounds.items():
         if isinstance(record, Mapping):
             try:
-                _feishu_current_inbound_key_from_record(record)
+                _feishu_current_inbound_key_from_record(record, persisted_key)
             except _GatewayEventPersistedFailure as exc:
                 raise GatewayEventContractError(exc.failure_class, exc.reason) from exc
         try:

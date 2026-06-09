@@ -425,6 +425,42 @@ def test_current_inbound_with_incomplete_persisted_evidence_fails_closed_as_idem
     assert list(after_replay["inbounds"]) == [persisted_key]
 
 
+def test_current_shaped_persisted_key_without_evidence_fails_closed_before_new_success(
+    tmp_path,
+):
+    first_event = _inbound_event(
+        canonical_event_id="evt_current_key_without_evidence_first_fake",
+        message_id="om_current_key_without_evidence_first_fake",
+    )
+    first = apply_gateway_event(first_event, tmp_path)
+    assert first.ok is True
+    state = _ledger_state(tmp_path)
+    assert len(state["inbounds"]) == 1
+    persisted_key, persisted_record = next(iter(state["inbounds"].items()))
+    assert persisted_key.startswith("sha256:")
+    for field in (
+        "canonical_event_ref",
+        "route_partition_hash",
+        "contract_hash",
+        "transport_kind",
+    ):
+        persisted_record.pop(field)
+    _write_ledger_state(tmp_path, state)
+    before_replay = _ledger_state(tmp_path)
+
+    second_event = _inbound_event(
+        canonical_event_id="evt_current_key_without_evidence_second_fake",
+        message_id="om_current_key_without_evidence_second_fake",
+    )
+    result = apply_gateway_event(second_event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "feishu_inbound_idempotency_unknown"
+    after_replay = _ledger_state(tmp_path)
+    assert after_replay == before_replay
+    assert list(after_replay["inbounds"]) == [persisted_key]
+
+
 @pytest.mark.asyncio
 async def test_missing_current_admission_evidence_fails_before_batching_or_dispatch(
     tmp_path,
