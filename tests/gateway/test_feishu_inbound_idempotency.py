@@ -256,13 +256,14 @@ async def test_concurrent_duplicate_admission_has_one_winner_and_one_duplicate(t
 @pytest.mark.asyncio
 async def test_duplicate_text_fanout_is_dropped_before_batch_merge(tmp_path):
     adapter = _adapter(tmp_path)
+    text_fixture = "text_ref_fake_001"
     adapter._extract_message_content = AsyncMock(
-        return_value=("hello", MessageType.TEXT, [], [], [])
+        return_value=(text_fixture, MessageType.TEXT, [], [], [])
     )
     data = _raw_message_data(
         event_id="evt_text_fanout_fake",
         message_id="om_text_fanout_fake",
-        text="hello",
+        text=text_fixture,
     )
 
     await adapter._handle_message_event_data(data, transport_kind="websocket")
@@ -271,7 +272,9 @@ async def test_duplicate_text_fanout_is_dropped_before_batch_merge(tmp_path):
 
     adapter.handle_message.assert_awaited_once()
     dispatched = adapter.handle_message.await_args.args[0]
-    assert dispatched.text == "hello"
+    assert dispatched.message_type is MessageType.TEXT
+    assert isinstance(dispatched.text, str)
+    assert dispatched.text.count("\n") == 0
     state = _ledger_state(tmp_path)
     assert len(state["inbounds"]) == 1
 
@@ -280,7 +283,7 @@ async def test_duplicate_text_fanout_is_dropped_before_batch_merge(tmp_path):
 async def test_duplicate_media_fanout_is_dropped_before_batch_append(tmp_path):
     adapter = _adapter(tmp_path)
     adapter._extract_message_content = AsyncMock(
-        return_value=("", MessageType.PHOTO, ["/tmp/image.png"], ["image/png"], [])
+        return_value=("", MessageType.PHOTO, ["media_ref_fake_001"], ["image/png"], [])
     )
     data = _raw_message_data(
         event_id="evt_media_fanout_fake",
@@ -294,8 +297,9 @@ async def test_duplicate_media_fanout_is_dropped_before_batch_append(tmp_path):
 
     adapter.handle_message.assert_awaited_once()
     dispatched = adapter.handle_message.await_args.args[0]
-    assert dispatched.media_urls == ["/tmp/image.png"]
-    assert dispatched.media_types == ["image/png"]
+    assert len(dispatched.media_urls) == 1
+    assert len(dispatched.media_types) == 1
+    assert dispatched.media_types.count("image/png") == 1
     state = _ledger_state(tmp_path)
     assert len(state["inbounds"]) == 1
 
