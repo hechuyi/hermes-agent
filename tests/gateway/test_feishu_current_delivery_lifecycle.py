@@ -141,6 +141,10 @@ async def _lifecycle_failed_append_missing(**_kwargs) -> bool:
     return False
 
 
+async def _unknown_delivery_state_apply_missing(*_args, **_kwargs) -> bool:
+    return False
+
+
 @pytest.mark.asyncio
 async def test_current_reply_send_records_attempt_sent_and_ack_unknown_with_sanitized_refs(tmp_path):
     adapter = _adapter(tmp_path)
@@ -352,6 +356,121 @@ async def test_delivery_sent_apply_failure_fails_closed_when_lifecycle_failed_ap
 
 
 @pytest.mark.asyncio
+async def test_sdk_exception_after_admission_fails_closed_when_unknown_state_append_missing(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(tmp_path)
+    monkeypatch.setattr(
+        adapter,
+        "_apply_unknown_delivery_state",
+        _unknown_delivery_state_apply_missing,
+    )
+
+    async def raise_non_terminal_exception(_uuid_value):
+        raise RuntimeError("sdk transport failed")
+
+    result = await adapter._audited_delivery(
+        delivery_id="delivery-exception-unknown-state-gap",
+        operation="reply",
+        target="feishu:chat:oc_current_chat",
+        inbound_id="inbound-current-1",
+        session_id="session-current-1",
+        correlation_id="corr-current-1",
+        network_call=raise_non_terminal_exception,
+        require_returned_message_id=True,
+        metadata=_metadata(delivery_id="delivery-exception-unknown-state-gap"),
+    )
+
+    assert result.success is False
+    assert result.error == "unknown_delivery_state apply failed"
+    assert _event_types(tmp_path) == [
+        "feishu_delivery_attempted",
+        "feishu_delivery_failed",
+    ]
+    assert _lifecycle_events(tmp_path, "feishu_delivery_sent") == []
+    assert _lifecycle_events(tmp_path, "feishu_delivery_ack_unknown") == []
+
+
+@pytest.mark.asyncio
+async def test_retryable_non_acceptance_fails_closed_when_unknown_state_append_missing(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(tmp_path)
+    monkeypatch.setattr(
+        adapter,
+        "_apply_unknown_delivery_state",
+        _unknown_delivery_state_apply_missing,
+    )
+
+    async def return_ambiguous_response(_uuid_value):
+        response = _FakeResponse(ok=False, message_id=None, code=999999, msg="retry")
+        response.retryable = True
+        return response
+
+    result = await adapter._audited_delivery(
+        delivery_id="delivery-ambiguous-unknown-state-gap",
+        operation="reply",
+        target="feishu:chat:oc_current_chat",
+        inbound_id="inbound-current-1",
+        session_id="session-current-1",
+        correlation_id="corr-current-1",
+        network_call=return_ambiguous_response,
+        require_returned_message_id=True,
+        metadata=_metadata(delivery_id="delivery-ambiguous-unknown-state-gap"),
+    )
+
+    assert result.success is False
+    assert result.error == "unknown_delivery_state apply failed"
+    assert _event_types(tmp_path) == [
+        "feishu_delivery_attempted",
+        "feishu_delivery_failed",
+    ]
+    assert _lifecycle_events(tmp_path, "feishu_delivery_sent") == []
+    assert _lifecycle_events(tmp_path, "feishu_delivery_ack_unknown") == []
+
+
+@pytest.mark.asyncio
+async def test_delivery_sent_apply_failure_fails_closed_when_unknown_state_append_missing(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(tmp_path)
+    monkeypatch.setattr(
+        adapter,
+        "_apply_unknown_delivery_state",
+        _unknown_delivery_state_apply_missing,
+    )
+
+    async def delivery_sent_missing(*_args, **_kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(adapter, "_apply_delivery_sent", delivery_sent_missing)
+
+    async def return_success_response(_uuid_value):
+        return _FakeResponse(ok=True, message_id="om_bot_current_1")
+
+    result = await adapter._audited_delivery(
+        delivery_id="delivery-sent-unknown-state-gap",
+        operation="reply",
+        target="feishu:chat:oc_current_chat",
+        inbound_id="inbound-current-1",
+        session_id="session-current-1",
+        correlation_id="corr-current-1",
+        network_call=return_success_response,
+        require_returned_message_id=True,
+        metadata=_metadata(delivery_id="delivery-sent-unknown-state-gap"),
+    )
+
+    assert result.success is False
+    assert result.error == "unknown_delivery_state apply failed"
+    assert _event_types(tmp_path) == [
+        "feishu_delivery_attempted",
+        "feishu_delivery_failed",
+    ]
+    assert _lifecycle_events(tmp_path, "feishu_delivery_sent") == []
+    assert _lifecycle_events(tmp_path, "feishu_delivery_ack_unknown") == []
+
+
+@pytest.mark.asyncio
 async def test_unknown_ack_support_records_ack_unknown_not_ack_success(tmp_path):
     adapter = _adapter(tmp_path)
 
@@ -482,11 +601,25 @@ async def test_limited_edit_requires_bot_owned_current_delivery_and_matching_rou
 
     assert edit_result.success is True
     assert adapter._client.im.v1.message.update.call_count == 1
+    replay_result = await adapter.edit_message(
+        "oc_current_chat",
+        "om_bot_current_1",
+        "edited current",
+        metadata=_metadata(delivery_id="delivery-edit-1"),
+    )
+    assert replay_result.success is True
+    assert replay_result.message_id == "om_bot_current_1"
+    assert adapter._client.im.v1.message.update.call_count == 1
     sent_events = _lifecycle_events(tmp_path, "feishu_delivery_sent")
     assert [event["action"] for event in sent_events] == ["send", "edit"]
     edit_event = sent_events[-1]
     assert edit_event["original_delivery_hash"] == sent_events[0]["delivery_hash"]
     assert edit_event["bot_ownership_hash"] == sent_events[0]["bot_ownership_hash"]
+    state = _state(tmp_path)
+    assert state["deliveries"]["delivery-edit-1"]["feishu_message_id"] is None
+    assert state["feishu_message_index"] == {
+        "om_bot_current_1": "delivery-edit-source"
+    }
     _assert_no_raw_platform_context(_lifecycle_events(tmp_path))
 
 

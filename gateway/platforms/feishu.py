@@ -6762,11 +6762,15 @@ class FeishuAdapter(BasePlatformAdapter):
                 )
                 if lifecycle_gap_result is not None:
                     return lifecycle_gap_result
-            await self._apply_unknown_delivery_state(
+            if not await self._apply_unknown_delivery_state(
                 delivery_id,
                 "sdk_exception_after_admission",
                 message_id=existing_message_id,
-            )
+            ):
+                return SendResult(
+                    success=False,
+                    error="unknown_delivery_state apply failed",
+                )
             return SendResult(success=False, error=exc.__class__.__name__)
 
         if self._response_is_ambiguous_non_acceptance(response):
@@ -6782,11 +6786,16 @@ class FeishuAdapter(BasePlatformAdapter):
                 )
                 if lifecycle_gap_result is not None:
                     return lifecycle_gap_result
-            await self._apply_unknown_delivery_state(
+            if not await self._apply_unknown_delivery_state(
                 delivery_id,
                 "retryable_non_acceptance_after_admission",
                 message_id=existing_message_id,
-            )
+            ):
+                return SendResult(
+                    success=False,
+                    error="unknown_delivery_state apply failed",
+                    raw_response=response,
+                )
             return self._response_error_result(
                 response,
                 default_message=f"{operation} ambiguous",
@@ -6866,11 +6875,16 @@ class FeishuAdapter(BasePlatformAdapter):
                 )
                 if lifecycle_gap_result is not None:
                     return lifecycle_gap_result
-            await self._apply_unknown_delivery_state(
+            if not await self._apply_unknown_delivery_state(
                 delivery_id,
                 "delivery_sent_apply_failed",
                 message_id=str(message_id),
-            )
+            ):
+                return SendResult(
+                    success=False,
+                    error="unknown_delivery_state apply failed",
+                    raw_response=response,
+                )
             return SendResult(
                 success=False,
                 error="delivery_sent apply failed",
@@ -7020,6 +7034,33 @@ class FeishuAdapter(BasePlatformAdapter):
             return True
         return message_id == target[len(message_target_prefix):]
 
+    def _delivery_record_replay_message_id(
+        self,
+        record: Dict[str, Any],
+        *,
+        target: str,
+    ) -> Optional[str]:
+        message_id = record.get("feishu_message_id")
+        message_id_text = str(message_id or "")
+        if (
+            message_id
+            and self._valid_feishu_message_id(message_id_text)
+            and self._delivery_record_message_id_matches_target(
+                message_id=message_id_text,
+                target=target,
+            )
+        ):
+            return message_id_text
+        if message_id:
+            return None
+
+        message_target_prefix = "feishu:message:"
+        if target.startswith(message_target_prefix):
+            target_message_id = target[len(message_target_prefix):]
+            if self._valid_feishu_message_id(target_message_id):
+                return target_message_id
+        return None
+
     def _send_result_from_delivery_record_apply(
         self,
         result: Any,
@@ -7055,15 +7096,11 @@ class FeishuAdapter(BasePlatformAdapter):
         ):
             return None
         if identity_matches and record.get("status") in {"sent", "acked"}:
-            message_id_text = str(message_id or "")
-            if (
-                bool(message_id)
-                and self._valid_feishu_message_id(message_id_text)
-                and self._delivery_record_message_id_matches_target(
-                    message_id=message_id_text,
-                    target=target,
-                )
-            ):
+            message_id_text = self._delivery_record_replay_message_id(
+                record,
+                target=target,
+            )
+            if message_id_text is not None:
                 return SendResult(
                     success=True,
                     message_id=message_id_text,
