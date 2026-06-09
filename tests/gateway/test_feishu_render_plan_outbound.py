@@ -402,6 +402,45 @@ async def test_unsupported_part_fallback_matrix_is_deterministic(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fallback_action", "text_key"),
+    [
+        ("preserve", "preserve_text"),
+        ("replace", "replacement_text"),
+    ],
+)
+async def test_unsupported_part_fallback_fails_closed_when_split_chunk_exceeds_limit(
+    tmp_path,
+    fallback_action,
+    text_key,
+):
+    part = _part(
+        "button",
+        f"oversized-fallback-{fallback_action}",
+        fallback_action=fallback_action,
+        action_contract=_action_contract("button"),
+    )
+    adapter = _adapter(tmp_path)
+    adapter.MAX_MESSAGE_LENGTH = 24
+    long_fence_language = "x" * 80
+    fallback_text = f"```{long_fence_language}\n" + ("opaque fallback body\n" * 4)
+
+    result = await adapter.send_render_plan(
+        chat_id="chat_plan",
+        plan=_plan((part,)),
+        rendered_parts={part.part_hash: {text_key: fallback_text}},
+        reply_to="msg_anchor_plan",
+        metadata=_metadata(delivery_id=f"delivery-fallback-too-large-{fallback_action}"),
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_render_part_too_large"
+    assert adapter._client.im.v1.message.reply.call_count == 0
+    assert adapter._client.im.v1.message.create.call_count == 0
+    _assert_no_success_lifecycle(tmp_path)
+
+
+@pytest.mark.asyncio
 async def test_oversized_render_content_is_chunked_not_silently_truncated(tmp_path):
     part = _part("plain_text", "oversized", metadata={"format": "text"})
     adapter = _adapter(tmp_path)

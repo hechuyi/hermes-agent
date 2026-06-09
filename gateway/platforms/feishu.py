@@ -2050,7 +2050,11 @@ class FeishuAdapter(BasePlatformAdapter):
         if not isinstance(text, str):
             return [], "feishu_render_fallback_content_missing"
         chunks = self.truncate_message(text, self.MAX_MESSAGE_LENGTH)
-        messages = [("text", self._render_plan_payload("text", chunk)) for chunk in chunks]
+        messages: list[tuple[str, str]] = []
+        for chunk in chunks:
+            if len(chunk) > self.MAX_MESSAGE_LENGTH:
+                return [], "feishu_render_part_too_large"
+            messages.append(("text", self._render_plan_payload("text", chunk)))
         fallback_events.append({**event, "outcome": "sent"})
         return messages, None
 
