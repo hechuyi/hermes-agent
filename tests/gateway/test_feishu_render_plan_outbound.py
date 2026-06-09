@@ -81,8 +81,12 @@ def _plan(parts: tuple[RenderPlanPart, ...]) -> RenderPlan:
     )
 
 
-def _admission(*, evidence_state: str = "current") -> dict[str, str]:
-    reply_ref = feishu_hashed_ref("feishu_reply_anchor", "msg_anchor_plan")
+def _admission(
+    *,
+    evidence_state: str = "current",
+    reply_anchor: str = "msg_anchor_plan",
+) -> dict[str, str]:
+    reply_ref = feishu_hashed_ref("feishu_reply_anchor", reply_anchor)
     assert reply_ref is not None
     return {
         "canonical_event_ref": _sha("event:plan"),
@@ -160,6 +164,10 @@ def _lifecycle_events(tmp_path, event_type: str | None = None) -> list[dict]:
     return [event for event in events if event["type"] == event_type]
 
 
+def _ledger_text(tmp_path) -> str:
+    return (tmp_path / LEDGER_FILENAME).read_text(encoding="utf-8")
+
+
 def _assert_no_success_lifecycle(tmp_path) -> None:
     if not (tmp_path / LEDGER_FILENAME).exists():
         return
@@ -218,6 +226,78 @@ async def test_render_plan_supported_parts_use_current_lifecycle_route(tmp_path)
             "feishu_delivery_ack_unknown",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_render_plan_current_success_ledger_persists_only_sanitized_evidence(tmp_path):
+    raw_chat_id = "oc_fake_render_plan_chat_0001"
+    raw_reply_anchor = "om_fake_render_plan_reply_anchor_0001"
+    raw_message_id = "om_fake_render_plan_sent_0001"
+    raw_path_marker = "/fake/raw/render-plan/path/secret.txt"
+    original_content = (
+        "original render content that must stay out of ledger "
+        "om_fake_render_plan_body_0001"
+    )
+    part = _part("plain_text", "sanitized-ledger", metadata={"format": "text"})
+    adapter = _adapter(
+        tmp_path,
+        reply_side_effect=[_FakeResponse(message_id=raw_message_id)],
+    )
+    metadata = _metadata(delivery_id="delivery-render-sanitized")
+    metadata["feishu_current_admission"] = _admission(reply_anchor=raw_reply_anchor)
+
+    result = await adapter.send_render_plan(
+        chat_id=raw_chat_id,
+        plan=_plan((part,)),
+        rendered_parts={part.part_hash: f"{original_content}\n{raw_path_marker}"},
+        reply_to=raw_reply_anchor,
+        metadata=metadata,
+    )
+
+    assert result.success is True
+    result_text = repr(result)
+    assert raw_message_id not in result_text
+    assert result.message_id is not None
+    assert result.message_id.startswith("feishu_render_plan_message_")
+    request_body = _request_bodies(adapter)[0].content
+    state = _state(tmp_path)
+    ledger_text = _ledger_text(tmp_path)
+    state_text = json.dumps(state, sort_keys=True, ensure_ascii=False)
+    for forbidden in (
+        raw_chat_id,
+        raw_reply_anchor,
+        raw_message_id,
+        raw_path_marker,
+        original_content,
+        request_body,
+        str(tmp_path),
+    ):
+        assert forbidden not in ledger_text
+        assert forbidden not in state_text
+
+    legacy_record = next(iter(state["deliveries"].values()))
+    assert legacy_record["status"] == "sent"
+    assert legacy_record["target"].startswith("feishu:render_plan_target:")
+    assert legacy_record["inbound_id"].startswith("feishu:render_plan_inbound:")
+    assert legacy_record["feishu_message_id"].startswith("feishu_render_plan_message_")
+    assert raw_chat_id not in json.dumps(legacy_record, sort_keys=True)
+    assert raw_message_id not in json.dumps(legacy_record, sort_keys=True)
+
+    lifecycle_events = _lifecycle_events(tmp_path)
+    assert [event["type"] for event in lifecycle_events] == [
+        "feishu_delivery_attempted",
+        "feishu_delivery_sent",
+        "feishu_delivery_ack_unknown",
+    ]
+    for event in lifecycle_events:
+        assert event["evidence_state"] == "current"
+        assert event["target_ref_hash"].startswith("sha256:")
+        assert event["delivery_hash"].startswith("sha256:")
+        assert "message_id" not in event
+        assert "message_ref_hash" not in event or event["message_ref_hash"].startswith("sha256:")
+    assert lifecycle_events[1]["message_ref_hash"].startswith("sha256:")
+    assert lifecycle_events[1]["bot_ownership_hash"].startswith("sha256:")
+    assert lifecycle_events[2]["message_ref_hash"].startswith("sha256:")
 
 
 @pytest.mark.asyncio

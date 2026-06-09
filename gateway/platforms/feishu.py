@@ -1931,6 +1931,18 @@ class FeishuAdapter(BasePlatformAdapter):
             ],
         )
 
+    @classmethod
+    def _render_plan_legacy_ref(cls, kind: str, *values: Any) -> str:
+        material = "\x1f".join(str(value) for value in values)
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        return f"feishu:render_plan_{kind}:{digest}"
+
+    @classmethod
+    def _render_plan_legacy_message_id(cls, *values: Any) -> str:
+        material = "\x1f".join(str(value) for value in values)
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        return f"feishu_render_plan_message_{digest}"
+
     def _metadata_for_render_plan_part(
         self,
         *,
@@ -2215,20 +2227,58 @@ class FeishuAdapter(BasePlatformAdapter):
                     message_index=message_index,
                     message_count=len(messages),
                 )
+                raw_inbound_id = self._delivery_metadata(
+                    chunk_metadata, "inbound_id", reply_to or chat_id
+                )
+                raw_session_id = self._delivery_metadata(
+                    chunk_metadata, "session_id", "session"
+                )
+                raw_correlation_id = self._delivery_metadata(
+                    chunk_metadata, "correlation_id", delivery_id
+                )
+                legacy_message_id = self._render_plan_legacy_message_id(
+                    delivery_id,
+                    plan.plan_hash,
+                    part.part_hash,
+                    message_index,
+                )
                 response_or_result = await self._audited_delivery(
                     delivery_id=delivery_id,
                     operation="render_plan_send",
                     target=f"feishu:chat:{chat_id}",
                     metadata=chunk_metadata,
-                    inbound_id=self._delivery_metadata(
-                        chunk_metadata, "inbound_id", reply_to or chat_id
+                    inbound_id=raw_inbound_id,
+                    session_id=raw_session_id,
+                    correlation_id=raw_correlation_id,
+                    ledger_target=self._render_plan_legacy_ref(
+                        "target",
+                        plan.plan_hash,
+                        plan.target_ref_hash,
+                        chat_id,
+                        part.part_hash,
+                        message_index,
                     ),
-                    session_id=self._delivery_metadata(
-                        chunk_metadata, "session_id", "session"
+                    ledger_inbound_id=self._render_plan_legacy_ref(
+                        "inbound",
+                        plan.plan_hash,
+                        raw_inbound_id,
+                        reply_to or "",
+                        part.part_hash,
+                        message_index,
                     ),
-                    correlation_id=self._delivery_metadata(
-                        chunk_metadata, "correlation_id", delivery_id
+                    ledger_session_id=self._render_plan_legacy_ref(
+                        "session",
+                        plan.plan_hash,
+                        raw_session_id,
+                        part.part_hash,
+                        message_index,
                     ),
+                    ledger_correlation_id=self._render_plan_legacy_ref(
+                        "correlation",
+                        delivery_id,
+                        raw_correlation_id,
+                    ),
+                    ledger_message_id=legacy_message_id,
                     network_call=lambda uuid_value, msg_type=msg_type, payload=payload, chunk_metadata=chunk_metadata: self._send_raw_message(
                         chat_id=chat_id,
                         msg_type=msg_type,
@@ -2267,7 +2317,7 @@ class FeishuAdapter(BasePlatformAdapter):
                         },
                     )
                 if result.message_id:
-                    message_ids.append(str(result.message_id))
+                    message_ids.append(legacy_message_id)
             if messages:
                 sent_part_count += 1
 
@@ -7082,22 +7132,31 @@ class FeishuAdapter(BasePlatformAdapter):
         existing_message_id: Optional[str] = None,
         current_delivery_proof: Optional[Dict[str, Any]] = None,
         terminal_exception_matcher: Any = None,
+        ledger_target: Optional[str] = None,
+        ledger_inbound_id: Optional[str] = None,
+        ledger_session_id: Optional[str] = None,
+        ledger_correlation_id: Optional[str] = None,
+        ledger_message_id: Optional[str] = None,
     ) -> Any | SendResult:
+        delivery_record_target = ledger_target or target
+        delivery_record_inbound_id = ledger_inbound_id or inbound_id
+        delivery_record_session_id = ledger_session_id or session_id
+        delivery_record_correlation_id = ledger_correlation_id or correlation_id
         pending_result = await self._apply_delivery_pending(
             delivery_id=delivery_id,
             operation=operation,
-            inbound_id=inbound_id,
-            target=target,
-            session_id=session_id,
-            correlation_id=correlation_id,
+            inbound_id=delivery_record_inbound_id,
+            target=delivery_record_target,
+            session_id=delivery_record_session_id,
+            correlation_id=delivery_record_correlation_id,
         )
         replay_result = self._send_result_from_delivery_record_apply(
             pending_result,
             delivery_id=delivery_id,
-            inbound_id=inbound_id,
-            target=target,
-            session_id=session_id,
-            correlation_id=correlation_id,
+            inbound_id=delivery_record_inbound_id,
+            target=delivery_record_target,
+            session_id=delivery_record_session_id,
+            correlation_id=delivery_record_correlation_id,
         )
         if replay_result is not None:
             return replay_result
@@ -7286,7 +7345,12 @@ class FeishuAdapter(BasePlatformAdapter):
                 raw_response=response,
             )
 
-        if not await self._apply_delivery_sent(delivery_id, str(message_id), operation):
+        delivery_record_message_id = ledger_message_id or str(message_id)
+        if not await self._apply_delivery_sent(
+            delivery_id,
+            delivery_record_message_id,
+            operation,
+        ):
             if lifecycle_context is not None:
                 lifecycle_gap_result = await self._fail_if_lifecycle_failed_append_missing(
                     delivery_id=delivery_id,
@@ -7302,7 +7366,7 @@ class FeishuAdapter(BasePlatformAdapter):
             if not await self._apply_unknown_delivery_state(
                 delivery_id,
                 "delivery_sent_apply_failed",
-                message_id=str(message_id),
+                message_id=delivery_record_message_id,
             ):
                 return SendResult(
                     success=False,
