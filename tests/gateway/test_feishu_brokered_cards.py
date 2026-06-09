@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from gateway import gateway_event_ledger
 from gateway.config import PlatformConfig
 from gateway.feishu_legacy_guard import current_feishu_broker_context
 from gateway.gateway_event_ledger import LEDGER_FILENAME
@@ -112,6 +114,37 @@ def _callback(result: dict[str, object], seed: str = "alpha", **overrides) -> di
     }
     value.update(overrides)
     return value
+
+
+def _resolve_kwargs(seed: str = "alpha", **overrides) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        "route_partition_hash": _sha(f"route:{seed}"),
+        "route_snapshot_hash": _sha(f"route-snapshot:{seed}"),
+        "operator_hash": _sha(f"operator:{seed}"),
+        "contract_hash": _sha(f"contract:{seed}"),
+        "now": 1_700_000_000,
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _record(tmp_path, action_id: str) -> dict[str, object]:
+    record = _state(tmp_path)["feishu_broker_actions"][action_id]
+    assert isinstance(record, dict)
+    return record
+
+
+def _accept_event(
+    adapter: FeishuAdapter,
+    record: dict[str, object],
+    seed: str = "alpha",
+) -> dict[str, object]:
+    return adapter._broker_action_resolution_event(
+        "feishu_broker_action_accepted",
+        record=record,
+        callback_hash=_sha(f"callback:{seed}"),
+        choice_hash=_sha(f"choice:{seed}"),
+    )
 
 
 @pytest.mark.parametrize("kind", ["clarification", "confirmation"])
@@ -377,6 +410,141 @@ async def test_successful_callback_replay_records_replayed_once_without_dispatch
     assert _state(tmp_path).get("feishu_delivery_lifecycle", []) == []
     assert len(_broker_events(tmp_path, "feishu_broker_action_accepted")) == 1
     assert len(_broker_events(tmp_path, "feishu_broker_action_resolved")) == 1
+    assert len(_broker_events(tmp_path, "feishu_broker_action_replayed")) == 1
+    _assert_no_raw_material(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_in_flight_accepted_callback_replay_fails_before_side_effects_and_lifecycle_duplication(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    created = _create(adapter)
+    record = _record(tmp_path, str(created["action_id"]))
+    accepted = gateway_event_ledger.apply_gateway_event(
+        _accept_event(adapter, record),
+        tmp_path,
+    )
+    assert accepted.ok is True
+    side_effect = AsyncMock()
+
+    result = await adapter.resolve_brokered_card_callback(
+        action_value=_callback(created),
+        **_resolve_kwargs(on_resolved=side_effect),
+    )
+
+    assert result == {
+        "ok": False,
+        "failure_class": "feishu_broker_action_duplicate",
+        "replayed": True,
+    }
+    assert side_effect.await_count == 0
+    assert adapter.handle_message.await_count == 0
+    assert adapter._handle_message_with_guards.await_count == 0
+    assert len(_broker_events(tmp_path, "feishu_broker_action_accepted")) == 1
+    assert _broker_events(tmp_path, "feishu_broker_action_resolved") == []
+    assert len(_broker_events(tmp_path, "feishu_broker_action_replayed")) == 1
+    _assert_no_raw_material(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_callbacks_for_same_action_execute_side_effect_at_most_once(
+    tmp_path,
+):
+    adapter = _adapter(tmp_path)
+    created = _create(adapter)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    side_effect_calls = 0
+
+    async def on_resolved(_record):
+        nonlocal side_effect_calls
+        side_effect_calls += 1
+        entered.set()
+        await release.wait()
+
+    first = asyncio.create_task(
+        adapter.resolve_brokered_card_callback(
+            action_value=_callback(created),
+            **_resolve_kwargs(on_resolved=on_resolved),
+        )
+    )
+    await entered.wait()
+    replay_task = asyncio.create_task(
+        adapter.resolve_brokered_card_callback(
+            action_value=_callback(created),
+            **_resolve_kwargs(now=1_700_000_001, on_resolved=on_resolved),
+        )
+    )
+    for _ in range(100):
+        if replay_task.done() or side_effect_calls > 1:
+            break
+        await asyncio.sleep(0.01)
+    release.set()
+    first_result, replay = await asyncio.gather(first, replay_task)
+
+    assert first_result["ok"] is True
+    assert replay == {
+        "ok": False,
+        "failure_class": "feishu_broker_action_duplicate",
+        "replayed": True,
+    }
+    assert side_effect_calls == 1
+    assert adapter.handle_message.await_count == 0
+    assert adapter._handle_message_with_guards.await_count == 0
+    assert len(_broker_events(tmp_path, "feishu_broker_action_accepted")) == 1
+    assert len(_broker_events(tmp_path, "feishu_broker_action_resolved")) == 1
+    assert len(_broker_events(tmp_path, "feishu_broker_action_replayed")) == 1
+    _assert_no_raw_material(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_resolved_write_failure_retry_fails_closed_without_second_side_effect(
+    tmp_path,
+    monkeypatch,
+):
+    adapter = _adapter(tmp_path)
+    created = _create(adapter)
+    side_effect = AsyncMock()
+    original_apply = gateway_event_ledger.apply_gateway_event_async
+
+    async def fail_resolved_once(event, state_dir):
+        if event.get("type") == "feishu_broker_action_resolved":
+            monkeypatch.setattr(
+                gateway_event_ledger,
+                "apply_gateway_event_async",
+                original_apply,
+            )
+            return SimpleNamespace(ok=False, failure_class="gateway_event_state_io_failed")
+        return await original_apply(event, state_dir)
+
+    monkeypatch.setattr(
+        gateway_event_ledger,
+        "apply_gateway_event_async",
+        fail_resolved_once,
+    )
+
+    failed = await adapter.resolve_brokered_card_callback(
+        action_value=_callback(created),
+        **_resolve_kwargs(on_resolved=side_effect),
+    )
+    retry = await adapter.resolve_brokered_card_callback(
+        action_value=_callback(created),
+        **_resolve_kwargs(now=1_700_000_001, on_resolved=side_effect),
+    )
+
+    assert failed == {
+        "ok": False,
+        "failure_class": "gateway_event_state_io_failed",
+    }
+    assert retry == {
+        "ok": False,
+        "failure_class": "feishu_broker_action_duplicate",
+        "replayed": True,
+    }
+    assert side_effect.await_count == 1
+    assert len(_broker_events(tmp_path, "feishu_broker_action_accepted")) == 1
+    assert _broker_events(tmp_path, "feishu_broker_action_resolved") == []
     assert len(_broker_events(tmp_path, "feishu_broker_action_replayed")) == 1
     _assert_no_raw_material(tmp_path)
 

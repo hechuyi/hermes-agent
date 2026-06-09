@@ -706,7 +706,7 @@ def _apply_feishu_broker_action_accepted(
     event: Mapping[str, Any], state: dict[str, Any]
 ) -> dict[str, Any]:
     record = _broker_action_record_for_event(event, state)
-    if record["status"] == "resolved":
+    if record["status"] != "created":
         return {
             "type": "feishu_broker_action_record",
             "record": dict(record),
