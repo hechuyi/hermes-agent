@@ -7202,11 +7202,16 @@ class FeishuAdapter(BasePlatformAdapter):
             declared_mime_class=declared_mime_class,
         )
         if failure_class is not None:
-            await self._record_attachment_upload_denial(
+            denial_recorded = await self._record_attachment_upload_denial(
                 metadata=metadata,
                 failure_class=failure_class,
                 declared_mime_class=declared_mime_class,
             )
+            if not denial_recorded:
+                return SendResult(
+                    success=False,
+                    error="feishu_attachment_denial_apply_failed",
+                )
             return SendResult(success=False, error=failure_class)
 
         if self._gateway_event_state_dir is None:
@@ -7219,11 +7224,16 @@ class FeishuAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=operation_error)
         explicit_delivery_id = (metadata or {}).get("delivery_id")
         if not isinstance(explicit_delivery_id, str) or not explicit_delivery_id:
-            await self._record_attachment_upload_denial(
+            denial_recorded = await self._record_attachment_upload_denial(
                 metadata=metadata,
                 failure_class="feishu_attachment_provenance_mismatch",
                 declared_mime_class=declared_mime_class,
             )
+            if not denial_recorded:
+                return SendResult(
+                    success=False,
+                    error="feishu_attachment_denial_apply_failed",
+                )
             return SendResult(
                 success=False,
                 error="feishu_attachment_provenance_mismatch",
@@ -7564,9 +7574,9 @@ class FeishuAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]],
         failure_class: str,
         declared_mime_class: str,
-    ) -> None:
+    ) -> bool:
         if self._gateway_event_state_dir is None:
-            return
+            return True
         route_evidence = self._attachment_route_evidence(metadata) or {}
         event = {
             "type": "feishu_attachment_upload_denied",
@@ -7593,7 +7603,8 @@ class FeishuAdapter(BasePlatformAdapter):
             else "small",
             "timestamp": int(time.time()),
         }
-        await self._apply_gateway_event(event)
+        result = await self._apply_gateway_event(event)
+        return self._gateway_event_apply_succeeded(result)
 
     async def _send_uploaded_file_message(
         self,

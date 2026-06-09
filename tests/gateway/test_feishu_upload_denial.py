@@ -385,6 +385,37 @@ async def test_image_upload_without_provenance_denies_before_upload_request_crea
 
 
 @pytest.mark.asyncio
+async def test_image_upload_denial_apply_failed_fails_closed_without_upload_side_effects(
+    tmp_path,
+    monkeypatch,
+):
+    adapter, image_api, file_api, message_api = _adapter(tmp_path)
+    image_path = "/tmp/fake-image.png"
+    original_apply_gateway_event = adapter._apply_gateway_event
+
+    async def fail_denial_apply(event):
+        if event.get("type") == "feishu_attachment_upload_denied":
+            return False
+        return await original_apply_gateway_event(event)
+
+    monkeypatch.setattr(adapter, "_apply_gateway_event", fail_denial_apply)
+
+    result = await adapter.send_image_file(
+        chat_id="oc_b7_chat",
+        image_path=image_path,
+        reply_to=_REPLY_TO,
+        metadata=_base_metadata(),
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_attachment_denial_apply_failed"
+    _assert_no_upload_side_effects(adapter, image_api, file_api, message_api)
+    state_json = json.dumps(_state(tmp_path), sort_keys=True)
+    assert "delivery_sent" not in state_json
+    assert "feishu_upload" not in state_json
+
+
+@pytest.mark.asyncio
 async def test_generated_bare_local_path_with_matching_provenance_is_denied_before_probe(
     tmp_path,
     monkeypatch,
