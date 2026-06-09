@@ -483,14 +483,8 @@ TOOLSETS = {
     },
 
     "hermes-feishu": {
-        "description": "Feishu/Lark bot toolset - enterprise messaging via Feishu/Lark (full access)",
-        "tools": _HERMES_CORE_TOOLS + [
-            "feishu_doc_read",
-            "feishu_drive_list_comments",
-            "feishu_drive_list_comment_replies",
-            "feishu_drive_reply_comment",
-            "feishu_drive_add_comment",
-        ],
+        "description": "Feishu/Lark bot toolset - enterprise messaging via Feishu/Lark",
+        "tools": _HERMES_CORE_TOOLS,
         "includes": []
     },
 
