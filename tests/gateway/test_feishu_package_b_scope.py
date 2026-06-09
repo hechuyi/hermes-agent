@@ -50,6 +50,74 @@ def test_model_visible_discovery_exposes_only_package_b_current_conversation_ids
     assert exposed == tuple(sorted(EXPECTED_MODEL_VISIBLE))
 
 
+def _model_visible_feishu_tool_names() -> frozenset[str]:
+    import model_tools
+
+    definitions = model_tools.get_tool_definitions(
+        enabled_toolsets=["hermes-feishu"],
+        quiet_mode=True,
+    )
+    return frozenset(
+        tool["function"]["name"]
+        for tool in definitions
+        if tool["function"]["name"].startswith("feishu")
+    )
+
+
+def test_actual_model_tools_export_exact_package_b_current_conversation_ids():
+    assert _model_visible_feishu_tool_names() == EXPECTED_MODEL_VISIBLE
+
+
+def test_scope_classifier_accepts_actual_model_tools_export():
+    result = classify_feishu_package_b_tool_scope(
+        model_visible_identifiers=_model_visible_feishu_tool_names(),
+    )
+
+    assert result.status == "ready"
+    assert result.failure_class is None
+    assert result.blockers == ()
+
+
+def test_actual_model_tools_export_filters_injected_unknown_feishu_tool():
+    import model_tools
+
+    model_tools.registry.register(
+        name="feishu.openapi.raw",
+        toolset="hermes-feishu",
+        schema={
+            "name": "feishu.openapi.raw",
+            "description": "raw Feishu OpenAPI passthrough",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        handler=lambda _args, **_kwargs: "{}",
+    )
+    try:
+        assert _model_visible_feishu_tool_names() == EXPECTED_MODEL_VISIBLE
+    finally:
+        model_tools.registry.deregister("feishu.openapi.raw")
+
+
+def test_model_visible_scope_rejects_empty_or_subset_actual_surface():
+    actual = _model_visible_feishu_tool_names()
+    observed_surfaces = [
+        frozenset(),
+        actual - {"feishu.current.reply.send"},
+    ]
+
+    for observed in observed_surfaces:
+        result = classify_feishu_package_b_tool_scope(
+            model_visible_identifiers=observed,
+        )
+
+        assert result.status == "not_ready"
+        assert result.failure_class == "feishu_package_b_model_surface_missing"
+        assert result.blockers
+        assert all(
+            blocker.startswith("feishu_package_b_model_surface_missing:")
+            for blocker in result.blockers
+        )
+
+
 @pytest.mark.parametrize("identifier", sorted(EXPECTED_MODEL_VISIBLE))
 def test_classifier_marks_exact_package_b_capabilities_model_visible(identifier):
     assert classify_feishu_package_b_tool_identifier(identifier) == "model_visible"

@@ -139,8 +139,13 @@ def classify_feishu_package_b_tool_scope(
     """
 
     blockers: list[str] = []
+    observed_model_visible = set(model_visible_identifiers)
+    missing_model_visible = FEISHU_PACKAGE_B_MODEL_VISIBLE_CAPABILITIES - observed_model_visible
 
-    for identifier in sorted(set(model_visible_identifiers)):
+    for identifier in sorted(missing_model_visible):
+        blockers.append(f"feishu_package_b_model_surface_missing:{identifier}")
+
+    for identifier in sorted(observed_model_visible):
         identifier_class = classify_feishu_package_b_tool_identifier(identifier)
         if identifier_class in {"adapter_only", "denied", "unknown"}:
             blockers.append(f"feishu_package_b_scope_creep:{identifier}")

@@ -565,9 +565,18 @@ def get_toolset(name: str) -> Optional[Dict[str, Any]]:
         return toolset if toolset else None
 
     if toolset:
+        registry_tools = set(registry.get_tool_names_for_toolset(name))
+        if name == "hermes-feishu":
+            from gateway.feishu_readiness import classify_feishu_package_b_tool_identifier
+
+            registry_tools = {
+                tool_name
+                for tool_name in registry_tools
+                if classify_feishu_package_b_tool_identifier(tool_name) == "model_visible"
+            }
         merged_tools = sorted(
             set(toolset.get("tools", []))
-            | set(registry.get_tool_names_for_toolset(name))
+            | registry_tools
         )
         return {**toolset, "tools": merged_tools}
 

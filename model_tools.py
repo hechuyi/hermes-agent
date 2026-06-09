@@ -391,6 +391,7 @@ def _compute_tool_definitions(
 
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
+    filtered_tools = _filter_hermes_feishu_package_b_schemas(filtered_tools)
 
     # The set of tool names that actually passed check_fn filtering.
     # Use this (not tools_to_include) for any downstream schema that references
@@ -483,6 +484,29 @@ def _compute_tool_definitions(
         logger.warning("Schema sanitization skipped: %s", e)
 
     return filtered_tools
+
+
+def _filter_hermes_feishu_package_b_schemas(
+    tool_definitions: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Keep hermes-feishu model schemas inside the exact Package B surface."""
+
+    try:
+        from gateway.feishu_readiness import classify_feishu_package_b_tool_identifier
+    except Exception:
+        return tool_definitions
+
+    result: List[Dict[str, Any]] = []
+    for tool_definition in tool_definitions:
+        tool_name = tool_definition.get("function", {}).get("name")
+        if (
+            isinstance(tool_name, str)
+            and registry.get_toolset_for_tool(tool_name) == "hermes-feishu"
+            and classify_feishu_package_b_tool_identifier(tool_name) != "model_visible"
+        ):
+            continue
+        result.append(tool_definition)
+    return result
 
 
 def _feishu_broker_cache_fingerprint() -> tuple | None:
