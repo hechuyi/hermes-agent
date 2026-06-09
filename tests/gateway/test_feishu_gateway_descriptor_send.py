@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from gateway.config import PlatformConfig
+from gateway.feishu_contracts import feishu_hashed_ref
 from gateway.feishu_legacy_guard import feishu_broker_context
 from gateway.gateway_event_ledger import apply_gateway_event
 import gateway.platforms.feishu as feishu_module
@@ -18,6 +19,11 @@ _PLAN_HASH = "sha256:" + "6" * 64
 _ROOT_PROOF_HASH = "sha256:" + "7" * 64
 _TOOL_ACTION_HASH = "sha256:" + "8" * 64
 _GRANT_HANDLE = "broker_grant_handle:sha256:" + "9" * 64
+_CURRENT_REPLY_ANCHOR = "om_user_anchor_1"
+
+
+def _sha(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 class _FakeResponse:
@@ -117,6 +123,57 @@ def _metadata(delivery_id="delivery-create"):
     }
 
 
+def _current_admission(
+    *,
+    route="route:descriptor:current",
+    route_snapshot="session-route-descriptor-current",
+    reply_anchor=_CURRENT_REPLY_ANCHOR,
+):
+    reply_ref = feishu_hashed_ref("feishu_reply_anchor", reply_anchor)
+    assert reply_ref is not None
+    return {
+        "canonical_event_ref": _sha("descriptor-current-event"),
+        "contract_hash": _sha("descriptor-current-contract"),
+        "route_partition_key": route,
+        "route_session_key_snapshot": route_snapshot,
+        "actor_ref": _sha("descriptor-current-actor"),
+        "authority_subject_ref": _sha("descriptor-current-authority"),
+        "transport_kind": "dm",
+        "reply_anchor_ref": reply_ref.value_hash,
+        "evidence_state": "current",
+    }
+
+
+def _metadata_with_current_admission(delivery_id="delivery-create"):
+    metadata = _metadata(delivery_id)
+    metadata["feishu_current_admission"] = _current_admission()
+    return metadata
+
+
+async def _seed_current_bot_owned_message(
+    adapter,
+    message_api,
+    *,
+    chat_id="oc_chat",
+    message_id="om_existing",
+    delivery_id="delivery-edit-source",
+):
+    original_reply_response = message_api.reply_response
+    message_api.reply_response = _FakeResponse(message_id=message_id)
+    result = await adapter.send(
+        chat_id,
+        "current bot-owned edit target",
+        reply_to=_CURRENT_REPLY_ANCHOR,
+        metadata=_metadata_with_current_admission(delivery_id),
+    )
+    assert result.success is True
+    assert result.message_id == message_id
+    message_api.reply_response = original_reply_response
+    message_api.create_calls.clear()
+    message_api.reply_calls.clear()
+    message_api.update_calls.clear()
+
+
 def _metadata_with_attachment_provenance(
     tmp_path,
     payload: bytes,
@@ -188,6 +245,20 @@ def _broker_context():
 
 def _event_types(calls):
     return [call.get("type") for call in calls if "type" in call]
+
+
+def _delivery_audit_event_types(calls):
+    return [
+        call.get("type")
+        for call in calls
+        if call.get("type")
+        in {
+            "delivery_pending",
+            "delivery_sent",
+            "delivery_failed",
+            "unknown_delivery_state",
+        }
+    ]
 
 
 def _assert_legacy_descriptor_denied(event, *, surface):
@@ -1562,27 +1633,30 @@ async def test_exception_after_pending_applies_unknown_and_no_delivery_failed_or
 @pytest.mark.asyncio
 async def test_edit_validates_existing_message_id_and_records_sent_with_same_id(tmp_path):
     adapter, message_api = _adapter(tmp_path)
+    await _seed_current_bot_owned_message(adapter, message_api)
     events = _install_event_recorder(adapter)
 
     result = await adapter.edit_message(
         "oc_chat",
         "om_existing",
         "updated",
-        metadata=_metadata("delivery-edit"),
+        metadata=_metadata_with_current_admission("delivery-edit"),
     )
 
     assert result.success is True
     assert result.message_id == "om_existing"
     assert message_api.update_calls[0].message_id == "om_existing"
-    assert _event_types(events) == ["delivery_pending", "delivery_sent"]
+    assert _delivery_audit_event_types(events) == ["delivery_pending", "delivery_sent"]
     assert events[0]["operation"] == "message_edit"
-    assert events[1]["operation"] == "message_edit"
-    assert events[-1]["message_id"] == "om_existing"
+    delivery_events = _delivery_events(events)
+    assert delivery_events[1]["operation"] == "message_edit"
+    assert delivery_events[-1]["message_id"] == "om_existing"
 
 
 @pytest.mark.asyncio
 async def test_message_edit_operation_matrix_uses_existing_target_as_message_evidence(tmp_path):
     adapter, message_api = _adapter(tmp_path)
+    await _seed_current_bot_owned_message(adapter, message_api)
     timeline = []
 
     async def apply(event):
@@ -1601,12 +1675,19 @@ async def test_message_edit_operation_matrix_uses_existing_target_as_message_evi
         "oc_chat",
         "om_existing",
         "edited final",
-        metadata=_metadata("outbound-delivery-9-edit-1"),
+        metadata=_metadata_with_current_admission("outbound-delivery-9-edit-1"),
     )
 
     assert result.success is True
     assert result.message_id == "om_existing"
-    assert [entry[0] for entry in timeline] == ["event", "sdk_update", "event"]
+    assert [
+        entry[0]
+        if entry[0] == "sdk_update"
+        else entry[1]["type"]
+        for entry in timeline
+        if entry[0] == "sdk_update"
+        or entry[1].get("type") in {"delivery_pending", "delivery_sent"}
+    ] == ["delivery_pending", "sdk_update", "delivery_sent"]
     events = [entry[1] for entry in timeline if entry[0] == "event"]
     _assert_sent_matrix_events(
         events,
@@ -1632,6 +1713,7 @@ async def test_message_edit_operation_matrix_uses_existing_target_as_message_evi
 @pytest.mark.asyncio
 async def test_audited_edit_falls_back_to_text_on_post_rejection_response(tmp_path):
     adapter, message_api = _adapter(tmp_path)
+    await _seed_current_bot_owned_message(adapter, message_api)
     events = _install_event_recorder(adapter)
 
     def update(request):
@@ -1650,7 +1732,7 @@ async def test_audited_edit_falls_back_to_text_on_post_rejection_response(tmp_pa
         "oc_chat",
         "om_existing",
         "可以用 **粗体** 和 *斜体*。",
-        metadata=_metadata("delivery-edit-post-response"),
+        metadata=_metadata_with_current_admission("delivery-edit-post-response"),
     )
 
     assert result.success is True
@@ -1659,18 +1741,19 @@ async def test_audited_edit_falls_back_to_text_on_post_rejection_response(tmp_pa
         "post",
         "text",
     ]
-    assert _event_types(events) == [
+    assert _delivery_audit_event_types(events) == [
         "delivery_pending",
         "delivery_failed",
         "delivery_pending",
         "delivery_sent",
     ]
-    assert events[-1]["message_id"] == "om_existing"
+    assert _delivery_events(events)[-1]["message_id"] == "om_existing"
 
 
 @pytest.mark.asyncio
 async def test_audited_edit_invalid_post_response_does_not_fallback_when_failed_apply_fails(tmp_path):
     adapter, message_api = _adapter(tmp_path)
+    await _seed_current_bot_owned_message(adapter, message_api)
     events = _install_event_recorder(adapter, fail_event_types={"delivery_failed"})
 
     def update(request):
@@ -1689,12 +1772,12 @@ async def test_audited_edit_invalid_post_response_does_not_fallback_when_failed_
         "oc_chat",
         "om_existing",
         "可以用 **粗体** 和 *斜体*。",
-        metadata=_metadata("delivery-edit-post-response"),
+        metadata=_metadata_with_current_admission("delivery-edit-post-response"),
     )
 
     assert result.success is False
     assert result.error == "delivery_failed apply failed"
-    assert _event_types(events) == ["delivery_pending", "delivery_failed"]
+    assert _delivery_audit_event_types(events) == ["delivery_pending", "delivery_failed"]
     assert len(message_api.update_calls) == 1
     assert message_api.update_calls[0].request_body.msg_type == "post"
 
@@ -1702,6 +1785,7 @@ async def test_audited_edit_invalid_post_response_does_not_fallback_when_failed_
 @pytest.mark.asyncio
 async def test_audited_edit_falls_back_to_text_on_post_rejection_exception(tmp_path):
     adapter, message_api = _adapter(tmp_path)
+    await _seed_current_bot_owned_message(adapter, message_api)
     events = _install_event_recorder(adapter)
 
     def update(request):
@@ -1716,7 +1800,7 @@ async def test_audited_edit_falls_back_to_text_on_post_rejection_exception(tmp_p
         "oc_chat",
         "om_existing",
         "可以用 **粗体** 和 *斜体*。",
-        metadata=_metadata("delivery-edit-post-exception"),
+        metadata=_metadata_with_current_admission("delivery-edit-post-exception"),
     )
 
     assert result.success is True
@@ -1725,18 +1809,19 @@ async def test_audited_edit_falls_back_to_text_on_post_rejection_exception(tmp_p
         "post",
         "text",
     ]
-    assert _event_types(events) == [
+    assert _delivery_audit_event_types(events) == [
         "delivery_pending",
         "delivery_failed",
         "delivery_pending",
         "delivery_sent",
     ]
-    assert "unknown_delivery_state" not in _event_types(events)
+    assert "unknown_delivery_state" not in _delivery_audit_event_types(events)
 
 
 @pytest.mark.asyncio
 async def test_audited_edit_invalid_post_exception_does_not_fallback_when_failed_apply_fails(tmp_path):
     adapter, message_api = _adapter(tmp_path)
+    await _seed_current_bot_owned_message(adapter, message_api)
     events = _install_event_recorder(adapter, fail_event_types={"delivery_failed"})
 
     def update(request):
@@ -1751,12 +1836,12 @@ async def test_audited_edit_invalid_post_exception_does_not_fallback_when_failed
         "oc_chat",
         "om_existing",
         "可以用 **粗体** 和 *斜体*。",
-        metadata=_metadata("delivery-edit-post-exception"),
+        metadata=_metadata_with_current_admission("delivery-edit-post-exception"),
     )
 
     assert result.success is False
     assert result.error == "delivery_failed apply failed"
-    assert _event_types(events) == ["delivery_pending", "delivery_failed"]
+    assert _delivery_audit_event_types(events) == ["delivery_pending", "delivery_failed"]
     assert len(message_api.update_calls) == 1
     assert message_api.update_calls[0].request_body.msg_type == "post"
 
@@ -1764,6 +1849,7 @@ async def test_audited_edit_invalid_post_exception_does_not_fallback_when_failed
 @pytest.mark.asyncio
 async def test_audited_edit_does_not_fallback_on_ambiguous_invalid_post_response(tmp_path):
     adapter, message_api = _adapter(tmp_path)
+    await _seed_current_bot_owned_message(adapter, message_api)
     events = _install_event_recorder(adapter)
 
     def update(request):
@@ -1780,11 +1866,14 @@ async def test_audited_edit_does_not_fallback_on_ambiguous_invalid_post_response
         "oc_chat",
         "om_existing",
         "可以用 **粗体** 和 *斜体*。",
-        metadata=_metadata("delivery-edit-post-ambiguous"),
+        metadata=_metadata_with_current_admission("delivery-edit-post-ambiguous"),
     )
 
     assert result.success is False
-    assert _event_types(events) == ["delivery_pending", "unknown_delivery_state"]
+    assert _delivery_audit_event_types(events) == [
+        "delivery_pending",
+        "unknown_delivery_state",
+    ]
     assert events[-1]["failure_class"] == "retryable_non_acceptance_after_admission"
     assert len(message_api.update_calls) == 1
     assert message_api.update_calls[0].request_body.msg_type == "post"
