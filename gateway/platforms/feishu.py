@@ -3036,6 +3036,15 @@ class FeishuAdapter(BasePlatformAdapter):
         if preflight is not None:
             return preflight
         if not os.path.exists(image_path):
+            terminalized = await self._terminalize_attachment_upload_failure(
+                chat_id=chat_id,
+                reply_to=reply_to,
+                metadata=metadata,
+                declared_mime_class="image",
+                failure_class="feishu_attachment_local_file_missing",
+            )
+            if terminalized is not None:
+                return terminalized
             return SendResult(success=False, error="Image file not found")
 
         try:
@@ -3052,37 +3061,54 @@ class FeishuAdapter(BasePlatformAdapter):
             request = self._build_image_upload_request(body)
             upload_response = await asyncio.to_thread(self._client.im.v1.image.create, request)
             image_key = self._extract_response_field(upload_response, "image_key")
-            if not image_key:
-                return self._response_error_result(
-                    upload_response,
-                    default_message="image upload failed",
-                    override_error="Feishu image upload missing image_key",
-                )
+        except Exception as exc:
+            logger.error(
+                "[Feishu] Failed to upload image attachment: failure_class=%s",
+                exc.__class__.__name__,
+            )
+            terminalized = await self._terminalize_attachment_upload_failure(
+                chat_id=chat_id,
+                reply_to=reply_to,
+                metadata=metadata,
+                declared_mime_class="image",
+                failure_class="feishu_image_upload_exception",
+            )
+            if terminalized is not None:
+                return terminalized
+            return SendResult(success=False, error=exc.__class__.__name__)
+        if not image_key:
+            terminalized = await self._terminalize_attachment_upload_failure(
+                chat_id=chat_id,
+                reply_to=reply_to,
+                metadata=metadata,
+                declared_mime_class="image",
+                failure_class="feishu_image_upload_missing_image_key",
+            )
+            if terminalized is not None:
+                return terminalized
+            return SendResult(success=False, error="Feishu image upload missing image_key")
 
-            if caption:
-                post_payload = self._build_media_post_payload(
-                    caption=caption,
-                    media_tag={"tag": "img", "image_key": image_key},
-                )
-                return await self._send_audited_or_legacy_message(
-                    chat_id=chat_id,
-                    msg_type="post",
-                    payload=post_payload,
-                    reply_to=reply_to,
-                    metadata=metadata,
-                    default_message="image send failed",
-                )
+        if caption:
+            post_payload = self._build_media_post_payload(
+                caption=caption,
+                media_tag={"tag": "img", "image_key": image_key},
+            )
             return await self._send_audited_or_legacy_message(
                 chat_id=chat_id,
-                msg_type="image",
-                payload=json.dumps({"image_key": image_key}, ensure_ascii=False),
+                msg_type="post",
+                payload=post_payload,
                 reply_to=reply_to,
                 metadata=metadata,
                 default_message="image send failed",
             )
-        except Exception as exc:
-            logger.error("[Feishu] Failed to send image attachment: %s", exc, exc_info=True)
-            return SendResult(success=False, error=str(exc))
+        return await self._send_audited_or_legacy_message(
+            chat_id=chat_id,
+            msg_type="image",
+            payload=json.dumps({"image_key": image_key}, ensure_ascii=False),
+            reply_to=reply_to,
+            metadata=metadata,
+            default_message="image send failed",
+        )
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         """Feishu bot API does not expose a typing indicator."""
@@ -7301,6 +7327,43 @@ class FeishuAdapter(BasePlatformAdapter):
         digest = self._delivery_ref_hash("feishu_message", message_id)[7:47]
         return f"om_attachment_{digest}"
 
+    @staticmethod
+    def _is_attachment_upload_ledger_message_id(message_id: str) -> bool:
+        return bool(re.fullmatch(r"om_attachment_[a-f0-9]{40}", message_id))
+
+    async def _terminalize_attachment_upload_failure(
+        self,
+        *,
+        chat_id: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        declared_mime_class: str,
+        failure_class: str,
+    ) -> Optional[SendResult]:
+        if self._gateway_event_state_dir is None:
+            return None
+        if not self._is_sha256_ref_text(
+            (metadata or {}).get("feishu_attachment_provenance_hash")
+        ):
+            return None
+        operation, operation_error = self._send_delivery_operation(
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+        if operation_error is not None:
+            return SendResult(success=False, error=operation_error)
+        explicit_delivery_id = (metadata or {}).get("delivery_id")
+        if not isinstance(explicit_delivery_id, str) or not explicit_delivery_id:
+            return None
+        delivery_id = self._delivery_id_for(
+            operation,
+            metadata=metadata,
+            parts=[chat_id, reply_to or "", declared_mime_class],
+        )
+        if not await self._apply_delivery_failed(delivery_id, failure_class):
+            return SendResult(success=False, error="delivery_failed apply failed")
+        return None
+
     def _attachment_provenance_failure(
         self,
         *,
@@ -7543,6 +7606,17 @@ class FeishuAdapter(BasePlatformAdapter):
         if preflight is not None:
             return preflight
         if not os.path.exists(file_path):
+            terminalized = await self._terminalize_attachment_upload_failure(
+                chat_id=chat_id,
+                reply_to=reply_to,
+                metadata=metadata,
+                declared_mime_class=self._attachment_mime_class_for_message_type(
+                    outbound_message_type
+                ),
+                failure_class="feishu_attachment_local_file_missing",
+            )
+            if terminalized is not None:
+                return terminalized
             return SendResult(success=False, error="File not found")
 
         display_name = file_name or os.path.basename(file_path)
@@ -7560,38 +7634,59 @@ class FeishuAdapter(BasePlatformAdapter):
                 request = self._build_file_upload_request(body)
                 upload_response = await asyncio.to_thread(self._client.im.v1.file.create, request)
             file_key = self._extract_response_field(upload_response, "file_key")
-            if not file_key:
-                return self._response_error_result(
-                    upload_response,
-                    default_message="file upload failed",
-                    override_error="Feishu file upload missing file_key",
-                )
+        except Exception as exc:
+            logger.error(
+                "[Feishu] Failed to upload file attachment: failure_class=%s",
+                exc.__class__.__name__,
+            )
+            terminalized = await self._terminalize_attachment_upload_failure(
+                chat_id=chat_id,
+                reply_to=reply_to,
+                metadata=metadata,
+                declared_mime_class=self._attachment_mime_class_for_message_type(
+                    outbound_message_type
+                ),
+                failure_class="feishu_file_upload_exception",
+            )
+            if terminalized is not None:
+                return terminalized
+            return SendResult(success=False, error=exc.__class__.__name__)
+        if not file_key:
+            terminalized = await self._terminalize_attachment_upload_failure(
+                chat_id=chat_id,
+                reply_to=reply_to,
+                metadata=metadata,
+                declared_mime_class=self._attachment_mime_class_for_message_type(
+                    outbound_message_type
+                ),
+                failure_class="feishu_file_upload_missing_file_key",
+            )
+            if terminalized is not None:
+                return terminalized
+            return SendResult(success=False, error="Feishu file upload missing file_key")
 
-            if caption:
-                media_tag = {
-                    "tag": "media",
-                    "file_key": file_key,
-                    "file_name": display_name,
-                }
-                return await self._send_audited_or_legacy_message(
-                    chat_id=chat_id,
-                    msg_type="post",
-                    payload=self._build_media_post_payload(caption=caption, media_tag=media_tag),
-                    reply_to=reply_to,
-                    metadata=metadata,
-                    default_message="file send failed",
-                )
+        if caption:
+            media_tag = {
+                "tag": "media",
+                "file_key": file_key,
+                "file_name": display_name,
+            }
             return await self._send_audited_or_legacy_message(
                 chat_id=chat_id,
-                msg_type=resolved_message_type,
-                payload=json.dumps({"file_key": file_key}, ensure_ascii=False),
+                msg_type="post",
+                payload=self._build_media_post_payload(caption=caption, media_tag=media_tag),
                 reply_to=reply_to,
                 metadata=metadata,
                 default_message="file send failed",
             )
-        except Exception as exc:
-            logger.error("[Feishu] Failed to send file attachment: %s", exc, exc_info=True)
-            return SendResult(success=False, error=str(exc))
+        return await self._send_audited_or_legacy_message(
+            chat_id=chat_id,
+            msg_type=resolved_message_type,
+            payload=json.dumps({"file_key": file_key}, ensure_ascii=False),
+            reply_to=reply_to,
+            metadata=metadata,
+            default_message="file send failed",
+        )
 
     async def _send_audited_or_legacy_message(
         self,
@@ -8562,6 +8657,8 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> Optional[str]:
         message_id = record.get("feishu_message_id")
         message_id_text = str(message_id or "")
+        if self._is_attachment_upload_ledger_message_id(message_id_text):
+            return None
         if (
             message_id
             and self._valid_feishu_message_id(message_id_text)
@@ -8620,6 +8717,14 @@ class FeishuAdapter(BasePlatformAdapter):
                 record,
                 target=target,
             )
+            if message_id_text is None and self._is_attachment_upload_ledger_message_id(
+                str(message_id or "")
+            ):
+                return SendResult(
+                    success=True,
+                    message_id=None,
+                    raw_response={"type": "delivery_record", "record": record},
+                )
             if message_id_text is not None:
                 return SendResult(
                     success=True,

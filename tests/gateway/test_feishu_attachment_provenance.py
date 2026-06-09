@@ -189,6 +189,30 @@ def _state(tmp_path):
     return json.loads(state_path.read_text())
 
 
+def _single_delivery_record(tmp_path):
+    deliveries = _state(tmp_path).get("deliveries", {})
+    assert len(deliveries) == 1
+    return next(iter(deliveries.values()))
+
+
+def _assert_attachment_failure_state_is_terminal_and_sanitized(
+    tmp_path,
+    *,
+    expected_failure_class,
+    forbidden_values,
+):
+    state = _state(tmp_path)
+    record = _single_delivery_record(tmp_path)
+    assert record["status"] == "failed"
+    assert record["failure_class"] == expected_failure_class
+    assert record["feishu_message_id"] is None
+
+    state_json = json.dumps(state, sort_keys=True)
+    assert "feishu:chat:" not in state_json
+    for forbidden in forbidden_values:
+        assert forbidden not in state_json
+
+
 def test_inbound_user_attachment_provenance_records_sanitized_closure(tmp_path):
     result = apply_gateway_event(_inbound_event(), tmp_path)
 
@@ -422,6 +446,8 @@ async def test_attachment_provenance_survives_replay_without_duplicate_upload(tm
 
     assert first.success is True
     assert second.success is True
+    assert first.message_id == _RAW_MESSAGE_ID
+    assert second.message_id is None
     assert len(image_api.create_calls) == 1
     assert len(message_api.create_calls) == 0
     assert len(message_api.reply_calls) == 1
@@ -432,3 +458,168 @@ async def test_attachment_provenance_survives_replay_without_duplicate_upload(tm
         tmp_path, provenance["provenance_hash"]
     )
     assert persisted["provenance_hash"] == provenance["provenance_hash"]
+
+
+@pytest.mark.asyncio
+async def test_attachment_image_missing_local_file_terminalizes_reservation_with_sanitized_failure(
+    tmp_path,
+):
+    provenance = apply_gateway_event(_generated_event(), tmp_path).action["record"]
+    adapter, image_api, file_api, message_api = _adapter(tmp_path)
+    image_path = tmp_path / "raw_missing_local_image.png"
+
+    result = await adapter.send_image_file(
+        chat_id=_RAW_CHAT_ID,
+        image_path=str(image_path),
+        reply_to=_REPLY_TO,
+        metadata=_metadata(
+            provenance["provenance_hash"],
+            feishu_attachment_producing_tool_action_hash=_TOOL_ACTION_HASH,
+            feishu_attachment_safe_output_root_proof_hash=_ROOT_PROOF_HASH,
+            delivery_id="delivery-missing-local-image",
+            inbound_id="inbound-raw-missing-local-image",
+            session_id="session-raw-missing-local-image",
+            correlation_id="correlation-raw-missing-local-image",
+            raw_sdk_body=_RAW_SDK_BODY,
+            raw_content=_RAW_CONTENT,
+        ),
+    )
+
+    assert result.success is False
+    assert result.error == "Image file not found"
+    assert len(image_api.create_calls) == 0
+    assert len(file_api.create_calls) == 0
+    assert len(message_api.create_calls) == 0
+    assert len(message_api.reply_calls) == 0
+    _assert_attachment_failure_state_is_terminal_and_sanitized(
+        tmp_path,
+        expected_failure_class="feishu_attachment_local_file_missing",
+        forbidden_values=(
+            _RAW_CHAT_ID,
+            _RAW_MESSAGE_ID,
+            _RAW_FILE_KEY,
+            str(image_path),
+            image_path.name,
+            _RAW_SDK_BODY,
+            _RAW_CONTENT,
+            "inbound-raw-missing-local-image",
+            "session-raw-missing-local-image",
+            "correlation-raw-missing-local-image",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_attachment_image_upload_missing_key_terminalizes_reservation_with_sanitized_failure(
+    tmp_path,
+):
+    provenance = apply_gateway_event(_generated_event(), tmp_path).action["record"]
+    adapter, image_api, file_api, message_api = _adapter(tmp_path)
+    image_api.create_response = SimpleNamespace(
+        success=lambda: True,
+        data=SimpleNamespace(image_key=""),
+        raw_body=_RAW_SDK_BODY,
+    )
+    image_path = tmp_path / "raw_missing_image_key.png"
+    image_path.write_bytes(_CONTENT_BYTES)
+
+    result = await adapter.send_image_file(
+        chat_id=_RAW_CHAT_ID,
+        image_path=str(image_path),
+        reply_to=_REPLY_TO,
+        metadata=_metadata(
+            provenance["provenance_hash"],
+            feishu_attachment_producing_tool_action_hash=_TOOL_ACTION_HASH,
+            feishu_attachment_safe_output_root_proof_hash=_ROOT_PROOF_HASH,
+            delivery_id="delivery-missing-image-key",
+            inbound_id="inbound-raw-missing-image-key",
+            session_id="session-raw-missing-image-key",
+            correlation_id="correlation-raw-missing-image-key",
+            raw_sdk_body=_RAW_SDK_BODY,
+            raw_content=_RAW_CONTENT,
+        ),
+    )
+
+    assert result.success is False
+    assert result.error == "Feishu image upload missing image_key"
+    assert result.raw_response is None
+    assert len(image_api.create_calls) == 1
+    assert len(file_api.create_calls) == 0
+    assert len(message_api.create_calls) == 0
+    assert len(message_api.reply_calls) == 0
+    _assert_attachment_failure_state_is_terminal_and_sanitized(
+        tmp_path,
+        expected_failure_class="feishu_image_upload_missing_image_key",
+        forbidden_values=(
+            _RAW_CHAT_ID,
+            _RAW_MESSAGE_ID,
+            _RAW_FILE_KEY,
+            str(image_path),
+            image_path.name,
+            _RAW_SDK_BODY,
+            _RAW_CONTENT,
+            "inbound-raw-missing-image-key",
+            "session-raw-missing-image-key",
+            "correlation-raw-missing-image-key",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_attachment_file_upload_missing_key_terminalizes_reservation_with_sanitized_failure(
+    tmp_path,
+):
+    provenance = apply_gateway_event(
+        _generated_event(declared_mime_class="file"),
+        tmp_path,
+    ).action["record"]
+    adapter, image_api, file_api, message_api = _adapter(tmp_path)
+    file_api.create_response = SimpleNamespace(
+        success=lambda: True,
+        data=SimpleNamespace(file_key=""),
+        raw_body=_RAW_SDK_BODY,
+    )
+    file_path = tmp_path / "raw_missing_file_key.pdf"
+    file_path.write_bytes(_CONTENT_BYTES)
+
+    result = await adapter._send_uploaded_file_message(
+        chat_id=_RAW_CHAT_ID,
+        file_path=str(file_path),
+        reply_to=_REPLY_TO,
+        metadata=_metadata(
+            provenance["provenance_hash"],
+            feishu_attachment_declared_mime_class="file",
+            feishu_attachment_producing_tool_action_hash=_TOOL_ACTION_HASH,
+            feishu_attachment_safe_output_root_proof_hash=_ROOT_PROOF_HASH,
+            delivery_id="delivery-missing-file-key",
+            inbound_id="inbound-raw-missing-file-key",
+            session_id="session-raw-missing-file-key",
+            correlation_id="correlation-raw-missing-file-key",
+            raw_sdk_body=_RAW_SDK_BODY,
+            raw_content=_RAW_CONTENT,
+        ),
+    )
+
+    assert result.success is False
+    assert result.error == "Feishu file upload missing file_key"
+    assert result.raw_response is None
+    assert len(image_api.create_calls) == 0
+    assert len(file_api.create_calls) == 1
+    assert len(message_api.create_calls) == 0
+    assert len(message_api.reply_calls) == 0
+    _assert_attachment_failure_state_is_terminal_and_sanitized(
+        tmp_path,
+        expected_failure_class="feishu_file_upload_missing_file_key",
+        forbidden_values=(
+            _RAW_CHAT_ID,
+            _RAW_MESSAGE_ID,
+            _RAW_FILE_KEY,
+            str(file_path),
+            file_path.name,
+            _RAW_SDK_BODY,
+            _RAW_CONTENT,
+            "inbound-raw-missing-file-key",
+            "session-raw-missing-file-key",
+            "correlation-raw-missing-file-key",
+        ),
+    )
