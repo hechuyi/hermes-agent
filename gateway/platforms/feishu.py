@@ -3941,6 +3941,16 @@ class FeishuAdapter(BasePlatformAdapter):
                 "failure_class": getattr(result, "failure_class", None)
                 or "feishu_broker_action_create_failed",
             }
+        record = (result.action or {}).get("record") if result.action else None
+        if not isinstance(record, dict):
+            return {
+                "ok": False,
+                "failure_class": "feishu_broker_action_create_failed",
+            }
+        action_id = str(record["action_id"])
+        grant_handle = str(record["grant_handle"])
+        payload_hash = str(record["payload_hash"])
+        action_kind = str(record["action_kind"])
         return {
             "ok": True,
             "action_id": action_id,

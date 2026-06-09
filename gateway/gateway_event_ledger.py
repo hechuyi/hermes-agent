@@ -39,6 +39,7 @@ _STATE_DICT_SECTIONS: tuple[str, ...] = (
     "ack_event_index",
     "session_routes",
     "feishu_broker_actions",
+    "feishu_broker_action_idempotency_index",
 )
 _STATE_LIST_SECTIONS: tuple[str, ...] = (
     "compression_rejections",
@@ -668,9 +669,30 @@ def _apply_feishu_broker_action_created(
 ) -> dict[str, Any]:
     action_id = str(event["action_id"])
     actions = state["feishu_broker_actions"]
+    idempotency_index = state["feishu_broker_action_idempotency_index"]
+    idempotency_key_hash = str(event["idempotency_key_hash"])
+    indexed_action_id = idempotency_index.get(idempotency_key_hash)
+    if indexed_action_id is not None:
+        record = actions.get(indexed_action_id)
+        if not isinstance(record, dict):
+            raise GatewayEventContractError(
+                "feishu_broker_action_idempotency_unknown",
+                "broker action idempotency index references unknown action",
+            )
+        if _broker_record_idempotency_binding_matches_created_event(record, event):
+            return {
+                "type": "feishu_broker_action_record",
+                "record": dict(record),
+                "outcome": "created",
+            }
+        raise GatewayEventContractError(
+            "feishu_broker_action_idempotency_conflict",
+            "broker action idempotency key already has different binding",
+        )
     existing = actions.get(action_id)
     if existing is not None:
         if _broker_record_matches_created_event(existing, event):
+            idempotency_index[idempotency_key_hash] = action_id
             return {
                 "type": "feishu_broker_action_record",
                 "record": dict(existing),
@@ -690,7 +712,7 @@ def _apply_feishu_broker_action_created(
         "contract_hash": str(event["contract_hash"]),
         "payload_hash": str(event["payload_hash"]),
         "expires_at": event["expires_at"],
-        "idempotency_key_hash": str(event["idempotency_key_hash"]),
+        "idempotency_key_hash": idempotency_key_hash,
         "status": "created",
         "created_at": event["timestamp"],
         "accepted_at": None,
@@ -698,6 +720,7 @@ def _apply_feishu_broker_action_created(
         "replayed_at": None,
     }
     actions[action_id] = record
+    idempotency_index[idempotency_key_hash] = action_id
     state["feishu_broker_action_lifecycle"].append(dict(event))
     return {"type": "feishu_broker_action_record", "record": dict(record), "outcome": "created"}
 
@@ -793,6 +816,22 @@ def _broker_record_matches_created_event(
     return all(record.get(field) == event.get(field) for field in fields)
 
 
+def _broker_record_idempotency_binding_matches_created_event(
+    record: Mapping[str, Any], event: Mapping[str, Any]
+) -> bool:
+    fields = (
+        "action_kind",
+        "route_partition_hash",
+        "route_snapshot_hash",
+        "operator_hash",
+        "contract_hash",
+        "payload_hash",
+        "expires_at",
+        "idempotency_key_hash",
+    )
+    return all(record.get(field) == event.get(field) for field in fields)
+
+
 def _minimal_broker_denial_record(event: Mapping[str, Any]) -> dict[str, Any]:
     action_id = str(event.get("action_id") or _sha256_ref(str(event.get("callback_hash"))))
     if not action_id.startswith("broker_action:"):
@@ -844,6 +883,7 @@ def _read_state(state_path: Path) -> dict[str, Any]:
         ),
     }
     required_keys.discard("feishu_broker_actions")
+    required_keys.discard("feishu_broker_action_idempotency_index")
     if not required_keys.issubset(raw):
         raise _state_schema_error()
     for key in _STATE_DICT_SECTIONS:
@@ -926,6 +966,7 @@ def _empty_state() -> dict[str, Any]:
         "feishu_audit_events": [],
         "feishu_delivery_lifecycle": [],
         "feishu_broker_actions": {},
+        "feishu_broker_action_idempotency_index": {},
         "feishu_broker_action_lifecycle": [],
     }
 
@@ -1026,6 +1067,7 @@ def _validate_persisted_feishu_delivery_lifecycle(events: list[Any]) -> None:
 def _validate_persisted_feishu_broker_actions(
     actions: Mapping[str, Any], lifecycle: list[Any]
 ) -> None:
+    idempotency_keys: dict[str, str] = {}
     for action_id, record in actions.items():
         if not isinstance(action_id, str):
             raise _state_schema_error()
@@ -1041,6 +1083,11 @@ def _validate_persisted_feishu_broker_actions(
             raise _state_schema_error() from exc
         if validated["record"]["action_id"] != action_id:
             raise _state_schema_error()
+        idempotency_key_hash = validated["record"]["idempotency_key_hash"]
+        existing_action_id = idempotency_keys.get(idempotency_key_hash)
+        if existing_action_id is not None and existing_action_id != action_id:
+            raise _state_schema_error()
+        idempotency_keys[idempotency_key_hash] = action_id
     for event in lifecycle:
         try:
             validate_gateway_event(event)
@@ -1052,6 +1099,7 @@ def _reconcile_persisted_indexes(state: dict[str, Any]) -> None:
     expected_identity_index: dict[str, str] = {}
     expected_message_index: dict[str, str] = {}
     expected_ack_index: dict[str, str] = {}
+    expected_broker_action_idempotency_index: dict[str, str] = {}
     for record in state["deliveries"].values():
         if not isinstance(record, Mapping):
             raise _state_schema_error()
@@ -1093,9 +1141,28 @@ def _reconcile_persisted_indexes(state: dict[str, Any]) -> None:
     )
     _validate_persisted_index_subset(state["feishu_message_index"], expected_message_index)
     _validate_persisted_index_subset(state["ack_event_index"], expected_ack_index)
+    for action_id, record in state["feishu_broker_actions"].items():
+        if not isinstance(record, Mapping):
+            raise _state_schema_error()
+        idempotency_key_hash = record.get("idempotency_key_hash")
+        if not isinstance(idempotency_key_hash, str):
+            raise _state_schema_error()
+        existing_action_id = expected_broker_action_idempotency_index.get(
+            idempotency_key_hash
+        )
+        if existing_action_id is not None and existing_action_id != action_id:
+            raise _state_schema_error()
+        expected_broker_action_idempotency_index[idempotency_key_hash] = action_id
+    _validate_persisted_index_subset(
+        state["feishu_broker_action_idempotency_index"],
+        expected_broker_action_idempotency_index,
+    )
     state["delivery_identity_index"] = expected_identity_index
     state["feishu_message_index"] = expected_message_index
     state["ack_event_index"] = expected_ack_index
+    state["feishu_broker_action_idempotency_index"] = (
+        expected_broker_action_idempotency_index
+    )
 
 
 def _validate_persisted_index_subset(

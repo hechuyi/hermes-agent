@@ -245,6 +245,101 @@ def test_creating_brokered_card_persists_opaque_binding_and_exact_payload_hash(
     _assert_no_raw_material(tmp_path)
 
 
+def test_brokered_card_create_replays_same_idempotency_key_and_binding(tmp_path):
+    first_adapter = _adapter(tmp_path, action_seed="first")
+    replay_adapter = _adapter(tmp_path, action_seed="second")
+
+    first = _create(first_adapter)
+    replay = _create(replay_adapter)
+
+    assert first["ok"] is True
+    assert replay == first
+    state = _state(tmp_path)
+    assert len(state["feishu_broker_actions"]) == 1
+    assert state["feishu_broker_action_idempotency_index"] == {
+        _sha(_idempotency("alpha")): first["action_id"],
+    }
+    assert len(_broker_events(tmp_path, "feishu_broker_action_created")) == 1
+    assert _record(tmp_path, str(first["action_id"]))["status"] == "created"
+    _assert_no_raw_material(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("label", "kind", "overrides"),
+    [
+        ("action_kind", "confirmation", {}),
+        ("route_partition", "clarification", {"route_partition_hash": _sha("route:other")}),
+        ("route_snapshot", "clarification", {"route_snapshot_hash": _sha("route-snapshot:other")}),
+        ("operator", "clarification", {"operator_hash": _sha("operator:other")}),
+        ("contract", "clarification", {"contract_hash": _sha("contract:other")}),
+        ("payload", "clarification", {"payload": {"payload_hash": _sha("payload:other")}}),
+        ("expiry", "clarification", {"expires_at": 1_800_000_001}),
+    ],
+)
+def test_brokered_card_create_same_idempotency_key_conflicts_on_binding_change(
+    tmp_path,
+    label,
+    kind,
+    overrides,
+):
+    del label
+    first_adapter = _adapter(tmp_path, action_seed="first")
+    conflict_adapter = _adapter(tmp_path, action_seed="second")
+    first = _create(first_adapter)
+
+    conflict = _create(
+        conflict_adapter,
+        kind=kind,
+        idempotency_key=_idempotency("alpha"),
+        **overrides,
+    )
+
+    assert first["ok"] is True
+    assert conflict == {
+        "ok": False,
+        "failure_class": "feishu_broker_action_idempotency_conflict",
+    }
+    state = _state(tmp_path)
+    assert len(state["feishu_broker_actions"]) == 1
+    assert state["feishu_broker_action_idempotency_index"] == {
+        _sha(_idempotency("alpha")): first["action_id"],
+    }
+    assert len(_broker_events(tmp_path, "feishu_broker_action_created")) == 1
+    _assert_no_raw_material(tmp_path)
+
+
+async def _create_in_thread(adapter: FeishuAdapter) -> dict[str, object]:
+    return await asyncio.to_thread(_create, adapter)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_brokered_card_create_same_idempotency_key_creates_one_action(
+    tmp_path,
+):
+    first_adapter = _adapter(tmp_path, action_seed="first")
+    second_adapter = _adapter(tmp_path, action_seed="second")
+
+    first, second = await asyncio.gather(
+        _create_in_thread(first_adapter),
+        _create_in_thread(second_adapter),
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert first == second
+    assert {first["action_id"], second["action_id"]} in (
+        {_action_id("first")},
+        {_action_id("second")},
+    )
+    state = _state(tmp_path)
+    assert len(state["feishu_broker_actions"]) == 1
+    assert state["feishu_broker_action_idempotency_index"] == {
+        _sha(_idempotency("alpha")): first["action_id"],
+    }
+    assert len(_broker_events(tmp_path, "feishu_broker_action_created")) == 1
+    _assert_no_raw_material(tmp_path)
+
+
 @pytest.mark.asyncio
 async def test_successful_callback_records_accepted_and_resolved_once_with_broker_context(
     tmp_path,
