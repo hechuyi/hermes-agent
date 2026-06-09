@@ -6352,6 +6352,16 @@ class FeishuAdapter(BasePlatformAdapter):
     def _delivery_ref_hash(cls, kind: str, value: Any) -> str:
         return cls._sha256_ref_text(f"{kind}\x1f{value}")
 
+    @classmethod
+    def _delivery_lifecycle_correlation_hash(
+        cls,
+        metadata: Optional[Dict[str, Any]],
+        fallback: str,
+    ) -> str:
+        value = (metadata or {}).get("correlation_id")
+        text = str(value if value is not None else fallback).strip()
+        return cls._delivery_ref_hash("feishu_lifecycle_correlation", text)
+
     @staticmethod
     def _is_sha256_ref_text(value: Any) -> bool:
         return (
@@ -6403,8 +6413,8 @@ class FeishuAdapter(BasePlatformAdapter):
             ),
             "contract_hash": str(contract_hash),
             "evidence_state": evidence_state,
-            "correlation_id": self._delivery_metadata(
-                metadata, "correlation_id", delivery_id
+            "correlation_hash": self._delivery_lifecycle_correlation_hash(
+                metadata, delivery_id
             ),
         }
 
@@ -6422,8 +6432,8 @@ class FeishuAdapter(BasePlatformAdapter):
             "action": action,
             "target_ref_hash": self._delivery_ref_hash("feishu_target", target),
             "evidence_state": evidence_state,
-            "correlation_id": self._delivery_metadata(
-                metadata, "correlation_id", delivery_id
+            "correlation_hash": self._delivery_lifecycle_correlation_hash(
+                metadata, delivery_id
             ),
         }
 
@@ -6464,7 +6474,7 @@ class FeishuAdapter(BasePlatformAdapter):
             "action": context["action"],
             "target_ref_hash": context["target_ref_hash"],
             "evidence_state": context["evidence_state"],
-            "correlation_id": context["correlation_id"],
+            "correlation_hash": context["correlation_hash"],
         }
         for field in ("route_partition_hash", "route_snapshot_hash", "contract_hash"):
             if field in context:
@@ -6815,11 +6825,28 @@ class FeishuAdapter(BasePlatformAdapter):
             else existing_message_id
         )
         if not message_id or not self._valid_feishu_message_id(str(message_id)):
-            await self._apply_unknown_delivery_state(
+            if lifecycle_context is not None:
+                lifecycle_gap_result = await self._fail_if_lifecycle_failed_append_missing(
+                    delivery_id=delivery_id,
+                    action=lifecycle_action,
+                    target=target,
+                    metadata=metadata,
+                    failure_class="missing_message_id_after_sdk_success",
+                    message_id=existing_message_id,
+                    original_proof=current_delivery_proof,
+                )
+                if lifecycle_gap_result is not None:
+                    return lifecycle_gap_result
+            if not await self._apply_unknown_delivery_state(
                 delivery_id,
                 "missing_message_id_after_sdk_success",
                 message_id=existing_message_id,
-            )
+            ):
+                return SendResult(
+                    success=False,
+                    error="unknown_delivery_state apply failed",
+                    raw_response=response,
+                )
             return SendResult(
                 success=False,
                 error="Feishu SDK success missing message_id",

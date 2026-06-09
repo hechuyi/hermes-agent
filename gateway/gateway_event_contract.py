@@ -139,6 +139,7 @@ _FEISHU_AUDIT_HASH_FIELDS = frozenset(
 )
 _FEISHU_DELIVERY_LIFECYCLE_HASH_FIELDS = frozenset(
     {
+        "correlation_hash",
         "delivery_hash",
         "target_ref_hash",
         "message_ref_hash",
@@ -154,6 +155,9 @@ _FEISHU_DELIVERY_LIFECYCLE_ATOM_FIELDS = frozenset(
         "action",
         "evidence_state",
     }
+)
+_FEISHU_DELIVERY_LIFECYCLE_COMMON_FIELDS = frozenset(
+    {"type", "timestamp", "failure_class"}
 )
 _FEISHU_DELIVERY_ACTIONS = frozenset({"send", "edit"})
 _FEISHU_DELIVERY_EVIDENCE_STATES = frozenset(
@@ -729,7 +733,7 @@ def _validate_feishu_delivery_lifecycle_event(
     event_type: str, event: Mapping[str, Any]
 ) -> None:
     allowed_fields = (
-        _FEISHU_AUDIT_COMMON_FIELDS
+        _FEISHU_DELIVERY_LIFECYCLE_COMMON_FIELDS
         | _FEISHU_DELIVERY_LIFECYCLE_HASH_FIELDS
         | _FEISHU_DELIVERY_LIFECYCLE_ATOM_FIELDS
     )
@@ -749,7 +753,7 @@ def _validate_feishu_delivery_lifecycle_event(
 
     for field in (
         "timestamp",
-        "correlation_id",
+        "correlation_hash",
         "delivery_hash",
         "target_ref_hash",
         "action",
@@ -761,7 +765,6 @@ def _validate_feishu_delivery_lifecycle_event(
                 f"missing required field: {field}",
             )
     _require_number(event, "timestamp")
-    _require_session_route_value(event, "correlation_id")
     if event.get("action") not in _FEISHU_DELIVERY_ACTIONS:
         raise GatewayEventContractError(
             "invalid_gateway_event_contract",

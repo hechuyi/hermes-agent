@@ -8,6 +8,10 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.feishu_contracts import feishu_hashed_ref
+from gateway.gateway_event_contract import (
+    GatewayEventContractError,
+    validate_gateway_event,
+)
 from gateway.gateway_event_ledger import LEDGER_FILENAME, apply_gateway_event
 from gateway.platforms.feishu import FeishuAdapter
 
@@ -91,12 +95,13 @@ def _metadata(
     *,
     delivery_id: str = "delivery-current-send",
     admission: dict[str, str] | None = None,
+    correlation_id: str = "corr-current-1",
 ) -> dict[str, object]:
     return {
         "delivery_id": delivery_id,
         "inbound_id": "inbound-current-1",
         "session_id": "session-current-1",
-        "correlation_id": "corr-current-1",
+        "correlation_id": correlation_id,
         "feishu_current_admission": admission or _admission(),
     }
 
@@ -125,6 +130,7 @@ def _assert_no_raw_platform_context(value) -> None:
         "om_user_anchor",
         "ou_actor_raw",
         "on_actor_raw",
+        "oc_raw_correlation_bypass_1",
         "raw response",
         "hello current",
     ):
@@ -377,13 +383,82 @@ async def test_sdk_success_without_usable_message_id_records_unknown_state_witho
 
     assert result.success is False
     assert result.error == "Feishu SDK success missing message_id"
-    assert _event_types(tmp_path) == ["feishu_delivery_attempted"]
+    assert _event_types(tmp_path) == [
+        "feishu_delivery_attempted",
+        "feishu_delivery_failed",
+    ]
+    failed = _lifecycle_events(tmp_path, "feishu_delivery_failed")[0]
+    assert failed["failure_class"] == "missing_message_id_after_sdk_success"
     assert _lifecycle_events(tmp_path, "feishu_delivery_sent") == []
     assert _lifecycle_events(tmp_path, "feishu_delivery_ack_unknown") == []
     delivery_record = next(iter(_state(tmp_path)["deliveries"].values()))
     assert delivery_record["status"] == "unknown"
     assert delivery_record["failure_class"] == "missing_message_id_after_sdk_success"
     _assert_no_raw_platform_context(_lifecycle_events(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_sdk_success_without_usable_message_id_fails_closed_when_lifecycle_failed_append_missing(
+    tmp_path, monkeypatch
+):
+    adapter = _adapter(tmp_path, reply_response=_FakeResponse(ok=True, message_id=None))
+    monkeypatch.setattr(
+        adapter,
+        "_apply_feishu_delivery_lifecycle_failed",
+        _lifecycle_failed_append_missing,
+    )
+
+    result = await adapter.send(
+        "oc_current_chat",
+        "hello current",
+        reply_to="om_user_anchor_1",
+        metadata=_metadata(delivery_id="delivery-missing-message-lifecycle-gap"),
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_delivery_lifecycle_apply_failed"
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_correlation_uses_hash_not_raw_metadata_value(tmp_path):
+    raw_correlation = "oc_raw_correlation_bypass_1"
+    adapter = _adapter(tmp_path)
+
+    result = await adapter.send(
+        "oc_current_chat",
+        "hello current",
+        reply_to="om_user_anchor_1",
+        metadata=_metadata(
+            delivery_id="delivery-raw-correlation",
+            correlation_id=raw_correlation,
+        ),
+    )
+
+    assert result.success is True
+    events = _lifecycle_events(tmp_path)
+    assert events
+    assert raw_correlation not in json.dumps(events, sort_keys=True)
+    for event in events:
+        assert "correlation_id" not in event
+        assert event["correlation_hash"] == _sha(
+            f"feishu_lifecycle_correlation\x1f{raw_correlation}"
+        )
+    _assert_no_raw_platform_context(events)
+
+
+def test_lifecycle_contract_rejects_raw_correlation_id_field():
+    with pytest.raises(GatewayEventContractError):
+        validate_gateway_event(
+            {
+                "type": "feishu_delivery_attempted",
+                "timestamp": 1,
+                "delivery_hash": _sha("delivery"),
+                "target_ref_hash": _sha("target"),
+                "action": "send",
+                "evidence_state": "current",
+                "correlation_id": "oc_raw_correlation_bypass_1",
+            }
+        )
 
 
 @pytest.mark.asyncio
