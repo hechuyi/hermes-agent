@@ -1,7 +1,7 @@
 import hashlib
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -458,10 +458,18 @@ def _delivery_record_action(
         "type": "delivery_record",
         "record": {
             "delivery_id": delivery_id,
-            "inbound_id": inbound_id,
-            "target": target,
-            "session_id": session_id,
-            "correlation_id": correlation_id,
+            "inbound_id": FeishuAdapter._delivery_ref_hash(
+                "delivery_identity.inbound_id", inbound_id
+            ),
+            "target": FeishuAdapter._delivery_ref_hash(
+                "delivery_identity.target", target
+            ),
+            "session_id": FeishuAdapter._delivery_ref_hash(
+                "delivery_identity.session_id", session_id
+            ),
+            "correlation_id": FeishuAdapter._delivery_ref_hash(
+                "delivery_identity.correlation_id", correlation_id
+            ),
             "status": status,
             "created_at": 1,
             "updated_at": 2,
@@ -1091,7 +1099,7 @@ async def test_audited_send_rejects_unsupported_operation_hint_before_sdk(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_non_audited_send_ignores_operation_hint_for_legacy_behavior():
+async def test_non_audited_send_fails_closed_before_sdk_even_with_operation_hint():
     adapter, message_api = _non_audited_adapter()
     metadata = {
         **_metadata("delivery-dev-mode"),
@@ -1100,10 +1108,52 @@ async def test_non_audited_send_ignores_operation_hint_for_legacy_behavior():
 
     result = await adapter.send("oc_chat", "hello", metadata=metadata)
 
-    assert result.success is True
-    assert result.message_id == "om_created"
-    assert len(message_api.create_calls) == 1
+    assert result.success is False
+    assert result.error == "feishu_delivery_audit_state_missing"
+    assert message_api.create_calls == []
     assert message_api.reply_calls == []
+
+
+@pytest.mark.asyncio
+async def test_non_audited_attachment_post_send_fails_closed_before_sdk():
+    adapter, message_api = _non_audited_adapter()
+
+    with patch.object(
+        adapter,
+        "_feishu_send_with_retry",
+        new_callable=AsyncMock,
+        return_value=_FakeResponse(message_id="om_legacy"),
+    ) as send_with_retry:
+        result = await adapter._send_audited_or_legacy_message(
+            chat_id="oc_chat",
+            msg_type="image",
+            payload=json.dumps({"image_key": "img_uploaded"}),
+            reply_to=None,
+            metadata=_metadata("delivery-image"),
+            default_message="image send failed",
+        )
+
+    assert result.success is False
+    assert result.error == "feishu_delivery_audit_state_missing"
+    send_with_retry.assert_not_awaited()
+    assert message_api.create_calls == []
+    assert message_api.reply_calls == []
+
+
+@pytest.mark.asyncio
+async def test_non_audited_edit_message_fails_closed_before_sdk():
+    adapter, message_api = _non_audited_adapter()
+
+    result = await adapter.edit_message(
+        "oc_chat",
+        "om_existing",
+        "updated",
+        metadata=_metadata("delivery-edit"),
+    )
+
+    assert result.success is False
+    assert result.error == "feishu_delivery_audit_state_missing"
+    assert message_api.update_calls == []
 
 
 @pytest.mark.asyncio
@@ -2034,6 +2084,43 @@ async def test_descriptor_create_interactive_denies_raw_descriptor_before_sdk_bu
                 uuid_value=descriptor_uuid,
             ),
             delivery_id=delivery_id,
+            inbound_id="inbound-1",
+            session_id="session-a",
+            correlation_id="corr-a",
+        )
+
+    assert result.success is False
+    assert result.error == "feishu_raw_descriptor_execution_denied"
+    assert _event_types(events) == ["feishu_legacy_descriptor_denied"]
+    _assert_legacy_descriptor_denied(
+        events[0],
+        surface="feishu.descriptor",
+        failure_class="feishu_raw_descriptor_execution_denied",
+    )
+    adapter._build_create_message_body.assert_not_called()
+    adapter._build_create_message_request.assert_not_called()
+    assert message_api.create_calls == []
+    assert message_api.update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_descriptor_raw_denial_precedes_missing_client_when_audit_state_exists(
+    tmp_path,
+):
+    adapter, message_api = _adapter(tmp_path)
+    adapter._client = None
+    events = _install_event_recorder(adapter)
+    adapter._build_create_message_body = MagicMock(
+        wraps=adapter._build_create_message_body
+    )
+    adapter._build_create_message_request = MagicMock(
+        wraps=adapter._build_create_message_request
+    )
+
+    with _broker_context():
+        result = await adapter.execute_feishu_request_descriptor(
+            _create_descriptor('{"config":{"wide_screen_mode":true}}'),
+            delivery_id="delivery-card-create-no-client",
             inbound_id="inbound-1",
             session_id="session-a",
             correlation_id="corr-a",

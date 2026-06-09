@@ -209,10 +209,18 @@ def _delivery_record_action(
         "type": "delivery_record",
         "record": {
             "delivery_id": delivery_id,
-            "inbound_id": inbound_id,
-            "target": target,
-            "session_id": session_id,
-            "correlation_id": correlation_id,
+            "inbound_id": FeishuAdapter._delivery_ref_hash(
+                "delivery_identity.inbound_id", inbound_id
+            ),
+            "target": FeishuAdapter._delivery_ref_hash(
+                "delivery_identity.target", target
+            ),
+            "session_id": FeishuAdapter._delivery_ref_hash(
+                "delivery_identity.session_id", session_id
+            ),
+            "correlation_id": FeishuAdapter._delivery_ref_hash(
+                "delivery_identity.correlation_id", correlation_id
+            ),
             "status": status,
             "created_at": 1,
             "updated_at": 2,
@@ -518,7 +526,7 @@ class TestFeishuExecApproval:
         assert adapter._approval_state == {}
 
     @pytest.mark.asyncio
-    async def test_sends_interactive_card(self):
+    async def test_missing_audit_state_fails_closed_before_sdk(self):
         adapter = _make_adapter()
 
         mock_response = SimpleNamespace(
@@ -536,30 +544,13 @@ class TestFeishuExecApproval:
                 description="dangerous deletion",
             )
 
-        assert result.success is True
-        assert result.message_id == "msg_001"
-
-        mock_send.assert_called_once()
-        kwargs = mock_send.call_args[1]
-        assert kwargs["chat_id"] == "oc_12345"
-        assert kwargs["msg_type"] == "interactive"
-
-        # Verify card payload contains the command and buttons
-        card = json.loads(kwargs["payload"])
-        assert card["header"]["template"] == "orange"
-        assert "rm -rf /important" in card["elements"][0]["content"]
-        assert "dangerous deletion" in card["elements"][0]["content"]
-
-        # Check buttons
-        actions = card["elements"][1]["actions"]
-        assert len(actions) == 4
-        action_names = [a["value"]["hermes_action"] for a in actions]
-        assert action_names == [
-            "approve_once", "approve_session", "approve_always", "deny"
-        ]
+        assert result.success is False
+        assert result.error == "feishu_delivery_audit_state_missing"
+        mock_send.assert_not_awaited()
+        assert adapter._approval_state == {}
 
     @pytest.mark.asyncio
-    async def test_stores_approval_state(self):
+    async def test_missing_audit_state_does_not_store_approval_state(self):
         adapter = _make_adapter()
 
         mock_response = SimpleNamespace(
@@ -574,14 +565,9 @@ class TestFeishuExecApproval:
                 chat_id="oc_12345",
                 command="echo test",
                 session_key="my-session-key",
-            )
+                )
 
-        assert len(adapter._approval_state) == 1
-        approval_id = list(adapter._approval_state.keys())[0]
-        state = adapter._approval_state[approval_id]
-        assert state["session_key"] == "my-session-key"
-        assert state["message_id"] == "msg_002"
-        assert state["chat_id"] == "oc_12345"
+        assert adapter._approval_state == {}
 
     @pytest.mark.asyncio
     async def test_not_connected(self):
@@ -593,7 +579,7 @@ class TestFeishuExecApproval:
         assert result.success is False
 
     @pytest.mark.asyncio
-    async def test_truncates_long_command(self):
+    async def test_missing_audit_state_does_not_build_truncated_card_for_sdk(self):
         adapter = _make_adapter()
 
         mock_response = SimpleNamespace(
@@ -609,13 +595,10 @@ class TestFeishuExecApproval:
                 chat_id="oc_12345", command=long_cmd, session_key="s"
             )
 
-        card = json.loads(mock_send.call_args[1]["payload"])
-        content = card["elements"][0]["content"]
-        assert "..." in content
-        assert len(content) < 5000
+        mock_send.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_multiple_approvals_get_unique_ids(self):
+    async def test_missing_audit_state_multiple_approvals_do_not_store_ids(self):
         adapter = _make_adapter()
 
         mock_response = SimpleNamespace(
@@ -633,9 +616,7 @@ class TestFeishuExecApproval:
                 chat_id="oc_2", command="cmd2", session_key="s2"
             )
 
-        assert len(adapter._approval_state) == 2
-        ids = list(adapter._approval_state.keys())
-        assert ids[0] != ids[1]
+        assert adapter._approval_state == {}
 
 
 # ===========================================================================
@@ -805,7 +786,7 @@ class TestFeishuUpdatePrompt:
         assert adapter._update_prompt_state == {}
 
     @pytest.mark.asyncio
-    async def test_sends_interactive_card(self):
+    async def test_missing_audit_state_fails_closed_before_sdk(self):
         adapter = _make_adapter()
 
         mock_response = SimpleNamespace(
@@ -824,23 +805,13 @@ class TestFeishuUpdatePrompt:
                 metadata={"thread_id": "th_1"},
             )
 
-        assert result.success is True
-        assert result.message_id == "msg_up_001"
-
-        kwargs = mock_send.call_args[1]
-        assert kwargs["chat_id"] == "oc_12345"
-        assert kwargs["msg_type"] == "interactive"
-        assert kwargs["metadata"] == {"thread_id": "th_1"}
-
-        card = json.loads(kwargs["payload"])
-        assert card["header"]["template"] == "orange"
-        assert "Restore stashed changes after update?" in card["elements"][0]["content"]
-        assert "Default: `y`" in card["elements"][0]["content"]
-        actions = card["elements"][1]["actions"]
-        assert [a["value"]["hermes_update_prompt_action"] for a in actions] == ["y", "n"]
+        assert result.success is False
+        assert result.error == "feishu_delivery_audit_state_missing"
+        mock_send.assert_not_awaited()
+        assert adapter._update_prompt_state == {}
 
     @pytest.mark.asyncio
-    async def test_stores_prompt_state(self):
+    async def test_missing_audit_state_does_not_store_prompt_state(self):
         adapter = _make_adapter()
 
         mock_response = SimpleNamespace(
@@ -855,14 +826,9 @@ class TestFeishuUpdatePrompt:
                 chat_id="oc_12345",
                 prompt="Continue update?",
                 session_key="my-session-key",
-            )
+                )
 
-        assert len(adapter._update_prompt_state) == 1
-        prompt_id = list(adapter._update_prompt_state.keys())[0]
-        state = adapter._update_prompt_state[prompt_id]
-        assert state["session_key"] == "my-session-key"
-        assert state["message_id"] == "msg_up_002"
-        assert state["chat_id"] == "oc_12345"
+        assert adapter._update_prompt_state == {}
 
     @pytest.mark.asyncio
     async def test_not_connected(self):
@@ -876,12 +842,12 @@ class TestFeishuUpdatePrompt:
         assert result.success is False
 
     @pytest.mark.asyncio
-    async def test_send_failure_returns_error(self):
+    async def test_missing_audit_state_precedes_legacy_send_failure(self):
         adapter = _make_adapter()
         with patch.object(
             adapter, "_feishu_send_with_retry", new_callable=AsyncMock,
             side_effect=TimeoutError("timed out"),
-        ):
+        ) as mock_send:
             result = await adapter.send_update_prompt(
                 chat_id="oc_12345",
                 prompt="Continue update?",
@@ -889,7 +855,8 @@ class TestFeishuUpdatePrompt:
             )
 
         assert result.success is False
-        assert "timed out" in (result.error or "")
+        assert result.error == "feishu_delivery_audit_state_missing"
+        mock_send.assert_not_awaited()
 
 
 class TestFeishuIdempotencyKeys:

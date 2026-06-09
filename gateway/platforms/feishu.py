@@ -1469,6 +1469,7 @@ class FeishuAdapter(BasePlatformAdapter):
     _SEND_DELIVERY_OPERATION_HINTS = frozenset(
         {"queued_followup_first_reply", "stream_fresh_final"}
     )
+    _DELIVERY_AUDIT_STATE_MISSING = "feishu_delivery_audit_state_missing"
     # Threshold for detecting Feishu client-side message splits.
     # When a chunk is near the ~4096-char practical limit, a continuation
     # is almost certain.
@@ -2346,6 +2347,8 @@ class FeishuAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Send a Feishu message."""
+        if self._gateway_event_state_dir is None:
+            return self._delivery_audit_state_missing_result()
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
@@ -2527,6 +2530,8 @@ class FeishuAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Edit a previously sent Feishu text/post message."""
+        if self._gateway_event_state_dir is None:
+            return self._delivery_audit_state_missing_result()
         if not self._client:
             return SendResult(success=False, error="Not connected")
         if not self._valid_feishu_message_id(message_id):
@@ -2661,6 +2666,8 @@ class FeishuAdapter(BasePlatformAdapter):
         ``_handle_card_action_event`` can intercept them and call
         ``resolve_gateway_approval()`` to unblock the waiting agent thread.
         """
+        if self._gateway_event_state_dir is None:
+            return self._delivery_audit_state_missing_result()
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
@@ -2818,6 +2825,8 @@ class FeishuAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Send an interactive update prompt with Yes/No buttons."""
+        if self._gateway_event_state_dir is None:
+            return self._delivery_audit_state_missing_result()
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
@@ -3760,6 +3769,17 @@ class FeishuAdapter(BasePlatformAdapter):
     @staticmethod
     def _feishu_broker_context_present() -> bool:
         return current_feishu_broker_context() is not None
+
+    def _delivery_audit_state_missing_result(self) -> SendResult:
+        logger.warning(
+            "[Feishu] Refusing outbound delivery before SDK delivery: "
+            "reason=%s",
+            self._DELIVERY_AUDIT_STATE_MISSING,
+        )
+        return SendResult(
+            success=False,
+            error=self._DELIVERY_AUDIT_STATE_MISSING,
+        )
 
     @staticmethod
     def _feishu_audit_hash(value: str) -> str:
@@ -7725,14 +7745,7 @@ class FeishuAdapter(BasePlatformAdapter):
         default_message: str,
     ) -> SendResult:
         if self._gateway_event_state_dir is None:
-            response = await self._feishu_send_with_retry(
-                chat_id=chat_id,
-                msg_type=msg_type,
-                payload=payload,
-                reply_to=reply_to,
-                metadata=metadata,
-            )
-            return self._finalize_send_result(response, default_message)
+            return self._delivery_audit_state_missing_result()
 
         operation, operation_error = self._send_delivery_operation(
             reply_to=reply_to,
@@ -7825,9 +7838,6 @@ class FeishuAdapter(BasePlatformAdapter):
                 success=False,
                 error="feishu_legacy_descriptor_audit_state_missing",
             )
-        if not self._client:
-            return SendResult(success=False, error="Not connected")
-
         validated = self._validate_feishu_request_descriptor(descriptor)
         target = "feishu:descriptor"
         if validated is None:
