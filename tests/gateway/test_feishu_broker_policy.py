@@ -118,6 +118,30 @@ def _decision(**overrides) -> AuthorizationProviderDecision:
     return AuthorizationProviderDecision(**values)
 
 
+def _malformed_typed_decision(**overrides) -> AuthorizationProviderDecision:
+    values = {
+        "provider_id": "custom_provider",
+        "provider_version": "2026-06-10.custom",
+        "policy_version": "policy:v1",
+        "evidence_source_class": "verified_object_acl",
+        "reachability_state": "reachable",
+        "issued_at": "2026-06-10T00:00:00Z",
+        "expires_at": "2026-06-10T00:05:00Z",
+        "freshness_class": "current",
+        "credential_freshness": "fresh",
+        "acl_complete": True,
+        "unsupported_scope": None,
+        "revocation_reason": None,
+        "denial_failure_class": None,
+        "decision_hash": "sha256:" + "7" * 64,
+    }
+    values.update(overrides)
+    decision = AuthorizationProviderDecision.__new__(AuthorizationProviderDecision)
+    for field_name, value in values.items():
+        object.__setattr__(decision, field_name, value)
+    return decision
+
+
 def _evidence(**overrides) -> AuthorizationEvidence:
     values = {
         "evidence_kind": "verified_object_acl",
@@ -130,6 +154,24 @@ def _evidence(**overrides) -> AuthorizationEvidence:
     }
     values.update(overrides)
     return AuthorizationEvidence(**values)
+
+
+def _malformed_typed_evidence(**overrides) -> AuthorizationEvidence:
+    values = {
+        "evidence_kind": "verified_object_acl",
+        "authority_subject_ref": _SUBJECT_REF,
+        "route_session_key_snapshot": _ROUTE_SNAPSHOT,
+        "object_ref": _OBJECT_REF,
+        "scopes": ("doc:read", "doc:write", "doc:delete"),
+        "token_class": "user_access_token",
+        "evidence_state": "current",
+        "evidence_hash": "sha256:" + "8" * 64,
+    }
+    values.update(overrides)
+    evidence = AuthorizationEvidence.__new__(AuthorizationEvidence)
+    for field_name, value in values.items():
+        object.__setattr__(evidence, field_name, value)
+    return evidence
 
 
 def _provider_result_invariant_bypass(
@@ -356,6 +398,86 @@ def test_malformed_provider_failure_class_is_normalized_without_leaking_raw_reas
     assert (
         decision.denial_reason_class
         == "feishu_authorization_provider_failure_class_invalid"
+    )
+
+
+def test_malformed_typed_provider_decision_truthy_acl_complete_is_denied():
+    malformed_result = _provider_result_invariant_bypass(
+        evidence=_evidence(scopes=("doc:read",)),
+        decision=_malformed_typed_decision(acl_complete="yes"),
+        failure_class=None,
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(malformed_result)},
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert (
+        decision.denial_reason_class
+        == "feishu_authorization_provider_decision_malformed"
+    )
+
+
+def test_malformed_typed_authorization_evidence_unknown_state_is_denied():
+    malformed_result = _provider_result_invariant_bypass(
+        evidence=_malformed_typed_evidence(evidence_state="unknown"),
+        decision=_decision(),
+        failure_class=None,
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(malformed_result)},
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert decision.denial_reason_class == "feishu_authorization_evidence_malformed"
+
+
+def test_malformed_typed_decision_denial_failure_class_does_not_leak_raw_marker():
+    malformed_result = _provider_result_invariant_bypass(
+        evidence=None,
+        decision=_malformed_typed_decision(
+            denial_failure_class="tenant_access_token_secret"
+        ),
+        failure_class=None,
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(malformed_result)},
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert (
+        decision.denial_reason_class
+        == "feishu_authorization_provider_decision_malformed"
+    )
+    assert decision.denial_reason_class != "tenant_access_token_secret"
+
+
+def test_malformed_typed_decision_invalid_expires_at_is_denied_without_raise():
+    malformed_result = _provider_result_invariant_bypass(
+        evidence=_evidence(scopes=("doc:read",)),
+        decision=_malformed_typed_decision(expires_at="not-a-timestamp"),
+        failure_class=None,
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(malformed_result)},
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert (
+        decision.denial_reason_class
+        == "feishu_authorization_provider_decision_malformed"
     )
 
 

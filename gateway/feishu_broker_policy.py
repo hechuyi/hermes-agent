@@ -84,6 +84,50 @@ _STABLE_PROVIDER_FAILURE_CLASSES = frozenset(
         "feishu_provider_user_owned_object",
     }
 )
+_PROVIDER_EVIDENCE_SOURCE_CLASSES = frozenset(
+    {
+        "admin_policy_grant",
+        "app_owned_object",
+        "app_token_only",
+        "discovery_only",
+        "explicit_user_confirmation",
+        "none",
+        "system_test_object",
+        "user_delegated_credential",
+        "verified_object_acl",
+    }
+)
+_PROVIDER_REACHABILITY_STATES = frozenset({"reachable", "unreachable", "unknown"})
+_PROVIDER_CREDENTIAL_FRESHNESS_CLASSES = frozenset(
+    {"fresh", "stale", "revoked", "unknown"}
+)
+_PROVIDER_FRESHNESS_CLASSES = frozenset({"current", "stale", "revoked", "unknown"})
+_AUTHORIZATION_EVIDENCE_KINDS = frozenset(
+    {
+        "verified_object_acl",
+        "user_delegated_credential",
+        "admin_policy_grant",
+        "app_owned_object",
+        "explicit_user_confirmation",
+        "system_test_object",
+        "app_token_only",
+        "discovery_only",
+    }
+)
+_AUTHORIZATION_EVIDENCE_STATES = frozenset({"current", "stale", "revoked"})
+_TOKEN_CLASSES = frozenset(
+    {
+        "none",
+        "app_token",
+        "app_access_token",
+        "tenant_access_token",
+        "user_token",
+        "user_access_token",
+        "delegated_user_token",
+        "system_test_credential",
+        "app_owned_object_credential",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -386,6 +430,9 @@ def issue_object_capability_grant(
         return _deny("feishu_authorization_evidence_missing")
     if not isinstance(evidence, AuthorizationEvidence):
         return _deny("feishu_authorization_evidence_missing")
+    evidence_failure = _authorization_evidence_failure(evidence)
+    if evidence_failure is not None:
+        return _normalized_deny(evidence_failure)
     provider_decision = result.decision
     if provider_decision.evidence_source_class != evidence.evidence_kind:
         return _normalized_deny("feishu_provider_decision_evidence_mismatch")
@@ -459,6 +506,12 @@ def _provider_failure(
             "feishu_broker_policy_denied",
             "feishu_authorization_provider_decision_malformed",
         )
+    decision_failure = _provider_decision_field_failure(
+        decision_fields,
+        provider_id=provider_id,
+    )
+    if decision_failure is not None:
+        return "feishu_broker_policy_denied", decision_failure
     if decision_fields["provider_id"] != provider_id:
         return "feishu_broker_policy_denied", "feishu_provider_identity_mismatch"
     failure_class = getattr(result, "failure_class", None)
@@ -470,6 +523,11 @@ def _provider_failure(
             )
         return failure_class, failure_class
     if decision_fields["denial_failure_class"] is not None:
+        if decision_fields["denial_failure_class"] not in _STABLE_PROVIDER_FAILURE_CLASSES:
+            return (
+                "feishu_broker_policy_denied",
+                "feishu_authorization_provider_decision_malformed",
+            )
         return (
             decision_fields["denial_failure_class"],
             decision_fields["denial_failure_class"],
@@ -513,9 +571,11 @@ def _provider_decision_fields(
     try:
         return {
             "provider_id": decision.provider_id,
+            "provider_version": decision.provider_version,
             "policy_version": decision.policy_version,
             "evidence_source_class": decision.evidence_source_class,
             "reachability_state": decision.reachability_state,
+            "issued_at": decision.issued_at,
             "expires_at": decision.expires_at,
             "freshness_class": decision.freshness_class,
             "credential_freshness": decision.credential_freshness,
@@ -527,6 +587,157 @@ def _provider_decision_fields(
         }
     except AttributeError:
         return None
+
+
+def _provider_decision_field_failure(
+    decision_fields: Mapping[str, Any],
+    *,
+    provider_id: str,
+) -> str | None:
+    if not _is_classifier_or_hash(decision_fields["provider_id"]):
+        return "feishu_authorization_provider_decision_malformed"
+    if decision_fields["provider_id"] != provider_id:
+        return None
+    if not _is_classifier_or_hash(decision_fields["provider_version"]):
+        return "feishu_authorization_provider_decision_malformed"
+    if not _is_classifier_or_hash(decision_fields["policy_version"]):
+        return "feishu_authorization_provider_decision_malformed"
+    if not _is_known_classifier(
+        decision_fields["evidence_source_class"],
+        _PROVIDER_EVIDENCE_SOURCE_CLASSES,
+    ):
+        return "feishu_authorization_provider_decision_malformed"
+    if not _is_known_classifier(
+        decision_fields["reachability_state"],
+        _PROVIDER_REACHABILITY_STATES,
+    ):
+        return "feishu_authorization_provider_decision_malformed"
+    if not _is_known_classifier(
+        decision_fields["credential_freshness"],
+        _PROVIDER_CREDENTIAL_FRESHNESS_CLASSES,
+    ):
+        return "feishu_authorization_provider_decision_malformed"
+    if decision_fields["freshness_class"] is not None and not _is_known_classifier(
+        decision_fields["freshness_class"],
+        _PROVIDER_FRESHNESS_CLASSES,
+    ):
+        return "feishu_authorization_provider_decision_malformed"
+    for timestamp_field in ("issued_at", "expires_at"):
+        value = decision_fields[timestamp_field]
+        if value is not None and not _is_utc_timestamp(value):
+            return "feishu_authorization_provider_decision_malformed"
+    if not isinstance(decision_fields["acl_complete"], bool):
+        return "feishu_authorization_provider_decision_malformed"
+    for field_name in ("unsupported_scope", "revocation_reason"):
+        value = decision_fields[field_name]
+        if value is not None and not _is_classifier_or_hash(value):
+            return "feishu_authorization_provider_decision_malformed"
+    denial_failure_class = decision_fields["denial_failure_class"]
+    if denial_failure_class is not None and (
+        not _is_classifier_or_hash(denial_failure_class)
+        or denial_failure_class not in _STABLE_PROVIDER_FAILURE_CLASSES
+    ):
+        return "feishu_authorization_provider_decision_malformed"
+    if not _is_sha256_hash(decision_fields["decision_hash"]):
+        return "feishu_authorization_provider_decision_malformed"
+    return None
+
+
+def _authorization_evidence_failure(evidence: AuthorizationEvidence) -> str | None:
+    try:
+        fields = {
+            "evidence_kind": evidence.evidence_kind,
+            "authority_subject_ref": evidence.authority_subject_ref,
+            "route_session_key_snapshot": evidence.route_session_key_snapshot,
+            "object_ref": evidence.object_ref,
+            "scopes": evidence.scopes,
+            "token_class": evidence.token_class,
+            "evidence_state": evidence.evidence_state,
+            "evidence_hash": evidence.evidence_hash,
+        }
+    except AttributeError:
+        return "feishu_authorization_evidence_malformed"
+    if not _is_known_classifier(
+        fields["evidence_kind"],
+        _AUTHORIZATION_EVIDENCE_KINDS,
+    ):
+        return "feishu_authorization_evidence_malformed"
+    if not _is_optional_hashed_ref(fields["authority_subject_ref"]):
+        return "feishu_authorization_evidence_malformed"
+    if not _is_route_snapshot_hash(fields["route_session_key_snapshot"]):
+        return "feishu_authorization_evidence_malformed"
+    if not _is_optional_hashed_ref(fields["object_ref"]):
+        return "feishu_authorization_evidence_malformed"
+    if not _is_classifier_or_hash_tuple(fields["scopes"]):
+        return "feishu_authorization_evidence_malformed"
+    if fields["token_class"] is not None and fields["token_class"] not in _TOKEN_CLASSES:
+        return "feishu_authorization_evidence_malformed"
+    if not _is_known_classifier(
+        fields["evidence_state"],
+        _AUTHORIZATION_EVIDENCE_STATES,
+    ):
+        return "feishu_authorization_evidence_malformed"
+    if not _is_sha256_hash(fields["evidence_hash"]):
+        return "feishu_authorization_evidence_malformed"
+    return None
+
+
+def _is_classifier_or_hash(value: Any) -> bool:
+    try:
+        _classifier_or_hash(value, "provider_boundary_field")
+    except BrokerPolicyError:
+        return False
+    return True
+
+
+def _is_classifier_or_hash_tuple(value: Any) -> bool:
+    if not isinstance(value, tuple):
+        return False
+    return all(_is_classifier_or_hash(item) for item in value)
+
+
+def _is_known_classifier(value: Any, allowed: frozenset[str]) -> bool:
+    return isinstance(value, str) and value in allowed
+
+
+def _is_sha256_hash(value: Any) -> bool:
+    return isinstance(value, str) and _SHA256_HASH_RE.fullmatch(value) is not None
+
+
+def _is_utc_timestamp(value: Any) -> bool:
+    try:
+        _require_utc_timestamp(value, "provider_boundary_timestamp")
+    except BrokerPolicyError:
+        return False
+    return True
+
+
+def _is_route_snapshot_hash(value: Any) -> bool:
+    try:
+        _route_snapshot_hash(value, "provider_boundary_route_snapshot")
+    except BrokerPolicyError:
+        return False
+    return True
+
+
+def _is_optional_hashed_ref(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, HashedRef):
+        return False
+    try:
+        kind = value.kind
+        value_hash = value.value_hash
+        schema_version = value.schema_version
+    except AttributeError:
+        return False
+    return (
+        _is_classifier_or_hash(kind)
+        and _is_sha256_hash(value_hash)
+        and isinstance(schema_version, int)
+        and not isinstance(schema_version, bool)
+        and schema_version >= 1
+    )
 
 
 def _provider_for(provider_id: str, registry: Mapping[str, Any] | None) -> Any | None:
