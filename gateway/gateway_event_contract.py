@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -123,6 +124,7 @@ _ROUTE_SNAPSHOT_AUDIT_HASH_RE = re.compile(
 _BROKER_ACTION_ID_RE = re.compile(r"^broker_action:sha256:[a-f0-9]{64}$")
 _BROKER_GRANT_HANDLE_RE = re.compile(r"^broker_grant_handle:sha256:[a-f0-9]{64}$")
 _SAFE_AUDIT_ATOM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_NORMALIZED_RAW_MARKER_CHARS_RE = re.compile(r"[^a-z0-9]+")
 _RAW_FEISHU_ID_VALUE_RE = re.compile(
     r"^(?:ou|oc|on|om|user|open|union|chat|doccn|file|fld|boxcn|wikcn)[a-z0-9_.:-]*$"
 )
@@ -422,7 +424,17 @@ _FEISHU_AUDIT_SENSITIVE_VALUE_TOKENS = frozenset(
     }
 )
 _FEISHU_AUDIT_RAW_VALUE_MARKERS = frozenset(
-    {"object_ref", "raw_acl", "raw_document"}
+    {
+        "aclresponsebody",
+        "documentcontent",
+        "feishuobjectid",
+        "messagecontent",
+        "objectid",
+        "objectref",
+        "rawacl",
+        "rawdocument",
+        "rawmessage",
+    }
 )
 _FEISHU_AUDIT_NEGATIVE_DECISIONS = frozenset(
     {
@@ -471,7 +483,10 @@ _FEISHU_AUDIT_FAILURE_CLASSES = frozenset(
         "feishu_authorization_denied",
         "feishu_authorization_evidence_malformed",
         "feishu_authorization_evidence_missing",
+        "feishu_authorization_evidence_revoked",
+        "feishu_authorization_evidence_stale",
         "feishu_authorization_provider_decision_malformed",
+        "feishu_authorization_provider_decision_missing",
         "feishu_authorization_provider_failure_class_invalid",
         "feishu_authorization_provider_missing",
         "feishu_authorization_provider_result_malformed",
@@ -489,12 +504,14 @@ _FEISHU_AUDIT_FAILURE_CLASSES = frozenset(
         "feishu_legacy_card_action_requires_broker",
         "feishu_legacy_descriptor_requires_broker",
         "feishu_legacy_tool_requires_broker",
+        "feishu_object_authority_evidence_missing",
         "feishu_object_authority_scope_insufficient",
         "feishu_object_ref_mismatch",
         "feishu_p3_requires_object_authority_evidence",
         "feishu_provider_acl_incomplete",
         "feishu_provider_app_token_unavailable",
         "feishu_provider_authority_mismatch",
+        "feishu_provider_authorization_exception",
         "feishu_provider_credential_unknown",
         "feishu_provider_decision_evidence_mismatch",
         "feishu_provider_decision_expired",
@@ -510,6 +527,7 @@ _FEISHU_AUDIT_FAILURE_CLASSES = frozenset(
         "feishu_provider_unsupported_scope",
         "feishu_provider_user_owned_object",
         "feishu_route_snapshot_mismatch",
+        "feishu_scope_not_scoped",
     }
 )
 _FEISHU_AUDIT_SEMANTIC_CLASS_FIELDS: dict[str, frozenset[str]] = {
@@ -1666,7 +1684,7 @@ def _reject_sensitive_audit_value(value: Any) -> None:
         or "/" in normalized
         or "open_apis" in tokenized
         or _RAW_FEISHU_ID_VALUE_RE.fullmatch(normalized) is not None
-        or tokenized in _FEISHU_AUDIT_RAW_VALUE_MARKERS
+        or _normalized_raw_marker_value(normalized) in _FEISHU_AUDIT_RAW_VALUE_MARKERS
         or tokenized in _FEISHU_AUDIT_SENSITIVE_VALUE_TOKENS
         or any(
             token in tokenized
@@ -1677,6 +1695,11 @@ def _reject_sensitive_audit_value(value: Any) -> None:
             "invalid_gateway_event_contract",
             "feishu audit event contains sensitive value",
         )
+
+
+def _normalized_raw_marker_value(value: str) -> str:
+    normalized = unicodedata.normalize("NFC", value).lower()
+    return _NORMALIZED_RAW_MARKER_CHARS_RE.sub("", normalized)
 
 
 def _require_nonempty_string(event: Mapping[str, Any], field: str) -> str:

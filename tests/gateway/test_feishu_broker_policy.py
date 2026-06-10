@@ -208,6 +208,14 @@ class _StaticResultProvider:
         return self._result
 
 
+class _RaisingProvider:
+    provider_id = "custom_provider"
+    provider_version = "2026-06-10.custom"
+
+    def authorize(self, request):
+        raise RuntimeError("provider boundary failure")
+
+
 def _issue(request=None, registry=None):
     return issue_object_capability_grant(
         request or _request(),
@@ -641,6 +649,33 @@ def test_card_context_does_not_upgrade_confirmation_only_p3_to_object_authority(
         ({}, {}, {"evidence_state": "stale"}, "feishu_contract_evidence_stale"),
         ({}, {}, {"evidence_state": "revoked"}, "feishu_contract_evidence_revoked"),
         (
+            {},
+            {},
+            {"scope_assignment_status": "legacy_unscoped"},
+            "feishu_scope_not_scoped",
+        ),
+        (
+            {"evidence_state": "stale"},
+            {},
+            {},
+            "feishu_authorization_evidence_stale",
+        ),
+        (
+            {"evidence_state": "revoked"},
+            {},
+            {},
+            "feishu_authorization_evidence_revoked",
+        ),
+        (
+            {
+                "evidence_kind": "explicit_user_confirmation",
+                "token_class": "user_access_token",
+            },
+            {},
+            {},
+            "feishu_object_authority_evidence_missing",
+        ),
+        (
             {"scopes": ("doc:read",)},
             {"action": "write", "requested_scopes": ("doc:write",)},
             {},
@@ -654,9 +689,10 @@ def test_contract_evidence_failures_are_preserved_without_grant(
     contract_overrides,
     expected_failure,
 ):
-    result = AuthorizationProviderResult(
-        evidence=_evidence(**evidence_overrides),
-        decision=_decision(),
+    evidence = _evidence(**evidence_overrides)
+    result = _provider_result_invariant_bypass(
+        evidence=evidence,
+        decision=_decision(evidence_source_class=evidence.evidence_kind),
     )
     request = _request(
         provider_id="custom_provider",
@@ -669,6 +705,18 @@ def test_contract_evidence_failures_are_preserved_without_grant(
     assert decision.grant is None
     assert decision.failure_class == expected_failure
     assert decision.denial_reason_class == expected_failure
+    events = decision.audit_events(
+        correlation_id="corr-audit-contract-denial",
+        timestamp=1_700_000_107,
+    )
+    assert [event["type"] for event in events] == [
+        "feishu_broker_policy_denied",
+        "feishu_capability_denied",
+    ]
+    for event in events:
+        assert validate_gateway_event(event) == event["type"]
+        assert event["failure_class"] == expected_failure
+        assert event["denial_reason_class"] == expected_failure
 
 
 def test_valid_object_authority_evidence_issues_bound_broker_grant_wrapper():
@@ -763,6 +811,64 @@ def test_malformed_provider_state_emits_denial_audit_without_success_events():
             == "feishu_authorization_provider_decision_malformed"
         )
     assert "feishu_capability_granted" not in repr(events)
+
+
+def test_authorization_provider_decision_missing_denial_audit_events_validate():
+    result = _provider_result_invariant_bypass(
+        evidence=_evidence(scopes=("doc:read",)),
+        decision=None,
+        failure_class=None,
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(result)},
+    )
+    events = decision.audit_events(
+        correlation_id="corr-audit-decision-missing",
+        timestamp=1_700_000_105,
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert (
+        decision.denial_reason_class
+        == "feishu_authorization_provider_decision_missing"
+    )
+    assert [event["type"] for event in events] == [
+        "feishu_broker_policy_denied",
+        "feishu_capability_denied",
+    ]
+    for event in events:
+        assert validate_gateway_event(event) == event["type"]
+        assert event["failure_class"] == "feishu_broker_policy_denied"
+        assert (
+            event["denial_reason_class"]
+            == "feishu_authorization_provider_decision_missing"
+        )
+
+
+def test_provider_authorization_exception_denial_audit_events_validate():
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _RaisingProvider()},
+    )
+    events = decision.audit_events(
+        correlation_id="corr-audit-authorization-exception",
+        timestamp=1_700_000_106,
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert decision.denial_reason_class == "feishu_provider_authorization_exception"
+    assert [event["type"] for event in events] == [
+        "feishu_broker_policy_denied",
+        "feishu_capability_denied",
+    ]
+    for event in events:
+        assert validate_gateway_event(event) == event["type"]
+        assert event["failure_class"] == "feishu_broker_policy_denied"
+        assert event["denial_reason_class"] == "feishu_provider_authorization_exception"
 
 
 def test_valid_provider_denial_emits_provider_decision_audit_before_denial_events():

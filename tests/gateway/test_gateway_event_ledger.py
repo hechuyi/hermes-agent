@@ -827,6 +827,32 @@ def test_provider_decision_denial_requires_sanitized_denial_reason_class(tmp_pat
 
 
 @pytest.mark.parametrize(
+    "stable_class",
+    [
+        "feishu_authorization_provider_decision_missing",
+        "feishu_provider_authorization_exception",
+        "feishu_scope_not_scoped",
+        "feishu_authorization_evidence_stale",
+        "feishu_authorization_evidence_revoked",
+        "feishu_object_authority_evidence_missing",
+    ],
+)
+def test_c5_broker_denials_accept_stable_broker_contract_domains(
+    tmp_path, stable_class
+):
+    event = _c5_broker_policy_denied_event(
+        failure_class=stable_class,
+        denial_reason_class=stable_class,
+    )
+
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is True
+    assert result.action is not None
+    assert result.action["record"] == event
+
+
+@pytest.mark.parametrize(
     "event",
     [
         _c5_broker_policy_denied_event(
@@ -870,7 +896,20 @@ def test_provider_decision_rejects_unknown_revocation_reason_class(tmp_path):
     assert not (tmp_path / LEDGER_FILENAME).exists()
 
 
-@pytest.mark.parametrize("raw_marker", ["raw_acl", "raw_document", "object_ref"])
+@pytest.mark.parametrize(
+    "raw_marker",
+    [
+        "raw_acl",
+        "raw_document",
+        "object_ref",
+        "raw_message",
+        "message_content",
+        "object_id",
+        "feishu_object_id",
+        "acl_response_body",
+        "document_content",
+    ],
+)
 def test_provider_decision_rejects_raw_marker_provider_id_values(
     tmp_path, raw_marker
 ):
@@ -886,16 +925,71 @@ def test_provider_decision_rejects_raw_marker_provider_id_values(
     assert not (tmp_path / LEDGER_FILENAME).exists()
 
 
-@pytest.mark.parametrize("raw_marker", ["raw_acl", "raw_document", "object_ref"])
+@pytest.mark.parametrize(
+    ("field", "event_factory"),
+    [
+        ("provider_id", _c5_provider_decision_event),
+        ("provider_version", _c5_provider_decision_event),
+        ("policy_version", _c5_provider_decision_event),
+        ("action", _c5_broker_policy_denied_event),
+        ("tool", _c5_broker_policy_denied_event),
+        ("surface", _c5_broker_policy_denied_event),
+    ],
+)
+@pytest.mark.parametrize(
+    "raw_marker",
+    [
+        "raw_acl",
+        "raw_document",
+        "object_ref",
+        "raw_message",
+        "message_content",
+        "object_id",
+        "feishu_object_id",
+        "acl_response_body",
+        "document_content",
+    ],
+)
+def test_c5_audit_atom_fields_reject_broker_raw_markers(
+    tmp_path, field, event_factory, raw_marker
+):
+    event = event_factory(**{field: raw_marker})
+
+    with pytest.raises(GatewayEventContractError) as exc_info:
+        validate_gateway_event(event)
+
+    assert "sensitive value" in str(exc_info.value)
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    assert not (tmp_path / LEDGER_FILENAME).exists()
+
+
+@pytest.mark.parametrize(
+    "raw_marker",
+    [
+        "raw_acl",
+        "raw_document",
+        "object_ref",
+        "raw_message",
+        "message_content",
+        "object_id",
+        "feishu_object_id",
+        "acl_response_body",
+        "document_content",
+    ],
+)
 def test_c5_audit_denials_reject_raw_marker_class_values(tmp_path, raw_marker):
     event = _c5_broker_policy_denied_event(
         failure_class=raw_marker,
         denial_reason_class=raw_marker,
     )
 
-    with pytest.raises(GatewayEventContractError):
+    with pytest.raises(GatewayEventContractError) as exc_info:
         validate_gateway_event(event)
 
+    assert "sensitive value" in str(exc_info.value)
     result = apply_gateway_event(event, tmp_path)
 
     assert result.ok is False
