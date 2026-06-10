@@ -884,6 +884,11 @@ def _provider_decision_field_failure(
         value = decision_fields[field_name]
         if value is not None and not _is_classifier_or_hash(value):
             return "feishu_authorization_provider_decision_malformed"
+    if (
+        decision_fields["credential_freshness"] == "revoked"
+        or decision_fields["freshness_class"] == "revoked"
+    ) and decision_fields["revocation_reason"] is None:
+        return "feishu_authorization_provider_decision_malformed"
     denial_failure_class = decision_fields["denial_failure_class"]
     if denial_failure_class is not None and (
         not _is_classifier_or_hash(denial_failure_class)

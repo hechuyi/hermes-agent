@@ -926,6 +926,40 @@ def test_provider_decision_rejects_raw_marker_provider_id_values(
 
 
 @pytest.mark.parametrize(
+    "provider_id",
+    [
+        "safe_raw_message_provider",
+        "safe-raw-message-provider",
+        "prefixobjectidpostfix",
+    ],
+)
+def test_provider_decision_rejects_embedded_raw_marker_provider_id_values(
+    tmp_path, provider_id
+):
+    event = _c5_provider_decision_event(provider_id=provider_id)
+
+    with pytest.raises(GatewayEventContractError) as exc_info:
+        validate_gateway_event(event)
+
+    assert "sensitive value" in str(exc_info.value)
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    assert not (tmp_path / LEDGER_FILENAME).exists()
+
+
+def test_provider_decision_accepts_opaque_provider_hash_identifier(tmp_path):
+    event = _c5_provider_decision_event(provider_id="provider:sha256:" + ("a" * 64))
+
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is True
+    assert result.action is not None
+    assert result.action["record"] == event
+
+
+@pytest.mark.parametrize(
     ("field", "event_factory"),
     [
         ("provider_id", _c5_provider_decision_event),

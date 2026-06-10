@@ -785,6 +785,34 @@ def test_grant_decision_emits_sanitized_audit_events_for_provider_evidence_and_g
     assert grant_event["grant_session_class"] == "one_time"
 
 
+def test_user_delegated_credential_grant_audit_events_validate_as_semantic_class():
+    provider_result = AuthorizationProviderResult(
+        evidence=_evidence(evidence_kind="user_delegated_credential"),
+        decision=_decision(evidence_source_class="user_delegated_credential"),
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(provider_result)},
+    )
+    events = decision.audit_events(
+        correlation_id="corr-user-delegated-credential",
+        timestamp=1_700_000_109,
+    )
+
+    assert decision.grant is not None
+    assert [event["type"] for event in events] == [
+        "feishu_authorization_provider_decision",
+        "feishu_authorization_evidence_observed",
+        "feishu_capability_granted",
+        "feishu_auth_decision",
+    ]
+    assert events[0]["evidence_source_class"] == "user_delegated_credential"
+    assert events[1]["evidence_source_class"] == "user_delegated_credential"
+    for event in events:
+        assert validate_gateway_event(event) == event["type"]
+
+
 def test_malformed_provider_state_emits_denial_audit_without_success_events():
     malformed_result = _provider_result_invariant_bypass(
         evidence=_evidence(scopes=("doc:read",)),
@@ -916,6 +944,88 @@ def test_valid_provider_denial_emits_provider_decision_audit_before_denial_event
         assert validate_gateway_event(event) == event["type"]
         assert event["failure_class"] == "feishu_provider_sdk_unreachable"
         assert event["denial_reason_class"] == "feishu_provider_sdk_unreachable"
+
+
+def test_revoked_provider_denial_emits_traceable_provider_decision_audit():
+    provider_result = AuthorizationProviderResult(
+        evidence=None,
+        decision=_decision(
+            evidence_source_class="none",
+            reachability_state="reachable",
+            issued_at=None,
+            expires_at=None,
+            freshness_class="revoked",
+            credential_freshness="revoked",
+            acl_complete=False,
+            revocation_reason="credential_revoked",
+            denial_failure_class="feishu_provider_revoked_credential",
+        ),
+        failure_class="feishu_provider_revoked_credential",
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(provider_result)},
+    )
+    events = decision.audit_events(
+        correlation_id="corr-audit-revoked-provider",
+        timestamp=1_700_000_108,
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_provider_revoked_credential"
+    assert decision.denial_reason_class == "feishu_provider_revoked_credential"
+    assert [event["type"] for event in events] == [
+        "feishu_authorization_provider_decision",
+        "feishu_broker_policy_denied",
+        "feishu_capability_denied",
+    ]
+    provider_event = events[0]
+    assert validate_gateway_event(provider_event) == provider_event["type"]
+    assert provider_event["credential_freshness_class"] == "revoked"
+    assert provider_event["revocation_reason_class"] == "credential_revoked"
+    assert provider_event["failure_class"] == "feishu_provider_revoked_credential"
+    assert provider_event["denial_reason_class"] == "feishu_provider_revoked_credential"
+
+
+def test_revoked_provider_decision_without_reason_is_denied_before_provider_audit():
+    provider_result = _provider_result_invariant_bypass(
+        evidence=None,
+        decision=_decision(
+            evidence_source_class="none",
+            reachability_state="reachable",
+            issued_at=None,
+            expires_at=None,
+            freshness_class="revoked",
+            credential_freshness="revoked",
+            acl_complete=False,
+            revocation_reason=None,
+            denial_failure_class="feishu_provider_revoked_credential",
+        ),
+        failure_class="feishu_provider_revoked_credential",
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(provider_result)},
+    )
+    events = decision.audit_events(
+        correlation_id="corr-audit-revoked-provider-missing-reason",
+        timestamp=1_700_000_110,
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert (
+        decision.denial_reason_class
+        == "feishu_authorization_provider_decision_malformed"
+    )
+    assert [event["type"] for event in events] == [
+        "feishu_broker_policy_denied",
+        "feishu_capability_denied",
+    ]
+    for event in events:
+        assert validate_gateway_event(event) == event["type"]
 
 
 def test_direct_decision_audit_events_reject_raw_template_fields():

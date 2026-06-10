@@ -459,6 +459,14 @@ class AuthorizationProviderResult:
                     "result failure class must match decision denial failure class",
                     failure_class="invalid_feishu_authorization_provider_result",
                 )
+            if (
+                self.decision.credential_freshness == "revoked"
+                or self.decision.freshness_class == "revoked"
+            ) and self.decision.revocation_reason is None:
+                raise AuthorizationProviderError(
+                    "revoked credential denial requires revocation reason",
+                    failure_class="invalid_feishu_authorization_provider_result",
+                )
             return
         if self.failure_class is not None or self.decision.denial_failure_class is not None:
             raise AuthorizationProviderError(

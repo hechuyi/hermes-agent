@@ -1408,6 +1408,8 @@ def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> N
         elif field in _FEISHU_AUDIT_ATOM_FIELDS:
             if field in _FEISHU_AUDIT_SEMANTIC_CLASS_FIELDS:
                 _require_feishu_audit_semantic_class_value(value, field)
+            elif field == "denial_reason_class":
+                _require_feishu_audit_class_value(value, field)
             else:
                 _require_safe_audit_atom(value, field)
                 _reject_sensitive_audit_value(value)
@@ -1638,6 +1640,8 @@ def _require_feishu_audit_class_value(value: Any, field: str) -> str:
             "invalid_gateway_event_contract",
             f"{field} is missing or invalid",
         )
+    if value in _FEISHU_AUDIT_FAILURE_CLASSES:
+        return value
     _reject_sensitive_audit_value(value)
     if value not in _FEISHU_AUDIT_FAILURE_CLASSES:
         raise GatewayEventContractError(
@@ -1649,7 +1653,6 @@ def _require_feishu_audit_class_value(value: Any, field: str) -> str:
 
 def _require_feishu_audit_semantic_class_value(value: Any, field: str) -> str:
     value = _require_safe_audit_atom(value, field)
-    _reject_sensitive_audit_value(value)
     allowed = _FEISHU_AUDIT_SEMANTIC_CLASS_FIELDS[field]
     if value not in allowed:
         raise GatewayEventContractError(
@@ -1684,7 +1687,7 @@ def _reject_sensitive_audit_value(value: Any) -> None:
         or "/" in normalized
         or "open_apis" in tokenized
         or _RAW_FEISHU_ID_VALUE_RE.fullmatch(normalized) is not None
-        or _normalized_raw_marker_value(normalized) in _FEISHU_AUDIT_RAW_VALUE_MARKERS
+        or _contains_normalized_raw_marker(normalized)
         or tokenized in _FEISHU_AUDIT_SENSITIVE_VALUE_TOKENS
         or any(
             token in tokenized
@@ -1700,6 +1703,11 @@ def _reject_sensitive_audit_value(value: Any) -> None:
 def _normalized_raw_marker_value(value: str) -> str:
     normalized = unicodedata.normalize("NFC", value).lower()
     return _NORMALIZED_RAW_MARKER_CHARS_RE.sub("", normalized)
+
+
+def _contains_normalized_raw_marker(value: str) -> bool:
+    normalized = _normalized_raw_marker_value(value)
+    return any(marker in normalized for marker in _FEISHU_AUDIT_RAW_VALUE_MARKERS)
 
 
 def _require_nonempty_string(event: Mapping[str, Any], field: str) -> str:

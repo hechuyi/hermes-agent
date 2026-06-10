@@ -247,6 +247,29 @@ def test_provider_contract_result_denial_is_stable_not_bare_boolean_or_raw_sdk_r
         AuthorizationProviderResult(evidence=None, decision=True, failure_class="denied")
 
 
+def test_provider_contract_result_rejects_revoked_denial_without_revocation_reason():
+    denied_decision = _provider_decision(
+        evidence_source_class="none",
+        reachability_state="reachable",
+        issued_at=None,
+        expires_at=None,
+        freshness_class="revoked",
+        credential_freshness="revoked",
+        acl_complete=False,
+        revocation_reason=None,
+        denial_failure_class="feishu_provider_revoked_credential",
+    )
+
+    with pytest.raises(AuthorizationProviderError) as exc_info:
+        AuthorizationProviderResult(
+            evidence=None,
+            decision=denied_decision,
+            failure_class="feishu_provider_revoked_credential",
+        )
+
+    assert exc_info.value.failure_class == "invalid_feishu_authorization_provider_result"
+
+
 def test_provider_contract_protocol_returns_result_not_bool_or_sdk_response():
     class FakeProvider:
         provider_id = "fake_acl_provider"
