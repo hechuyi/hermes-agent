@@ -399,6 +399,19 @@ def test_provider_policy_version_mismatch_is_broker_policy_denied_with_reason():
     assert decision.denial_reason_class == "feishu_provider_policy_version_mismatch"
 
 
+def test_expired_short_session_request_is_denied_before_grant_issuance():
+    decision = _issue(
+        _request(
+            grant_semantics="short_session",
+            expires_at="2026-06-10T00:01:00Z",
+        ),
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert decision.denial_reason_class == "feishu_broker_policy_expired_grant_request"
+
+
 def test_short_session_grant_records_expiry_and_session_semantics():
     decision = _issue(
         _request(
@@ -411,6 +424,50 @@ def test_short_session_grant_records_expiry_and_session_semantics():
     assert decision.grant is not None
     assert decision.grant.grant_semantics == "short_session"
     assert decision.grant.expires_at == "2026-06-10T00:03:00Z"
+
+
+def test_malformed_positive_provider_decision_with_revocation_is_denied():
+    malformed_result = SimpleNamespace(
+        evidence=_evidence(scopes=("doc:read",)),
+        decision=_decision(revocation_reason="credential_revoked"),
+        failure_class=None,
+        is_denial=False,
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(malformed_result)},
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert decision.denial_reason_class == "feishu_provider_decision_inconsistent"
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "decision_id"),
+    [
+        ("other_provider", "custom_provider"),
+        ("custom_provider", "other_provider"),
+    ],
+)
+def test_provider_identity_mismatch_is_denied_without_grant(provider_id, decision_id):
+    provider = _StaticResultProvider(
+        AuthorizationProviderResult(
+            evidence=_evidence(scopes=("doc:read",)),
+            decision=_decision(provider_id=decision_id),
+        )
+    )
+    provider.provider_id = provider_id
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": provider},
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert decision.denial_reason_class == "feishu_provider_identity_mismatch"
 
 
 def test_reusing_one_time_request_id_is_normalized_to_broker_policy_denied():

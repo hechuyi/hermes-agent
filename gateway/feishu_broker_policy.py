@@ -272,6 +272,12 @@ def issue_object_capability_grant(
         return _normalized_deny("feishu_broker_policy_invalid_policy_version")
     if request.contract.policy_version != policy_version:
         return _normalized_deny("feishu_contract_policy_version_mismatch")
+    if (
+        request.grant_semantics == "short_session"
+        and request.expires_at is not None
+        and _parse_utc(request.expires_at) <= now
+    ):
+        return _normalized_deny("feishu_broker_policy_expired_grant_request")
 
     replay_failure = _replay_failure(request)
     if replay_failure is not None:
@@ -282,6 +288,8 @@ def issue_object_capability_grant(
     provider = _provider_for(request.provider_id, registry)
     if provider is None:
         return _deny("feishu_authorization_provider_missing")
+    if getattr(provider, "provider_id", None) != request.provider_id:
+        return _normalized_deny("feishu_provider_identity_mismatch")
 
     provider_request = AuthorizationProviderRequest(
         contract_hash=request.contract.contract_hash,
@@ -300,7 +308,12 @@ def issue_object_capability_grant(
     except Exception as exc:  # pragma: no cover - defensive boundary guard.
         return _normalized_deny(_exception_failure_class(exc))
 
-    provider_failure = _provider_failure(result, now=now, policy_version=policy_version)
+    provider_failure = _provider_failure(
+        result,
+        now=now,
+        policy_version=policy_version,
+        provider_id=request.provider_id,
+    )
     if provider_failure is not None:
         failure_class, denial_reason_class = provider_failure
         return _deny(failure_class, denial_reason_class=denial_reason_class)
@@ -363,7 +376,16 @@ def _provider_failure(
     *,
     now: datetime,
     policy_version: str,
+    provider_id: str,
 ) -> tuple[str, str] | None:
+    decision = getattr(result, "decision", None)
+    if not isinstance(decision, AuthorizationProviderDecision):
+        return (
+            "feishu_broker_policy_denied",
+            "feishu_authorization_provider_decision_missing",
+        )
+    if decision.provider_id != provider_id:
+        return "feishu_broker_policy_denied", "feishu_provider_identity_mismatch"
     failure_class = getattr(result, "failure_class", None)
     if failure_class is not None:
         if failure_class not in _STABLE_PROVIDER_FAILURE_CLASSES:
@@ -372,14 +394,10 @@ def _provider_failure(
                 "feishu_authorization_provider_failure_class_invalid",
             )
         return failure_class, failure_class
-    decision = getattr(result, "decision", None)
-    if not isinstance(decision, AuthorizationProviderDecision):
-        return (
-            "feishu_broker_policy_denied",
-            "feishu_authorization_provider_decision_missing",
-        )
     if decision.denial_failure_class is not None:
         return decision.denial_failure_class, decision.denial_failure_class
+    if decision.revocation_reason is not None:
+        return "feishu_broker_policy_denied", "feishu_provider_decision_inconsistent"
     if decision.policy_version != policy_version:
         return "feishu_broker_policy_denied", "feishu_provider_policy_version_mismatch"
     if decision.reachability_state != "reachable":
