@@ -70,8 +70,12 @@ class BrokerPolicyReplayRecord:
         _require_sha256_hash(self.provider_decision_hash, "provider_decision_hash")
         _require_nonempty_string(self.route_snapshot_hash, "route_snapshot_hash")
         _require_sha256_hash(self.object_ref_hash, "object_ref_hash")
-        _require_nonempty_string(self.object_type, "object_type")
-        _require_nonempty_string(self.action, "action")
+        object.__setattr__(
+            self,
+            "object_type",
+            _classifier_or_hash(self.object_type, "object_type"),
+        )
+        object.__setattr__(self, "action", _classifier_or_hash(self.action, "action"))
         _require_grant_semantics(self.grant_semantics)
         _require_sha256_hash(self.grant_hash, "grant_hash")
         if self.expires_at is not None:
@@ -111,18 +115,26 @@ class BrokerPolicyRequest:
                 "contract must be a ConversationContract",
                 failure_class="invalid_feishu_broker_policy_request",
             )
-        object.__setattr__(self, "provider_id", _classifier_or_hash(self.provider_id))
-        _require_nonempty_string(self.object_type, "object_type")
+        object.__setattr__(
+            self,
+            "provider_id",
+            _classifier_or_hash(self.provider_id, "provider_id"),
+        )
+        object.__setattr__(
+            self,
+            "object_type",
+            _classifier_or_hash(self.object_type, "object_type"),
+        )
         if not isinstance(self.object_ref, HashedRef):
             raise BrokerPolicyError(
                 "object_ref must be a HashedRef",
                 failure_class="invalid_feishu_broker_policy_request",
             )
-        _require_nonempty_string(self.action, "action")
+        object.__setattr__(self, "action", _classifier_or_hash(self.action, "action"))
         object.__setattr__(
             self,
             "requested_scopes",
-            _string_tuple(self.requested_scopes, "requested_scopes"),
+            _classifier_or_hash_tuple(self.requested_scopes, "requested_scopes"),
         )
         _require_grant_semantics(self.grant_semantics)
         if self.expires_at is not None:
@@ -519,7 +531,7 @@ def _replay_record_payload(record: BrokerPolicyReplayRecord) -> dict[str, Any]:
     }
 
 
-def _string_tuple(value: Any, field_name: str) -> tuple[str, ...]:
+def _classifier_or_hash_tuple(value: Any, field_name: str) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray, str)):
         raise BrokerPolicyError(
             f"{field_name} must be a sequence",
@@ -531,20 +543,18 @@ def _string_tuple(value: Any, field_name: str) -> tuple[str, ...]:
             f"{field_name} must not be empty",
             failure_class="invalid_feishu_broker_policy_request",
         )
-    for item in items:
-        _require_nonempty_string(item, field_name)
-    return items
+    return tuple(_classifier_or_hash(item, field_name) for item in items)
 
 
-def _classifier_or_hash(value: Any) -> str:
-    _require_nonempty_string(value, "provider_id")
+def _classifier_or_hash(value: Any, field_name: str) -> str:
+    _require_nonempty_string(value, field_name)
     normalized = unicodedata.normalize("NFC", value)
     if _SHA256_HASH_RE.fullmatch(normalized):
         return normalized
     if re.fullmatch(r"^[a-z0-9][a-z0-9._:-]{0,63}$", normalized):
         return normalized
     raise BrokerPolicyError(
-        "provider_id must be a stable classifier or sha256 hash",
+        f"{field_name} must be a stable classifier or sha256 hash",
         failure_class="invalid_feishu_broker_policy_request",
     )
 

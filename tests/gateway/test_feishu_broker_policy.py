@@ -11,6 +11,7 @@ from gateway.feishu_authorization_providers import (
     FakeAuthorizationProvider,
 )
 from gateway.feishu_broker_policy import (
+    BrokerPolicyError,
     BrokerPolicyRequest,
     BrokerPolicyReplayRecord,
     issue_object_capability_grant,
@@ -149,6 +150,40 @@ def _issue(request=None, registry=None):
         now=_NOW,
         policy_version="policy:v1",
     )
+
+
+@pytest.mark.parametrize(
+    "request_overrides",
+    [
+        {"object_type": "doc/path/secret"},
+        {"action": "read/path"},
+        {"requested_scopes": ("doc:read/path",)},
+        {"requested_scopes": ("doc:read scope",)},
+    ],
+)
+def test_broker_policy_request_rejects_raw_classifier_material(
+    request_overrides,
+):
+    with pytest.raises(BrokerPolicyError) as exc_info:
+        _request(**request_overrides)
+
+    assert exc_info.value.failure_class == "invalid_feishu_broker_policy_request"
+
+
+def test_broker_policy_request_classifier_values_still_issue_grant():
+    decision = _issue(
+        _request(
+            object_type="doc",
+            action="read",
+            requested_scopes=("doc:read",),
+        ),
+        {"fake_verified_object_acl": _fake_provider(scopes=("doc:read",))},
+    )
+
+    assert decision.failure_class is None
+    assert decision.grant is not None
+    assert decision.grant.object_capability_grant.object_type == "doc"
+    assert decision.grant.object_capability_grant.action == "read"
 
 
 def test_missing_provider_registry_returns_provider_missing_without_grant():
