@@ -303,3 +303,120 @@ def test_provider_decision_hash_allows_prehashed_unknown_metadata_and_classifier
         "policy_version": "policy:v1",
     }
     assert _SHA256_HASH_RE.fullmatch(decision.decision_hash)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("provider_id", "tenant_access_token_secret"),
+        ("provider_version", "/Users/rtoc/Documents/provider-version.txt"),
+        ("policy_version", "Please approve this object"),
+        ("evidence_source_class", "verified object acl from finance doc"),
+        ("reachability_state", "call SDK and hope"),
+        ("credential_freshness", "fresh enough for Bob"),
+        ("unsupported_scope", "/Users/rtoc/Documents/raw-scope.txt"),
+        ("revocation_reason", "tenant_access_token_secret"),
+        ("denial_failure_class", "just some failure"),
+    ],
+)
+def test_provider_decision_top_level_metadata_rejects_raw_or_ad_hoc_content(field, value):
+    with pytest.raises(AuthorizationProviderError):
+        _provider_decision(**{field: value})
+
+
+@pytest.mark.parametrize("failure_class", ["just some failure", "random_failure"])
+def test_provider_contract_rejects_arbitrary_failure_classes(failure_class):
+    with pytest.raises(AuthorizationProviderError):
+        _provider_decision(
+            evidence_source_class="none",
+            reachability_state="unreachable",
+            issued_at=None,
+            expires_at=None,
+            freshness_class="unknown",
+            credential_freshness="unknown",
+            acl_complete=False,
+            denial_failure_class=failure_class,
+        )
+
+    decision = _provider_decision(
+        evidence_source_class="none",
+        reachability_state="unreachable",
+        issued_at=None,
+        expires_at=None,
+        freshness_class="unknown",
+        credential_freshness="unknown",
+        acl_complete=False,
+        denial_failure_class="feishu_provider_sdk_unreachable",
+    )
+
+    with pytest.raises(AuthorizationProviderError):
+        AuthorizationProviderResult(
+            evidence=None,
+            decision=decision,
+            failure_class=failure_class,
+        )
+
+
+def test_provider_contract_allows_stable_package_c_failure_class():
+    decision = _provider_decision(
+        evidence_source_class="none",
+        reachability_state="unreachable",
+        issued_at=None,
+        expires_at=None,
+        freshness_class="unknown",
+        credential_freshness="unknown",
+        acl_complete=False,
+        denial_failure_class="feishu_provider_sdk_unreachable",
+    )
+
+    result = AuthorizationProviderResult(
+        evidence=None,
+        decision=decision,
+        failure_class="feishu_provider_sdk_unreachable",
+    )
+
+    assert result.is_denial is True
+    assert result.failure_class == "feishu_provider_sdk_unreachable"
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        _provider_decision(reachability_state="unreachable"),
+        _provider_decision(acl_complete=False),
+        _provider_decision(
+            issued_at=None,
+            expires_at=None,
+            freshness_class="unknown",
+            credential_freshness="unknown",
+        ),
+        _provider_decision(freshness_class="stale", credential_freshness="stale"),
+        _provider_decision(evidence_source_class="admin_policy_grant"),
+        _provider_decision(denial_failure_class="feishu_provider_sdk_unreachable"),
+    ],
+)
+def test_provider_contract_positive_result_rejects_unusable_decisions(decision):
+    with pytest.raises(AuthorizationProviderError):
+        AuthorizationProviderResult(evidence=_evidence(), decision=decision)
+
+
+def test_provider_contract_positive_result_rejects_stale_or_failed_result_metadata():
+    stale_evidence = AuthorizationEvidence(
+        evidence_kind="verified_object_acl",
+        authority_subject_ref=_SUBJECT_REF,
+        route_session_key_snapshot=_ROUTE_SNAPSHOT,
+        object_ref=_OBJECT_REF,
+        scopes=("doc:read", "doc:write"),
+        token_class="user_access_token",
+        evidence_state="stale",
+    )
+
+    with pytest.raises(AuthorizationProviderError):
+        AuthorizationProviderResult(evidence=stale_evidence, decision=_provider_decision())
+
+    with pytest.raises(AuthorizationProviderError):
+        AuthorizationProviderResult(
+            evidence=_evidence(),
+            decision=_provider_decision(),
+            failure_class="feishu_provider_sdk_unreachable",
+        )

@@ -11,6 +11,7 @@ import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from gateway.feishu_contracts import (
@@ -25,6 +26,7 @@ _GRANT_MODES = frozenset({"one_time", "short_session"})
 _NORMALIZED_KEY_CHARS_RE = re.compile(r"[^a-z0-9]+")
 _SHA256_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 _CLASSIFIER_METADATA_STRING_RE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
+_UTC_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
 _RAW_FEISHU_ID_VALUE_RE = re.compile(
     r"^(?:(?:ou|on|oc|om|u|msg|doccn|shtcn|fldcn|boxcn)[A-Za-z0-9_-]*"
@@ -56,6 +58,37 @@ _PROVIDER_RAW_VALUE_MARKERS = frozenset(
     }
 )
 _ACL_BODY_KEYS = frozenset({"acl", "code", "data", "msg", "permission", "permissions"})
+_AUTHORIZATION_EVIDENCE_SOURCE_CLASSES = frozenset(
+    {
+        "admin_policy_grant",
+        "app_owned_object",
+        "app_token_only",
+        "discovery_only",
+        "explicit_user_confirmation",
+        "none",
+        "system_test_object",
+        "user_delegated_credential",
+        "verified_object_acl",
+    }
+)
+_CREDENTIAL_FRESHNESS_CLASSES = frozenset({"fresh", "stale", "revoked", "unknown"})
+_FRESHNESS_CLASSES = frozenset({"current", "stale", "revoked", "unknown"})
+_REACHABILITY_STATES = frozenset({"reachable", "unreachable", "unknown"})
+_STABLE_FAILURE_CLASS_PREFIXES = (
+    "feishu_provider_",
+    "feishu_authorization_",
+    "feishu_object_authority_",
+    "feishu_contract_",
+    "feishu_route_",
+    "feishu_p3_",
+    "invalid_feishu_",
+)
+_STABLE_FAILURE_CLASS_VALUES = frozenset(
+    {
+        "invalid_hashed_sensitive_ref",
+        "sensitive_raw_field",
+    }
+)
 _CLASSIFIER_METADATA_KEYS = frozenset(
     {
         "category",
@@ -217,36 +250,69 @@ class AuthorizationProviderDecision:
     decision_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
-        for field_name in (
+        object.__setattr__(
+            self,
             "provider_id",
+            _require_classifier_or_hash(self.provider_id, "provider_id"),
+        )
+        object.__setattr__(
+            self,
             "provider_version",
+            _require_classifier_or_hash(self.provider_version, "provider_version"),
+        )
+        object.__setattr__(
+            self,
             "policy_version",
+            _require_classifier_or_hash(self.policy_version, "policy_version"),
+        )
+        object.__setattr__(
+            self,
             "evidence_source_class",
+            _require_known_classifier(
+                self.evidence_source_class,
+                _AUTHORIZATION_EVIDENCE_SOURCE_CLASSES,
+                "evidence_source_class",
+            ),
+        )
+        object.__setattr__(
+            self,
             "reachability_state",
+            _require_known_classifier(
+                self.reachability_state,
+                _REACHABILITY_STATES,
+                "reachability_state",
+            ),
+        )
+        object.__setattr__(
+            self,
             "credential_freshness",
-        ):
-            _require_nonempty_string(
-                getattr(self, field_name),
-                field_name,
-                failure_class="invalid_feishu_authorization_provider_decision",
-            )
+            _require_known_classifier(
+                self.credential_freshness,
+                _CREDENTIAL_FRESHNESS_CLASSES,
+                "credential_freshness",
+            ),
+        )
         if self.issued_at is not None:
-            _require_nonempty_string(
-                self.issued_at,
+            object.__setattr__(
+                self,
                 "issued_at",
-                failure_class="invalid_feishu_authorization_provider_decision",
+                _require_utc_timestamp(self.issued_at, "issued_at"),
             )
         if self.expires_at is not None:
-            _require_nonempty_string(
-                self.expires_at,
+            object.__setattr__(
+                self,
                 "expires_at",
-                failure_class="invalid_feishu_authorization_provider_decision",
+                _require_utc_timestamp(self.expires_at, "expires_at"),
             )
         if self.freshness_class is not None:
-            _require_nonempty_string(
-                self.freshness_class,
+            object.__setattr__(
+                self,
                 "freshness_class",
-                failure_class="invalid_feishu_authorization_provider_decision",
+                _require_known_classifier(
+                    self.freshness_class,
+                    _FRESHNESS_CLASSES,
+                    "freshness_class",
+                ),
             )
         if self.issued_at is None and self.expires_at is None and self.freshness_class is None:
             raise AuthorizationProviderError(
@@ -265,14 +331,28 @@ class AuthorizationProviderDecision:
                 "acl_complete must be a boolean",
                 failure_class="invalid_feishu_authorization_provider_decision",
             )
-        for field_name in ("unsupported_scope", "revocation_reason", "denial_failure_class"):
-            value = getattr(self, field_name)
-            if value is not None:
-                _require_nonempty_string(
-                    value,
-                    field_name,
+        if self.unsupported_scope is not None:
+            object.__setattr__(
+                self,
+                "unsupported_scope",
+                _require_classifier_or_hash(self.unsupported_scope, "unsupported_scope"),
+            )
+        if self.revocation_reason is not None:
+            object.__setattr__(
+                self,
+                "revocation_reason",
+                _require_classifier_or_hash(self.revocation_reason, "revocation_reason"),
+            )
+        if self.denial_failure_class is not None:
+            object.__setattr__(
+                self,
+                "denial_failure_class",
+                _require_stable_failure_class(
+                    self.denial_failure_class,
+                    "denial_failure_class",
                     failure_class="invalid_feishu_authorization_provider_decision",
-                )
+                ),
+            )
         _require_schema_version(
             self.schema_version,
             failure_class="invalid_feishu_authorization_provider_decision",
@@ -315,10 +395,14 @@ class AuthorizationProviderResult:
                 failure_class="invalid_feishu_authorization_provider_result",
             )
         if self.failure_class is not None:
-            _require_nonempty_string(
-                self.failure_class,
+            object.__setattr__(
+                self,
                 "failure_class",
-                failure_class="invalid_feishu_authorization_provider_result",
+                _require_stable_failure_class(
+                    self.failure_class,
+                    "failure_class",
+                    failure_class="invalid_feishu_authorization_provider_result",
+                ),
             )
         if self.evidence is None:
             if self.failure_class is None or self.decision.denial_failure_class is None:
@@ -337,6 +421,7 @@ class AuthorizationProviderResult:
                 "evidence result must not carry denial failure class",
                 failure_class="invalid_feishu_authorization_provider_result",
             )
+        _require_current_positive_decision(self.evidence, self.decision)
 
     @property
     def is_denial(self) -> bool:
@@ -473,6 +558,13 @@ def _reject_sensitive_raw_metadata_string(value: str, comparable_key: str) -> No
         )
     if _SHA256_HASH_RE.fullmatch(value):
         return
+    if comparable_key in {"denialfailureclass", "failureclass"}:
+        _require_stable_failure_class(
+            value,
+            comparable_key,
+            failure_class="invalid_feishu_authorization_provider_decision",
+        )
+        return
     if (
         comparable_key in _CLASSIFIER_METADATA_KEYS
         and _CLASSIFIER_METADATA_STRING_RE.fullmatch(value)
@@ -482,6 +574,150 @@ def _reject_sensitive_raw_metadata_string(value: str, comparable_key: str) -> No
         "decision metadata strings must be pre-hashed or stable classifier values",
         failure_class="sensitive_raw_field",
     )
+
+
+def _require_classifier_or_hash(value: Any, field_name: str) -> str:
+    _require_nonempty_string(
+        value,
+        field_name,
+        failure_class="invalid_feishu_authorization_provider_decision",
+    )
+    normalized = unicodedata.normalize("NFC", value)
+    if _looks_like_raw_local_path(normalized):
+        raise AuthorizationProviderError(
+            f"{field_name} must not contain a raw local path",
+            failure_class="sensitive_raw_field",
+        )
+    comparable = _normalized_key_for_policy(normalized)
+    if _RAW_FEISHU_ID_VALUE_RE.fullmatch(normalized):
+        raise AuthorizationProviderError(
+            f"{field_name} must not contain a raw Feishu identifier",
+            failure_class="sensitive_raw_field",
+        )
+    if any(marker in comparable for marker in _PROVIDER_RAW_VALUE_MARKERS):
+        raise AuthorizationProviderError(
+            f"{field_name} must not contain raw provider secrets",
+            failure_class="sensitive_raw_field",
+        )
+    if _SHA256_HASH_RE.fullmatch(normalized):
+        return normalized
+    if _CLASSIFIER_METADATA_STRING_RE.fullmatch(normalized):
+        return normalized
+    raise AuthorizationProviderError(
+        f"{field_name} must be a stable classifier or sha256 hash",
+        failure_class="invalid_feishu_authorization_provider_decision",
+    )
+
+
+def _require_known_classifier(
+    value: Any,
+    allowed: frozenset[str],
+    field_name: str,
+) -> str:
+    _require_nonempty_string(
+        value,
+        field_name,
+        failure_class="invalid_feishu_authorization_provider_decision",
+    )
+    normalized = unicodedata.normalize("NFC", value)
+    if _looks_like_raw_local_path(normalized):
+        raise AuthorizationProviderError(
+            f"{field_name} must not contain a raw local path",
+            failure_class="sensitive_raw_field",
+        )
+    if not _CLASSIFIER_METADATA_STRING_RE.fullmatch(normalized):
+        raise AuthorizationProviderError(
+            f"{field_name} must be a supported classifier",
+            failure_class="invalid_feishu_authorization_provider_decision",
+        )
+    if normalized not in allowed:
+        raise AuthorizationProviderError(
+            f"{field_name} must be a supported classifier",
+            failure_class="invalid_feishu_authorization_provider_decision",
+        )
+    return normalized
+
+
+def _require_stable_failure_class(
+    value: Any,
+    field_name: str,
+    *,
+    failure_class: str,
+) -> str:
+    _require_nonempty_string(value, field_name, failure_class=failure_class)
+    normalized = unicodedata.normalize("NFC", value)
+    if not _CLASSIFIER_METADATA_STRING_RE.fullmatch(normalized):
+        raise AuthorizationProviderError(
+            f"{field_name} must be a stable failure classifier",
+            failure_class=failure_class,
+        )
+    if (
+        normalized in _STABLE_FAILURE_CLASS_VALUES
+        or normalized.startswith(_STABLE_FAILURE_CLASS_PREFIXES)
+    ):
+        return normalized
+    raise AuthorizationProviderError(
+        f"{field_name} must use a stable Feishu failure namespace",
+        failure_class=failure_class,
+    )
+
+
+def _require_utc_timestamp(value: Any, field_name: str) -> str:
+    _require_nonempty_string(
+        value,
+        field_name,
+        failure_class="invalid_feishu_authorization_provider_decision",
+    )
+    normalized = unicodedata.normalize("NFC", value)
+    if not _UTC_TIMESTAMP_RE.fullmatch(normalized):
+        raise AuthorizationProviderError(
+            f"{field_name} must be an ISO-8601 UTC timestamp",
+            failure_class="invalid_feishu_authorization_provider_decision",
+        )
+    try:
+        datetime.strptime(normalized, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise AuthorizationProviderError(
+            f"{field_name} must be a valid UTC timestamp",
+            failure_class="invalid_feishu_authorization_provider_decision",
+        ) from exc
+    return normalized
+
+
+def _require_current_positive_decision(
+    evidence: AuthorizationEvidence,
+    decision: AuthorizationProviderDecision,
+) -> None:
+    if decision.reachability_state != "reachable":
+        raise AuthorizationProviderError(
+            "positive authorization requires reachable provider decision",
+            failure_class="invalid_feishu_authorization_provider_result",
+        )
+    if decision.credential_freshness != "fresh" or decision.freshness_class != "current":
+        raise AuthorizationProviderError(
+            "positive authorization requires current fresh credentials",
+            failure_class="invalid_feishu_authorization_provider_result",
+        )
+    if not decision.acl_complete:
+        raise AuthorizationProviderError(
+            "positive authorization requires complete ACL evidence",
+            failure_class="invalid_feishu_authorization_provider_result",
+        )
+    if decision.evidence_source_class != evidence.evidence_kind:
+        raise AuthorizationProviderError(
+            "decision evidence source class must match authorization evidence kind",
+            failure_class="invalid_feishu_authorization_provider_result",
+        )
+    if evidence.evidence_state != "current":
+        raise AuthorizationProviderError(
+            "positive authorization requires current evidence",
+            failure_class="invalid_feishu_authorization_provider_result",
+        )
+    if decision.unsupported_scope is not None or decision.revocation_reason is not None:
+        raise AuthorizationProviderError(
+            "positive authorization must not carry denial reason metadata",
+            failure_class="invalid_feishu_authorization_provider_result",
+        )
 
 
 def _looks_like_raw_local_path(value: str) -> bool:
