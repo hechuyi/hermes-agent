@@ -71,9 +71,50 @@ _AUTHORIZATION_EVIDENCE_SOURCE_CLASSES = frozenset(
         "verified_object_acl",
     }
 )
+_FAKE_PROVIDER_SOURCE_CLASSES = frozenset(
+    {
+        "admin_policy_grant",
+        "app_owned_object",
+        "app_token_only",
+        "availability_only",
+        "discovery_only",
+        "explicit_user_confirmation",
+        "sdk_reachable_only",
+        "system_test_object",
+        "user_delegated_credential",
+        "verified_object_acl",
+    }
+)
+_OBJECT_AUTHORITY_SOURCE_CLASSES = frozenset(
+    {
+        "admin_policy_grant",
+        "app_owned_object",
+        "system_test_object",
+        "user_delegated_credential",
+        "verified_object_acl",
+    }
+)
+_NON_GRANTABLE_PROVIDER_STATE_CLASSES = frozenset(
+    {
+        "availability_only",
+        "sdk_reachable_only",
+    }
+)
+_PROVIDER_EVIDENCE_CLASSES = frozenset(
+    {
+        "app_token_only",
+        "confirmation",
+        "discovery_only",
+        "non_grantable_provider_state",
+        "object_authority",
+    }
+)
+_OBJECT_OWNER_CLASSES = frozenset({"app_owned", "user_owned"})
 _CREDENTIAL_FRESHNESS_CLASSES = frozenset({"fresh", "stale", "revoked", "unknown"})
 _FRESHNESS_CLASSES = frozenset({"current", "stale", "revoked", "unknown"})
 _REACHABILITY_STATES = frozenset({"reachable", "unreachable", "unknown"})
+_FAKE_PROVIDER_ISSUED_AT = "2026-06-10T00:00:00Z"
+_FAKE_PROVIDER_EXPIRES_AT = "2026-06-10T00:05:00Z"
 _STABLE_FAILURE_CLASS_PREFIXES = (
     "feishu_provider_",
     "feishu_authorization_",
@@ -440,6 +481,337 @@ class AuthorizationProviderProtocol(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class FakeAuthorizationProvider:
+    """Deterministic in-process provider for Package C policy tests.
+
+    This class models sanitized authorization-provider outcomes only. It does
+    not call Feishu SDKs, OpenAPI, lark-cli, OAuth, or persisted grant stores.
+    """
+
+    provider_id: str
+    provider_version: str
+    evidence_source_class: str
+    authority_subject_ref: HashedRef
+    object_ref: HashedRef
+    route_session_key_snapshot: str
+    scopes: tuple[str, ...]
+    provider_available: bool = True
+    sdk_reachable: bool = True
+    app_token_available: bool = True
+    acl_complete: bool = True
+    credential_freshness: str = "fresh"
+    object_owner_class: str = "app_owned"
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "provider_id",
+            _require_classifier_or_hash(self.provider_id, "provider_id"),
+        )
+        object.__setattr__(
+            self,
+            "provider_version",
+            _require_classifier_or_hash(self.provider_version, "provider_version"),
+        )
+        _require_nonempty_string(
+            self.evidence_source_class,
+            "evidence_source_class",
+            failure_class="invalid_feishu_authorization_provider_contract",
+        )
+        _require_hashed_ref(
+            self.authority_subject_ref,
+            "authority_subject_ref",
+            failure_class="invalid_feishu_authorization_provider_contract",
+        )
+        _require_hashed_ref(
+            self.object_ref,
+            "object_ref",
+            failure_class="invalid_feishu_authorization_provider_contract",
+        )
+        _require_nonempty_string(
+            self.route_session_key_snapshot,
+            "route_session_key_snapshot",
+            failure_class="invalid_feishu_authorization_provider_contract",
+        )
+        object.__setattr__(
+            self,
+            "scopes",
+            _string_tuple(
+                self.scopes,
+                "scopes",
+                failure_class="invalid_feishu_authorization_provider_contract",
+            ),
+        )
+        for field_name in ("provider_available", "sdk_reachable", "app_token_available"):
+            if not isinstance(getattr(self, field_name), bool):
+                raise AuthorizationProviderError(
+                    f"{field_name} must be a boolean",
+                    failure_class="invalid_feishu_authorization_provider_contract",
+                )
+        if not isinstance(self.acl_complete, bool):
+            raise AuthorizationProviderError(
+                "acl_complete must be a boolean",
+                failure_class="invalid_feishu_authorization_provider_contract",
+            )
+        if self.credential_freshness not in _CREDENTIAL_FRESHNESS_CLASSES:
+            raise AuthorizationProviderError(
+                "credential_freshness must be a supported classifier",
+                failure_class="invalid_feishu_authorization_provider_contract",
+            )
+        object.__setattr__(
+            self,
+            "object_owner_class",
+            _require_known_classifier(
+                self.object_owner_class,
+                _OBJECT_OWNER_CLASSES,
+                "object_owner_class",
+            ),
+        )
+        _require_schema_version(
+            self.schema_version,
+            failure_class="invalid_feishu_authorization_provider_contract",
+        )
+
+    def authorize(
+        self,
+        request: AuthorizationProviderRequest,
+    ) -> AuthorizationProviderResult:
+        if not isinstance(request, AuthorizationProviderRequest):
+            raise AuthorizationProviderError(
+                "request must be AuthorizationProviderRequest",
+                failure_class="invalid_feishu_authorization_provider_request",
+            )
+        if self.evidence_source_class not in _FAKE_PROVIDER_SOURCE_CLASSES:
+            return self._deny(request, "feishu_provider_unsupported_provider")
+        state_failure = self._state_failure()
+        if state_failure is not None:
+            return self._deny(request, state_failure)
+        if self.evidence_source_class in _NON_GRANTABLE_PROVIDER_STATE_CLASSES:
+            return self._deny(request, "feishu_provider_non_grantable_state")
+        if self.evidence_source_class == "app_owned_object" and (
+            self.object_owner_class != "app_owned"
+        ):
+            return self._deny(request, "feishu_provider_user_owned_object")
+        if not self.acl_complete:
+            return self._deny(request, "feishu_provider_acl_incomplete")
+        unsupported_scope = self._unsupported_scope(request)
+        if unsupported_scope is not None:
+            return self._deny(
+                request,
+                "feishu_provider_unsupported_scope",
+                unsupported_scope=unsupported_scope,
+            )
+        if self._authority_mismatch(request):
+            return self._deny(request, "feishu_provider_authority_mismatch")
+        return self._grant(request)
+
+    def _state_failure(self) -> str | None:
+        if not self.provider_available:
+            return "feishu_provider_unavailable"
+        if not self.sdk_reachable:
+            return "feishu_provider_sdk_unreachable"
+        if not self.app_token_available:
+            return "feishu_provider_app_token_unavailable"
+        if self.credential_freshness == "stale":
+            return "feishu_provider_stale_credential"
+        if self.credential_freshness == "revoked":
+            return "feishu_provider_revoked_credential"
+        if self.credential_freshness == "unknown":
+            return "feishu_provider_credential_unknown"
+        return None
+
+    def _unsupported_scope(self, request: AuthorizationProviderRequest) -> str | None:
+        supported = frozenset(self.scopes)
+        for scope in request.requested_scopes:
+            if scope not in supported:
+                return scope
+        return None
+
+    def _authority_mismatch(self, request: AuthorizationProviderRequest) -> bool:
+        if self.evidence_source_class in {"app_token_only", "discovery_only"}:
+            return False
+        return (
+            request.authority_subject_ref != self.authority_subject_ref
+            or request.object_ref != self.object_ref
+            or request.route_session_key_snapshot != self.route_session_key_snapshot
+        )
+
+    def _grant(self, request: AuthorizationProviderRequest) -> AuthorizationProviderResult:
+        evidence = AuthorizationEvidence(
+            evidence_kind=self.evidence_source_class,
+            authority_subject_ref=_evidence_subject_ref(self.evidence_source_class, request),
+            route_session_key_snapshot=request.route_session_key_snapshot,
+            object_ref=_evidence_object_ref(self.evidence_source_class, request),
+            scopes=request.requested_scopes,
+            token_class=_token_class_for_source(self.evidence_source_class),
+            evidence_state="current",
+        )
+        decision = AuthorizationProviderDecision(
+            provider_id=self.provider_id,
+            provider_version=self.provider_version,
+            policy_version=request.policy_version,
+            evidence_source_class=self.evidence_source_class,
+            reachability_state="reachable",
+            issued_at=_FAKE_PROVIDER_ISSUED_AT,
+            expires_at=_FAKE_PROVIDER_EXPIRES_AT,
+            freshness_class="current",
+            credential_freshness="fresh",
+            acl_complete=True,
+            extra_metadata=_evidence_class_metadata(self.evidence_source_class),
+        )
+        return AuthorizationProviderResult(evidence=evidence, decision=decision)
+
+    def _deny(
+        self,
+        request: AuthorizationProviderRequest,
+        failure_class: str,
+        *,
+        unsupported_scope: str | None = None,
+    ) -> AuthorizationProviderResult:
+        decision = _denial_decision(
+            provider_id=self.provider_id,
+            provider_version=self.provider_version,
+            policy_version=request.policy_version,
+            failure_class=failure_class,
+            reachability_state=_denial_reachability_state(failure_class),
+            credential_freshness=_denial_credential_freshness(failure_class),
+            freshness_class=_denial_freshness_class(failure_class),
+            acl_complete=self.acl_complete and failure_class != "feishu_provider_acl_incomplete",
+            unsupported_scope=unsupported_scope,
+        )
+        return AuthorizationProviderResult(
+            evidence=None,
+            decision=decision,
+            failure_class=failure_class,
+        )
+
+
+@dataclass(frozen=True)
+class SystemTestAuthorizationProvider:
+    provider_id: str
+    provider_version: str
+    object_ref: HashedRef
+    route_session_key_snapshot: str
+    scopes: tuple[str, ...]
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "provider_id",
+            _require_classifier_or_hash(self.provider_id, "provider_id"),
+        )
+        object.__setattr__(
+            self,
+            "provider_version",
+            _require_classifier_or_hash(self.provider_version, "provider_version"),
+        )
+        _require_hashed_ref(
+            self.object_ref,
+            "object_ref",
+            failure_class="invalid_feishu_authorization_provider_contract",
+        )
+        _require_nonempty_string(
+            self.route_session_key_snapshot,
+            "route_session_key_snapshot",
+            failure_class="invalid_feishu_authorization_provider_contract",
+        )
+        object.__setattr__(
+            self,
+            "scopes",
+            _string_tuple(
+                self.scopes,
+                "scopes",
+                failure_class="invalid_feishu_authorization_provider_contract",
+            ),
+        )
+        _require_schema_version(
+            self.schema_version,
+            failure_class="invalid_feishu_authorization_provider_contract",
+        )
+
+    def authorize(
+        self,
+        request: AuthorizationProviderRequest,
+    ) -> AuthorizationProviderResult:
+        if not isinstance(request, AuthorizationProviderRequest):
+            raise AuthorizationProviderError(
+                "request must be AuthorizationProviderRequest",
+                failure_class="invalid_feishu_authorization_provider_request",
+            )
+        if not self.provider_id.startswith("system_test_"):
+            return self._deny(request, "feishu_provider_unsupported_provider")
+        if request.object_ref.kind != "feishu_system_test_object":
+            return self._deny(request, "feishu_provider_unsupported_provider")
+        if request.object_ref != self.object_ref:
+            return self._deny(request, "feishu_provider_unsupported_provider")
+        unsupported_scope = self._unsupported_scope(request)
+        if unsupported_scope is not None:
+            return self._deny(
+                request,
+                "feishu_provider_unsupported_scope",
+                unsupported_scope=unsupported_scope,
+            )
+        if request.route_session_key_snapshot != self.route_session_key_snapshot:
+            return self._deny(request, "feishu_provider_authority_mismatch")
+        evidence = AuthorizationEvidence(
+            evidence_kind="system_test_object",
+            authority_subject_ref=request.authority_subject_ref,
+            route_session_key_snapshot=request.route_session_key_snapshot,
+            object_ref=request.object_ref,
+            scopes=request.requested_scopes,
+            token_class="system_test_credential",
+            evidence_state="current",
+        )
+        decision = AuthorizationProviderDecision(
+            provider_id=self.provider_id,
+            provider_version=self.provider_version,
+            policy_version=request.policy_version,
+            evidence_source_class="system_test_object",
+            reachability_state="reachable",
+            issued_at=_FAKE_PROVIDER_ISSUED_AT,
+            expires_at=_FAKE_PROVIDER_EXPIRES_AT,
+            freshness_class="current",
+            credential_freshness="fresh",
+            acl_complete=True,
+            extra_metadata=_evidence_class_metadata("system_test_object"),
+        )
+        return AuthorizationProviderResult(evidence=evidence, decision=decision)
+
+    def _unsupported_scope(self, request: AuthorizationProviderRequest) -> str | None:
+        supported = frozenset(self.scopes)
+        for scope in request.requested_scopes:
+            if scope not in supported:
+                return scope
+        return None
+
+    def _deny(
+        self,
+        request: AuthorizationProviderRequest,
+        failure_class: str,
+        *,
+        unsupported_scope: str | None = None,
+    ) -> AuthorizationProviderResult:
+        decision = _denial_decision(
+            provider_id=self.provider_id,
+            provider_version=self.provider_version,
+            policy_version=request.policy_version,
+            failure_class=failure_class,
+            reachability_state=_denial_reachability_state(failure_class),
+            credential_freshness=_denial_credential_freshness(failure_class),
+            freshness_class=_denial_freshness_class(failure_class),
+            acl_complete=False,
+            unsupported_scope=unsupported_scope,
+        )
+        return AuthorizationProviderResult(
+            evidence=None,
+            decision=decision,
+            failure_class=failure_class,
+        )
+
+
 def _authorization_provider_request_payload(
     request: AuthorizationProviderRequest,
 ) -> dict[str, Any]:
@@ -478,6 +850,133 @@ def _authorization_provider_decision_payload(
     }
 
 
+def _denial_decision(
+    *,
+    provider_id: str,
+    provider_version: str,
+    policy_version: str,
+    failure_class: str,
+    reachability_state: str,
+    credential_freshness: str,
+    freshness_class: str,
+    acl_complete: bool,
+    unsupported_scope: str | None = None,
+) -> AuthorizationProviderDecision:
+    return AuthorizationProviderDecision(
+        provider_id=provider_id,
+        provider_version=provider_version,
+        policy_version=policy_version,
+        evidence_source_class="none",
+        reachability_state=reachability_state,
+        issued_at=None,
+        expires_at=None,
+        freshness_class=freshness_class,
+        credential_freshness=credential_freshness,
+        acl_complete=acl_complete,
+        unsupported_scope=unsupported_scope,
+        revocation_reason=_revocation_reason(failure_class),
+        denial_failure_class=failure_class,
+        extra_metadata={
+            "evidence_class": "non_grantable_provider_state",
+            "object_authority": False,
+        },
+    )
+
+
+def _evidence_class_metadata(source_class: str) -> dict[str, Any]:
+    evidence_class = _evidence_class_for_source(source_class)
+    return {
+        "evidence_class": evidence_class,
+        "object_authority": evidence_class == "object_authority",
+    }
+
+
+def _evidence_class_for_source(source_class: str) -> str:
+    if source_class in _OBJECT_AUTHORITY_SOURCE_CLASSES:
+        return "object_authority"
+    if source_class == "explicit_user_confirmation":
+        return "confirmation"
+    if source_class == "app_token_only":
+        return "app_token_only"
+    if source_class == "discovery_only":
+        return "discovery_only"
+    return "non_grantable_provider_state"
+
+
+def _evidence_subject_ref(
+    source_class: str,
+    request: AuthorizationProviderRequest,
+) -> HashedRef | None:
+    if source_class in {"app_token_only", "discovery_only"}:
+        return None
+    return request.authority_subject_ref
+
+
+def _evidence_object_ref(
+    source_class: str,
+    request: AuthorizationProviderRequest,
+) -> HashedRef | None:
+    if source_class == "app_token_only":
+        return None
+    return request.object_ref
+
+
+def _token_class_for_source(source_class: str) -> str:
+    if source_class == "user_delegated_credential":
+        return "delegated_user_token"
+    if source_class == "verified_object_acl":
+        return "user_access_token"
+    if source_class == "app_owned_object":
+        return "app_owned_object_credential"
+    if source_class == "system_test_object":
+        return "system_test_credential"
+    if source_class == "app_token_only":
+        return "app_access_token"
+    return "none"
+
+
+def _denial_reachability_state(failure_class: str) -> str:
+    if failure_class == "feishu_provider_sdk_unreachable":
+        return "unreachable"
+    if failure_class == "feishu_provider_unavailable":
+        return "unknown"
+    return "reachable"
+
+
+def _denial_credential_freshness(failure_class: str) -> str:
+    if failure_class == "feishu_provider_stale_credential":
+        return "stale"
+    if failure_class == "feishu_provider_revoked_credential":
+        return "revoked"
+    if failure_class in {
+        "feishu_provider_app_token_unavailable",
+        "feishu_provider_credential_unknown",
+        "feishu_provider_unavailable",
+    }:
+        return "unknown"
+    return "fresh"
+
+
+def _denial_freshness_class(failure_class: str) -> str:
+    if failure_class == "feishu_provider_stale_credential":
+        return "stale"
+    if failure_class == "feishu_provider_revoked_credential":
+        return "revoked"
+    if failure_class in {
+        "feishu_provider_app_token_unavailable",
+        "feishu_provider_credential_unknown",
+        "feishu_provider_unavailable",
+    }:
+        return "unknown"
+    return "current"
+
+
+def _revocation_reason(failure_class: str) -> str | None:
+    if failure_class == "feishu_provider_revoked_credential":
+        return "credential_revoked"
+    return None
+
+
 def _sanitized_extra_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise AuthorizationProviderError(
@@ -513,6 +1012,11 @@ def _sanitized_extra_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
 def _sanitized_metadata_value(value: Any, comparable_key: str) -> Any:
     if isinstance(value, str):
         normalized = unicodedata.normalize("NFC", value)
+        if (
+            comparable_key == "evidenceclass"
+            and normalized in _PROVIDER_EVIDENCE_CLASSES
+        ):
+            return normalized
         _reject_sensitive_raw_metadata_string(normalized, comparable_key)
         return normalized
     if isinstance(value, bool) or value is None:
@@ -810,4 +1314,6 @@ __all__ = [
     "AuthorizationProviderProtocol",
     "AuthorizationProviderRequest",
     "AuthorizationProviderResult",
+    "FakeAuthorizationProvider",
+    "SystemTestAuthorizationProvider",
 ]

@@ -2,6 +2,7 @@ import re
 
 import pytest
 
+import gateway.feishu_authorization_providers as provider_module
 from gateway.feishu_contracts import AuthorizationEvidence, FeishuContractError, HashedRef
 from gateway.feishu_authorization_providers import (
     AuthorizationProviderDecision,
@@ -17,6 +18,12 @@ _CONTRACT_HASH = "sha256:" + "1" * 64
 _ROUTE_SNAPSHOT = "route_session_snapshot_hash:sha256:" + "2" * 64
 _SUBJECT_REF = HashedRef(kind="feishu_user", value_hash="sha256:" + "b" * 64)
 _OBJECT_REF = HashedRef(kind="feishu_doc", value_hash="sha256:" + "a" * 64)
+_OTHER_SUBJECT_REF = HashedRef(kind="feishu_user", value_hash="sha256:" + "c" * 64)
+_OTHER_OBJECT_REF = HashedRef(kind="feishu_doc", value_hash="sha256:" + "d" * 64)
+_SYSTEM_TEST_OBJECT_REF = HashedRef(
+    kind="feishu_system_test_object",
+    value_hash="sha256:" + "e" * 64,
+)
 
 
 def _provider_contract_request(**overrides) -> AuthorizationProviderRequest:
@@ -65,6 +72,27 @@ def _evidence() -> AuthorizationEvidence:
         token_class="user_access_token",
         evidence_state="current",
     )
+
+
+def _fake_provider_request(**overrides) -> AuthorizationProviderRequest:
+    return _provider_contract_request(**overrides)
+
+
+def _fake_provider(
+    default_evidence_source_class: str,
+    **overrides,
+):
+    values = {
+        "provider_id": f"fake_{default_evidence_source_class}",
+        "provider_version": "2026-06-10.fake",
+        "evidence_source_class": default_evidence_source_class,
+        "authority_subject_ref": _SUBJECT_REF,
+        "object_ref": _OBJECT_REF,
+        "route_session_key_snapshot": _ROUTE_SNAPSHOT,
+        "scopes": ("doc:read",),
+    }
+    values.update(overrides)
+    return provider_module.FakeAuthorizationProvider(**values)
 
 
 @pytest.mark.parametrize(
@@ -420,3 +448,181 @@ def test_provider_contract_positive_result_rejects_stale_or_failed_result_metada
             decision=_provider_decision(),
             failure_class="feishu_provider_sdk_unreachable",
         )
+
+
+def test_fake_provider_user_delegated_credential_requires_exact_authority_snapshot_and_scope():
+    provider = _fake_provider("user_delegated_credential")
+
+    result = provider.authorize(_fake_provider_request())
+
+    assert result.is_denial is False
+    assert result.evidence.evidence_kind == "user_delegated_credential"
+    assert result.evidence.authority_subject_ref == _SUBJECT_REF
+    assert result.evidence.object_ref == _OBJECT_REF
+    assert result.evidence.route_session_key_snapshot == _ROUTE_SNAPSHOT
+    assert result.evidence.scopes == ("doc:read",)
+    assert result.evidence.evidence_state == "current"
+    assert result.decision.evidence_source_class == "user_delegated_credential"
+    assert result.decision.extra_metadata["evidence_class"] == "object_authority"
+    assert _SHA256_HASH_RE.fullmatch(result.decision.decision_hash)
+
+    mismatched_requests = [
+        _fake_provider_request(authority_subject_ref=_OTHER_SUBJECT_REF),
+        _fake_provider_request(object_ref=_OTHER_OBJECT_REF),
+        _fake_provider_request(
+            route_session_key_snapshot="route_session_snapshot_hash:sha256:" + "9" * 64
+        ),
+        _fake_provider_request(requested_scopes=("doc:write",)),
+    ]
+
+    for request in mismatched_requests:
+        denied = provider.authorize(request)
+        assert denied.is_denial is True
+        assert denied.evidence is None
+
+
+def test_fake_provider_verified_object_acl_denies_incomplete_acl_with_stable_failure_class():
+    provider = _fake_provider("verified_object_acl", acl_complete=False)
+
+    result = provider.authorize(_fake_provider_request())
+
+    assert result.is_denial is True
+    assert result.failure_class == "feishu_provider_acl_incomplete"
+    assert result.decision.denial_failure_class == "feishu_provider_acl_incomplete"
+    assert result.decision.extra_metadata["evidence_class"] == "non_grantable_provider_state"
+
+
+def test_fake_provider_admin_policy_grant_denies_unsupported_scope_with_stable_failure_class():
+    provider = _fake_provider(
+        "admin_policy_grant",
+        scopes=("doc:read",),
+    )
+
+    result = provider.authorize(_fake_provider_request(requested_scopes=("doc:write",)))
+
+    assert result.is_denial is True
+    assert result.failure_class == "feishu_provider_unsupported_scope"
+    assert result.decision.unsupported_scope == "doc:write"
+    assert result.decision.extra_metadata["evidence_class"] == "non_grantable_provider_state"
+
+
+def test_fake_provider_app_owned_object_grants_only_app_owned_object_evidence():
+    provider = _fake_provider("app_owned_object", object_owner_class="app_owned")
+
+    result = provider.authorize(_fake_provider_request())
+
+    assert result.is_denial is False
+    assert result.evidence.evidence_kind == "app_owned_object"
+    assert result.evidence.token_class == "app_owned_object_credential"
+    assert result.decision.extra_metadata["evidence_class"] == "object_authority"
+
+    user_owned_provider = _fake_provider(
+        "app_owned_object",
+        object_owner_class="user_owned",
+    )
+    denied = user_owned_provider.authorize(_fake_provider_request())
+
+    assert denied.is_denial is True
+    assert denied.failure_class == "feishu_provider_user_owned_object"
+    assert denied.decision.extra_metadata["evidence_class"] == "non_grantable_provider_state"
+
+
+def test_fake_provider_explicit_user_confirmation_is_confirmation_not_object_authority():
+    provider = _fake_provider("explicit_user_confirmation")
+
+    result = provider.authorize(_fake_provider_request(action="doc.write"))
+
+    assert result.is_denial is False
+    assert result.evidence.evidence_kind == "explicit_user_confirmation"
+    assert result.decision.evidence_source_class == "explicit_user_confirmation"
+    assert result.decision.extra_metadata["evidence_class"] == "confirmation"
+    assert result.decision.extra_metadata["object_authority"] is False
+
+
+def test_system_test_provider_grants_only_system_test_object_refs_and_test_provider_ids():
+    provider = provider_module.SystemTestAuthorizationProvider(
+        provider_id="system_test_object_provider",
+        provider_version="2026-06-10.test",
+        object_ref=_SYSTEM_TEST_OBJECT_REF,
+        route_session_key_snapshot=_ROUTE_SNAPSHOT,
+        scopes=("doc:read",),
+    )
+
+    result = provider.authorize(_fake_provider_request(object_ref=_SYSTEM_TEST_OBJECT_REF))
+
+    assert result.is_denial is False
+    assert result.evidence.evidence_kind == "system_test_object"
+    assert result.evidence.object_ref == _SYSTEM_TEST_OBJECT_REF
+    assert result.evidence.token_class == "system_test_credential"
+    assert result.decision.extra_metadata["evidence_class"] == "object_authority"
+
+    non_test_object = provider.authorize(_fake_provider_request())
+    assert non_test_object.is_denial is True
+    assert non_test_object.failure_class == "feishu_provider_unsupported_provider"
+
+    non_test_provider = provider_module.SystemTestAuthorizationProvider(
+        provider_id="fake_object_provider",
+        provider_version="2026-06-10.test",
+        object_ref=_SYSTEM_TEST_OBJECT_REF,
+        route_session_key_snapshot=_ROUTE_SNAPSHOT,
+        scopes=("doc:read",),
+    )
+    denied = non_test_provider.authorize(
+        _fake_provider_request(object_ref=_SYSTEM_TEST_OBJECT_REF)
+    )
+    assert denied.is_denial is True
+    assert denied.failure_class == "feishu_provider_unsupported_provider"
+
+
+@pytest.mark.parametrize(
+    ("evidence_source_class", "expected_evidence_class", "expected_failure"),
+    [
+        ("availability_only", "non_grantable_provider_state", "feishu_provider_non_grantable_state"),
+        ("sdk_reachable_only", "non_grantable_provider_state", "feishu_provider_non_grantable_state"),
+        ("app_token_only", "app_token_only", None),
+        ("discovery_only", "discovery_only", None),
+    ],
+)
+def test_fake_provider_non_object_authority_states_are_explicitly_typed(
+    evidence_source_class,
+    expected_evidence_class,
+    expected_failure,
+):
+    provider = _fake_provider(evidence_source_class)
+
+    result = provider.authorize(_fake_provider_request())
+
+    assert result.decision.extra_metadata["evidence_class"] == expected_evidence_class
+    assert result.decision.extra_metadata["object_authority"] is False
+    if expected_failure is None:
+        assert result.is_denial is False
+        assert result.evidence.evidence_kind == evidence_source_class
+    else:
+        assert result.is_denial is True
+        assert result.failure_class == expected_failure
+
+
+@pytest.mark.parametrize(
+    ("provider_overrides", "expected_failure"),
+    [
+        ({"provider_available": False}, "feishu_provider_unavailable"),
+        ({"sdk_reachable": False}, "feishu_provider_sdk_unreachable"),
+        ({"app_token_available": False}, "feishu_provider_app_token_unavailable"),
+        ({"credential_freshness": "stale"}, "feishu_provider_stale_credential"),
+        ({"credential_freshness": "revoked"}, "feishu_provider_revoked_credential"),
+        ({"evidence_source_class": "unsupported_provider"}, "feishu_provider_unsupported_provider"),
+    ],
+)
+def test_provider_failure_states_fail_closed_with_stable_failure_classes(
+    provider_overrides,
+    expected_failure,
+):
+    provider = _fake_provider("user_delegated_credential", **provider_overrides)
+
+    result = provider.authorize(_fake_provider_request())
+
+    assert result.is_denial is True
+    assert result.failure_class == expected_failure
+    assert result.decision.denial_failure_class == expected_failure
+    assert result.decision.extra_metadata["evidence_class"] == "non_grantable_provider_state"
+    assert _SHA256_HASH_RE.fullmatch(result.decision.decision_hash)
