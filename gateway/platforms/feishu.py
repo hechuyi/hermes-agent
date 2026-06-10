@@ -3131,24 +3131,11 @@ class FeishuAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Download a remote image then send it through the native Feishu image flow."""
-        try:
-            image_path = await self._download_remote_image(image_url)
-        except Exception as exc:
-            logger.error("[Feishu] Failed to download image %s: %s", image_url, exc, exc_info=True)
-            return await super().send_image(
-                chat_id=chat_id,
-                image_url=image_url,
-                caption=caption,
-                reply_to=reply_to,
-                metadata=metadata,
-            )
-        return await self.send_image_file(
-            chat_id=chat_id,
-            image_path=image_path,
-            caption=caption,
-            reply_to=reply_to,
+        """Reject raw remote image URLs before any download or fallback side effect."""
+        del chat_id, image_url, caption, reply_to
+        return await self._deny_raw_remote_attachment_upload(
             metadata=metadata,
+            declared_mime_class="image",
         )
 
     async def send_animation(
@@ -3159,30 +3146,11 @@ class FeishuAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Feishu has no native GIF bubble; degrade to a downloadable file."""
-        try:
-            file_path, file_name = await self._download_remote_document(
-                animation_url,
-                default_ext=".gif",
-                preferred_name="animation.gif",
-            )
-        except Exception as exc:
-            logger.error("[Feishu] Failed to download animation %s: %s", animation_url, exc, exc_info=True)
-            return await super().send_animation(
-                chat_id=chat_id,
-                animation_url=animation_url,
-                caption=caption,
-                reply_to=reply_to,
-                metadata=metadata,
-            )
-        degraded_caption = f"[GIF downgraded to file]\n{caption}" if caption else "[GIF downgraded to file]"
-        return await self.send_document(
-            chat_id=chat_id,
-            file_path=file_path,
-            file_name=file_name,
-            caption=degraded_caption,
-            reply_to=reply_to,
+        """Reject raw remote animation URLs before any download or fallback side effect."""
+        del chat_id, animation_url, caption, reply_to
+        return await self._deny_raw_remote_attachment_upload(
             metadata=metadata,
+            declared_mime_class="media",
         )
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
@@ -7291,6 +7259,25 @@ class FeishuAdapter(BasePlatformAdapter):
         if not self._gateway_event_apply_succeeded(pending_result):
             return SendResult(success=False, error="delivery_pending apply failed")
         return None
+
+    async def _deny_raw_remote_attachment_upload(
+        self,
+        *,
+        metadata: Optional[Dict[str, Any]],
+        declared_mime_class: str,
+    ) -> SendResult:
+        failure_class = "feishu_arbitrary_local_upload_denied"
+        denial_recorded = await self._record_attachment_upload_denial(
+            metadata=metadata,
+            failure_class=failure_class,
+            declared_mime_class=declared_mime_class,
+        )
+        if not denial_recorded:
+            return SendResult(
+                success=False,
+                error="feishu_attachment_denial_apply_failed",
+            )
+        return SendResult(success=False, error=failure_class)
 
     def _attachment_upload_reservation_refs(
         self,

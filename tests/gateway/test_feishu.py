@@ -1847,46 +1847,102 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertIn("第二张", event.text)
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_send_image_downloads_then_uses_native_image_send(self):
+    def test_send_image_raw_url_denies_before_download_or_base_fallback(self):
         from gateway.config import PlatformConfig
+        from gateway.platforms.base import BasePlatformAdapter
         from gateway.platforms.feishu import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
-        adapter.send_image_file = AsyncMock(return_value=SimpleNamespace(success=True, message_id="om_img"))
+        raw_url = "https://example.com/cat.png?token=secret"
 
-        async def _run():
-            with patch("gateway.platforms.feishu.cache_image_from_url", new=AsyncMock(return_value="/tmp/cached.png")):
-                return await adapter.send_image("oc_chat", "https://example.com/cat.png", caption="cat")
+        with tempfile.TemporaryDirectory() as state_dir:
+            adapter = FeishuAdapter(
+                PlatformConfig(extra={"hermes_tools_state_dir": state_dir})
+            )
+            adapter._client = SimpleNamespace(
+                im=SimpleNamespace(
+                    v1=SimpleNamespace(
+                        image=SimpleNamespace(create=Mock()),
+                        file=SimpleNamespace(create=Mock()),
+                        message=SimpleNamespace(create=Mock(), reply=Mock()),
+                    )
+                )
+            )
+            adapter._download_remote_image = AsyncMock(side_effect=RuntimeError("download attempted"))
 
-        result = asyncio.run(_run())
+            async def _run():
+                with patch.object(
+                    BasePlatformAdapter,
+                    "send_image",
+                    new=AsyncMock(return_value=SimpleNamespace(success=True, message_id="om_base")),
+                ) as base_send_image, patch("gateway.platforms.feishu.logger.error") as log_error:
+                    result = await adapter.send_image("oc_chat", raw_url, caption="cat")
+                    return result, base_send_image, log_error
 
-        self.assertTrue(result.success)
-        adapter.send_image_file.assert_awaited_once()
-        self.assertEqual(adapter.send_image_file.await_args.kwargs["image_path"], "/tmp/cached.png")
+            result, base_send_image, log_error = asyncio.run(_run())
+            self.assertFalse(result.success)
+            self.assertEqual(result.error, "feishu_arbitrary_local_upload_denied")
+            adapter._download_remote_image.assert_not_awaited()
+            base_send_image.assert_not_awaited()
+            adapter._client.im.v1.image.create.assert_not_called()
+            adapter._client.im.v1.file.create.assert_not_called()
+            adapter._client.im.v1.message.create.assert_not_called()
+            adapter._client.im.v1.message.reply.assert_not_called()
+            log_error.assert_not_called()
+            state = json.loads(
+                (Path(state_dir) / "gateway_event_ledger.json").read_text()
+            )
+
+        self.assertNotIn(raw_url, json.dumps(state, sort_keys=True))
 
     @patch.dict(os.environ, {}, clear=True)
-    def test_send_animation_degrades_to_document_send(self):
+    def test_send_animation_raw_url_denies_before_download_or_base_fallback(self):
         from gateway.config import PlatformConfig
+        from gateway.platforms.base import BasePlatformAdapter
         from gateway.platforms.feishu import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
-        adapter.send_document = AsyncMock(return_value=SimpleNamespace(success=True, message_id="om_gif"))
+        raw_url = "https://example.com/anim.gif?token=secret"
 
-        async def _run():
-            with patch.object(
-                adapter,
-                "_download_remote_document",
-                new=AsyncMock(return_value=("/tmp/anim.gif", "anim.gif")),
-            ):
-                return await adapter.send_animation("oc_chat", "https://example.com/anim.gif", caption="look")
+        with tempfile.TemporaryDirectory() as state_dir:
+            adapter = FeishuAdapter(
+                PlatformConfig(extra={"hermes_tools_state_dir": state_dir})
+            )
+            adapter._client = SimpleNamespace(
+                im=SimpleNamespace(
+                    v1=SimpleNamespace(
+                        image=SimpleNamespace(create=Mock()),
+                        file=SimpleNamespace(create=Mock()),
+                        message=SimpleNamespace(create=Mock(), reply=Mock()),
+                    )
+                )
+            )
+            adapter._download_remote_document = AsyncMock(
+                side_effect=RuntimeError("download attempted")
+            )
 
-        result = asyncio.run(_run())
+            async def _run():
+                with patch.object(
+                    BasePlatformAdapter,
+                    "send_animation",
+                    new=AsyncMock(return_value=SimpleNamespace(success=True, message_id="om_base")),
+                ) as base_send_animation, patch("gateway.platforms.feishu.logger.error") as log_error:
+                    result = await adapter.send_animation("oc_chat", raw_url, caption="look")
+                    return result, base_send_animation, log_error
 
-        self.assertTrue(result.success)
-        adapter.send_document.assert_awaited_once()
-        caption = adapter.send_document.await_args.kwargs["caption"]
-        self.assertIn("GIF downgraded to file", caption)
-        self.assertIn("look", caption)
+            result, base_send_animation, log_error = asyncio.run(_run())
+            self.assertFalse(result.success)
+            self.assertEqual(result.error, "feishu_arbitrary_local_upload_denied")
+            adapter._download_remote_document.assert_not_awaited()
+            base_send_animation.assert_not_awaited()
+            adapter._client.im.v1.image.create.assert_not_called()
+            adapter._client.im.v1.file.create.assert_not_called()
+            adapter._client.im.v1.message.create.assert_not_called()
+            adapter._client.im.v1.message.reply.assert_not_called()
+            log_error.assert_not_called()
+            state = json.loads(
+                (Path(state_dir) / "gateway_event_ledger.json").read_text()
+            )
+
+        self.assertNotIn(raw_url, json.dumps(state, sort_keys=True))
 
     def test_download_remote_document_reads_response_before_httpx_client_closes(self):
         """#18451 — snapshot Content-Type + body while the httpx.AsyncClient
