@@ -36,6 +36,8 @@ Package A/B contracts, broker guards, card action bindings, readiness primitives
 
 Every task is TDD-first. Write the failing tests, run the focused `uv run --extra dev pytest ... -q` command to observe RED, implement the minimal green path, rerun focused tests, run `git diff --check`, review the task diff for Package C scope, then commit the task before expanding behavior.
 
+Focused pytest commands that use `-k` must not be able to pass by silent deselection. New RED test functions or classes must contain the selector substrings used by the command, and the captured pytest output must prove that selected tests are non-zero. If `-q` output does not show a non-zero selected count or named selected tests, rerun the same selector with `-vv` or `--collect-only` before accepting the RED or GREEN result.
+
 ## File Structure
 
 Expected Package C write-set:
@@ -79,6 +81,13 @@ Tests must assert stable failure classes for at least:
 - `feishu_discovery_only_evidence`
 - `feishu_object_authority_scope_insufficient`
 - `feishu_broker_policy_denied`
+- `feishu_route_snapshot_mismatch`
+- `feishu_object_ref_mismatch`
+- `feishu_authority_subject_mismatch`
+- `feishu_p3_requires_object_authority_evidence`
+- `feishu_object_authority_evidence_missing`
+- `feishu_contract_evidence_stale`
+- `feishu_contract_evidence_revoked`
 - `feishu_business_tool_surface_denied`
 - `feishu_provider_unavailable`
 - `feishu_provider_sdk_unreachable`
@@ -201,10 +210,11 @@ Before committing, compare `git diff --name-only` against the C2 write-set and e
 - Provider unavailable, SDK unreachable, app token unavailable, stale credential, revoked credential, incomplete ACL, unsupported provider, and unsupported scope are denied before grant issuance.
 - App-token-only evidence is denied with `feishu_app_token_only_evidence`.
 - Discovery-only evidence is denied with `feishu_discovery_only_evidence`.
-- Confirmation-only P3 object action is denied and does not issue a grant.
-- Wrong authority subject, wrong object ref, wrong route snapshot, stale evidence, revoked evidence, and insufficient scope are denied using the existing contract failure classes where possible.
-- Valid object-authority evidence returns `ObjectCapabilityGrant` with contract hash, evidence hashes, object type, object ref, action, authority subject ref, policy version, expiry, one-time/short-session semantics, and grant hash.
+- Confirmation-only P3 object action is denied with `feishu_p3_requires_object_authority_evidence` or `feishu_object_authority_evidence_missing` and does not issue a grant.
+- Wrong authority subject, wrong object ref, wrong route snapshot, stale evidence, revoked evidence, and insufficient scope are denied using `feishu_authority_subject_mismatch`, `feishu_object_ref_mismatch`, `feishu_route_snapshot_mismatch`, `feishu_contract_evidence_stale`, `feishu_contract_evidence_revoked`, and `feishu_object_authority_scope_insufficient` where applicable.
+- Valid object-authority evidence returns an issued grant wrapper with contract hash, evidence hashes, object type, object ref, action, authority subject ref, policy version, expiry, one-time/short-session semantics, and grant hash.
 - Reusing a one-time grant request id or changing payload hash/route/object/action after decision returns `feishu_broker_policy_denied`.
+- If the broker normalizes any of the stable contract or provider denial classes into `feishu_broker_policy_denied`, `BrokerPolicyDecision` and denial audit events must still preserve the original class as a separate `denial_reason_class`.
 
 Run:
 
@@ -216,7 +226,9 @@ Expected RED: policy module and grant issuance API do not exist.
 
 **GREEN implementation constraints:**
 - Provide a single public entrypoint such as `issue_object_capability_grant(request, registry, *, now, policy_version) -> BrokerPolicyDecision`.
-- `BrokerPolicyDecision` must contain either `grant: ObjectCapabilityGrant` or `failure_class`; it must never return a grant alongside denial.
+- `BrokerPolicyDecision` must contain either `grant: BrokerPolicyGrant` or `failure_class`; it must never return a grant alongside denial. If the public denial class is normalized, include `denial_reason_class` for the underlying stable reason.
+- The preferred Package C design is a new wrapper in `gateway/feishu_broker_policy.py`, named `BrokerPolicyGrant` or `IssuedObjectCapabilityGrant`. The wrapper must contain the existing `ObjectCapabilityGrant` plus Package C issuance metadata: `expires_at`, `route_snapshot_hash`, `policy_version`, `grant_semantics`, `request_id_hash`, `payload_hash`, and sanitized replay metadata sufficient to detect one-time reuse without storing raw request payloads.
+- Do not require new expiry, route snapshot, policy version, or one-time semantics fields on the current `ObjectCapabilityGrant` to make C3 executable. A schema-versioned `ObjectCapabilityGrant` v2 is allowed only as an explicitly tested alternative with v1 compatibility/hash-stability assertions.
 - Use `can_issue_object_grant` for core evidence checks. Add Package C checks around provider decision completeness, provider freshness, expiry, one-time/short-session semantics, and policy version.
 - Keep persistent grants out of scope. If a ledger projection is needed for one-time replay checks, store only sanitized hashes and expiry.
 - Do not accept a `FeishuBrokerContext.grant_handle` or card action id as object authority. If a callback supplies explicit confirmation, convert it into typed `explicit_user_confirmation` evidence and still require object authority evidence for object actions that need it.
@@ -440,9 +452,9 @@ Scope audit commands:
 ```bash
 BASE=$(git merge-base HEAD origin/fix/live-gateway-hermes-tools)
 git diff --name-only "$BASE"..HEAD
-git diff "$BASE"..HEAD -- gateway tools tests/gateway tests/tools docs/superpowers/plans
-rg -n "feishu_doc_read|feishu_drive_|feishu\\.doc\\.|feishu\\.docs\\.|feishu\\.document\\.|feishu\\.drive\\.|feishu\\.wiki\\.|feishu\\.calendar\\.|feishu\\.task\\.|feishu\\.approval\\.|feishu\\.base\\.|feishu\\.sheets\\.|feishu\\.search\\.|feishu\\.contact\\.|feishu\\.admin\\.|feishu\\.openapi\\.|feishu\\.file\\.export\\.|feishu\\.cross_chat\\.|feishu\\.comment\\.|feishu\\.descriptor\\.|feishu\\.status_card\\.|feishu\\.generic_card\\.|feishu\\.reaction\\." gateway tools tests/gateway tests/tools docs/superpowers/plans
-rg -n "OpenAPI|lark-cli|NixOS|remote|persistent grant|calendar|task|approval|Base|Sheets|search|admin" gateway tools tests/gateway tests/tools docs/superpowers/plans
+git diff "$BASE"..HEAD -- gateway tools tests/gateway tests/tools docs/superpowers/plans model_tools.py toolsets.py
+rg -n "feishu_doc_read|feishu_drive_|feishu\\.doc\\.|feishu\\.docs\\.|feishu\\.document\\.|feishu\\.drive\\.|feishu\\.wiki\\.|feishu\\.calendar\\.|feishu\\.task\\.|feishu\\.approval\\.|feishu\\.base\\.|feishu\\.sheets\\.|feishu\\.search\\.|feishu\\.contact\\.|feishu\\.admin\\.|feishu\\.openapi\\.|feishu\\.file\\.export\\.|feishu\\.cross_chat\\.|feishu\\.comment\\.|feishu\\.descriptor\\.|feishu\\.status_card\\.|feishu\\.generic_card\\.|feishu\\.reaction\\." gateway tools tests/gateway tests/tools docs/superpowers/plans model_tools.py toolsets.py
+rg -n "OpenAPI|lark-cli|NixOS|remote|persistent grant|calendar|task|approval|Base|Sheets|search|admin" gateway tools tests/gateway tests/tools docs/superpowers/plans model_tools.py toolsets.py
 ```
 
 Expected: Package C files show provider interfaces, fake/system-test providers, broker policy, audit/readiness/scope checks, and negative tests. Out-of-scope strings may appear only in non-goals, deny lists, scope audit assertions, failure classes, legacy guard tests, or package plan text. If `git merge-base` cannot identify an upstream base, stop and require an explicit base commit.
