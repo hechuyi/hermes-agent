@@ -269,6 +269,14 @@ def test_evidence_hash_stability_provider_wrappers_do_not_change_v1_fixture_hash
         ("neutral", {"code": 0, "data": {"permissions": ["read"]}}),
         ("neutral", "raw document body"),
         ("neutral", "raw message body"),
+        (
+            "neutral",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvdV9yYXcifQ.signature",
+        ),
+        ("neutral", "rtocopaqueaccesstokenvalue20260610"),
+        ("neutral", "verified_object_acl"),
+        ("neutral", "Q2PlanningDocBudgetNumbers"),
+        ("neutral", "PleaseApproveTheVendorInvoice"),
         ("neutral", "/Users/rtoc/Documents/raw-local-path"),
         ("neutral", r"C:\Users\rtoc\Documents\raw-local-path"),
     ],
@@ -276,3 +284,22 @@ def test_evidence_hash_stability_provider_wrappers_do_not_change_v1_fixture_hash
 def test_provider_decision_hash_rejects_raw_sensitive_provider_material(field, value):
     with pytest.raises((AuthorizationProviderError, FeishuContractError)):
         _provider_decision(extra_metadata={field: value})
+
+
+def test_provider_decision_hash_allows_prehashed_unknown_metadata_and_classifier_values():
+    decision = _provider_decision(
+        extra_metadata={
+            "neutral": "sha256:" + "c" * 64,
+            "source_class": "verified_object_acl",
+            "failure_class": "feishu_provider_sdk_unreachable",
+            "policy_version": "policy:v1",
+        }
+    )
+
+    assert decision.extra_metadata == {
+        "neutral": "sha256:" + "c" * 64,
+        "source_class": "verified_object_acl",
+        "failure_class": "feishu_provider_sdk_unreachable",
+        "policy_version": "policy:v1",
+    }
+    assert _SHA256_HASH_RE.fullmatch(decision.decision_hash)

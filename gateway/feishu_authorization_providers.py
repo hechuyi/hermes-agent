@@ -24,7 +24,7 @@ from gateway.feishu_contracts import (
 _GRANT_MODES = frozenset({"one_time", "short_session"})
 _NORMALIZED_KEY_CHARS_RE = re.compile(r"[^a-z0-9]+")
 _SHA256_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
-_SAFE_METADATA_STRING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_CLASSIFIER_METADATA_STRING_RE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
 _RAW_FEISHU_ID_VALUE_RE = re.compile(
     r"^(?:(?:ou|on|oc|om|u|msg|doccn|shtcn|fldcn|boxcn)[A-Za-z0-9_-]*"
@@ -56,6 +56,36 @@ _PROVIDER_RAW_VALUE_MARKERS = frozenset(
     }
 )
 _ACL_BODY_KEYS = frozenset({"acl", "code", "data", "msg", "permission", "permissions"})
+_CLASSIFIER_METADATA_KEYS = frozenset(
+    {
+        "category",
+        "class",
+        "classifier",
+        "credentialfreshness",
+        "denialfailureclass",
+        "evidenceclass",
+        "evidencesourceclass",
+        "failureclass",
+        "freshnessclass",
+        "kind",
+        "policyversion",
+        "providerclass",
+        "providerversion",
+        "reachabilitystate",
+        "reasonclass",
+        "reasoncode",
+        "reasonkind",
+        "resultclass",
+        "revocationreason",
+        "sourceclass",
+        "sourcekind",
+        "sourcetype",
+        "state",
+        "status",
+        "type",
+        "version",
+    }
+)
 
 
 class AuthorizationProviderError(ValueError):
@@ -391,14 +421,14 @@ def _sanitized_extra_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
                 f"raw provider material is not allowed in decision metadata: {key}",
                 failure_class="sensitive_raw_field",
             )
-        sanitized[normalized_key] = _sanitized_metadata_value(item)
+        sanitized[normalized_key] = _sanitized_metadata_value(item, comparable)
     return sanitized
 
 
-def _sanitized_metadata_value(value: Any) -> Any:
+def _sanitized_metadata_value(value: Any, comparable_key: str) -> Any:
     if isinstance(value, str):
         normalized = unicodedata.normalize("NFC", value)
-        _reject_sensitive_raw_metadata_string(normalized)
+        _reject_sensitive_raw_metadata_string(normalized, comparable_key)
         return normalized
     if isinstance(value, bool) or value is None:
         return value
@@ -412,7 +442,7 @@ def _sanitized_metadata_value(value: Any) -> Any:
             )
         return _sanitized_extra_metadata(value)
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
-        return tuple(_sanitized_metadata_value(item) for item in value)
+        return tuple(_sanitized_metadata_value(item, comparable_key) for item in value)
     raise AuthorizationProviderError(
         f"unsupported decision metadata type: {type(value).__name__}",
         failure_class="invalid_feishu_authorization_provider_decision",
@@ -424,7 +454,7 @@ def _normalized_key_for_policy(key: str) -> str:
     return _NORMALIZED_KEY_CHARS_RE.sub("", normalized)
 
 
-def _reject_sensitive_raw_metadata_string(value: str) -> None:
+def _reject_sensitive_raw_metadata_string(value: str, comparable_key: str) -> None:
     if _looks_like_raw_local_path(value):
         raise AuthorizationProviderError(
             "raw local paths are not allowed in decision metadata",
@@ -441,11 +471,17 @@ def _reject_sensitive_raw_metadata_string(value: str) -> None:
             "raw provider secrets are not allowed in decision metadata",
             failure_class="sensitive_raw_field",
         )
-    if not _SAFE_METADATA_STRING_RE.fullmatch(value):
-        raise AuthorizationProviderError(
-            "decision metadata strings must be classified identifiers or hashes",
-            failure_class="sensitive_raw_field",
-        )
+    if _SHA256_HASH_RE.fullmatch(value):
+        return
+    if (
+        comparable_key in _CLASSIFIER_METADATA_KEYS
+        and _CLASSIFIER_METADATA_STRING_RE.fullmatch(value)
+    ):
+        return
+    raise AuthorizationProviderError(
+        "decision metadata strings must be pre-hashed or stable classifier values",
+        failure_class="sensitive_raw_field",
+    )
 
 
 def _looks_like_raw_local_path(value: str) -> bool:
