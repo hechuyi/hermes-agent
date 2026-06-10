@@ -445,6 +445,8 @@ def _replay_failure(request: BrokerPolicyRequest) -> str | None:
         prior.object_ref_hash == request.object_ref.value_hash,
         prior.object_type == request.object_type,
         prior.action == request.action,
+        prior.grant_semantics == request.grant_semantics,
+        prior.expires_at == request.expires_at,
     )
     if not all(bound_fields):
         return "feishu_broker_policy_replay_binding_mismatch"

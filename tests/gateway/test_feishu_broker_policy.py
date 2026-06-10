@@ -516,6 +516,50 @@ def test_reusing_one_time_request_id_is_normalized_to_broker_policy_denied():
     assert second.denial_reason_class == "feishu_broker_policy_one_time_reuse"
 
 
+def test_extending_short_session_expiry_after_prior_decision_is_replay_mismatch():
+    prior = _issue(
+        _request(
+            grant_semantics="short_session",
+            expires_at="2026-06-10T00:03:00Z",
+        )
+    )
+    assert prior.grant is not None
+
+    replay = _issue(
+        _request(
+            grant_semantics="short_session",
+            expires_at="2026-06-10T00:10:00Z",
+            prior_replay_record=prior.grant.replay_record,
+        )
+    )
+
+    assert replay.grant is None
+    assert replay.failure_class == "feishu_broker_policy_denied"
+    assert (
+        replay.denial_reason_class
+        == "feishu_broker_policy_replay_binding_mismatch"
+    )
+
+
+def test_changing_grant_semantics_after_prior_decision_is_replay_mismatch():
+    prior = _issue(
+        _request(
+            grant_semantics="short_session",
+            expires_at="2026-06-10T00:03:00Z",
+        )
+    )
+    assert prior.grant is not None
+
+    replay = _issue(_request(prior_replay_record=prior.grant.replay_record))
+
+    assert replay.grant is None
+    assert replay.failure_class == "feishu_broker_policy_denied"
+    assert (
+        replay.denial_reason_class
+        == "feishu_broker_policy_replay_binding_mismatch"
+    )
+
+
 @pytest.mark.parametrize(
     "request_overrides",
     [
