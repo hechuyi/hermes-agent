@@ -312,6 +312,7 @@ class BrokerPolicyDecision:
     grant: BrokerPolicyGrant | None = None
     failure_class: str | None = None
     denial_reason_class: str | None = None
+    audit_event_templates: tuple[dict[str, Any], ...] = ()
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -339,7 +340,39 @@ class BrokerPolicyDecision:
                 "grant decisions must not carry denial reason",
                 failure_class="invalid_feishu_broker_policy_decision",
             )
+        if not isinstance(self.audit_event_templates, tuple):
+            raise BrokerPolicyError(
+                "audit_event_templates must be a tuple",
+                failure_class="invalid_feishu_broker_policy_decision",
+            )
+        for template in self.audit_event_templates:
+            if not isinstance(template, dict) or "type" not in template:
+                raise BrokerPolicyError(
+                    "audit_event_templates must contain event templates",
+                    failure_class="invalid_feishu_broker_policy_decision",
+                )
         _require_schema_version(self.schema_version)
+
+    def audit_events(self, *, correlation_id: str, timestamp: int | float) -> tuple[dict[str, Any], ...]:
+        _require_nonempty_string(correlation_id, "correlation_id")
+        if not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool):
+            raise BrokerPolicyError(
+                "timestamp must be numeric",
+                failure_class="invalid_feishu_broker_policy_decision",
+            )
+        events = []
+        for template in self.audit_event_templates:
+            event = dict(template)
+            event["timestamp"] = timestamp
+            event["correlation_id"] = correlation_id
+            event["event_hash"] = feishu_contract_hash(
+                event,
+                domain="feishu.broker_policy_audit_event",
+                version="v1",
+                schema_version=self.schema_version,
+            )
+            events.append(event)
+        return tuple(events)
 
 
 class BrokerPolicyError(ValueError):
@@ -363,41 +396,64 @@ def issue_object_capability_grant(
 ) -> BrokerPolicyDecision:
     if not isinstance(request, BrokerPolicyRequest):
         return _deny("invalid_feishu_broker_policy_request")
+    def deny(
+        failure_class: str,
+        *,
+        denial_reason_class: str | None = None,
+    ) -> BrokerPolicyDecision:
+        reason = denial_reason_class or failure_class
+        return _deny(
+            failure_class,
+            denial_reason_class=reason,
+            audit_event_templates=_denial_audit_event_templates(
+                request,
+                failure_class=failure_class,
+                denial_reason_class=reason,
+                policy_version=policy_version if isinstance(policy_version, str) and policy_version else "unknown",
+            ),
+        )
+
+    def normalized_deny(denial_reason_class: str) -> BrokerPolicyDecision:
+        return deny(
+            "feishu_broker_policy_denied",
+            denial_reason_class=denial_reason_class,
+        )
+
     if not isinstance(now, datetime):
-        return _normalized_deny("feishu_broker_policy_invalid_now")
+        return normalized_deny("feishu_broker_policy_invalid_now")
     if now.tzinfo is None:
         now = now.replace(tzinfo=UTC)
     else:
         now = now.astimezone(UTC)
     if not isinstance(policy_version, str) or not policy_version:
-        return _normalized_deny("feishu_broker_policy_invalid_policy_version")
+        return normalized_deny("feishu_broker_policy_invalid_policy_version")
     if request.contract.policy_version != policy_version:
-        return _normalized_deny("feishu_contract_policy_version_mismatch")
+        return normalized_deny("feishu_contract_policy_version_mismatch")
     try:
         route_snapshot_hash = _route_snapshot_hash(
             request.contract.route_session_key_snapshot,
             "route_session_key_snapshot",
         )
     except BrokerPolicyError as exc:
-        return _normalized_deny(exc.failure_class)
+        return normalized_deny(exc.failure_class)
     if (
         request.grant_semantics == "short_session"
         and request.expires_at is not None
         and _parse_utc(request.expires_at) <= now
     ):
-        return _normalized_deny("feishu_broker_policy_expired_grant_request")
+        return normalized_deny("feishu_broker_policy_expired_grant_request")
 
     replay_failure = _replay_failure(request)
     if replay_failure is not None:
-        return _normalized_deny(replay_failure)
+        return normalized_deny(replay_failure)
 
     if request.contract.authority_subject_ref is None:
-        return _deny("feishu_authority_subject_missing")
+        return deny("feishu_authority_subject_missing")
     provider = _provider_for(request.provider_id, registry)
     if provider is None:
-        return _deny("feishu_authorization_provider_missing")
+        return deny("feishu_authorization_provider_missing")
     if getattr(provider, "provider_id", None) != request.provider_id:
-        return _normalized_deny("feishu_provider_identity_mismatch")
+        return normalized_deny("feishu_provider_identity_mismatch")
 
     provider_request = AuthorizationProviderRequest(
         contract_hash=request.contract.contract_hash,
@@ -414,7 +470,7 @@ def issue_object_capability_grant(
     try:
         result = provider.authorize(provider_request)
     except Exception as exc:  # pragma: no cover - defensive boundary guard.
-        return _normalized_deny(_exception_failure_class(exc))
+        return normalized_deny(_exception_failure_class(exc))
 
     provider_failure = _provider_failure(
         result,
@@ -424,18 +480,18 @@ def issue_object_capability_grant(
     )
     if provider_failure is not None:
         failure_class, denial_reason_class = provider_failure
-        return _deny(failure_class, denial_reason_class=denial_reason_class)
+        return deny(failure_class, denial_reason_class=denial_reason_class)
     evidence = getattr(result, "evidence", None)
     if evidence is None:
-        return _deny("feishu_authorization_evidence_missing")
+        return deny("feishu_authorization_evidence_missing")
     if not isinstance(evidence, AuthorizationEvidence):
-        return _deny("feishu_authorization_evidence_missing")
+        return deny("feishu_authorization_evidence_missing")
     evidence_failure = _authorization_evidence_failure(evidence)
     if evidence_failure is not None:
-        return _normalized_deny(evidence_failure)
+        return normalized_deny(evidence_failure)
     provider_decision = result.decision
     if provider_decision.evidence_source_class != evidence.evidence_kind:
-        return _normalized_deny("feishu_provider_decision_evidence_mismatch")
+        return normalized_deny("feishu_provider_decision_evidence_mismatch")
 
     allowed, failure_class = can_issue_object_grant(
         request.contract,
@@ -445,7 +501,7 @@ def issue_object_capability_grant(
         action=request.action,
     )
     if not allowed:
-        return _deny(failure_class or "feishu_broker_policy_denied")
+        return deny(failure_class or "feishu_broker_policy_denied")
 
     grant = ObjectCapabilityGrant(
         contract_hash=request.contract.contract_hash,
@@ -478,8 +534,165 @@ def issue_object_capability_grant(
             payload_hash=request.payload_hash,
             provider_decision_hash=provider_decision.decision_hash,
             replay_record=replay_record,
-        )
+        ),
+        audit_event_templates=_grant_audit_event_templates(
+            request,
+            provider_decision=provider_decision,
+            evidence=evidence,
+            grant=grant,
+            route_snapshot_hash=route_snapshot_hash,
+            policy_version=policy_version,
+        ),
     )
+
+
+def _grant_audit_event_templates(
+    request: BrokerPolicyRequest,
+    *,
+    provider_decision: AuthorizationProviderDecision,
+    evidence: AuthorizationEvidence,
+    grant: ObjectCapabilityGrant,
+    route_snapshot_hash: str,
+    policy_version: str,
+) -> tuple[dict[str, Any], ...]:
+    return (
+        _provider_decision_audit_event_template(
+            request,
+            provider_decision=provider_decision,
+            route_snapshot_hash=route_snapshot_hash,
+            policy_version=policy_version,
+        ),
+        {
+            "type": "feishu_authorization_evidence_observed",
+            "authorization_evidence_hash": evidence.evidence_hash,
+            "contract_hash": request.contract.contract_hash,
+            "route_snapshot_hash": route_snapshot_hash,
+            "object_ref_hash": _object_ref_hash(evidence.object_ref, request.object_ref),
+            "authority_subject_hash": _authority_subject_hash(
+                evidence.authority_subject_ref,
+                request,
+            ),
+            "evidence_source_class": evidence.evidence_kind,
+            "evidence_state_class": evidence.evidence_state,
+            "policy_version": policy_version,
+        },
+        {
+            "type": "feishu_capability_granted",
+            "grant_hash": grant.grant_hash,
+            "evidence_hashes": list(grant.evidence_hashes),
+            "contract_hash": grant.contract_hash,
+            "object_type": grant.object_type,
+            "object_ref_hash": grant.object_ref.value_hash,
+            "action": grant.action,
+            "authority_subject_hash": grant.authority_subject_ref.value_hash,
+            "expiry": request.expires_at or "no_expiry",
+            "grant_session_class": request.grant_semantics,
+            "policy_version": policy_version,
+        },
+        {
+            "type": "feishu_auth_decision",
+            "decision_hash": provider_decision.decision_hash,
+            "request_hash": request.request_hash,
+            "contract_hash": request.contract.contract_hash,
+            "decision": "authorized",
+            "policy_version": policy_version,
+        },
+    )
+
+
+def _provider_decision_audit_event_template(
+    request: BrokerPolicyRequest,
+    *,
+    provider_decision: AuthorizationProviderDecision,
+    route_snapshot_hash: str,
+    policy_version: str,
+) -> dict[str, Any]:
+    event = {
+        "type": "feishu_authorization_provider_decision",
+        "provider_id": provider_decision.provider_id,
+        "provider_version": provider_decision.provider_version,
+        "evidence_source_class": provider_decision.evidence_source_class,
+        "provider_reachability_class": provider_decision.reachability_state,
+        "credential_freshness_class": provider_decision.credential_freshness,
+        "acl_completeness_class": (
+            "complete" if provider_decision.acl_complete else "incomplete"
+        ),
+        "unsupported_scope_status": (
+            "none"
+            if provider_decision.unsupported_scope is None
+            else "unsupported"
+        ),
+        "decision_hash": provider_decision.decision_hash,
+        "contract_hash": request.contract.contract_hash,
+        "route_snapshot_hash": route_snapshot_hash,
+        "object_ref_hash": request.object_ref.value_hash,
+        "authority_subject_hash": _authority_subject_hash(
+            request.contract.authority_subject_ref,
+            request,
+        ),
+        "policy_version": policy_version,
+    }
+    failure_class = provider_decision.denial_failure_class
+    if failure_class is not None:
+        event["failure_class"] = failure_class
+    if provider_decision.revocation_reason is not None:
+        event["revocation_reason_class"] = provider_decision.revocation_reason
+    return event
+
+
+def _denial_audit_event_templates(
+    request: BrokerPolicyRequest,
+    *,
+    failure_class: str,
+    denial_reason_class: str,
+    policy_version: str,
+) -> tuple[dict[str, Any], ...]:
+    common = {
+        "request_hash": request.request_hash,
+        "contract_hash": request.contract.contract_hash,
+        "object_ref_hash": request.object_ref.value_hash,
+        "action": request.action,
+        "failure_class": failure_class,
+        "denial_reason_class": denial_reason_class,
+        "policy_version": policy_version,
+    }
+    return (
+        {
+            "type": "feishu_broker_policy_denied",
+            **common,
+            "route_snapshot_hash": _audit_route_snapshot_hash(request),
+            "authority_subject_hash": _authority_subject_hash(
+                request.contract.authority_subject_ref,
+                request,
+            ),
+        },
+        {
+            "type": "feishu_capability_denied",
+            **common,
+        },
+    )
+
+
+def _authority_subject_hash(ref: HashedRef | None, request: BrokerPolicyRequest) -> str:
+    if ref is not None:
+        return ref.value_hash
+    return request.request_hash
+
+
+def _audit_route_snapshot_hash(request: BrokerPolicyRequest) -> str:
+    try:
+        return _route_snapshot_hash(
+            request.contract.route_session_key_snapshot,
+            "route_session_key_snapshot",
+        )
+    except BrokerPolicyError:
+        return request.request_hash
+
+
+def _object_ref_hash(ref: HashedRef | None, fallback: HashedRef) -> str:
+    if ref is not None:
+        return ref.value_hash
+    return fallback.value_hash
 
 
 def _provider_failure(
@@ -770,11 +983,13 @@ def _deny(
     failure_class: str,
     *,
     denial_reason_class: str | None = None,
+    audit_event_templates: tuple[dict[str, Any], ...] = (),
 ) -> BrokerPolicyDecision:
     return BrokerPolicyDecision(
         grant=None,
         failure_class=failure_class,
         denial_reason_class=denial_reason_class or failure_class,
+        audit_event_templates=audit_event_templates,
     )
 
 

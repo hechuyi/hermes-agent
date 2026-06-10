@@ -119,6 +119,65 @@ def _feishu_audit_event(event_type: str, **overrides) -> dict[str, object]:
     return event
 
 
+def _c5_provider_decision_event(**overrides) -> dict[str, object]:
+    event = _feishu_audit_event(
+        "feishu_authorization_provider_decision",
+        event_hash="sha256:" + ("0" * 64),
+        provider_id="fake_verified_object_acl",
+        provider_version="2026-06-10.fake",
+        evidence_source_class="verified_object_acl",
+        provider_reachability_class="reachable",
+        credential_freshness_class="fresh",
+        acl_completeness_class="complete",
+        unsupported_scope_status="none",
+        decision_hash="sha256:" + ("1" * 64),
+        contract_hash="sha256:" + ("2" * 64),
+        route_snapshot_hash="sha256:" + ("3" * 64),
+        object_ref_hash="sha256:" + ("4" * 64),
+        authority_subject_hash="sha256:" + ("5" * 64),
+        policy_version="policy:v1",
+    )
+    event.update(overrides)
+    return event
+
+
+def _c5_capability_granted_event(**overrides) -> dict[str, object]:
+    event = _feishu_audit_event(
+        "feishu_capability_granted",
+        event_hash="sha256:" + ("0" * 64),
+        grant_hash="sha256:" + ("6" * 64),
+        evidence_hashes=["sha256:" + ("7" * 64)],
+        contract_hash="sha256:" + ("2" * 64),
+        object_type="doc",
+        object_ref_hash="sha256:" + ("4" * 64),
+        action="read",
+        authority_subject_hash="sha256:" + ("5" * 64),
+        expiry="no_expiry",
+        grant_session_class="one_time",
+        policy_version="policy:v1",
+    )
+    event.update(overrides)
+    return event
+
+
+def _c5_broker_policy_denied_event(**overrides) -> dict[str, object]:
+    event = _feishu_audit_event(
+        "feishu_broker_policy_denied",
+        event_hash="sha256:" + ("0" * 64),
+        request_hash="sha256:" + ("8" * 64),
+        contract_hash="sha256:" + ("2" * 64),
+        route_snapshot_hash="sha256:" + ("3" * 64),
+        object_ref_hash="sha256:" + ("4" * 64),
+        authority_subject_hash="sha256:" + ("5" * 64),
+        action="read",
+        failure_class="feishu_broker_policy_denied",
+        denial_reason_class="feishu_authorization_provider_missing",
+        policy_version="policy:v1",
+    )
+    event.update(overrides)
+    return event
+
+
 def _apply_pending_from_process(state_dir, delivery_id, start_event, result_queue):
     start_event.wait(5)
     result = apply_gateway_event(_delivery_pending(delivery_id), state_dir)
@@ -510,24 +569,65 @@ def test_corrupt_persisted_json_fails_with_schema_class(tmp_path):
         (
             "feishu_authorization_evidence_observed",
             "authorization_evidence_hash",
-            {"actor_hash": "fnv1a64:1111111111111111"},
+            {
+                "contract_hash": "sha256:" + ("2" * 64),
+                "route_snapshot_hash": "sha256:" + ("3" * 64),
+                "object_ref_hash": "sha256:" + ("4" * 64),
+                "authority_subject_hash": "sha256:" + ("5" * 64),
+                "evidence_source_class": "verified_object_acl",
+                "evidence_state_class": "current",
+                "policy_version": "policy:v1",
+            },
         ),
         (
             "feishu_authorization_evidence_denied",
             "authorization_evidence_hash",
-            {"failure_class": "feishu_authorization_evidence_missing"},
+            {
+                "request_hash": "sha256:" + ("8" * 64),
+                "failure_class": "feishu_authorization_evidence_missing",
+                "denial_reason_class": "feishu_authorization_evidence_missing",
+                "evidence_source_class": "none",
+                "policy_version": "policy:v1",
+            },
         ),
         (
             "feishu_auth_decision",
             "decision_hash",
-            {"decision": "denied", "failure_class": "feishu_authorization_denied"},
+            {
+                "request_hash": "sha256:" + ("8" * 64),
+                "contract_hash": "sha256:" + ("2" * 64),
+                "decision": "denied",
+                "failure_class": "feishu_authorization_denied",
+                "policy_version": "policy:v1",
+            },
         ),
         ("feishu_object_scope_resolved", "object_ref_hash", {"object_kind": "doc"}),
-        ("feishu_capability_granted", "capability_hash", {"capability": "comment"}),
+        (
+            "feishu_capability_granted",
+            "grant_hash",
+            {
+                "evidence_hashes": ["sha256:" + ("7" * 64)],
+                "contract_hash": "sha256:" + ("2" * 64),
+                "object_type": "doc",
+                "object_ref_hash": "sha256:" + ("4" * 64),
+                "action": "read",
+                "authority_subject_hash": "sha256:" + ("5" * 64),
+                "expiry": "no_expiry",
+                "grant_session_class": "one_time",
+                "policy_version": "policy:v1",
+            },
+        ),
         (
             "feishu_capability_denied",
-            "capability_hash",
-            {"capability": "comment", "failure_class": "feishu_capability_missing"},
+            "request_hash",
+            {
+                "contract_hash": "sha256:" + ("2" * 64),
+                "object_ref_hash": "sha256:" + ("4" * 64),
+                "action": "read",
+                "failure_class": "feishu_capability_missing",
+                "denial_reason_class": "feishu_capability_missing",
+                "policy_version": "policy:v1",
+            },
         ),
         ("feishu_action_requested", "action_hash", {"action": "reply"}),
         ("feishu_action_authorized", "action_hash", {"action": "reply"}),
@@ -580,6 +680,89 @@ def test_feishu_audit_event_families_are_persisted_as_sanitized_records(
         state = json.load(handle)
     assert state["version"] == 1
     assert state["feishu_audit_events"] == [event]
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        _c5_provider_decision_event(),
+        _feishu_audit_event(
+            "feishu_authorization_evidence_observed",
+            event_hash="sha256:" + ("0" * 64),
+            authorization_evidence_hash="sha256:" + ("7" * 64),
+            contract_hash="sha256:" + ("2" * 64),
+            route_snapshot_hash="sha256:" + ("3" * 64),
+            object_ref_hash="sha256:" + ("4" * 64),
+            authority_subject_hash="sha256:" + ("5" * 64),
+            evidence_source_class="verified_object_acl",
+            evidence_state_class="current",
+            policy_version="policy:v1",
+        ),
+        _feishu_audit_event(
+            "feishu_authorization_evidence_denied",
+            event_hash="sha256:" + ("0" * 64),
+            authorization_evidence_hash="sha256:" + ("7" * 64),
+            request_hash="sha256:" + ("8" * 64),
+            failure_class="feishu_authorization_evidence_missing",
+            denial_reason_class="feishu_authorization_evidence_missing",
+            evidence_source_class="none",
+            policy_version="policy:v1",
+        ),
+        _feishu_audit_event(
+            "feishu_auth_decision",
+            event_hash="sha256:" + ("0" * 64),
+            decision_hash="sha256:" + ("1" * 64),
+            request_hash="sha256:" + ("8" * 64),
+            contract_hash="sha256:" + ("2" * 64),
+            decision="authorized",
+            policy_version="policy:v1",
+        ),
+        _c5_capability_granted_event(),
+        _feishu_audit_event(
+            "feishu_capability_denied",
+            event_hash="sha256:" + ("0" * 64),
+            request_hash="sha256:" + ("8" * 64),
+            contract_hash="sha256:" + ("2" * 64),
+            object_ref_hash="sha256:" + ("4" * 64),
+            action="read",
+            failure_class="feishu_object_ref_mismatch",
+            denial_reason_class="feishu_object_ref_mismatch",
+            policy_version="policy:v1",
+        ),
+        _c5_broker_policy_denied_event(),
+    ],
+)
+def test_c5_audit_events_accept_only_required_sanitized_contract(tmp_path, event):
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is True
+    assert result.action is not None
+    assert result.action["record"] == event
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        _c5_provider_decision_event(provider_version=None),
+        _c5_provider_decision_event(provider_reachability_class="unknown"),
+        _c5_provider_decision_event(
+            credential_freshness_class="revoked",
+            failure_class="feishu_provider_revoked_credential",
+        ),
+        _c5_capability_granted_event(evidence_hashes=[]),
+        _c5_capability_granted_event(evidence_hashes=["not-a-hash"]),
+        _c5_broker_policy_denied_event(denial_reason_class="tenant_access_token"),
+        _c5_broker_policy_denied_event(open_id="ou_raw_user_1"),
+        _c5_provider_decision_event(raw_acl_json="{}"),
+        _c5_provider_decision_event(user_token="secret"),
+    ],
+)
+def test_c5_audit_events_reject_missing_failure_and_raw_material(tmp_path, event):
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    assert not (tmp_path / LEDGER_FILENAME).exists()
 
 
 def test_feishu_audit_events_are_append_only_without_rolling_truncation(tmp_path):
@@ -669,6 +852,9 @@ def test_feishu_auth_decision_success_event_does_not_require_failure_class(tmp_p
         "feishu_auth_decision",
         decision="authorized",
         decision_hash="fnv1a64:aaaaaaaaaaaaaaaa",
+        request_hash="sha256:" + ("8" * 64),
+        contract_hash="sha256:" + ("2" * 64),
+        policy_version="policy:v1",
     )
 
     result = apply_gateway_event(event, tmp_path)

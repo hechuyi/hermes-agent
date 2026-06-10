@@ -47,12 +47,14 @@ EVENT_REQUIREMENTS: dict[str, tuple[str, ...]] = {
 FEISHU_AUDIT_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "feishu_contract_observed",
+        "feishu_authorization_provider_decision",
         "feishu_authorization_evidence_observed",
         "feishu_authorization_evidence_denied",
         "feishu_auth_decision",
         "feishu_object_scope_resolved",
         "feishu_capability_granted",
         "feishu_capability_denied",
+        "feishu_broker_policy_denied",
         "feishu_action_requested",
         "feishu_action_authorized",
         "feishu_action_denied",
@@ -68,6 +70,7 @@ FEISHU_AUDIT_FAILURE_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "feishu_authorization_evidence_denied",
         "feishu_capability_denied",
+        "feishu_broker_policy_denied",
         "feishu_action_denied",
         "feishu_api_failure",
         "feishu_legacy_tool_denied",
@@ -114,6 +117,9 @@ _SAFE_EVENT_TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,79}$")
 _SAFE_FAILURE_CLASS_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _FNV1A64_RE = re.compile(r"^fnv1a64:[a-f0-9]{16}$")
 _SHA256_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+_ROUTE_SNAPSHOT_AUDIT_HASH_RE = re.compile(
+    r"^(?:route_session_snapshot_hash|route_partition_hash):sha256:[a-f0-9]{64}$"
+)
 _BROKER_ACTION_ID_RE = re.compile(r"^broker_action:sha256:[a-f0-9]{64}$")
 _BROKER_GRANT_HANDLE_RE = re.compile(r"^broker_grant_handle:sha256:[a-f0-9]{64}$")
 _SAFE_AUDIT_ATOM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -143,8 +149,10 @@ _FEISHU_AUDIT_HASH_FIELDS = frozenset(
         "event_hash",
         "contract_hash",
         "authorization_evidence_hash",
+        "grant_hash",
         "decision_hash",
         "object_ref_hash",
+        "authority_subject_hash",
         "actor_hash",
         "route_snapshot_hash",
         "capability_hash",
@@ -156,6 +164,7 @@ _FEISHU_AUDIT_HASH_FIELDS = frozenset(
         "descriptor_hash",
     }
 )
+_FEISHU_AUDIT_HASH_LIST_FIELDS = frozenset({"evidence_hashes"})
 _FEISHU_DELIVERY_LIFECYCLE_HASH_FIELDS = frozenset(
     {
         "correlation_hash",
@@ -267,11 +276,105 @@ _FEISHU_AUDIT_ATOM_FIELDS = frozenset(
         "api",
         "method",
         "outcome",
+        "provider_id",
+        "provider_version",
+        "evidence_source_class",
+        "provider_reachability_class",
+        "credential_freshness_class",
+        "acl_completeness_class",
+        "unsupported_scope_status",
+        "revocation_reason_class",
+        "policy_version",
+        "denial_reason_class",
+        "evidence_state_class",
+        "object_type",
+        "expiry",
+        "grant_session_class",
     }
 )
 _FEISHU_AUDIT_COMMON_FIELDS = frozenset(
     {"type", "timestamp", "correlation_id", "failure_class"}
 )
+_FEISHU_AUDIT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "feishu_authorization_provider_decision": (
+        "event_hash",
+        "provider_id",
+        "provider_version",
+        "evidence_source_class",
+        "provider_reachability_class",
+        "credential_freshness_class",
+        "acl_completeness_class",
+        "unsupported_scope_status",
+        "decision_hash",
+        "contract_hash",
+        "route_snapshot_hash",
+        "object_ref_hash",
+        "authority_subject_hash",
+        "policy_version",
+    ),
+    "feishu_authorization_evidence_observed": (
+        "event_hash",
+        "authorization_evidence_hash",
+        "contract_hash",
+        "route_snapshot_hash",
+        "object_ref_hash",
+        "authority_subject_hash",
+        "evidence_source_class",
+        "evidence_state_class",
+        "policy_version",
+    ),
+    "feishu_authorization_evidence_denied": (
+        "event_hash",
+        "request_hash",
+        "failure_class",
+        "denial_reason_class",
+        "evidence_source_class",
+        "policy_version",
+    ),
+    "feishu_auth_decision": (
+        "event_hash",
+        "decision_hash",
+        "request_hash",
+        "contract_hash",
+        "decision",
+        "policy_version",
+    ),
+    "feishu_capability_granted": (
+        "event_hash",
+        "grant_hash",
+        "evidence_hashes",
+        "contract_hash",
+        "object_type",
+        "object_ref_hash",
+        "action",
+        "authority_subject_hash",
+        "expiry",
+        "grant_session_class",
+        "policy_version",
+    ),
+    "feishu_capability_denied": (
+        "event_hash",
+        "request_hash",
+        "contract_hash",
+        "object_ref_hash",
+        "action",
+        "failure_class",
+        "denial_reason_class",
+        "policy_version",
+    ),
+    "feishu_broker_policy_denied": (
+        "event_hash",
+        "request_hash",
+        "contract_hash",
+        "route_snapshot_hash",
+        "object_ref_hash",
+        "authority_subject_hash",
+        "action",
+        "failure_class",
+        "denial_reason_class",
+        "policy_version",
+    ),
+}
 _FEISHU_AUDIT_RAW_FIELD_NAMES = frozenset(
     {
         "token",
@@ -289,6 +392,17 @@ _FEISHU_AUDIT_RAW_FIELD_NAMES = frozenset(
         "path",
         "content",
         "object_ref",
+        "raw_acl_json",
+        "raw_openapi_body",
+        "raw_document_content",
+        "raw_message_body",
+        "app_token",
+        "user_token",
+        "chat_id",
+        "document_token",
+        "file_token",
+        "comment_id",
+        "local_path",
     }
 )
 _FEISHU_AUDIT_SENSITIVE_VALUE_TOKENS = frozenset(
@@ -320,6 +434,7 @@ _FEISHU_AUDIT_NEGATIVE_DECISIONS = frozenset(
         "not_allowed",
     }
 )
+_FEISHU_AUDIT_SAFE_CLASS_VALUES = frozenset({"one_time"})
 
 
 class GatewayEventContractError(ValueError):
@@ -1163,6 +1278,7 @@ def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> N
     allowed_fields = (
         _FEISHU_AUDIT_COMMON_FIELDS
         | _FEISHU_AUDIT_HASH_FIELDS
+        | _FEISHU_AUDIT_HASH_LIST_FIELDS
         | _FEISHU_AUDIT_ATOM_FIELDS
     )
     hash_fields_present = []
@@ -1179,6 +1295,9 @@ def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> N
             )
         if field in _FEISHU_AUDIT_HASH_FIELDS:
             _require_sanitized_hash_value(value, field)
+            hash_fields_present.append(field)
+        elif field in _FEISHU_AUDIT_HASH_LIST_FIELDS:
+            _require_sanitized_hash_list(value, field)
             hash_fields_present.append(field)
         elif field in _FEISHU_AUDIT_ATOM_FIELDS:
             _require_safe_audit_atom(value, field)
@@ -1197,6 +1316,22 @@ def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> N
             "invalid_gateway_event_contract",
             "feishu audit event requires a sanitized hash field",
         )
+    for field in _FEISHU_AUDIT_REQUIRED_FIELDS.get(event_type, ()):
+        if field not in event:
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                f"missing required field: {field}",
+            )
+    if _feishu_provider_decision_is_denial(event):
+        require_failure_class(event.get("failure_class"))
+    if event_type == "feishu_authorization_provider_decision":
+        if event.get("credential_freshness_class") == "revoked" and (
+            "revocation_reason_class" not in event
+        ):
+            raise GatewayEventContractError(
+                "invalid_gateway_event_contract",
+                "missing required field: revocation_reason_class",
+            )
     if _feishu_audit_event_requires_failure_class(event_type, event):
         require_failure_class(event.get("failure_class"))
     elif "failure_class" in event:
@@ -1287,6 +1422,17 @@ def _feishu_audit_event_requires_failure_class(
     return isinstance(decision, str) and decision.lower() in _FEISHU_AUDIT_NEGATIVE_DECISIONS
 
 
+def _feishu_provider_decision_is_denial(event: Mapping[str, Any]) -> bool:
+    if event.get("type") != "feishu_authorization_provider_decision":
+        return False
+    return (
+        event.get("provider_reachability_class") != "reachable"
+        or event.get("credential_freshness_class") != "fresh"
+        or event.get("acl_completeness_class") != "complete"
+        or event.get("unsupported_scope_status") != "none"
+    )
+
+
 def _is_feishu_audit_raw_field(field: str) -> bool:
     normalized = field.lower()
     if normalized in _FEISHU_AUDIT_RAW_FIELD_NAMES:
@@ -1300,12 +1446,25 @@ def _is_feishu_audit_raw_field(field: str) -> bool:
 def _require_sanitized_hash_value(value: Any, field: str) -> str:
     if not isinstance(value, str) or not (
         _FNV1A64_RE.fullmatch(value) or _SHA256_RE.fullmatch(value)
+        or (
+            field == "route_snapshot_hash"
+            and _ROUTE_SNAPSHOT_AUDIT_HASH_RE.fullmatch(value)
+        )
     ):
         raise GatewayEventContractError(
             "invalid_gateway_event_contract",
             f"{field} is missing or invalid",
         )
     return value
+
+
+def _require_sanitized_hash_list(value: Any, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            f"{field} is missing or invalid",
+        )
+    return tuple(_require_sanitized_hash_value(item, field) for item in value)
 
 
 def _require_broker_action_id(value: Any) -> str:
@@ -1364,6 +1523,8 @@ def _reject_sensitive_audit_value(value: Any) -> None:
     if not isinstance(value, str):
         return
     normalized = value.strip().lower()
+    if normalized in _FEISHU_AUDIT_SAFE_CLASS_VALUES:
+        return
     tokenized = normalized.replace("-", "_").replace(".", "_").replace(":", "_")
     if (
         normalized.startswith("/")

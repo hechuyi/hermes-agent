@@ -16,6 +16,7 @@ from gateway.feishu_broker_policy import (
     BrokerPolicyReplayRecord,
     issue_object_capability_grant,
 )
+from gateway.gateway_event_contract import validate_gateway_event
 from gateway.feishu_contracts import (
     AuthorizationEvidence,
     ConversationContract,
@@ -698,6 +699,69 @@ def test_valid_object_authority_evidence_issues_bound_broker_grant_wrapper():
     assert grant.replay_record.provider_decision_hash == grant.provider_decision_hash
     assert _SHA256_HASH_RE.fullmatch(grant.object_capability_grant.grant_hash)
     assert _SHA256_HASH_RE.fullmatch(grant.grant_hash)
+
+
+def test_grant_decision_emits_sanitized_audit_events_for_provider_evidence_and_grant():
+    decision = _issue()
+    assert decision.grant is not None
+
+    events = decision.audit_events(correlation_id="corr-audit-1", timestamp=1_700_000_100)
+
+    event_types = [event["type"] for event in events]
+    assert event_types == [
+        "feishu_authorization_provider_decision",
+        "feishu_authorization_evidence_observed",
+        "feishu_capability_granted",
+        "feishu_auth_decision",
+    ]
+    for event in events:
+        assert validate_gateway_event(event) == event["type"]
+    rendered = repr(events)
+    assert "ou_" not in rendered
+    assert "oc_" not in rendered
+    assert "tenant_access_token" not in rendered
+    provider_event = events[0]
+    assert provider_event["provider_id"] == "fake_verified_object_acl"
+    assert provider_event["provider_reachability_class"] == "reachable"
+    assert provider_event["credential_freshness_class"] == "fresh"
+    assert provider_event["acl_completeness_class"] == "complete"
+    grant_event = events[2]
+    assert grant_event["grant_hash"] == decision.grant.object_capability_grant.grant_hash
+    assert grant_event["evidence_hashes"] == list(
+        decision.grant.object_capability_grant.evidence_hashes
+    )
+    assert grant_event["object_ref_hash"] == _OBJECT_REF.value_hash
+    assert grant_event["authority_subject_hash"] == _SUBJECT_REF.value_hash
+    assert grant_event["expiry"] == "no_expiry"
+    assert grant_event["grant_session_class"] == "one_time"
+
+
+def test_malformed_provider_state_emits_denial_audit_without_success_events():
+    malformed_result = _provider_result_invariant_bypass(
+        evidence=_evidence(scopes=("doc:read",)),
+        decision=_malformed_typed_decision(acl_complete="yes"),
+        failure_class=None,
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(malformed_result)},
+    )
+    events = decision.audit_events(correlation_id="corr-audit-2", timestamp=1_700_000_101)
+
+    assert decision.grant is None
+    assert [event["type"] for event in events] == [
+        "feishu_broker_policy_denied",
+        "feishu_capability_denied",
+    ]
+    for event in events:
+        assert validate_gateway_event(event) == event["type"]
+        assert event["failure_class"] == "feishu_broker_policy_denied"
+        assert (
+            event["denial_reason_class"]
+            == "feishu_authorization_provider_decision_malformed"
+        )
+    assert "feishu_capability_granted" not in repr(events)
 
 
 @pytest.mark.parametrize("raw_route", ["oc_raw_chat_route", "doccnrawroute"])
