@@ -264,6 +264,13 @@ def test_evidence_hash_stability_provider_wrappers_do_not_change_v1_fixture_hash
         ("document_content", "raw document body"),
         ("message_content", "raw message body"),
         ("file_path", "/Users/rtoc/Documents/raw-local-path"),
+        ("neutral", "tenant_access_token_secret"),
+        ("neutral", "ou_raw_feishu_object_id"),
+        ("neutral", {"code": 0, "data": {"permissions": ["read"]}}),
+        ("neutral", "raw document body"),
+        ("neutral", "raw message body"),
+        ("neutral", "/Users/rtoc/Documents/raw-local-path"),
+        ("neutral", r"C:\Users\rtoc\Documents\raw-local-path"),
     ],
 )
 def test_provider_decision_hash_rejects_raw_sensitive_provider_material(field, value):

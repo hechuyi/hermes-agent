@@ -24,6 +24,12 @@ from gateway.feishu_contracts import (
 _GRANT_MODES = frozenset({"one_time", "short_session"})
 _NORMALIZED_KEY_CHARS_RE = re.compile(r"[^a-z0-9]+")
 _SHA256_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+_SAFE_METADATA_STRING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+_RAW_FEISHU_ID_VALUE_RE = re.compile(
+    r"^(?:(?:ou|on|oc|om|u|msg|doccn|shtcn|fldcn|boxcn)[A-Za-z0-9_-]*"
+    r"|(?:app_token|file)_[A-Za-z0-9_-]+)$"
+)
 _PROVIDER_RAW_MARKERS = frozenset(
     {
         "aclresponsebody",
@@ -37,6 +43,19 @@ _PROVIDER_RAW_MARKERS = frozenset(
         "rawmessage",
     }
 )
+_PROVIDER_RAW_VALUE_MARKERS = frozenset(
+    {
+        "accesstokensecret",
+        "authorizationbearer",
+        "clientsecret",
+        "privatekey",
+        "refreshtokensecret",
+        "secret",
+        "tenantaccesstokensecret",
+        "useraccesstokensecret",
+    }
+)
+_ACL_BODY_KEYS = frozenset({"acl", "code", "data", "msg", "permission", "permissions"})
 
 
 class AuthorizationProviderError(ValueError):
@@ -378,17 +397,19 @@ def _sanitized_extra_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def _sanitized_metadata_value(value: Any) -> Any:
     if isinstance(value, str):
-        if value.startswith("/"):
-            raise AuthorizationProviderError(
-                "raw local paths are not allowed in decision metadata",
-                failure_class="sensitive_raw_field",
-            )
-        return unicodedata.normalize("NFC", value)
+        normalized = unicodedata.normalize("NFC", value)
+        _reject_sensitive_raw_metadata_string(normalized)
+        return normalized
     if isinstance(value, bool) or value is None:
         return value
     if isinstance(value, int):
         return value
     if isinstance(value, Mapping):
+        if _looks_like_raw_acl_body(value):
+            raise AuthorizationProviderError(
+                "raw ACL bodies are not allowed in decision metadata",
+                failure_class="sensitive_raw_field",
+            )
         return _sanitized_extra_metadata(value)
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, str)):
         return tuple(_sanitized_metadata_value(item) for item in value)
@@ -401,6 +422,60 @@ def _sanitized_metadata_value(value: Any) -> Any:
 def _normalized_key_for_policy(key: str) -> str:
     normalized = unicodedata.normalize("NFC", key).lower()
     return _NORMALIZED_KEY_CHARS_RE.sub("", normalized)
+
+
+def _reject_sensitive_raw_metadata_string(value: str) -> None:
+    if _looks_like_raw_local_path(value):
+        raise AuthorizationProviderError(
+            "raw local paths are not allowed in decision metadata",
+            failure_class="sensitive_raw_field",
+        )
+    comparable = _normalized_key_for_policy(value)
+    if _RAW_FEISHU_ID_VALUE_RE.fullmatch(value):
+        raise AuthorizationProviderError(
+            "raw Feishu object identifiers are not allowed in decision metadata",
+            failure_class="sensitive_raw_field",
+        )
+    if any(marker in comparable for marker in _PROVIDER_RAW_VALUE_MARKERS):
+        raise AuthorizationProviderError(
+            "raw provider secrets are not allowed in decision metadata",
+            failure_class="sensitive_raw_field",
+        )
+    if not _SAFE_METADATA_STRING_RE.fullmatch(value):
+        raise AuthorizationProviderError(
+            "decision metadata strings must be classified identifiers or hashes",
+            failure_class="sensitive_raw_field",
+        )
+
+
+def _looks_like_raw_local_path(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    normalized = text.replace("\\", "/")
+    return (
+        text.startswith("/")
+        or text.startswith("\\\\")
+        or _WINDOWS_ABSOLUTE_PATH_RE.match(text) is not None
+        or normalized.startswith("~/")
+        or normalized.startswith("../")
+        or normalized.startswith("./")
+        or normalized.startswith("workspace/")
+        or "/../" in normalized
+    )
+
+
+def _looks_like_raw_acl_body(value: Mapping[Any, Any]) -> bool:
+    keys = {
+        _normalized_key_for_policy(key)
+        for key in value
+        if isinstance(key, str)
+    }
+    if "data" in keys and keys.intersection({"code", "msg"}):
+        return True
+    if len(keys.intersection(_ACL_BODY_KEYS)) >= 2:
+        return True
+    return False
 
 
 def _string_tuple(
