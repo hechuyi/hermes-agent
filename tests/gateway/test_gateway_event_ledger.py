@@ -6,6 +6,7 @@ import multiprocessing
 import pytest
 
 from gateway.gateway_event_contract import (
+    GatewayEventContractError,
     validate_feishu_request_descriptor,
     validate_gateway_action,
     validate_gateway_event,
@@ -817,6 +818,83 @@ def test_provider_decision_denial_requires_sanitized_denial_reason_class(tmp_pat
         credential_freshness_class="unknown",
         failure_class="feishu_provider_sdk_unreachable",
     )
+
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    assert not (tmp_path / LEDGER_FILENAME).exists()
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        _c5_broker_policy_denied_event(
+            failure_class="random_failure",
+            denial_reason_class="feishu_authorization_provider_missing",
+        ),
+        _c5_broker_policy_denied_event(
+            failure_class="feishu_broker_policy_denied",
+            denial_reason_class="random_reason",
+        ),
+    ],
+)
+def test_c5_audit_denials_reject_unknown_failure_and_denial_domains(
+    tmp_path, event
+):
+    with pytest.raises(GatewayEventContractError):
+        validate_gateway_event(event)
+
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    assert not (tmp_path / LEDGER_FILENAME).exists()
+
+
+def test_provider_decision_rejects_unknown_revocation_reason_class(tmp_path):
+    event = _c5_provider_decision_event(
+        credential_freshness_class="revoked",
+        failure_class="feishu_provider_revoked_credential",
+        denial_reason_class="feishu_provider_revoked_credential",
+        revocation_reason_class="banana",
+    )
+
+    with pytest.raises(GatewayEventContractError):
+        validate_gateway_event(event)
+
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    assert not (tmp_path / LEDGER_FILENAME).exists()
+
+
+@pytest.mark.parametrize("raw_marker", ["raw_acl", "raw_document", "object_ref"])
+def test_provider_decision_rejects_raw_marker_provider_id_values(
+    tmp_path, raw_marker
+):
+    event = _c5_provider_decision_event(provider_id=raw_marker)
+
+    with pytest.raises(GatewayEventContractError):
+        validate_gateway_event(event)
+
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    assert not (tmp_path / LEDGER_FILENAME).exists()
+
+
+@pytest.mark.parametrize("raw_marker", ["raw_acl", "raw_document", "object_ref"])
+def test_c5_audit_denials_reject_raw_marker_class_values(tmp_path, raw_marker):
+    event = _c5_broker_policy_denied_event(
+        failure_class=raw_marker,
+        denial_reason_class=raw_marker,
+    )
+
+    with pytest.raises(GatewayEventContractError):
+        validate_gateway_event(event)
 
     result = apply_gateway_event(event, tmp_path)
 

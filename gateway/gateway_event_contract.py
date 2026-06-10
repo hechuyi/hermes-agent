@@ -421,6 +421,9 @@ _FEISHU_AUDIT_SENSITIVE_VALUE_TOKENS = frozenset(
         "response",
     }
 )
+_FEISHU_AUDIT_RAW_VALUE_MARKERS = frozenset(
+    {"object_ref", "raw_acl", "raw_document"}
+)
 _FEISHU_AUDIT_NEGATIVE_DECISIONS = frozenset(
     {
         "denied",
@@ -457,6 +460,58 @@ _FEISHU_AUDIT_ACL_COMPLETENESS_CLASSES = frozenset({"complete", "incomplete"})
 _FEISHU_AUDIT_UNSUPPORTED_SCOPE_STATUSES = frozenset({"none", "unsupported"})
 _FEISHU_AUDIT_GRANT_SESSION_CLASSES = frozenset({"one_time", "short_session"})
 _FEISHU_AUDIT_EVIDENCE_STATE_CLASSES = frozenset({"current", "stale", "revoked"})
+_FEISHU_AUDIT_REVOCATION_REASON_CLASSES = frozenset({"credential_revoked"})
+_FEISHU_AUDIT_FAILURE_CLASSES = frozenset(
+    {
+        "feishu_action_requires_broker",
+        "feishu_api_failed",
+        "feishu_app_token_only_evidence",
+        "feishu_authority_subject_mismatch",
+        "feishu_authority_subject_missing",
+        "feishu_authorization_denied",
+        "feishu_authorization_evidence_malformed",
+        "feishu_authorization_evidence_missing",
+        "feishu_authorization_provider_decision_malformed",
+        "feishu_authorization_provider_failure_class_invalid",
+        "feishu_authorization_provider_missing",
+        "feishu_authorization_provider_result_malformed",
+        "feishu_broker_policy_denied",
+        "feishu_broker_policy_expired_grant_request",
+        "feishu_broker_policy_invalid_now",
+        "feishu_broker_policy_invalid_policy_version",
+        "feishu_broker_policy_one_time_reuse",
+        "feishu_broker_policy_replay_binding_mismatch",
+        "feishu_capability_missing",
+        "feishu_contract_evidence_revoked",
+        "feishu_contract_evidence_stale",
+        "feishu_contract_policy_version_mismatch",
+        "feishu_discovery_only_evidence",
+        "feishu_legacy_card_action_requires_broker",
+        "feishu_legacy_descriptor_requires_broker",
+        "feishu_legacy_tool_requires_broker",
+        "feishu_object_authority_scope_insufficient",
+        "feishu_object_ref_mismatch",
+        "feishu_p3_requires_object_authority_evidence",
+        "feishu_provider_acl_incomplete",
+        "feishu_provider_app_token_unavailable",
+        "feishu_provider_authority_mismatch",
+        "feishu_provider_credential_unknown",
+        "feishu_provider_decision_evidence_mismatch",
+        "feishu_provider_decision_expired",
+        "feishu_provider_decision_inconsistent",
+        "feishu_provider_identity_mismatch",
+        "feishu_provider_non_grantable_state",
+        "feishu_provider_policy_version_mismatch",
+        "feishu_provider_revoked_credential",
+        "feishu_provider_sdk_unreachable",
+        "feishu_provider_stale_credential",
+        "feishu_provider_unavailable",
+        "feishu_provider_unsupported",
+        "feishu_provider_unsupported_scope",
+        "feishu_provider_user_owned_object",
+        "feishu_route_snapshot_mismatch",
+    }
+)
 _FEISHU_AUDIT_SEMANTIC_CLASS_FIELDS: dict[str, frozenset[str]] = {
     "evidence_source_class": _FEISHU_AUDIT_EVIDENCE_SOURCE_CLASSES,
     "provider_reachability_class": _FEISHU_AUDIT_PROVIDER_REACHABILITY_CLASSES,
@@ -465,6 +520,7 @@ _FEISHU_AUDIT_SEMANTIC_CLASS_FIELDS: dict[str, frozenset[str]] = {
     "unsupported_scope_status": _FEISHU_AUDIT_UNSUPPORTED_SCOPE_STATUSES,
     "grant_session_class": _FEISHU_AUDIT_GRANT_SESSION_CLASSES,
     "evidence_state_class": _FEISHU_AUDIT_EVIDENCE_STATE_CLASSES,
+    "revocation_reason_class": _FEISHU_AUDIT_REVOCATION_REASON_CLASSES,
 }
 _FEISHU_AUDIT_SAFE_CLASS_VALUES = _FEISHU_AUDIT_GRANT_SESSION_CLASSES
 
@@ -1565,6 +1621,11 @@ def _require_feishu_audit_class_value(value: Any, field: str) -> str:
             f"{field} is missing or invalid",
         )
     _reject_sensitive_audit_value(value)
+    if value not in _FEISHU_AUDIT_FAILURE_CLASSES:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            f"{field} is outside the stable audit class domain",
+        )
     return value
 
 
@@ -1605,6 +1666,7 @@ def _reject_sensitive_audit_value(value: Any) -> None:
         or "/" in normalized
         or "open_apis" in tokenized
         or _RAW_FEISHU_ID_VALUE_RE.fullmatch(normalized) is not None
+        or tokenized in _FEISHU_AUDIT_RAW_VALUE_MARKERS
         or tokenized in _FEISHU_AUDIT_SENSITIVE_VALUE_TOKENS
         or any(
             token in tokenized
