@@ -56,8 +56,11 @@ FEISHU_PACKAGE_C_ALLOWED_PROVIDER_CATEGORIES = (
 )
 
 FEISHU_PACKAGE_C_PROVIDER_DECISION_AUDIT_SOURCE_CLASSES = frozenset(
+    FEISHU_PACKAGE_C_REQUIRED_PROVIDER_CATEGORIES
+)
+
+_FEISHU_PACKAGE_C_DENIED_PROVIDER_DECISION_AUDIT_SOURCE_CLASSES = frozenset(
     {
-        *FEISHU_PACKAGE_C_REQUIRED_PROVIDER_CATEGORIES,
         "app_token_only",
         "discovery_only",
     }
@@ -123,6 +126,16 @@ _FEISHU_PACKAGE_C_BROKERED_LEGACY_TEXT_TOOLSET_ALIASES = frozenset(
     {
         "feishu_doc",
         "feishu_drive",
+    }
+)
+
+_FEISHU_PACKAGE_C_BROKERED_LEGACY_TEXT_IDENTIFIERS = frozenset(
+    {
+        "feishu_doc_read",
+        "feishu_drive_add_comment",
+        "feishu_drive_list_comment_replies",
+        "feishu_drive_list_comments",
+        "feishu_drive_reply_comment",
     }
 )
 
@@ -345,6 +358,7 @@ def classify_feishu_package_c_scope(
             if (
                 alias in _FEISHU_PACKAGE_C_BROKERED_LEGACY_TEXT_TOOLSET_ALIASES
                 and identifier in brokered_legacy_text
+                and identifier in _FEISHU_PACKAGE_C_BROKERED_LEGACY_TEXT_IDENTIFIERS
                 and identifier_class == "denied"
             ):
                 continue
@@ -381,9 +395,16 @@ def classify_feishu_package_c_readiness(
         FEISHU_PACKAGE_C_REQUIRED_PROVIDER_CATEGORIES
         - set(evidence.provider_categories)
     )
+    unknown_categories = (
+        set(evidence.provider_categories) - FEISHU_PACKAGE_C_ALLOWED_PROVIDER_CATEGORIES
+    )
     blockers.extend(
         f"feishu_authorization_provider_category_missing:{category}"
         for category in sorted(missing_categories)
+    )
+    blockers.extend(
+        f"feishu_authorization_provider_category_unknown:{category}"
+        for category in sorted(unknown_categories)
     )
     if blockers:
         blocker_tuple = tuple(blockers)
@@ -538,6 +559,14 @@ def _package_c_provider_decision_audit_failure(
         source_class = _optional_string(event.get("evidence_source_class"))
         if source_class is None:
             return "feishu_authorization_provider_decision_audit_incomplete"
+        if (
+            source_class
+            in _FEISHU_PACKAGE_C_DENIED_PROVIDER_DECISION_AUDIT_SOURCE_CLASSES
+        ):
+            return (
+                "feishu_authorization_provider_decision_audit_denied:"
+                f"{source_class}"
+            )
         if source_class not in FEISHU_PACKAGE_C_PROVIDER_DECISION_AUDIT_SOURCE_CLASSES:
             return (
                 "feishu_authorization_provider_decision_audit_unknown:"

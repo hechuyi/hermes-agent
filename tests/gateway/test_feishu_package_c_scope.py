@@ -249,6 +249,37 @@ def test_legacy_toolset_alias_requires_brokered_legacy_identifier_allowlist():
     )
 
 
+@pytest.mark.parametrize(
+    ("identifier", "failure_class", "blocker"),
+    [
+        (
+            "feishu.calendar.event.create",
+            "feishu_business_tool_surface_denied",
+            "feishu_business_tool_surface_denied:feishu_doc:feishu.calendar.event.create",
+        ),
+        (
+            "feishu.future.unclassified",
+            "feishu_package_c_scope_creep",
+            "feishu_package_c_scope_creep:feishu_doc:feishu.future.unclassified",
+        ),
+    ],
+)
+def test_legacy_toolset_alias_cannot_expand_brokered_legacy_identifier_allowlist(
+    identifier,
+    failure_class,
+    blocker,
+):
+    result = readiness.classify_feishu_package_c_scope(
+        model_visible_identifiers=PACKAGE_B_MODEL_VISIBLE,
+        toolset_aliases={"feishu_doc": {identifier}},
+        brokered_legacy_text_identifiers={identifier},
+    )
+
+    assert result.status == "not_ready"
+    assert result.failure_class == failure_class
+    assert result.blockers == (blocker,)
+
+
 def test_comment_agent_prompt_legacy_mentions_are_not_package_c_success_surface():
     result = readiness.classify_feishu_package_c_scope(
         model_visible_identifiers=PACKAGE_B_MODEL_VISIBLE,

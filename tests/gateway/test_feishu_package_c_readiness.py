@@ -228,7 +228,7 @@ def test_package_c_readiness_requires_exact_provider_categories(missing_category
                 _audit_event("app_token_only"),
                 _audit_event("discovery_only"),
             ),
-            "feishu_object_authority_provider_decision_missing",
+            "feishu_authorization_provider_decision_audit_denied",
         ),
     ],
 )
@@ -261,6 +261,21 @@ def test_package_c_readiness_requires_decision_audit_for_every_required_provider
     )
 
 
+def test_package_c_readiness_rejects_unknown_provider_category():
+    result = readiness.classify_feishu_package_c_readiness(
+        _ready_evidence(
+            provider_categories=REQUIRED_PROVIDER_CATEGORIES
+            + ("future_live_provider",),
+        )
+    )
+
+    assert result.status == "not_ready"
+    assert result.failure_class == "feishu_authorization_provider_category_unknown"
+    assert result.blockers == (
+        "feishu_authorization_provider_category_unknown:future_live_provider",
+    )
+
+
 def test_package_c_readiness_rejects_unknown_provider_decision_audit_source():
     audit_events = tuple(
         _audit_event(category) for category in REQUIRED_PROVIDER_CATEGORIES
@@ -274,6 +289,25 @@ def test_package_c_readiness_rejects_unknown_provider_decision_audit_source():
     assert result.failure_class == "feishu_authorization_provider_decision_audit_unknown"
     assert result.blockers == (
         "feishu_authorization_provider_decision_audit_unknown:future_live_provider",
+    )
+
+
+@pytest.mark.parametrize("source_class", ["app_token_only", "discovery_only"])
+def test_package_c_readiness_rejects_app_token_and_discovery_audit_sources(
+    source_class,
+):
+    audit_events = tuple(
+        _audit_event(category) for category in REQUIRED_PROVIDER_CATEGORIES
+    ) + (_audit_event(source_class),)
+
+    result = readiness.classify_feishu_package_c_readiness(
+        _ready_evidence(provider_decision_audit_events=audit_events)
+    )
+
+    assert result.status == "not_ready"
+    assert result.failure_class == "feishu_authorization_provider_decision_audit_denied"
+    assert result.blockers == (
+        f"feishu_authorization_provider_decision_audit_denied:{source_class}",
     )
 
 
