@@ -1057,7 +1057,10 @@ async def test_audited_chunked_send_continues_after_first_chunk_replay(tmp_path)
                     session_id=event["session_id"],
                     correlation_id=event["correlation_id"],
                     status="sent",
-                    feishu_message_id="om_replayed_chunk_1",
+                    feishu_message_id=FeishuAdapter._delivery_ref_hash(
+                        "feishu_message",
+                        "om_replayed_chunk_1",
+                    ),
                 ),
             )
         return True
@@ -1068,7 +1071,7 @@ async def test_audited_chunked_send_continues_after_first_chunk_replay(tmp_path)
 
     assert result.success is True
     assert result.message_id == "om_created"
-    assert result.continuation_message_ids == ("om_replayed_chunk_1", "om_created")
+    assert result.continuation_message_ids == ()
     assert _event_types(events) == [
         "delivery_pending",
         "delivery_pending",
@@ -1255,6 +1258,52 @@ async def test_repeat_pending_delivery_reuses_durable_sent_record_without_sdk_or
         "delivery_sent",
         "delivery_pending",
     ]
+    assert len(message_api.reply_calls) == 1
+    assert message_api.create_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acked", [False, True])
+async def test_repeat_audited_delivery_replays_hashed_ledger_record_safely(
+    tmp_path,
+    acked,
+):
+    adapter, message_api = _adapter(tmp_path)
+    metadata = _metadata("delivery-reply")
+
+    first = await adapter.send(
+        "oc_chat",
+        "hello",
+        reply_to="om_parent",
+        metadata=metadata,
+    )
+    if acked:
+        ack = apply_gateway_event(
+            {
+                "type": "feishu_ack",
+                "message_id": "om_reply",
+                "ack_event_id": "ev_read_1",
+                "timestamp": 9_000_000_000,
+            },
+            tmp_path,
+        )
+        assert ack.ok is True
+
+    second = await adapter.send(
+        "oc_chat",
+        "hello",
+        reply_to="om_parent",
+        metadata=metadata,
+    )
+
+    assert first.success is True
+    assert second.success is True
+    assert second.message_id is None
+    assert second.raw_response["type"] == "delivery_record"
+    record = second.raw_response["record"]
+    assert record["status"] == ("acked" if acked else "sent")
+    assert record["feishu_message_id"].startswith("sha256:")
+    assert record["feishu_message_id"] != "om_reply"
     assert len(message_api.reply_calls) == 1
     assert message_api.create_calls == []
 

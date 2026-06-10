@@ -8729,6 +8729,14 @@ class FeishuAdapter(BasePlatformAdapter):
                     message_id=None,
                     raw_response={"type": "delivery_record", "record": record},
                 )
+            if message_id_text is None and self._is_sha256_ref_text(
+                str(message_id or "")
+            ):
+                return SendResult(
+                    success=True,
+                    message_id=None,
+                    raw_response={"type": "delivery_record", "record": record},
+                )
             if message_id_text is not None:
                 return SendResult(
                     success=True,
