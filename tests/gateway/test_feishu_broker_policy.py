@@ -233,6 +233,24 @@ def test_broker_policy_replay_record_rejects_sensitive_classifier_material(
     assert exc_info.value.failure_class == "sensitive_raw_field"
 
 
+def test_broker_policy_replay_record_rejects_raw_route_snapshot():
+    with pytest.raises(BrokerPolicyError) as exc_info:
+        BrokerPolicyReplayRecord(
+            request_id_hash=_REQUEST_ID_HASH,
+            payload_hash=_PAYLOAD_HASH,
+            provider_decision_hash="sha256:" + "7" * 64,
+            route_snapshot_hash="oc_raw_chat_route",
+            object_ref_hash=_OBJECT_REF.value_hash,
+            object_type="doc",
+            action="read",
+            grant_semantics="one_time",
+            grant_hash="sha256:" + "6" * 64,
+            expires_at=None,
+        )
+
+    assert exc_info.value.failure_class == "sensitive_raw_field"
+
+
 def test_broker_policy_request_classifier_values_still_issue_grant():
     decision = _issue(
         _request(
@@ -511,6 +529,17 @@ def test_valid_object_authority_evidence_issues_bound_broker_grant_wrapper():
     assert _SHA256_HASH_RE.fullmatch(grant.grant_hash)
 
 
+@pytest.mark.parametrize("raw_route", ["oc_raw_chat_route", "doccnrawroute"])
+def test_raw_contract_route_snapshot_is_denied_without_grant(raw_route):
+    decision = _issue(
+        _request(contract=replace(_contract(), route_session_key_snapshot=raw_route)),
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert decision.denial_reason_class == "sensitive_raw_field"
+
+
 def test_broker_grant_hash_changes_when_provider_decision_hash_changes():
     request = _request(provider_id="custom_provider")
     first_result = AuthorizationProviderResult(
@@ -604,6 +633,29 @@ def test_malformed_positive_provider_decision_with_revocation_is_denied():
     assert decision.grant is None
     assert decision.failure_class == "feishu_broker_policy_denied"
     assert decision.denial_reason_class == "feishu_provider_decision_inconsistent"
+
+
+def test_malformed_provider_decision_missing_fields_is_denied_without_attribute_error():
+    malformed_decision = AuthorizationProviderDecision.__new__(
+        AuthorizationProviderDecision
+    )
+    malformed_result = _provider_result_invariant_bypass(
+        evidence=_evidence(scopes=("doc:read",)),
+        decision=malformed_decision,
+        failure_class=None,
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(malformed_result)},
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert (
+        decision.denial_reason_class
+        == "feishu_authorization_provider_decision_malformed"
+    )
 
 
 @pytest.mark.parametrize(

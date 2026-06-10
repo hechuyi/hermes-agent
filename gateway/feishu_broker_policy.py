@@ -32,6 +32,9 @@ from gateway.feishu_contracts import (
 _GRANT_SEMANTICS = frozenset({"one_time", "short_session"})
 _NORMALIZED_KEY_CHARS_RE = re.compile(r"[^a-z0-9]+")
 _SHA256_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+_ROUTE_SNAPSHOT_HASH_RE = re.compile(
+    r"^(?:route_session_snapshot_hash|route_partition_hash):sha256:[a-f0-9]{64}$"
+)
 _CLASSIFIER_METADATA_STRING_RE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
 _UTC_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
@@ -102,7 +105,11 @@ class BrokerPolicyReplayRecord:
         _require_sha256_hash(self.request_id_hash, "request_id_hash")
         _require_sha256_hash(self.payload_hash, "payload_hash")
         _require_sha256_hash(self.provider_decision_hash, "provider_decision_hash")
-        _require_nonempty_string(self.route_snapshot_hash, "route_snapshot_hash")
+        object.__setattr__(
+            self,
+            "route_snapshot_hash",
+            _route_snapshot_hash(self.route_snapshot_hash, "route_snapshot_hash"),
+        )
         _require_sha256_hash(self.object_ref_hash, "object_ref_hash")
         object.__setattr__(
             self,
@@ -228,7 +235,11 @@ class BrokerPolicyGrant:
             )
         if self.expires_at is not None:
             _require_utc_timestamp(self.expires_at, "expires_at")
-        _require_nonempty_string(self.route_snapshot_hash, "route_snapshot_hash")
+        object.__setattr__(
+            self,
+            "route_snapshot_hash",
+            _route_snapshot_hash(self.route_snapshot_hash, "route_snapshot_hash"),
+        )
         _require_nonempty_string(self.policy_version, "policy_version")
         _require_grant_semantics(self.grant_semantics)
         _require_sha256_hash(self.request_id_hash, "request_id_hash")
@@ -318,6 +329,13 @@ def issue_object_capability_grant(
         return _normalized_deny("feishu_broker_policy_invalid_policy_version")
     if request.contract.policy_version != policy_version:
         return _normalized_deny("feishu_contract_policy_version_mismatch")
+    try:
+        route_snapshot_hash = _route_snapshot_hash(
+            request.contract.route_session_key_snapshot,
+            "route_session_key_snapshot",
+        )
+    except BrokerPolicyError as exc:
+        return _normalized_deny(exc.failure_class)
     if (
         request.grant_semantics == "short_session"
         and request.expires_at is not None
@@ -339,7 +357,7 @@ def issue_object_capability_grant(
 
     provider_request = AuthorizationProviderRequest(
         contract_hash=request.contract.contract_hash,
-        route_session_key_snapshot=request.contract.route_session_key_snapshot,
+        route_session_key_snapshot=route_snapshot_hash,
         authority_subject_ref=request.contract.authority_subject_ref,
         object_ref=request.object_ref,
         object_type=request.object_type,
@@ -394,7 +412,7 @@ def issue_object_capability_grant(
         request_id_hash=request.request_id_hash,
         payload_hash=request.payload_hash,
         provider_decision_hash=provider_decision.decision_hash,
-        route_snapshot_hash=request.contract.route_session_key_snapshot,
+        route_snapshot_hash=route_snapshot_hash,
         object_ref_hash=request.object_ref.value_hash,
         object_type=request.object_type,
         action=request.action,
@@ -406,7 +424,7 @@ def issue_object_capability_grant(
         grant=BrokerPolicyGrant(
             object_capability_grant=grant,
             expires_at=request.expires_at,
-            route_snapshot_hash=request.contract.route_session_key_snapshot,
+            route_snapshot_hash=route_snapshot_hash,
             policy_version=policy_version,
             grant_semantics=request.grant_semantics,
             request_id_hash=request.request_id_hash,
@@ -435,7 +453,13 @@ def _provider_failure(
             "feishu_broker_policy_denied",
             "feishu_authorization_provider_decision_missing",
         )
-    if decision.provider_id != provider_id:
+    decision_fields = _provider_decision_fields(decision)
+    if decision_fields is None:
+        return (
+            "feishu_broker_policy_denied",
+            "feishu_authorization_provider_decision_malformed",
+        )
+    if decision_fields["provider_id"] != provider_id:
         return "feishu_broker_policy_denied", "feishu_provider_identity_mismatch"
     failure_class = getattr(result, "failure_class", None)
     if failure_class is not None:
@@ -445,27 +469,64 @@ def _provider_failure(
                 "feishu_authorization_provider_failure_class_invalid",
             )
         return failure_class, failure_class
-    if decision.denial_failure_class is not None:
-        return decision.denial_failure_class, decision.denial_failure_class
-    if decision.revocation_reason is not None:
+    if decision_fields["denial_failure_class"] is not None:
+        return (
+            decision_fields["denial_failure_class"],
+            decision_fields["denial_failure_class"],
+        )
+    if decision_fields["revocation_reason"] is not None:
         return "feishu_broker_policy_denied", "feishu_provider_decision_inconsistent"
-    if decision.policy_version != policy_version:
+    if decision_fields["policy_version"] != policy_version:
         return "feishu_broker_policy_denied", "feishu_provider_policy_version_mismatch"
-    if decision.reachability_state != "reachable":
+    if decision_fields["reachability_state"] != "reachable":
         return "feishu_provider_sdk_unreachable", "feishu_provider_sdk_unreachable"
-    if decision.credential_freshness == "stale" or decision.freshness_class == "stale":
+    if (
+        decision_fields["credential_freshness"] == "stale"
+        or decision_fields["freshness_class"] == "stale"
+    ):
         return "feishu_provider_stale_credential", "feishu_provider_stale_credential"
-    if decision.credential_freshness == "revoked" or decision.freshness_class == "revoked":
+    if (
+        decision_fields["credential_freshness"] == "revoked"
+        or decision_fields["freshness_class"] == "revoked"
+    ):
         return "feishu_provider_revoked_credential", "feishu_provider_revoked_credential"
-    if decision.credential_freshness != "fresh" or decision.freshness_class != "current":
+    if (
+        decision_fields["credential_freshness"] != "fresh"
+        or decision_fields["freshness_class"] != "current"
+    ):
         return "feishu_provider_credential_unknown", "feishu_provider_credential_unknown"
-    if not decision.acl_complete:
+    if not decision_fields["acl_complete"]:
         return "feishu_provider_acl_incomplete", "feishu_provider_acl_incomplete"
-    if decision.unsupported_scope is not None:
+    if decision_fields["unsupported_scope"] is not None:
         return "feishu_provider_unsupported_scope", "feishu_provider_unsupported_scope"
-    if decision.expires_at is not None and _parse_utc(decision.expires_at) <= now:
+    if (
+        decision_fields["expires_at"] is not None
+        and _parse_utc(decision_fields["expires_at"]) <= now
+    ):
         return "feishu_broker_policy_denied", "feishu_provider_decision_expired"
     return None
+
+
+def _provider_decision_fields(
+    decision: AuthorizationProviderDecision,
+) -> dict[str, Any] | None:
+    try:
+        return {
+            "provider_id": decision.provider_id,
+            "policy_version": decision.policy_version,
+            "evidence_source_class": decision.evidence_source_class,
+            "reachability_state": decision.reachability_state,
+            "expires_at": decision.expires_at,
+            "freshness_class": decision.freshness_class,
+            "credential_freshness": decision.credential_freshness,
+            "acl_complete": decision.acl_complete,
+            "unsupported_scope": decision.unsupported_scope,
+            "revocation_reason": decision.revocation_reason,
+            "denial_failure_class": decision.denial_failure_class,
+            "decision_hash": decision.decision_hash,
+        }
+    except AttributeError:
+        return None
 
 
 def _provider_for(provider_id: str, registry: Mapping[str, Any] | None) -> Any | None:
@@ -620,6 +681,38 @@ def _classifier_or_hash(value: Any, field_name: str) -> str:
         return normalized
     raise BrokerPolicyError(
         f"{field_name} must be a stable classifier or sha256 hash",
+        failure_class="invalid_feishu_broker_policy_request",
+    )
+
+
+def _route_snapshot_hash(value: Any, field_name: str) -> str:
+    _require_nonempty_string(value, field_name)
+    normalized = unicodedata.normalize("NFC", value)
+    if _ROUTE_SNAPSHOT_HASH_RE.fullmatch(normalized):
+        return normalized
+    if _looks_like_raw_local_path(normalized):
+        raise BrokerPolicyError(
+            f"{field_name} must not contain a raw local path",
+            failure_class="sensitive_raw_field",
+        )
+    comparable = _normalized_key_for_policy(normalized)
+    if _RAW_FEISHU_ID_VALUE_RE.fullmatch(normalized):
+        raise BrokerPolicyError(
+            f"{field_name} must not contain a raw Feishu identifier",
+            failure_class="sensitive_raw_field",
+        )
+    if any(marker in comparable for marker in _PROVIDER_RAW_MARKERS):
+        raise BrokerPolicyError(
+            f"{field_name} must not contain raw provider material",
+            failure_class="sensitive_raw_field",
+        )
+    if any(marker in comparable for marker in _PROVIDER_RAW_VALUE_MARKERS):
+        raise BrokerPolicyError(
+            f"{field_name} must not contain raw provider secrets",
+            failure_class="sensitive_raw_field",
+        )
+    raise BrokerPolicyError(
+        f"{field_name} must be a hashed route snapshot",
         failure_class="invalid_feishu_broker_policy_request",
     )
 
