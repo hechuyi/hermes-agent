@@ -40,6 +40,13 @@ def _adapter(tmp_path):
     return adapter
 
 
+def _sdk_success(message_id: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        success=lambda: True,
+        data=SimpleNamespace(message_id=message_id),
+    )
+
+
 def _source(
     *,
     chat_id: str = "oc_fake_dm",
@@ -619,6 +626,8 @@ async def test_current_admission_reaches_normal_inbound_reply_metadata(tmp_path)
 @pytest.mark.asyncio
 async def test_thread_current_admission_reaches_normal_reply_send_path(tmp_path, monkeypatch):
     adapter = _adapter(tmp_path)
+    adapter._gateway_event_state_dir = tmp_path
+    adapter._hermes_tools_state_dir = tmp_path
     source = _source(
         chat_id="oc_fake_group",
         chat_type="group",
@@ -643,8 +652,8 @@ async def test_thread_current_admission_reaches_normal_reply_send_path(tmp_path,
         im=SimpleNamespace(
             v1=SimpleNamespace(
                 message=SimpleNamespace(
-                    reply=Mock(return_value=SimpleNamespace(success=lambda: True)),
-                    create=Mock(return_value=SimpleNamespace(success=lambda: True)),
+                    reply=Mock(return_value=_sdk_success("om_thread_reply_sent_fake")),
+                    create=Mock(return_value=_sdk_success("om_thread_create_sent_fake")),
                 )
             )
         )

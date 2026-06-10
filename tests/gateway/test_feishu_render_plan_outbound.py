@@ -277,9 +277,12 @@ async def test_render_plan_current_success_ledger_persists_only_sanitized_eviden
 
     legacy_record = next(iter(state["deliveries"].values()))
     assert legacy_record["status"] == "sent"
-    assert legacy_record["target"].startswith("feishu:render_plan_target:")
-    assert legacy_record["inbound_id"].startswith("feishu:render_plan_inbound:")
-    assert legacy_record["feishu_message_id"].startswith("feishu_render_plan_message_")
+    assert legacy_record["target"].startswith("sha256:")
+    assert legacy_record["inbound_id"].startswith("sha256:")
+    assert not legacy_record["target"].startswith("feishu:render_plan_target:")
+    assert not legacy_record["inbound_id"].startswith("feishu:render_plan_inbound:")
+    assert legacy_record["feishu_message_id"].startswith("sha256:")
+    assert not legacy_record["feishu_message_id"].startswith("feishu_render_plan_message_")
     assert raw_chat_id not in json.dumps(legacy_record, sort_keys=True)
     assert raw_message_id not in json.dumps(legacy_record, sort_keys=True)
 
