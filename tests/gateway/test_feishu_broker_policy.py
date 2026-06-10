@@ -11,6 +11,7 @@ from gateway.feishu_authorization_providers import (
     FakeAuthorizationProvider,
 )
 from gateway.feishu_broker_policy import (
+    BrokerPolicyDecision,
     BrokerPolicyError,
     BrokerPolicyRequest,
     BrokerPolicyReplayRecord,
@@ -809,6 +810,58 @@ def test_valid_provider_denial_emits_provider_decision_audit_before_denial_event
         assert validate_gateway_event(event) == event["type"]
         assert event["failure_class"] == "feishu_provider_sdk_unreachable"
         assert event["denial_reason_class"] == "feishu_provider_sdk_unreachable"
+
+
+def test_direct_decision_audit_events_reject_raw_template_fields():
+    decision = BrokerPolicyDecision(
+        failure_class="feishu_broker_policy_denied",
+        denial_reason_class="sensitive_raw_field",
+        audit_event_templates=(
+            {
+                "type": "feishu_broker_policy_denied",
+                "request_hash": "sha256:" + "8" * 64,
+                "contract_hash": _CONTRACT_HASH,
+                "route_snapshot_hash": _ROUTE_SNAPSHOT,
+                "object_ref_hash": _OBJECT_REF.value_hash,
+                "authority_subject_hash": _SUBJECT_REF.value_hash,
+                "action": "read",
+                "failure_class": "feishu_broker_policy_denied",
+                "denial_reason_class": "sensitive_raw_field",
+                "policy_version": "policy:v1",
+                "raw_acl_json": "{}",
+            },
+        ),
+    )
+
+    with pytest.raises(BrokerPolicyError) as exc_info:
+        decision.audit_events(correlation_id="corr-audit-raw", timestamp=1_700_000_103)
+
+    assert exc_info.value.failure_class == "invalid_feishu_broker_policy_audit_event"
+
+
+def test_direct_decision_audit_events_reject_missing_required_c5_fields():
+    decision = BrokerPolicyDecision(
+        failure_class="feishu_broker_policy_denied",
+        denial_reason_class="feishu_provider_acl_incomplete",
+        audit_event_templates=(
+            {
+                "type": "feishu_broker_policy_denied",
+                "request_hash": "sha256:" + "8" * 64,
+                "contract_hash": _CONTRACT_HASH,
+                "route_snapshot_hash": _ROUTE_SNAPSHOT,
+                "object_ref_hash": _OBJECT_REF.value_hash,
+                "action": "read",
+                "failure_class": "feishu_broker_policy_denied",
+                "denial_reason_class": "feishu_provider_acl_incomplete",
+                "policy_version": "policy:v1",
+            },
+        ),
+    )
+
+    with pytest.raises(BrokerPolicyError) as exc_info:
+        decision.audit_events(correlation_id="corr-audit-missing", timestamp=1_700_000_104)
+
+    assert exc_info.value.failure_class == "invalid_feishu_broker_policy_audit_event"
 
 
 @pytest.mark.parametrize("raw_route", ["oc_raw_chat_route", "doccnrawroute"])

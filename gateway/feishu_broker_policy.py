@@ -27,6 +27,7 @@ from gateway.feishu_contracts import (
     can_issue_object_grant,
     feishu_contract_hash,
 )
+from gateway.gateway_event_contract import GatewayEventContractError, validate_gateway_event
 
 
 _GRANT_SEMANTICS = frozenset({"one_time", "short_session"})
@@ -371,6 +372,13 @@ class BrokerPolicyDecision:
                 version="v1",
                 schema_version=self.schema_version,
             )
+            try:
+                validate_gateway_event(event)
+            except GatewayEventContractError as exc:
+                raise BrokerPolicyError(
+                    "broker policy audit event violates gateway event contract",
+                    failure_class="invalid_feishu_broker_policy_audit_event",
+                ) from exc
             events.append(event)
         return tuple(events)
 
