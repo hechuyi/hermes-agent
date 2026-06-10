@@ -29,8 +29,41 @@ from gateway.feishu_contracts import (
 
 
 _GRANT_SEMANTICS = frozenset({"one_time", "short_session"})
+_NORMALIZED_KEY_CHARS_RE = re.compile(r"[^a-z0-9]+")
 _SHA256_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
+_CLASSIFIER_METADATA_STRING_RE = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
 _UTC_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\)")
+_RAW_FEISHU_ID_VALUE_RE = re.compile(
+    r"^(?:(?:ou|on|oc|om|u|msg|doccn|shtcn|fldcn|boxcn)[A-Za-z0-9_-]*"
+    r"|(?:app_token|file)_[A-Za-z0-9_-]+)$"
+)
+_BROKER_SAFE_CLASSIFIERS = frozenset({"app_token_only"})
+_PROVIDER_RAW_MARKERS = frozenset(
+    {
+        "aclresponsebody",
+        "documentcontent",
+        "feishuobjectid",
+        "messagecontent",
+        "objectid",
+        "objectref",
+        "rawacl",
+        "rawdocument",
+        "rawmessage",
+    }
+)
+_PROVIDER_RAW_VALUE_MARKERS = frozenset(
+    {
+        "accesstokensecret",
+        "authorizationbearer",
+        "clientsecret",
+        "privatekey",
+        "refreshtokensecret",
+        "secret",
+        "tenantaccesstokensecret",
+        "useraccesstokensecret",
+    }
+)
 _STABLE_PROVIDER_FAILURE_CLASSES = frozenset(
     {
         "feishu_provider_acl_incomplete",
@@ -551,13 +584,59 @@ def _classifier_or_hash_tuple(value: Any, field_name: str) -> tuple[str, ...]:
 def _classifier_or_hash(value: Any, field_name: str) -> str:
     _require_nonempty_string(value, field_name)
     normalized = unicodedata.normalize("NFC", value)
+    if _looks_like_raw_local_path(normalized):
+        raise BrokerPolicyError(
+            f"{field_name} must not contain a raw local path",
+            failure_class="sensitive_raw_field",
+        )
+    comparable = _normalized_key_for_policy(normalized)
+    if (
+        normalized not in _BROKER_SAFE_CLASSIFIERS
+        and _RAW_FEISHU_ID_VALUE_RE.fullmatch(normalized)
+    ):
+        raise BrokerPolicyError(
+            f"{field_name} must not contain a raw Feishu identifier",
+            failure_class="sensitive_raw_field",
+        )
+    if any(marker in comparable for marker in _PROVIDER_RAW_MARKERS):
+        raise BrokerPolicyError(
+            f"{field_name} must not contain raw provider material",
+            failure_class="sensitive_raw_field",
+        )
+    if any(marker in comparable for marker in _PROVIDER_RAW_VALUE_MARKERS):
+        raise BrokerPolicyError(
+            f"{field_name} must not contain raw provider secrets",
+            failure_class="sensitive_raw_field",
+        )
     if _SHA256_HASH_RE.fullmatch(normalized):
         return normalized
-    if re.fullmatch(r"^[a-z0-9][a-z0-9._:-]{0,63}$", normalized):
+    if _CLASSIFIER_METADATA_STRING_RE.fullmatch(normalized):
         return normalized
     raise BrokerPolicyError(
         f"{field_name} must be a stable classifier or sha256 hash",
         failure_class="invalid_feishu_broker_policy_request",
+    )
+
+
+def _normalized_key_for_policy(key: str) -> str:
+    normalized = unicodedata.normalize("NFC", key).lower()
+    return _NORMALIZED_KEY_CHARS_RE.sub("", normalized)
+
+
+def _looks_like_raw_local_path(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    normalized = text.replace("\\", "/")
+    return (
+        text.startswith("/")
+        or text.startswith("\\\\")
+        or _WINDOWS_ABSOLUTE_PATH_RE.match(text) is not None
+        or normalized.startswith("~/")
+        or normalized.startswith("../")
+        or normalized.startswith("./")
+        or normalized.startswith("workspace/")
+        or "/../" in normalized
     )
 
 

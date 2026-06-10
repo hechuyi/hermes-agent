@@ -153,21 +153,71 @@ def _issue(request=None, registry=None):
 
 
 @pytest.mark.parametrize(
-    "request_overrides",
+    ("request_overrides", "expected_failure_class"),
     [
-        {"object_type": "doc/path/secret"},
-        {"action": "read/path"},
-        {"requested_scopes": ("doc:read/path",)},
-        {"requested_scopes": ("doc:read scope",)},
+        ({"object_type": "doc/path/secret"}, "sensitive_raw_field"),
+        ({"action": "read/path"}, "invalid_feishu_broker_policy_request"),
+        ({"requested_scopes": ("doc:read/path",)}, "invalid_feishu_broker_policy_request"),
+        ({"requested_scopes": ("doc:read scope",)}, "invalid_feishu_broker_policy_request"),
     ],
 )
 def test_broker_policy_request_rejects_raw_classifier_material(
+    request_overrides,
+    expected_failure_class,
+):
+    with pytest.raises(BrokerPolicyError) as exc_info:
+        _request(**request_overrides)
+
+    assert exc_info.value.failure_class == expected_failure_class
+
+
+@pytest.mark.parametrize(
+    "request_overrides",
+    [
+        {"object_type": "doccnrawfeishuobjectid"},
+        {"object_type": "app_token_raw_id"},
+        {"action": "tenantaccesstokensecret"},
+        {"requested_scopes": ("doc:tenantaccesstokensecret",)},
+        {"requested_scopes": ("doc:doccnrawfeishuobjectid",)},
+    ],
+)
+def test_broker_policy_request_rejects_sensitive_classifier_material(
     request_overrides,
 ):
     with pytest.raises(BrokerPolicyError) as exc_info:
         _request(**request_overrides)
 
-    assert exc_info.value.failure_class == "invalid_feishu_broker_policy_request"
+    assert exc_info.value.failure_class == "sensitive_raw_field"
+
+
+@pytest.mark.parametrize(
+    "replay_overrides",
+    [
+        {"object_type": "doccnrawfeishuobjectid"},
+        {"action": "tenantaccesstokensecret"},
+    ],
+)
+def test_broker_policy_replay_record_rejects_sensitive_classifier_material(
+    replay_overrides,
+):
+    values = {
+        "request_id_hash": _REQUEST_ID_HASH,
+        "payload_hash": _PAYLOAD_HASH,
+        "provider_decision_hash": "sha256:" + "7" * 64,
+        "route_snapshot_hash": _ROUTE_SNAPSHOT,
+        "object_ref_hash": _OBJECT_REF.value_hash,
+        "object_type": "doc",
+        "action": "read",
+        "grant_semantics": "one_time",
+        "grant_hash": "sha256:" + "6" * 64,
+        "expires_at": None,
+    }
+    values.update(replay_overrides)
+
+    with pytest.raises(BrokerPolicyError) as exc_info:
+        BrokerPolicyReplayRecord(**values)
+
+    assert exc_info.value.failure_class == "sensitive_raw_field"
 
 
 def test_broker_policy_request_classifier_values_still_issue_grant():
@@ -184,6 +234,12 @@ def test_broker_policy_request_classifier_values_still_issue_grant():
     assert decision.grant is not None
     assert decision.grant.object_capability_grant.object_type == "doc"
     assert decision.grant.object_capability_grant.action == "read"
+
+
+def test_broker_policy_request_keeps_app_token_only_as_safe_classifier():
+    request = _request(provider_id="app_token_only")
+
+    assert request.provider_id == "app_token_only"
 
 
 def test_missing_provider_registry_returns_provider_missing_without_grant():
