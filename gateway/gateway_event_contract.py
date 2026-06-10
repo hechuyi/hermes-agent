@@ -1327,7 +1327,11 @@ def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> N
             event.get("denial_reason_class"),
             "denial_reason_class",
         )
-    if _feishu_provider_decision_is_denial(event):
+    provider_decision_denial = _feishu_provider_decision_is_denial(event) or (
+        event_type == "feishu_authorization_provider_decision"
+        and "failure_class" in event
+    )
+    if provider_decision_denial:
         _require_feishu_audit_class_value(event.get("failure_class"), "failure_class")
         _require_feishu_audit_class_value(
             event.get("denial_reason_class"),

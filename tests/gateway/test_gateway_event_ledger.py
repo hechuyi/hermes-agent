@@ -686,6 +686,10 @@ def test_feishu_audit_event_families_are_persisted_as_sanitized_records(
     "event",
     [
         _c5_provider_decision_event(),
+        _c5_provider_decision_event(
+            failure_class="feishu_provider_sdk_unreachable",
+            denial_reason_class="feishu_provider_sdk_unreachable",
+        ),
         _feishu_audit_event(
             "feishu_authorization_evidence_observed",
             event_hash="sha256:" + ("0" * 64),
@@ -748,6 +752,9 @@ def test_c5_audit_events_accept_only_required_sanitized_contract(tmp_path, event
         _c5_provider_decision_event(
             credential_freshness_class="revoked",
             failure_class="feishu_provider_revoked_credential",
+        ),
+        _c5_provider_decision_event(
+            failure_class="feishu_provider_sdk_unreachable",
         ),
         _c5_capability_granted_event(evidence_hashes=[]),
         _c5_capability_granted_event(evidence_hashes=["not-a-hash"]),
