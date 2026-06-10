@@ -1322,8 +1322,17 @@ def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> N
                 "invalid_gateway_event_contract",
                 f"missing required field: {field}",
             )
+    if "denial_reason_class" in event:
+        _require_feishu_audit_class_value(
+            event.get("denial_reason_class"),
+            "denial_reason_class",
+        )
     if _feishu_provider_decision_is_denial(event):
-        require_failure_class(event.get("failure_class"))
+        _require_feishu_audit_class_value(event.get("failure_class"), "failure_class")
+        _require_feishu_audit_class_value(
+            event.get("denial_reason_class"),
+            "denial_reason_class",
+        )
     if event_type == "feishu_authorization_provider_decision":
         if event.get("credential_freshness_class") == "revoked" and (
             "revocation_reason_class" not in event
@@ -1333,9 +1342,9 @@ def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> N
                 "missing required field: revocation_reason_class",
             )
     if _feishu_audit_event_requires_failure_class(event_type, event):
-        require_failure_class(event.get("failure_class"))
+        _require_feishu_audit_class_value(event.get("failure_class"), "failure_class")
     elif "failure_class" in event:
-        require_failure_class(event.get("failure_class"))
+        _require_feishu_audit_class_value(event.get("failure_class"), "failure_class")
 
 
 def _validate_feishu_delivery_lifecycle_event(
@@ -1503,6 +1512,16 @@ def _require_safe_audit_atom(value: Any, field: str) -> str:
             "invalid_gateway_event_contract",
             f"{field} is missing or invalid",
         )
+    return value
+
+
+def _require_feishu_audit_class_value(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not _SAFE_FAILURE_CLASS_RE.fullmatch(value):
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            f"{field} is missing or invalid",
+        )
+    _reject_sensitive_audit_value(value)
     return value
 
 

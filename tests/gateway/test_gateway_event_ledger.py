@@ -765,6 +765,40 @@ def test_c5_audit_events_reject_missing_failure_and_raw_material(tmp_path, event
     assert not (tmp_path / LEDGER_FILENAME).exists()
 
 
+def test_provider_decision_denial_requires_sanitized_denial_reason_class(tmp_path):
+    event = _c5_provider_decision_event(
+        provider_reachability_class="unreachable",
+        credential_freshness_class="unknown",
+        failure_class="feishu_provider_sdk_unreachable",
+    )
+
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    assert not (tmp_path / LEDGER_FILENAME).exists()
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        _c5_provider_decision_event(
+            provider_reachability_class="unreachable",
+            credential_freshness_class="unknown",
+            failure_class="tenant_access_token_secret",
+            denial_reason_class="feishu_provider_sdk_unreachable",
+        ),
+        _c5_broker_policy_denied_event(failure_class="tenant_access_token_secret"),
+    ],
+)
+def test_feishu_audit_denials_reject_raw_failure_class_markers(tmp_path, event):
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    assert not (tmp_path / LEDGER_FILENAME).exists()
+
+
 def test_feishu_audit_events_are_append_only_without_rolling_truncation(tmp_path):
     for index in range(1001):
         event = _feishu_audit_event(

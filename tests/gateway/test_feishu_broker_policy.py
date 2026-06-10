@@ -764,6 +764,53 @@ def test_malformed_provider_state_emits_denial_audit_without_success_events():
     assert "feishu_capability_granted" not in repr(events)
 
 
+def test_valid_provider_denial_emits_provider_decision_audit_before_denial_events():
+    provider_result = _provider_result_invariant_bypass(
+        evidence=_evidence(scopes=("doc:read",)),
+        decision=_decision(
+            reachability_state="unreachable",
+            credential_freshness="unknown",
+            acl_complete=True,
+        ),
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(provider_result)},
+    )
+    events = decision.audit_events(correlation_id="corr-audit-3", timestamp=1_700_000_102)
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_provider_sdk_unreachable"
+    assert decision.denial_reason_class == "feishu_provider_sdk_unreachable"
+    assert [event["type"] for event in events] == [
+        "feishu_authorization_provider_decision",
+        "feishu_broker_policy_denied",
+        "feishu_capability_denied",
+    ]
+    provider_event = events[0]
+    assert validate_gateway_event(provider_event) == provider_event["type"]
+    assert provider_event["provider_id"] == "custom_provider"
+    assert provider_event["provider_version"] == "2026-06-10.custom"
+    assert provider_event["evidence_source_class"] == "verified_object_acl"
+    assert provider_event["provider_reachability_class"] == "unreachable"
+    assert provider_event["credential_freshness_class"] == "unknown"
+    assert provider_event["acl_completeness_class"] == "complete"
+    assert provider_event["unsupported_scope_status"] == "none"
+    assert provider_event["decision_hash"] == provider_result.decision.decision_hash
+    assert provider_event["contract_hash"] == _contract().contract_hash
+    assert provider_event["route_snapshot_hash"] == _ROUTE_SNAPSHOT
+    assert provider_event["object_ref_hash"] == _OBJECT_REF.value_hash
+    assert provider_event["authority_subject_hash"] == _SUBJECT_REF.value_hash
+    assert provider_event["policy_version"] == "policy:v1"
+    assert provider_event["failure_class"] == "feishu_provider_sdk_unreachable"
+    assert provider_event["denial_reason_class"] == "feishu_provider_sdk_unreachable"
+    for event in events[1:]:
+        assert validate_gateway_event(event) == event["type"]
+        assert event["failure_class"] == "feishu_provider_sdk_unreachable"
+        assert event["denial_reason_class"] == "feishu_provider_sdk_unreachable"
+
+
 @pytest.mark.parametrize("raw_route", ["oc_raw_chat_route", "doccnrawroute"])
 def test_raw_contract_route_snapshot_is_denied_without_grant(raw_route):
     decision = _issue(

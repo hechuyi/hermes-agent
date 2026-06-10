@@ -479,8 +479,30 @@ def issue_object_capability_grant(
         provider_id=request.provider_id,
     )
     if provider_failure is not None:
-        failure_class, denial_reason_class = provider_failure
-        return deny(failure_class, denial_reason_class=denial_reason_class)
+        failure_class, denial_reason_class, audited_provider_decision = provider_failure
+        audit_event_templates = _denial_audit_event_templates(
+            request,
+            failure_class=failure_class,
+            denial_reason_class=denial_reason_class,
+            policy_version=policy_version,
+        )
+        if audited_provider_decision is not None:
+            audit_event_templates = (
+                _provider_decision_audit_event_template(
+                    request,
+                    provider_decision=audited_provider_decision,
+                    route_snapshot_hash=route_snapshot_hash,
+                    policy_version=policy_version,
+                    failure_class=failure_class,
+                    denial_reason_class=denial_reason_class,
+                ),
+                *audit_event_templates,
+            )
+        return _deny(
+            failure_class,
+            denial_reason_class=denial_reason_class,
+            audit_event_templates=audit_event_templates,
+        )
     evidence = getattr(result, "evidence", None)
     if evidence is None:
         return deny("feishu_authorization_evidence_missing")
@@ -606,6 +628,8 @@ def _provider_decision_audit_event_template(
     provider_decision: AuthorizationProviderDecision,
     route_snapshot_hash: str,
     policy_version: str,
+    failure_class: str | None = None,
+    denial_reason_class: str | None = None,
 ) -> dict[str, Any]:
     event = {
         "type": "feishu_authorization_provider_decision",
@@ -632,9 +656,10 @@ def _provider_decision_audit_event_template(
         ),
         "policy_version": policy_version,
     }
-    failure_class = provider_decision.denial_failure_class
+    failure_class = failure_class or provider_decision.denial_failure_class
     if failure_class is not None:
         event["failure_class"] = failure_class
+        event["denial_reason_class"] = denial_reason_class or failure_class
     if provider_decision.revocation_reason is not None:
         event["revocation_reason_class"] = provider_decision.revocation_reason
     return event
@@ -701,80 +726,86 @@ def _provider_failure(
     now: datetime,
     policy_version: str,
     provider_id: str,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, AuthorizationProviderDecision | None] | None:
     if not isinstance(result, AuthorizationProviderResult):
         return (
             "feishu_broker_policy_denied",
             "feishu_authorization_provider_result_malformed",
+            None,
         )
     decision = getattr(result, "decision", None)
     if not isinstance(decision, AuthorizationProviderDecision):
         return (
             "feishu_broker_policy_denied",
             "feishu_authorization_provider_decision_missing",
+            None,
         )
     decision_fields = _provider_decision_fields(decision)
     if decision_fields is None:
         return (
             "feishu_broker_policy_denied",
             "feishu_authorization_provider_decision_malformed",
+            None,
         )
     decision_failure = _provider_decision_field_failure(
         decision_fields,
         provider_id=provider_id,
     )
     if decision_failure is not None:
-        return "feishu_broker_policy_denied", decision_failure
+        return "feishu_broker_policy_denied", decision_failure, None
     if decision_fields["provider_id"] != provider_id:
-        return "feishu_broker_policy_denied", "feishu_provider_identity_mismatch"
+        return "feishu_broker_policy_denied", "feishu_provider_identity_mismatch", None
     failure_class = getattr(result, "failure_class", None)
     if failure_class is not None:
         if failure_class not in _STABLE_PROVIDER_FAILURE_CLASSES:
             return (
                 "feishu_broker_policy_denied",
                 "feishu_authorization_provider_failure_class_invalid",
+                None,
             )
-        return failure_class, failure_class
+        return failure_class, failure_class, decision
     if decision_fields["denial_failure_class"] is not None:
         if decision_fields["denial_failure_class"] not in _STABLE_PROVIDER_FAILURE_CLASSES:
             return (
                 "feishu_broker_policy_denied",
                 "feishu_authorization_provider_decision_malformed",
+                None,
             )
         return (
             decision_fields["denial_failure_class"],
             decision_fields["denial_failure_class"],
+            decision,
         )
     if decision_fields["revocation_reason"] is not None:
-        return "feishu_broker_policy_denied", "feishu_provider_decision_inconsistent"
+        return "feishu_broker_policy_denied", "feishu_provider_decision_inconsistent", None
     if decision_fields["policy_version"] != policy_version:
-        return "feishu_broker_policy_denied", "feishu_provider_policy_version_mismatch"
+        return "feishu_broker_policy_denied", "feishu_provider_policy_version_mismatch", decision
     if decision_fields["reachability_state"] != "reachable":
-        return "feishu_provider_sdk_unreachable", "feishu_provider_sdk_unreachable"
+        return "feishu_provider_sdk_unreachable", "feishu_provider_sdk_unreachable", decision
     if (
         decision_fields["credential_freshness"] == "stale"
         or decision_fields["freshness_class"] == "stale"
     ):
-        return "feishu_provider_stale_credential", "feishu_provider_stale_credential"
+        return "feishu_provider_stale_credential", "feishu_provider_stale_credential", decision
     if (
         decision_fields["credential_freshness"] == "revoked"
         or decision_fields["freshness_class"] == "revoked"
     ):
-        return "feishu_provider_revoked_credential", "feishu_provider_revoked_credential"
+        return "feishu_provider_revoked_credential", "feishu_provider_revoked_credential", decision
     if (
         decision_fields["credential_freshness"] != "fresh"
         or decision_fields["freshness_class"] != "current"
     ):
-        return "feishu_provider_credential_unknown", "feishu_provider_credential_unknown"
+        return "feishu_provider_credential_unknown", "feishu_provider_credential_unknown", decision
     if not decision_fields["acl_complete"]:
-        return "feishu_provider_acl_incomplete", "feishu_provider_acl_incomplete"
+        return "feishu_provider_acl_incomplete", "feishu_provider_acl_incomplete", decision
     if decision_fields["unsupported_scope"] is not None:
-        return "feishu_provider_unsupported_scope", "feishu_provider_unsupported_scope"
+        return "feishu_provider_unsupported_scope", "feishu_provider_unsupported_scope", decision
     if (
         decision_fields["expires_at"] is not None
         and _parse_utc(decision_fields["expires_at"]) <= now
     ):
-        return "feishu_broker_policy_denied", "feishu_provider_decision_expired"
+        return "feishu_broker_policy_denied", "feishu_provider_decision_expired", decision
     return None
 
 
