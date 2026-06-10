@@ -722,6 +722,10 @@ def test_feishu_audit_event_families_are_persisted_as_sanitized_records(
             policy_version="policy:v1",
         ),
         _c5_capability_granted_event(),
+        _c5_capability_granted_event(
+            expiry="2026-06-10T00:03:00Z",
+            grant_session_class="short_session",
+        ),
         _feishu_audit_event(
             "feishu_capability_denied",
             event_hash="sha256:" + ("0" * 64),
@@ -765,6 +769,41 @@ def test_c5_audit_events_accept_only_required_sanitized_contract(tmp_path, event
     ],
 )
 def test_c5_audit_events_reject_missing_failure_and_raw_material(tmp_path, event):
+    result = apply_gateway_event(event, tmp_path)
+
+    assert result.ok is False
+    assert result.failure_class == "invalid_gateway_event_contract"
+    assert not (tmp_path / LEDGER_FILENAME).exists()
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        _c5_provider_decision_event(
+            provider_reachability_class="telepathic",
+            failure_class="feishu_provider_sdk_unreachable",
+            denial_reason_class="feishu_provider_sdk_unreachable",
+        ),
+        _c5_provider_decision_event(
+            credential_freshness_class="banana",
+            failure_class="feishu_provider_stale_credential",
+            denial_reason_class="feishu_provider_stale_credential",
+        ),
+        _c5_provider_decision_event(
+            acl_completeness_class="maybe",
+            failure_class="feishu_provider_acl_incomplete",
+            denial_reason_class="feishu_provider_acl_incomplete",
+        ),
+        _c5_provider_decision_event(
+            unsupported_scope_status="sometimes",
+            failure_class="feishu_provider_unsupported_scope",
+            denial_reason_class="feishu_provider_unsupported_scope",
+        ),
+        _c5_provider_decision_event(evidence_source_class="nonsense_source"),
+        _c5_capability_granted_event(grant_session_class="banana"),
+    ],
+)
+def test_c5_audit_events_reject_semantically_invalid_class_values(tmp_path, event):
     result = apply_gateway_event(event, tmp_path)
 
     assert result.ok is False

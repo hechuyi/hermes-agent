@@ -434,7 +434,39 @@ _FEISHU_AUDIT_NEGATIVE_DECISIONS = frozenset(
         "not_allowed",
     }
 )
-_FEISHU_AUDIT_SAFE_CLASS_VALUES = frozenset({"one_time"})
+_FEISHU_AUDIT_EVIDENCE_SOURCE_CLASSES = frozenset(
+    {
+        "admin_policy_grant",
+        "app_owned_object",
+        "app_token_only",
+        "discovery_only",
+        "explicit_user_confirmation",
+        "none",
+        "system_test_object",
+        "user_delegated_credential",
+        "verified_object_acl",
+    }
+)
+_FEISHU_AUDIT_PROVIDER_REACHABILITY_CLASSES = frozenset(
+    {"reachable", "unreachable", "unknown"}
+)
+_FEISHU_AUDIT_CREDENTIAL_FRESHNESS_CLASSES = frozenset(
+    {"fresh", "stale", "revoked", "unknown"}
+)
+_FEISHU_AUDIT_ACL_COMPLETENESS_CLASSES = frozenset({"complete", "incomplete"})
+_FEISHU_AUDIT_UNSUPPORTED_SCOPE_STATUSES = frozenset({"none", "unsupported"})
+_FEISHU_AUDIT_GRANT_SESSION_CLASSES = frozenset({"one_time", "short_session"})
+_FEISHU_AUDIT_EVIDENCE_STATE_CLASSES = frozenset({"current", "stale", "revoked"})
+_FEISHU_AUDIT_SEMANTIC_CLASS_FIELDS: dict[str, frozenset[str]] = {
+    "evidence_source_class": _FEISHU_AUDIT_EVIDENCE_SOURCE_CLASSES,
+    "provider_reachability_class": _FEISHU_AUDIT_PROVIDER_REACHABILITY_CLASSES,
+    "credential_freshness_class": _FEISHU_AUDIT_CREDENTIAL_FRESHNESS_CLASSES,
+    "acl_completeness_class": _FEISHU_AUDIT_ACL_COMPLETENESS_CLASSES,
+    "unsupported_scope_status": _FEISHU_AUDIT_UNSUPPORTED_SCOPE_STATUSES,
+    "grant_session_class": _FEISHU_AUDIT_GRANT_SESSION_CLASSES,
+    "evidence_state_class": _FEISHU_AUDIT_EVIDENCE_STATE_CLASSES,
+}
+_FEISHU_AUDIT_SAFE_CLASS_VALUES = _FEISHU_AUDIT_GRANT_SESSION_CLASSES
 
 
 class GatewayEventContractError(ValueError):
@@ -1300,8 +1332,11 @@ def _validate_feishu_audit_event(event_type: str, event: Mapping[str, Any]) -> N
             _require_sanitized_hash_list(value, field)
             hash_fields_present.append(field)
         elif field in _FEISHU_AUDIT_ATOM_FIELDS:
-            _require_safe_audit_atom(value, field)
-            _reject_sensitive_audit_value(value)
+            if field in _FEISHU_AUDIT_SEMANTIC_CLASS_FIELDS:
+                _require_feishu_audit_semantic_class_value(value, field)
+            else:
+                _require_safe_audit_atom(value, field)
+                _reject_sensitive_audit_value(value)
 
     for field in ("timestamp", "correlation_id"):
         if field not in event:
@@ -1438,11 +1473,15 @@ def _feishu_audit_event_requires_failure_class(
 def _feishu_provider_decision_is_denial(event: Mapping[str, Any]) -> bool:
     if event.get("type") != "feishu_authorization_provider_decision":
         return False
-    return (
-        event.get("provider_reachability_class") != "reachable"
-        or event.get("credential_freshness_class") != "fresh"
-        or event.get("acl_completeness_class") != "complete"
-        or event.get("unsupported_scope_status") != "none"
+    return event.get("failure_class") is not None or (
+        event.get("provider_reachability_class")
+        in _FEISHU_AUDIT_PROVIDER_REACHABILITY_CLASSES - {"reachable"}
+        or event.get("credential_freshness_class")
+        in _FEISHU_AUDIT_CREDENTIAL_FRESHNESS_CLASSES - {"fresh"}
+        or event.get("acl_completeness_class")
+        in _FEISHU_AUDIT_ACL_COMPLETENESS_CLASSES - {"complete"}
+        or event.get("unsupported_scope_status")
+        in _FEISHU_AUDIT_UNSUPPORTED_SCOPE_STATUSES - {"none"}
     )
 
 
@@ -1526,6 +1565,18 @@ def _require_feishu_audit_class_value(value: Any, field: str) -> str:
             f"{field} is missing or invalid",
         )
     _reject_sensitive_audit_value(value)
+    return value
+
+
+def _require_feishu_audit_semantic_class_value(value: Any, field: str) -> str:
+    value = _require_safe_audit_atom(value, field)
+    _reject_sensitive_audit_value(value)
+    allowed = _FEISHU_AUDIT_SEMANTIC_CLASS_FIELDS[field]
+    if value not in allowed:
+        raise GatewayEventContractError(
+            "invalid_gateway_event_contract",
+            f"{field} is outside the stable semantic class domain",
+        )
     return value
 
 
