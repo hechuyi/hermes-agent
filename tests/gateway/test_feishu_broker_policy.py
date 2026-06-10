@@ -132,6 +132,19 @@ def _evidence(**overrides) -> AuthorizationEvidence:
     return AuthorizationEvidence(**values)
 
 
+def _provider_result_invariant_bypass(
+    *,
+    evidence,
+    decision,
+    failure_class=None,
+) -> AuthorizationProviderResult:
+    result = AuthorizationProviderResult.__new__(AuthorizationProviderResult)
+    object.__setattr__(result, "evidence", evidence)
+    object.__setattr__(result, "decision", decision)
+    object.__setattr__(result, "failure_class", failure_class)
+    return result
+
+
 class _StaticResultProvider:
     provider_id = "custom_provider"
     provider_version = "2026-06-10.custom"
@@ -251,11 +264,10 @@ def test_missing_provider_registry_returns_provider_missing_without_grant():
 
 
 def test_missing_evidence_returns_evidence_missing_without_grant():
-    malformed_result = SimpleNamespace(
+    malformed_result = _provider_result_invariant_bypass(
         evidence=None,
         decision=_decision(),
         failure_class=None,
-        is_denial=False,
     )
 
     decision = _issue(
@@ -268,12 +280,52 @@ def test_missing_evidence_returns_evidence_missing_without_grant():
     assert decision.denial_reason_class == "feishu_authorization_evidence_missing"
 
 
+def test_duck_typed_denial_provider_result_is_malformed_without_grant():
+    duck_typed_result = SimpleNamespace(
+        evidence=_evidence(scopes=("doc:read",)),
+        decision=_decision(),
+        failure_class=None,
+        is_denial=True,
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(duck_typed_result)},
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert (
+        decision.denial_reason_class
+        == "feishu_authorization_provider_result_malformed"
+    )
+
+
+def test_duck_typed_positive_provider_result_without_denial_flag_is_malformed():
+    duck_typed_result = SimpleNamespace(
+        evidence=_evidence(scopes=("doc:read",)),
+        decision=_decision(),
+        failure_class=None,
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(duck_typed_result)},
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_broker_policy_denied"
+    assert (
+        decision.denial_reason_class
+        == "feishu_authorization_provider_result_malformed"
+    )
+
+
 def test_malformed_provider_failure_class_is_normalized_without_leaking_raw_reason():
-    malformed_result = SimpleNamespace(
+    malformed_result = _provider_result_invariant_bypass(
         evidence=None,
         decision=_decision(),
         failure_class="tenant_access_token_secret",
-        is_denial=True,
     )
 
     decision = _issue(
@@ -287,6 +339,26 @@ def test_malformed_provider_failure_class_is_normalized_without_leaking_raw_reas
         decision.denial_reason_class
         == "feishu_authorization_provider_failure_class_invalid"
     )
+
+
+def test_real_provider_denial_result_preserves_stable_provider_failure():
+    result = AuthorizationProviderResult(
+        evidence=None,
+        decision=_decision(
+            denial_failure_class="feishu_provider_unsupported_scope",
+            unsupported_scope="doc:write",
+        ),
+        failure_class="feishu_provider_unsupported_scope",
+    )
+
+    decision = _issue(
+        _request(provider_id="custom_provider"),
+        {"custom_provider": _StaticResultProvider(result)},
+    )
+
+    assert decision.grant is None
+    assert decision.failure_class == "feishu_provider_unsupported_scope"
+    assert decision.denial_reason_class == "feishu_provider_unsupported_scope"
 
 
 @pytest.mark.parametrize(
@@ -518,11 +590,10 @@ def test_short_session_grant_records_expiry_and_session_semantics():
 
 
 def test_malformed_positive_provider_decision_with_revocation_is_denied():
-    malformed_result = SimpleNamespace(
+    malformed_result = _provider_result_invariant_bypass(
         evidence=_evidence(scopes=("doc:read",)),
         decision=_decision(revocation_reason="credential_revoked"),
         failure_class=None,
-        is_denial=False,
     )
 
     decision = _issue(

@@ -17,6 +17,7 @@ from typing import Any
 from gateway.feishu_authorization_providers import (
     AuthorizationProviderDecision,
     AuthorizationProviderRequest,
+    AuthorizationProviderResult,
 )
 from gateway.feishu_contracts import (
     AuthorizationEvidence,
@@ -423,6 +424,11 @@ def _provider_failure(
     policy_version: str,
     provider_id: str,
 ) -> tuple[str, str] | None:
+    if not isinstance(result, AuthorizationProviderResult):
+        return (
+            "feishu_broker_policy_denied",
+            "feishu_authorization_provider_result_malformed",
+        )
     decision = getattr(result, "decision", None)
     if not isinstance(decision, AuthorizationProviderDecision):
         return (
