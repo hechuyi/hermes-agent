@@ -10,16 +10,29 @@ import os
 from pathlib import Path
 import re
 import time
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
 
 from gateway.gateway_event_contract import GatewayEventResult
 
+if TYPE_CHECKING:
+    from gateway.feishu_broker_policy import BrokerPolicyGrant
+    from gateway.feishu_contracts import ObjectCapabilityGrant
+
 
 LEGACY_FEISHU_BROKER_DENIAL_REASON = "feishu_legacy_tool_requires_broker"
+FEISHU_OBJECT_CAPABILITY_CONTEXT_DENIAL_REASON = (
+    "feishu_object_capability_context_required"
+)
 
 _BROKER_CONTEXT: ContextVar["FeishuBrokerContext | None"] = ContextVar(
     "feishu_legacy_broker_context",
     default=None,
+)
+_OBJECT_CAPABILITY_CONTEXT: ContextVar["FeishuObjectCapabilityContext | None"] = (
+    ContextVar(
+        "feishu_object_capability_context",
+        default=None,
+    )
 )
 _CONTRACT_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
 _BROKER_GRANT_HANDLE_RE = re.compile(r"^broker_grant_handle:sha256:[a-f0-9]{64}$")
@@ -33,6 +46,20 @@ class FeishuBrokerContext:
     action_id: str
     contract_hash: str
     route_partition_key: str
+
+
+@dataclass(frozen=True)
+class FeishuObjectCapabilityContext:
+    grant: "BrokerPolicyGrant"
+    object_capability_grant: "ObjectCapabilityGrant"
+    grant_hash: str
+    contract_hash: str
+    route_snapshot_hash: str
+    request_id_hash: str
+    payload_hash: str
+    provider_decision_hash: str
+    grant_semantics: str
+    expires_at: str | None
 
 
 @contextmanager
@@ -71,8 +98,40 @@ def feishu_broker_context(
         _BROKER_CONTEXT.reset(token)
 
 
+@contextmanager
+def feishu_object_capability_context(
+    grant: "BrokerPolicyGrant",
+) -> Iterator[FeishuObjectCapabilityContext]:
+    from gateway.feishu_broker_policy import BrokerPolicyGrant
+
+    if not isinstance(grant, BrokerPolicyGrant):
+        raise TypeError("grant must be BrokerPolicyGrant")
+    object_grant = grant.object_capability_grant
+    context = FeishuObjectCapabilityContext(
+        grant=grant,
+        object_capability_grant=object_grant,
+        grant_hash=grant.grant_hash,
+        contract_hash=object_grant.contract_hash,
+        route_snapshot_hash=grant.route_snapshot_hash,
+        request_id_hash=grant.request_id_hash,
+        payload_hash=grant.payload_hash,
+        provider_decision_hash=grant.provider_decision_hash,
+        grant_semantics=grant.grant_semantics,
+        expires_at=grant.expires_at,
+    )
+    token = _OBJECT_CAPABILITY_CONTEXT.set(context)
+    try:
+        yield context
+    finally:
+        _OBJECT_CAPABILITY_CONTEXT.reset(token)
+
+
 def current_feishu_broker_context() -> FeishuBrokerContext | None:
     return _BROKER_CONTEXT.get()
+
+
+def current_feishu_object_capability_context() -> FeishuObjectCapabilityContext | None:
+    return _OBJECT_CAPABILITY_CONTEXT.get()
 
 
 def require_feishu_broker_context(
@@ -83,6 +142,17 @@ def require_feishu_broker_context(
     del kind, name, args
     if current_feishu_broker_context() is None:
         return False, LEGACY_FEISHU_BROKER_DENIAL_REASON
+    return True, ""
+
+
+def require_feishu_object_capability_context(
+    kind: str,
+    name: str,
+    args: object = None,
+) -> tuple[bool, str]:
+    del kind, name, args
+    if current_feishu_object_capability_context() is None:
+        return False, FEISHU_OBJECT_CAPABILITY_CONTEXT_DENIAL_REASON
     return True, ""
 
 

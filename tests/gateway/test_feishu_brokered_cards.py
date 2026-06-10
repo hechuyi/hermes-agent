@@ -9,7 +9,11 @@ import pytest
 
 from gateway import gateway_event_ledger
 from gateway.config import PlatformConfig
-from gateway.feishu_legacy_guard import current_feishu_broker_context, feishu_broker_context
+from gateway.feishu_legacy_guard import (
+    current_feishu_broker_context,
+    current_feishu_object_capability_context,
+    feishu_broker_context,
+)
 from gateway.gateway_event_ledger import LEDGER_FILENAME
 from gateway.platforms.feishu import FeishuAdapter
 
@@ -355,6 +359,7 @@ async def test_successful_callback_records_accepted_and_resolved_once_with_broke
         assert context.grant_handle == _grant_handle("alpha")
         assert context.contract_hash == _sha("contract:alpha")
         assert context.route_partition_key == "route_snapshot:" + _sha("route:alpha")
+        assert current_feishu_object_capability_context() is None
         side_effects.append(record)
 
     result = await adapter.resolve_brokered_card_callback(

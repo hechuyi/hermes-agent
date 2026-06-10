@@ -10,8 +10,10 @@ import pytest
 from gateway.gateway_event_contract import GatewayEventResult
 from gateway.feishu_legacy_guard import (
     FeishuBrokerContext,
+    current_feishu_object_capability_context,
     current_feishu_broker_context,
     feishu_broker_context,
+    require_feishu_object_capability_context,
     require_feishu_broker_context,
 )
 
@@ -145,6 +147,45 @@ def test_json_args_broker_grant_cannot_create_context():
     assert allowed is False
     assert reason == "feishu_legacy_tool_requires_broker"
     assert current_feishu_broker_context() is None
+
+
+def test_card_broker_context_does_not_satisfy_object_capability_context():
+    with feishu_broker_context(
+        GRANT_HANDLE,
+        action_id=ACTION_ID,
+        contract_hash=CONTRACT_HASH,
+        route_partition_key=ROUTE_PARTITION_KEY,
+    ):
+        allowed, reason = require_feishu_object_capability_context(
+            "tool",
+            "feishu_doc_read",
+        )
+
+        assert allowed is False
+        assert reason == "feishu_object_capability_context_required"
+        assert current_feishu_object_capability_context() is None
+
+
+def test_user_supplied_object_grant_like_kwargs_do_not_create_object_capability_context():
+    allowed, reason = require_feishu_object_capability_context(
+        "tool",
+        "feishu_doc_read",
+        args={
+            "_feishu_broker_grant": {
+                "grant_hash": "sha256:" + ("1" * 64),
+                "object_capability_grant": {
+                    "grant_hash": "sha256:" + ("2" * 64),
+                    "contract_hash": CONTRACT_HASH,
+                },
+            },
+            "grant_handle": GRANT_HANDLE,
+            "action_id": ACTION_ID,
+        },
+    )
+
+    assert allowed is False
+    assert reason == "feishu_object_capability_context_required"
+    assert current_feishu_object_capability_context() is None
 
 
 def test_contextvar_created_broker_context_allows_legacy_surface():

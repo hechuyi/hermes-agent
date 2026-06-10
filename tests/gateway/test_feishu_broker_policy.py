@@ -21,6 +21,14 @@ from gateway.feishu_contracts import (
     ConversationContract,
     HashedRef,
 )
+from gateway.feishu_legacy_guard import (
+    current_feishu_broker_context,
+    current_feishu_object_capability_context,
+    feishu_broker_context,
+    feishu_object_capability_context,
+    require_feishu_broker_context,
+    require_feishu_object_capability_context,
+)
 
 
 _SHA256_HASH_RE = re.compile(r"^sha256:[a-f0-9]{64}$")
@@ -564,6 +572,47 @@ def test_confirmation_only_p3_object_action_is_denied_without_grant():
     assert decision.grant is None
     assert decision.failure_class == "feishu_p3_requires_object_authority_evidence"
     assert decision.denial_reason_class == "feishu_p3_requires_object_authority_evidence"
+
+
+def test_issued_broker_policy_grant_creates_object_capability_context_only():
+    decision = _issue()
+    assert decision.grant is not None
+
+    with feishu_object_capability_context(decision.grant) as context:
+        allowed, reason = require_feishu_object_capability_context(
+            "tool",
+            "feishu_doc_read",
+        )
+
+        assert allowed is True
+        assert reason == ""
+        assert current_feishu_object_capability_context() == context
+        assert context.grant is decision.grant
+        assert context.object_capability_grant is decision.grant.object_capability_grant
+        assert current_feishu_broker_context() is None
+        assert require_feishu_broker_context("tool", "feishu_doc_read") == (
+            False,
+            "feishu_legacy_tool_requires_broker",
+        )
+
+    assert current_feishu_object_capability_context() is None
+
+
+def test_card_context_does_not_upgrade_confirmation_only_p3_to_object_authority():
+    with feishu_broker_context(
+        "broker_grant_handle:sha256:" + ("b" * 64),
+        action_id="broker_action:sha256:" + ("c" * 64),
+        contract_hash=_CONTRACT_HASH,
+        route_partition_key="route_snapshot:sha256:" + ("d" * 64),
+    ):
+        decision = _issue(
+            _request(action="delete", requested_scopes=("doc:delete",)),
+            {"fake_verified_object_acl": _fake_provider("explicit_user_confirmation")},
+        )
+
+        assert decision.grant is None
+        assert decision.failure_class == "feishu_p3_requires_object_authority_evidence"
+        assert current_feishu_object_capability_context() is None
 
 
 @pytest.mark.parametrize(
