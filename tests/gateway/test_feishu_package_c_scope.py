@@ -190,12 +190,62 @@ def test_hermes_feishu_toolset_alias_with_business_identifier_fails_closed():
     result = readiness.classify_feishu_package_c_scope(
         model_visible_identifiers=PACKAGE_B_MODEL_VISIBLE,
         toolset_aliases=inventory,
+        brokered_legacy_text_identifiers=inventory["feishu_doc"]
+        | inventory["feishu_drive"],
     )
 
     assert result.status == "not_ready"
     assert result.failure_class == "feishu_business_tool_surface_denied"
     assert result.blockers == (
         "feishu_business_tool_surface_denied:hermes-feishu:feishu.doc.read",
+    )
+
+
+@pytest.mark.parametrize(
+    ("alias", "identifier", "blocker"),
+    [
+        (
+            "feishu_future",
+            "feishu.calendar.event.create",
+            "feishu_business_tool_surface_denied:feishu_future:feishu.calendar.event.create",
+        ),
+        (
+            "feishu_future",
+            "feishu.future.unclassified",
+            "feishu_package_c_scope_creep:feishu_future:feishu.future.unclassified",
+        ),
+    ],
+)
+def test_non_legacy_toolset_aliases_fail_closed_for_feishu_business_or_unknown(
+    alias,
+    identifier,
+    blocker,
+):
+    result = readiness.classify_feishu_package_c_scope(
+        model_visible_identifiers=PACKAGE_B_MODEL_VISIBLE,
+        toolset_aliases={alias: {identifier}},
+        brokered_legacy_text_identifiers={
+            "feishu_doc_read",
+            "feishu_drive_reply_comment",
+        },
+    )
+
+    assert result.status == "not_ready"
+    assert result.failure_class == blocker.split(":", 1)[0]
+    assert result.blockers == (blocker,)
+
+
+def test_legacy_toolset_alias_requires_brokered_legacy_identifier_allowlist():
+    result = readiness.classify_feishu_package_c_scope(
+        model_visible_identifiers=PACKAGE_B_MODEL_VISIBLE,
+        toolset_aliases={"feishu_doc": {"feishu_doc_read", "feishu.doc.read"}},
+        brokered_legacy_text_identifiers={"feishu_doc_read"},
+    )
+
+    assert result.status == "not_ready"
+    assert result.failure_class == "feishu_business_tool_surface_denied"
+    assert result.blockers == (
+        "feishu_business_tool_surface_denied:feishu_doc:feishu.doc.read",
     )
 
 

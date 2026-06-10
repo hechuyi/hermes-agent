@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -244,6 +245,38 @@ def test_package_c_readiness_rejects_bad_provider_decision_audit(
     assert result.blockers[0].startswith(failure_class)
 
 
+def test_package_c_readiness_requires_decision_audit_for_every_required_provider_category():
+    result = readiness.classify_feishu_package_c_readiness(
+        _ready_evidence(
+            provider_decision_audit_events=(
+                _audit_event("verified_object_acl"),
+            )
+        )
+    )
+
+    assert result.status == "not_ready"
+    assert result.failure_class == "feishu_authorization_provider_decision_audit_incomplete"
+    assert result.blockers == (
+        "feishu_authorization_provider_decision_audit_incomplete:admin_policy_grant",
+    )
+
+
+def test_package_c_readiness_rejects_unknown_provider_decision_audit_source():
+    audit_events = tuple(
+        _audit_event(category) for category in REQUIRED_PROVIDER_CATEGORIES
+    ) + (_audit_event("future_live_provider"),)
+
+    result = readiness.classify_feishu_package_c_readiness(
+        _ready_evidence(provider_decision_audit_events=audit_events)
+    )
+
+    assert result.status == "not_ready"
+    assert result.failure_class == "feishu_authorization_provider_decision_audit_unknown"
+    assert result.blockers == (
+        "feishu_authorization_provider_decision_audit_unknown:future_live_provider",
+    )
+
+
 def test_package_c_broker_policy_foundation_classifies_required_fake_decisions():
     result = readiness.classify_feishu_package_c_readiness(_ready_evidence())
 
@@ -286,6 +319,40 @@ def test_package_c_broker_policy_rejects_app_discovery_and_confirmation_grants()
     assert result.blockers == ("feishu_broker_policy_denial_missing:app_token_only",)
 
 
+def test_package_c_broker_policy_rejects_duck_typed_object_authority_decision():
+    decisions = dict(_ready_evidence().broker_policy_decisions)
+    decisions["object_authority"] = SimpleNamespace(
+        grant=SimpleNamespace(object_capability_grant=object()),
+        failure_class=None,
+    )
+
+    result = readiness.classify_feishu_package_c_readiness(
+        _ready_evidence(broker_policy_decisions=decisions)
+    )
+
+    assert result.status == "not_ready"
+    assert result.failure_class == "feishu_broker_policy_foundation_missing"
+    assert result.blockers == (
+        "feishu_broker_policy_foundation_missing:object_authority",
+    )
+
+
+def test_package_c_broker_policy_rejects_duck_typed_denial_decision():
+    decisions = dict(_ready_evidence().broker_policy_decisions)
+    decisions["discovery_only"] = SimpleNamespace(
+        grant=None,
+        failure_class="feishu_discovery_only_denied",
+    )
+
+    result = readiness.classify_feishu_package_c_readiness(
+        _ready_evidence(broker_policy_decisions=decisions)
+    )
+
+    assert result.status == "not_ready"
+    assert result.failure_class == "feishu_broker_policy_denial_missing"
+    assert result.blockers == ("feishu_broker_policy_denial_missing:discovery_only",)
+
+
 def test_package_c_smoke_accepts_only_fake_and_system_test_provider_fixtures():
     fixture_cls = getattr(smoke, "PackageCSmokeFixture")
 
@@ -309,6 +376,39 @@ def test_package_c_smoke_accepts_only_fake_and_system_test_provider_fixtures():
     assert result.status == "pass"
     assert result.deploy_pass is True
     assert result.failure_class is None
+
+
+@pytest.mark.parametrize(
+    ("fixture_class", "provider_category"),
+    [
+        ("fake_provider", "future_live_provider"),
+        ("fake_provider", "app_token_only"),
+        ("system_test_provider", "verified_object_acl"),
+    ],
+)
+def test_package_c_smoke_fixture_category_must_match_package_c_provider_allowlist(
+    fixture_class,
+    provider_category,
+):
+    fixture_cls = getattr(smoke, "PackageCSmokeFixture")
+
+    result = smoke.classify_feishu_package_c_smoke_fixtures(
+        (
+            fixture_cls(
+                name="bad_fixture_category",
+                provider_category=provider_category,
+                fixture_class=fixture_class,
+                live_api_invocations=(),
+            ),
+        )
+    )
+
+    assert result.status == "fail"
+    assert result.deploy_pass is False
+    assert result.failure_class == "feishu_package_c_smoke_fixture_denied"
+    assert result.blockers == (
+        "feishu_package_c_smoke_fixture_denied:bad_fixture_category",
+    )
 
 
 @pytest.mark.parametrize(

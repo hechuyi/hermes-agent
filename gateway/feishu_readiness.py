@@ -51,6 +51,18 @@ FEISHU_PACKAGE_C_REQUIRED_PROVIDER_CATEGORIES = frozenset(
     }
 )
 
+FEISHU_PACKAGE_C_ALLOWED_PROVIDER_CATEGORIES = (
+    FEISHU_PACKAGE_C_REQUIRED_PROVIDER_CATEGORIES
+)
+
+FEISHU_PACKAGE_C_PROVIDER_DECISION_AUDIT_SOURCE_CLASSES = frozenset(
+    {
+        *FEISHU_PACKAGE_C_REQUIRED_PROVIDER_CATEGORIES,
+        "app_token_only",
+        "discovery_only",
+    }
+)
+
 FEISHU_PACKAGE_C_INTERNAL_IDENTIFIERS = frozenset(
     {
         "feishu.authorization.provider.registry",
@@ -104,6 +116,13 @@ _FEISHU_PACKAGE_C_OBJECT_AUTHORITY_PROVIDER_CATEGORIES = frozenset(
         "system_test_object",
         "user_delegated_credential",
         "verified_object_acl",
+    }
+)
+
+_FEISHU_PACKAGE_C_BROKERED_LEGACY_TEXT_TOOLSET_ALIASES = frozenset(
+    {
+        "feishu_doc",
+        "feishu_drive",
     }
 )
 
@@ -283,6 +302,7 @@ def classify_feishu_package_c_scope(
 
     blockers: list[str] = []
     model_visible = set(model_visible_identifiers)
+    brokered_legacy_text = set(brokered_legacy_text_identifiers)
 
     missing_model_visible = FEISHU_PACKAGE_B_MODEL_VISIBLE_CAPABILITIES - model_visible
     blockers.extend(
@@ -322,19 +342,22 @@ def classify_feishu_package_c_scope(
     for alias, identifiers in (toolset_aliases or {}).items():
         for identifier in sorted(set(identifiers)):
             identifier_class = classify_feishu_package_c_tool_identifier(identifier)
-            if alias == "hermes-feishu":
-                if identifier_class == "denied":
-                    blockers.append(
-                        f"feishu_business_tool_surface_denied:{alias}:{identifier}"
-                    )
-                elif identifier_class in {
-                    "package_b_adapter_only",
-                    "package_c_internal",
-                    "unknown",
-                }:
-                    blockers.append(f"feishu_package_c_scope_creep:{alias}:{identifier}")
-            elif identifier_class == "denied":
+            if (
+                alias in _FEISHU_PACKAGE_C_BROKERED_LEGACY_TEXT_TOOLSET_ALIASES
+                and identifier in brokered_legacy_text
+                and identifier_class == "denied"
+            ):
                 continue
+            if identifier_class == "denied":
+                blockers.append(
+                    f"feishu_business_tool_surface_denied:{alias}:{identifier}"
+                )
+            elif identifier_class in {
+                "package_b_adapter_only",
+                "package_c_internal",
+                "unknown",
+            }:
+                blockers.append(f"feishu_package_c_scope_creep:{alias}:{identifier}")
 
     blocker_tuple = tuple(_stable_unique(tuple(blockers)))
     if blocker_tuple:
@@ -362,7 +385,6 @@ def classify_feishu_package_c_readiness(
         f"feishu_authorization_provider_category_missing:{category}"
         for category in sorted(missing_categories)
     )
-
     if blockers:
         blocker_tuple = tuple(blockers)
         return FeishuReadinessResult(
@@ -509,15 +531,19 @@ def _package_c_provider_decision_audit_failure(
     if not audit_events:
         return "feishu_authorization_provider_decision_audit_missing"
 
-    saw_object_authority = False
+    audited_sources: set[str] = set()
     for event in audit_events:
         if event.get("type") != "feishu_authorization_provider_decision":
             return "feishu_authorization_provider_decision_audit_incomplete"
         source_class = _optional_string(event.get("evidence_source_class"))
         if source_class is None:
             return "feishu_authorization_provider_decision_audit_incomplete"
-        if source_class in _FEISHU_PACKAGE_C_OBJECT_AUTHORITY_PROVIDER_CATEGORIES:
-            saw_object_authority = True
+        if source_class not in FEISHU_PACKAGE_C_PROVIDER_DECISION_AUDIT_SOURCE_CLASSES:
+            return (
+                "feishu_authorization_provider_decision_audit_unknown:"
+                f"{source_class}"
+            )
+        audited_sources.add(source_class)
 
         reachability = _optional_string(event.get("provider_reachability_class"))
         credential_freshness = _optional_string(
@@ -543,14 +569,25 @@ def _package_c_provider_decision_audit_failure(
         if unsupported_scope != "none":
             return "feishu_provider_unsupported_scope"
 
-    if not saw_object_authority:
+    if not (
+        audited_sources & _FEISHU_PACKAGE_C_OBJECT_AUTHORITY_PROVIDER_CATEGORIES
+    ):
         return "feishu_object_authority_provider_decision_missing"
+    missing_audit_sources = FEISHU_PACKAGE_C_REQUIRED_PROVIDER_CATEGORIES - audited_sources
+    if missing_audit_sources:
+        return (
+            "feishu_authorization_provider_decision_audit_incomplete:"
+            f"{sorted(missing_audit_sources)[0]}"
+        )
     return None
 
 
 def _package_c_broker_policy_failure(
     decisions: Mapping[str, Any],
 ) -> str | None:
+    from gateway.feishu_broker_policy import BrokerPolicyDecision, BrokerPolicyGrant
+    from gateway.feishu_contracts import ObjectCapabilityGrant
+
     required_decisions = (
         "object_authority",
         "app_token_only",
@@ -563,16 +600,22 @@ def _package_c_broker_policy_failure(
 
     object_authority = decisions["object_authority"]
     if (
-        getattr(object_authority, "grant", None) is None
-        or getattr(object_authority, "failure_class", None) is not None
+        not isinstance(object_authority, BrokerPolicyDecision)
+        or not isinstance(object_authority.grant, BrokerPolicyGrant)
+        or not isinstance(
+            object_authority.grant.object_capability_grant,
+            ObjectCapabilityGrant,
+        )
+        or object_authority.failure_class is not None
     ):
         return "feishu_broker_policy_foundation_missing:object_authority"
 
     for key in ("app_token_only", "discovery_only", "confirmation_only"):
         decision = decisions[key]
         if (
-            getattr(decision, "grant", None) is not None
-            or getattr(decision, "failure_class", None) is None
+            not isinstance(decision, BrokerPolicyDecision)
+            or decision.grant is not None
+            or _optional_string(decision.failure_class) is None
         ):
             return f"feishu_broker_policy_denial_missing:{key}"
     return None

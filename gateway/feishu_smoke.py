@@ -92,8 +92,13 @@ def classify_feishu_package_c_smoke_fixtures(
         return _fail("feishu_package_c_smoke_fixture_missing")
 
     for fixture in fixtures:
-        if fixture.fixture_class not in {"fake_provider", "system_test_provider"}:
-            return _fail(f"feishu_package_c_smoke_fixture_denied:{fixture.name}")
+        if not _is_allowed_package_c_fixture_category(fixture):
+            return SmokeReadiness(
+                status="fail",
+                deploy_pass=False,
+                failure_class="feishu_package_c_smoke_fixture_denied",
+                blockers=(f"feishu_package_c_smoke_fixture_denied:{fixture.name}",),
+            )
         for identifier in fixture.live_api_invocations:
             if _is_feishu_live_business_invocation(identifier):
                 return SmokeReadiness(
@@ -106,6 +111,19 @@ def classify_feishu_package_c_smoke_fixtures(
                 )
 
     return SmokeReadiness(status="pass", deploy_pass=True, failure_class=None)
+
+
+def _is_allowed_package_c_fixture_category(fixture: PackageCSmokeFixture) -> bool:
+    try:
+        from gateway.feishu_readiness import FEISHU_PACKAGE_C_ALLOWED_PROVIDER_CATEGORIES
+    except Exception:
+        return False
+
+    if fixture.fixture_class == "fake_provider":
+        return fixture.provider_category in FEISHU_PACKAGE_C_ALLOWED_PROVIDER_CATEGORIES
+    if fixture.fixture_class == "system_test_provider":
+        return fixture.provider_category == "system_test_object"
+    return False
 
 
 def _identity_mismatch(
