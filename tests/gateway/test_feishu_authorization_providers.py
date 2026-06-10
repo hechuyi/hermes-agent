@@ -539,6 +539,30 @@ def test_fake_provider_explicit_user_confirmation_is_confirmation_not_object_aut
     assert result.decision.extra_metadata["object_authority"] is False
 
 
+@pytest.mark.parametrize(
+    ("provider_id", "object_ref"),
+    [
+        ("fake_system_test_object", _OBJECT_REF),
+        ("fake_object_provider", _SYSTEM_TEST_OBJECT_REF),
+    ],
+)
+def test_fake_provider_cannot_issue_system_test_provider_evidence_for_non_test_authority(
+    provider_id,
+    object_ref,
+):
+    provider = _fake_provider(
+        "system_test_object",
+        provider_id=provider_id,
+        object_ref=object_ref,
+    )
+
+    result = provider.authorize(_fake_provider_request(object_ref=object_ref))
+
+    assert result.is_denial is True
+    assert result.evidence is None
+    assert result.failure_class == "feishu_provider_unsupported_provider"
+
+
 def test_system_test_provider_grants_only_system_test_object_refs_and_test_provider_ids():
     provider = provider_module.SystemTestAuthorizationProvider(
         provider_id="system_test_object_provider",

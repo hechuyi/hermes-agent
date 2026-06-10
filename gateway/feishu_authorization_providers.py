@@ -585,6 +585,8 @@ class FakeAuthorizationProvider:
             )
         if self.evidence_source_class not in _FAKE_PROVIDER_SOURCE_CLASSES:
             return self._deny(request, "feishu_provider_unsupported_provider")
+        if self.evidence_source_class == "system_test_object":
+            return self._deny(request, "feishu_provider_unsupported_provider")
         state_failure = self._state_failure()
         if state_failure is not None:
             return self._deny(request, state_failure)
