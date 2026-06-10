@@ -41,6 +41,14 @@ class SmokeReadiness:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class PackageCSmokeFixture:
+    name: str
+    provider_category: str
+    fixture_class: str
+    live_api_invocations: tuple[str, ...] = ()
+
+
 def classify_smoke_evidence(
     evidence: SmokeEvidence | None,
     current_identity: SmokeIdentity,
@@ -75,6 +83,29 @@ def classify_smoke_evidence(
         return _fail(evidence.failure_class or "feishu_smoke_failed")
 
     return _fail("feishu_smoke_unknown")
+
+
+def classify_feishu_package_c_smoke_fixtures(
+    fixtures: tuple[PackageCSmokeFixture, ...],
+) -> SmokeReadiness:
+    if not fixtures:
+        return _fail("feishu_package_c_smoke_fixture_missing")
+
+    for fixture in fixtures:
+        if fixture.fixture_class not in {"fake_provider", "system_test_provider"}:
+            return _fail(f"feishu_package_c_smoke_fixture_denied:{fixture.name}")
+        for identifier in fixture.live_api_invocations:
+            if _is_feishu_live_business_invocation(identifier):
+                return SmokeReadiness(
+                    status="fail",
+                    deploy_pass=False,
+                    failure_class="feishu_package_c_live_api_invocation_denied",
+                    blockers=(
+                        f"feishu_package_c_live_api_invocation_denied:{identifier}",
+                    ),
+                )
+
+    return SmokeReadiness(status="pass", deploy_pass=True, failure_class=None)
 
 
 def _identity_mismatch(
@@ -117,6 +148,16 @@ def _identity_mismatch(
         if observed != current:
             return failure_class
     return None
+
+
+def _is_feishu_live_business_invocation(identifier: str) -> bool:
+    try:
+        from gateway.feishu_readiness import classify_feishu_package_c_tool_identifier
+    except Exception:
+        return identifier.startswith("feishu")
+
+    identifier_class = classify_feishu_package_c_tool_identifier(identifier)
+    return identifier_class in {"denied", "unknown"}
 
 
 def _is_stale(evidence: SmokeEvidence, now: datetime) -> bool:

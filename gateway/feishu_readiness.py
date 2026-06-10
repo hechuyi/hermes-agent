@@ -1,4 +1,4 @@
-"""Pure Feishu Package A/B readiness classification primitives."""
+"""Pure Feishu Package A/B/C readiness classification primitives."""
 
 from __future__ import annotations
 
@@ -40,6 +40,28 @@ FEISHU_PACKAGE_B_ADAPTER_ONLY_CAPABILITIES = frozenset(
     }
 )
 
+FEISHU_PACKAGE_C_REQUIRED_PROVIDER_CATEGORIES = frozenset(
+    {
+        "user_delegated_credential",
+        "verified_object_acl",
+        "admin_policy_grant",
+        "app_owned_object",
+        "system_test_object",
+        "explicit_user_confirmation",
+    }
+)
+
+FEISHU_PACKAGE_C_INTERNAL_IDENTIFIERS = frozenset(
+    {
+        "feishu.authorization.provider.registry",
+        "feishu.authorization.provider.decision_audit",
+        "feishu.broker.policy.object_capability",
+        "feishu.package_c.readiness",
+        "feishu.package_c.scope.audit",
+        "feishu.package_c.smoke.fixture",
+    }
+)
+
 _FEISHU_PACKAGE_B_DENIED_IDENTIFIERS = frozenset(
     {
         "feishu_doc_read",
@@ -51,11 +73,17 @@ _FEISHU_PACKAGE_B_DENIED_IDENTIFIERS = frozenset(
 )
 
 _FEISHU_PACKAGE_B_DENIED_PREFIXES = (
+    "feishu_drive_",
+    "feishu.doc.",
+    "feishu.docs.",
+    "feishu.document.",
     "feishu.calendar.",
     "feishu.task.",
     "feishu.approval.",
     "feishu.base.",
     "feishu.sheets.",
+    "feishu.search.",
+    "feishu.contact.",
     "feishu.drive.",
     "feishu.wiki.",
     "feishu.cross_chat.",
@@ -69,9 +97,28 @@ _FEISHU_PACKAGE_B_DENIED_PREFIXES = (
     "feishu.reaction.",
 )
 
+_FEISHU_PACKAGE_C_OBJECT_AUTHORITY_PROVIDER_CATEGORIES = frozenset(
+    {
+        "admin_policy_grant",
+        "app_owned_object",
+        "system_test_object",
+        "user_delegated_credential",
+        "verified_object_acl",
+    }
+)
+
 FeishuPackageBToolClass = Literal[
     "model_visible",
     "adapter_only",
+    "denied",
+    "unknown",
+    "non_feishu",
+]
+
+FeishuPackageCToolClass = Literal[
+    "package_b_model_visible",
+    "package_b_adapter_only",
+    "package_c_internal",
     "denied",
     "unknown",
     "non_feishu",
@@ -102,6 +149,43 @@ class FeishuReadinessResult:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class FeishuPackageCReadinessEvidence:
+    provider_registry_present: bool
+    provider_categories: tuple[str, ...]
+    provider_decision_audit_events: tuple[Mapping[str, Any], ...]
+    broker_policy_decisions: Mapping[str, Any]
+
+    def __init__(
+        self,
+        *,
+        provider_registry_present: bool,
+        provider_categories: Iterable[str],
+        provider_decision_audit_events: Iterable[Mapping[str, Any]],
+        broker_policy_decisions: Mapping[str, Any],
+    ) -> None:
+        object.__setattr__(
+            self,
+            "provider_registry_present",
+            bool(provider_registry_present),
+        )
+        object.__setattr__(
+            self,
+            "provider_categories",
+            tuple(str(category) for category in provider_categories),
+        )
+        object.__setattr__(
+            self,
+            "provider_decision_audit_events",
+            tuple(provider_decision_audit_events),
+        )
+        object.__setattr__(
+            self,
+            "broker_policy_decisions",
+            dict(broker_policy_decisions),
+        )
+
+
 def feishu_package_b_model_visible_capabilities() -> tuple[str, ...]:
     """Return the exact Package B capability identifiers visible to the model."""
 
@@ -117,6 +201,26 @@ def classify_feishu_package_b_tool_identifier(
         return "model_visible"
     if identifier in FEISHU_PACKAGE_B_ADAPTER_ONLY_CAPABILITIES:
         return "adapter_only"
+    if identifier in _FEISHU_PACKAGE_B_DENIED_IDENTIFIERS:
+        return "denied"
+    if any(identifier.startswith(prefix) for prefix in _FEISHU_PACKAGE_B_DENIED_PREFIXES):
+        return "denied"
+    if identifier.startswith("feishu"):
+        return "unknown"
+    return "non_feishu"
+
+
+def classify_feishu_package_c_tool_identifier(
+    identifier: str,
+) -> FeishuPackageCToolClass:
+    """Classify Feishu identifiers for Package C readiness/scope gates."""
+
+    if identifier in FEISHU_PACKAGE_B_MODEL_VISIBLE_CAPABILITIES:
+        return "package_b_model_visible"
+    if identifier in FEISHU_PACKAGE_B_ADAPTER_ONLY_CAPABILITIES:
+        return "package_b_adapter_only"
+    if identifier in FEISHU_PACKAGE_C_INTERNAL_IDENTIFIERS:
+        return "package_c_internal"
     if identifier in _FEISHU_PACKAGE_B_DENIED_IDENTIFIERS:
         return "denied"
     if any(identifier.startswith(prefix) for prefix in _FEISHU_PACKAGE_B_DENIED_PREFIXES):
@@ -164,6 +268,129 @@ def classify_feishu_package_b_tool_scope(
             failure_class=_base_failure_class(blocker_tuple[0]),
             blockers=blocker_tuple,
         )
+    return FeishuReadinessResult(status="ready", failure_class=None)
+
+
+def classify_feishu_package_c_scope(
+    *,
+    model_visible_identifiers: Iterable[str],
+    adapter_invoked_identifiers: Iterable[str] = (),
+    quiet_mode_cache_identifiers: Iterable[str] = (),
+    toolset_aliases: Mapping[str, Iterable[str]] | None = None,
+    brokered_legacy_text_identifiers: Iterable[str] = (),
+) -> FeishuReadinessResult:
+    """Fail closed if Package C exposes Package D-G business surfaces."""
+
+    blockers: list[str] = []
+    model_visible = set(model_visible_identifiers)
+
+    missing_model_visible = FEISHU_PACKAGE_B_MODEL_VISIBLE_CAPABILITIES - model_visible
+    blockers.extend(
+        f"feishu_package_c_scope_creep:{identifier}"
+        for identifier in sorted(missing_model_visible)
+    )
+
+    for identifier in sorted(model_visible):
+        identifier_class = classify_feishu_package_c_tool_identifier(identifier)
+        if identifier_class == "denied":
+            blockers.append(f"feishu_business_tool_surface_denied:{identifier}")
+        elif identifier_class in {
+            "package_b_adapter_only",
+            "package_c_internal",
+            "unknown",
+        }:
+            blockers.append(f"feishu_package_c_scope_creep:{identifier}")
+
+    for identifier in sorted(set(adapter_invoked_identifiers)):
+        identifier_class = classify_feishu_package_c_tool_identifier(identifier)
+        if identifier_class == "denied":
+            blockers.append(f"feishu_business_tool_surface_denied:{identifier}")
+        elif identifier_class == "unknown":
+            blockers.append(f"feishu_package_c_scope_creep:{identifier}")
+
+    for identifier in sorted(set(quiet_mode_cache_identifiers)):
+        identifier_class = classify_feishu_package_c_tool_identifier(identifier)
+        if identifier_class == "denied":
+            blockers.append(f"feishu_business_tool_surface_denied:{identifier}")
+        elif identifier_class in {
+            "package_b_adapter_only",
+            "package_c_internal",
+            "unknown",
+        }:
+            blockers.append(f"feishu_package_c_scope_creep:{identifier}")
+
+    for alias, identifiers in (toolset_aliases or {}).items():
+        for identifier in sorted(set(identifiers)):
+            identifier_class = classify_feishu_package_c_tool_identifier(identifier)
+            if alias == "hermes-feishu":
+                if identifier_class == "denied":
+                    blockers.append(
+                        f"feishu_business_tool_surface_denied:{alias}:{identifier}"
+                    )
+                elif identifier_class in {
+                    "package_b_adapter_only",
+                    "package_c_internal",
+                    "unknown",
+                }:
+                    blockers.append(f"feishu_package_c_scope_creep:{alias}:{identifier}")
+            elif identifier_class == "denied":
+                continue
+
+    blocker_tuple = tuple(_stable_unique(tuple(blockers)))
+    if blocker_tuple:
+        return FeishuReadinessResult(
+            status="not_ready",
+            failure_class=_base_failure_class(blocker_tuple[0]),
+            blockers=blocker_tuple,
+        )
+    return FeishuReadinessResult(status="ready", failure_class=None)
+
+
+def classify_feishu_package_c_readiness(
+    evidence: FeishuPackageCReadinessEvidence,
+) -> FeishuReadinessResult:
+    blockers: list[str] = []
+
+    if not evidence.provider_registry_present:
+        blockers.append("feishu_authorization_provider_missing")
+
+    missing_categories = (
+        FEISHU_PACKAGE_C_REQUIRED_PROVIDER_CATEGORIES
+        - set(evidence.provider_categories)
+    )
+    blockers.extend(
+        f"feishu_authorization_provider_category_missing:{category}"
+        for category in sorted(missing_categories)
+    )
+
+    if blockers:
+        blocker_tuple = tuple(blockers)
+        return FeishuReadinessResult(
+            status="not_ready",
+            failure_class=_base_failure_class(blocker_tuple[0]),
+            blockers=blocker_tuple,
+        )
+
+    audit_failure = _package_c_provider_decision_audit_failure(
+        evidence.provider_decision_audit_events
+    )
+    if audit_failure is not None:
+        return FeishuReadinessResult(
+            status="not_ready",
+            failure_class=_base_failure_class(audit_failure),
+            blockers=(audit_failure,),
+        )
+
+    broker_failure = _package_c_broker_policy_failure(
+        evidence.broker_policy_decisions
+    )
+    if broker_failure is not None:
+        return FeishuReadinessResult(
+            status="not_ready",
+            failure_class=_base_failure_class(broker_failure),
+            blockers=(broker_failure,),
+        )
+
     return FeishuReadinessResult(status="ready", failure_class=None)
 
 
@@ -274,6 +501,81 @@ def summarize_feishu_audit_readiness(
         checked_legacy_surfaces=checked_legacy_surfaces,
         denial_audit_available=denial_audit_available,
     )
+
+
+def _package_c_provider_decision_audit_failure(
+    audit_events: tuple[Mapping[str, Any], ...],
+) -> str | None:
+    if not audit_events:
+        return "feishu_authorization_provider_decision_audit_missing"
+
+    saw_object_authority = False
+    for event in audit_events:
+        if event.get("type") != "feishu_authorization_provider_decision":
+            return "feishu_authorization_provider_decision_audit_incomplete"
+        source_class = _optional_string(event.get("evidence_source_class"))
+        if source_class is None:
+            return "feishu_authorization_provider_decision_audit_incomplete"
+        if source_class in _FEISHU_PACKAGE_C_OBJECT_AUTHORITY_PROVIDER_CATEGORIES:
+            saw_object_authority = True
+
+        reachability = _optional_string(event.get("provider_reachability_class"))
+        credential_freshness = _optional_string(
+            event.get("credential_freshness_class")
+        )
+        acl_completeness = _optional_string(event.get("acl_completeness_class"))
+        unsupported_scope = _optional_string(event.get("unsupported_scope_status"))
+
+        if reachability is None or credential_freshness is None:
+            return "feishu_authorization_provider_decision_audit_incomplete"
+        if acl_completeness is None or unsupported_scope is None:
+            return "feishu_authorization_provider_decision_audit_incomplete"
+        if reachability != "reachable":
+            return "feishu_provider_sdk_unreachable"
+        if credential_freshness == "stale":
+            return "feishu_provider_stale_credential"
+        if credential_freshness == "revoked":
+            return "feishu_provider_revoked_credential"
+        if credential_freshness != "fresh":
+            return "feishu_provider_credential_unknown"
+        if acl_completeness != "complete":
+            return "feishu_provider_acl_incomplete"
+        if unsupported_scope != "none":
+            return "feishu_provider_unsupported_scope"
+
+    if not saw_object_authority:
+        return "feishu_object_authority_provider_decision_missing"
+    return None
+
+
+def _package_c_broker_policy_failure(
+    decisions: Mapping[str, Any],
+) -> str | None:
+    required_decisions = (
+        "object_authority",
+        "app_token_only",
+        "discovery_only",
+        "confirmation_only",
+    )
+    for key in required_decisions:
+        if key not in decisions:
+            return f"feishu_broker_policy_foundation_missing:{key}"
+
+    object_authority = decisions["object_authority"]
+    if (
+        getattr(object_authority, "grant", None) is None
+        or getattr(object_authority, "failure_class", None) is not None
+    ):
+        return "feishu_broker_policy_foundation_missing:object_authority"
+
+    for key in ("app_token_only", "discovery_only", "confirmation_only"):
+        decision = decisions[key]
+        if (
+            getattr(decision, "grant", None) is not None
+            or getattr(decision, "failure_class", None) is None
+        ):
+            return f"feishu_broker_policy_denial_missing:{key}"
+    return None
 
 
 def _route_snapshot_mismatch(evidence: FeishuReadinessEvidence) -> bool:
