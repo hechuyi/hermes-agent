@@ -385,6 +385,73 @@ def test_provider_contract_rejects_arbitrary_failure_classes(failure_class):
         )
 
 
+@pytest.mark.parametrize(
+    "failure_class",
+    [
+        "feishu_provider_tenant_access_token_secret",
+        "feishu_provider_ou_1234567890abcdef",
+    ],
+)
+def test_provider_failure_denial_failure_class_rejects_sensitive_classifier_fragments(
+    failure_class,
+):
+    with pytest.raises(AuthorizationProviderError):
+        _provider_decision(
+            evidence_source_class="none",
+            reachability_state="unreachable",
+            issued_at=None,
+            expires_at=None,
+            freshness_class="unknown",
+            credential_freshness="unknown",
+            acl_complete=False,
+            denial_failure_class=failure_class,
+        )
+
+
+@pytest.mark.parametrize(
+    "failure_class",
+    [
+        "feishu_provider_tenant_access_token_secret",
+        "feishu_provider_ou_1234567890abcdef",
+    ],
+)
+def test_provider_failure_result_failure_class_rejects_sensitive_classifier_fragments(
+    failure_class,
+):
+    decision = _provider_decision(
+        evidence_source_class="none",
+        reachability_state="unreachable",
+        issued_at=None,
+        expires_at=None,
+        freshness_class="unknown",
+        credential_freshness="unknown",
+        acl_complete=False,
+        denial_failure_class="feishu_provider_sdk_unreachable",
+    )
+    object.__setattr__(decision, "denial_failure_class", failure_class)
+
+    with pytest.raises(AuthorizationProviderError):
+        AuthorizationProviderResult(
+            evidence=None,
+            decision=decision,
+            failure_class=failure_class,
+        )
+
+
+@pytest.mark.parametrize(
+    "failure_class",
+    [
+        "feishu_provider_tenant_access_token_secret",
+        "feishu_provider_ou_1234567890abcdef",
+    ],
+)
+def test_provider_failure_extra_metadata_failure_class_rejects_sensitive_classifier_fragments(
+    failure_class,
+):
+    with pytest.raises(AuthorizationProviderError):
+        _provider_decision(extra_metadata={"failure_class": failure_class})
+
+
 def test_provider_contract_allows_stable_package_c_failure_class():
     decision = _provider_decision(
         evidence_source_class="none",
@@ -560,7 +627,7 @@ def test_fake_provider_cannot_issue_system_test_provider_evidence_for_non_test_a
 
     assert result.is_denial is True
     assert result.evidence is None
-    assert result.failure_class == "feishu_provider_unsupported_provider"
+    assert result.failure_class == "feishu_provider_unsupported"
 
 
 def test_system_test_provider_grants_only_system_test_object_refs_and_test_provider_ids():
@@ -582,7 +649,7 @@ def test_system_test_provider_grants_only_system_test_object_refs_and_test_provi
 
     non_test_object = provider.authorize(_fake_provider_request())
     assert non_test_object.is_denial is True
-    assert non_test_object.failure_class == "feishu_provider_unsupported_provider"
+    assert non_test_object.failure_class == "feishu_provider_unsupported"
 
     non_test_provider = provider_module.SystemTestAuthorizationProvider(
         provider_id="fake_object_provider",
@@ -595,7 +662,7 @@ def test_system_test_provider_grants_only_system_test_object_refs_and_test_provi
         _fake_provider_request(object_ref=_SYSTEM_TEST_OBJECT_REF)
     )
     assert denied.is_denial is True
-    assert denied.failure_class == "feishu_provider_unsupported_provider"
+    assert denied.failure_class == "feishu_provider_unsupported"
 
 
 @pytest.mark.parametrize(
@@ -634,7 +701,7 @@ def test_fake_provider_non_object_authority_states_are_explicitly_typed(
         ({"app_token_available": False}, "feishu_provider_app_token_unavailable"),
         ({"credential_freshness": "stale"}, "feishu_provider_stale_credential"),
         ({"credential_freshness": "revoked"}, "feishu_provider_revoked_credential"),
-        ({"evidence_source_class": "unsupported_provider"}, "feishu_provider_unsupported_provider"),
+        ({"evidence_source_class": "unsupported_provider"}, "feishu_provider_unsupported"),
     ],
 )
 def test_provider_failure_states_fail_closed_with_stable_failure_classes(

@@ -115,17 +115,20 @@ _FRESHNESS_CLASSES = frozenset({"current", "stale", "revoked", "unknown"})
 _REACHABILITY_STATES = frozenset({"reachable", "unreachable", "unknown"})
 _FAKE_PROVIDER_ISSUED_AT = "2026-06-10T00:00:00Z"
 _FAKE_PROVIDER_EXPIRES_AT = "2026-06-10T00:05:00Z"
-_STABLE_FAILURE_CLASS_PREFIXES = (
-    "feishu_provider_",
-    "feishu_authorization_",
-    "feishu_object_authority_",
-    "feishu_contract_",
-    "feishu_route_",
-    "feishu_p3_",
-    "invalid_feishu_",
-)
 _STABLE_FAILURE_CLASS_VALUES = frozenset(
     {
+        "feishu_provider_acl_incomplete",
+        "feishu_provider_app_token_unavailable",
+        "feishu_provider_authority_mismatch",
+        "feishu_provider_credential_unknown",
+        "feishu_provider_non_grantable_state",
+        "feishu_provider_revoked_credential",
+        "feishu_provider_sdk_unreachable",
+        "feishu_provider_stale_credential",
+        "feishu_provider_unavailable",
+        "feishu_provider_unsupported",
+        "feishu_provider_unsupported_scope",
+        "feishu_provider_user_owned_object",
         "invalid_hashed_sensitive_ref",
         "sensitive_raw_field",
     }
@@ -584,9 +587,9 @@ class FakeAuthorizationProvider:
                 failure_class="invalid_feishu_authorization_provider_request",
             )
         if self.evidence_source_class not in _FAKE_PROVIDER_SOURCE_CLASSES:
-            return self._deny(request, "feishu_provider_unsupported_provider")
+            return self._deny(request, "feishu_provider_unsupported")
         if self.evidence_source_class == "system_test_object":
-            return self._deny(request, "feishu_provider_unsupported_provider")
+            return self._deny(request, "feishu_provider_unsupported")
         state_failure = self._state_failure()
         if state_failure is not None:
             return self._deny(request, state_failure)
@@ -744,11 +747,11 @@ class SystemTestAuthorizationProvider:
                 failure_class="invalid_feishu_authorization_provider_request",
             )
         if not self.provider_id.startswith("system_test_"):
-            return self._deny(request, "feishu_provider_unsupported_provider")
+            return self._deny(request, "feishu_provider_unsupported")
         if request.object_ref.kind != "feishu_system_test_object":
-            return self._deny(request, "feishu_provider_unsupported_provider")
+            return self._deny(request, "feishu_provider_unsupported")
         if request.object_ref != self.object_ref:
-            return self._deny(request, "feishu_provider_unsupported_provider")
+            return self._deny(request, "feishu_provider_unsupported")
         unsupported_scope = self._unsupported_scope(request)
         if unsupported_scope is not None:
             return self._deny(
@@ -1157,13 +1160,10 @@ def _require_stable_failure_class(
             f"{field_name} must be a stable failure classifier",
             failure_class=failure_class,
         )
-    if (
-        normalized in _STABLE_FAILURE_CLASS_VALUES
-        or normalized.startswith(_STABLE_FAILURE_CLASS_PREFIXES)
-    ):
+    if normalized in _STABLE_FAILURE_CLASS_VALUES:
         return normalized
     raise AuthorizationProviderError(
-        f"{field_name} must use a stable Feishu failure namespace",
+        f"{field_name} must be a registered stable failure class",
         failure_class=failure_class,
     )
 
