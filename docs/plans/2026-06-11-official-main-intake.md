@@ -3,7 +3,7 @@
 > Date: 2026-06-11
 > Working branch: `fix/live-gateway-hermes-tools`
 > Local fork main: `origin/main` at `5921d667855880b0aa2083a50f001748aed52f3e`
-> Official main ref: `upstream/main` at `93a2f680fd18f08f70eaf5c96944cdf4dc477143`
+> Official main ref: `upstream/main` at `08b1c44a5330cb690a26a5e1983ff7719ec4439c`
 > Deployed fork head at intake start: `38144944bde7fd5e16051a4e8f739b9e417121ae`
 
 ## Scope
@@ -36,10 +36,10 @@ Initial results:
 
 Current refresh after the 2026-06-12 intake continuation:
 
-- `upstream/main`: `93a2f680fd18f08f70eaf5c96944cdf4dc477143`
-- `origin/main..upstream/main`: 1288 commits
-- `HEAD..upstream/main`: 1553 commits
-- `HEAD...upstream/main` right-only after patch-equivalence filtering: 1509 commits
+- `upstream/main`: `08b1c44a5330cb690a26a5e1983ff7719ec4439c`
+- `origin/main..upstream/main`: 1295 commits
+- `HEAD..upstream/main`: 1560 commits
+- `HEAD...upstream/main` right-only after patch-equivalence filtering: 1516 commits
 
 Continuation refresh:
 
@@ -49,6 +49,9 @@ Continuation refresh:
 - A later refresh advanced `upstream/main` from
   `e71d746820bf262214e4e1887683d3f65d211cc1` to
   `93a2f680fd18f08f70eaf5c96944cdf4dc477143`.
+- A further refresh advanced `upstream/main` from
+  `93a2f680fd18f08f70eaf5c96944cdf4dc477143` to
+  `08b1c44a5330cb690a26a5e1983ff7719ec4439c`.
 - A follow-up read-only subagent review was dispatched for
   `4d22b8293374fd9eaeac75e1f607b20ddea3a1b3..upstream/main`.
 
@@ -401,9 +404,61 @@ Verification:
 - `uv run ruff check hermes_state.py hermes_cli/main.py hermes_cli/doctor.py tests/test_state_db_malformed_repair.py`:
   passed.
 
+### 2026-06-12 — Attachment Guidance, Web Build, And Discord Cleanup
+
+Reviewed upstream increment:
+
+- `93a2f680fd18f08f70eaf5c96944cdf4dc477143..08b1c44a5330cb690a26a5e1983ff7719ec4439c`
+
+Absorbed semantics:
+
+- `e7ae145ac` and `4e9be3ee3` — document attachment context now tells the
+  agent to extract text from binary documents such as PDF/DOCX before
+  answering, instead of asking the user to paste the contents. The fork-local
+  wording avoids upstream-specific skill names and preserves the existing
+  agent-visible cache path handling.
+- `13650ab7f` — audio-file attachment context now tells the agent to
+  transcribe/process the saved file when the request concerns the audio
+  contents, instead of steering it into asking the user what to do.
+- `ce99a8112` — deterministic web UI npm installs now set `CI=1` so
+  postinstall hooks that write directly to `/dev/tty` do not pollute or wedge
+  non-interactive builds. This was hand-ported because the fork-local helper
+  signature differs from upstream.
+- `020ef76cf` and `08b1c44a5` — Discord adapter startup failure paths now
+  cancel and await the background bot task on ready-timeout, generic
+  connection failure, and disconnect. This prevents a discarded Discord client
+  from later connecting and processing duplicate inbound events.
+
+Fork-local review notes:
+
+- Feishu remains on its existing websocket-thread lifecycle. The Discord
+  zombie-client pattern was not applied to Feishu because Feishu `connect()`
+  does not create an adapter-owned `client.start()` task and then wait for a
+  ready event; disconnect already disables websocket auto-reconnect, cancels
+  tasks on the websocket thread loop, and waits for the executor future.
+- No model catalog, default model, model visibility, or model steering changes
+  were absorbed.
+- The desktop DnD dependency/hash change from `743c55efa` remains deferred.
+
+Verification:
+
+- `uv run pytest -q tests/gateway/test_document_context_note.py tests/gateway/test_telegram_audio_vs_voice.py tests/hermes_cli/test_web_ui_build.py`:
+  `30 passed`.
+- `uv run pytest -q tests/gateway/test_discord_connect.py tests/gateway/test_document_context_note.py tests/gateway/test_telegram_audio_vs_voice.py tests/hermes_cli/test_web_ui_build.py`:
+  `48 passed`.
+- `uv run ruff check gateway/run.py hermes_cli/main.py tests/gateway/test_document_context_note.py tests/gateway/test_telegram_audio_vs_voice.py tests/hermes_cli/test_web_ui_build.py`:
+  passed.
+- `uv run python -m py_compile gateway/run.py hermes_cli/main.py tests/gateway/test_document_context_note.py tests/gateway/test_telegram_audio_vs_voice.py tests/hermes_cli/test_web_ui_build.py`:
+  passed.
+- `uv run ruff check plugins/platforms/discord/adapter.py tests/gateway/test_discord_connect.py`:
+  passed.
+- `uv run python -m py_compile plugins/platforms/discord/adapter.py tests/gateway/test_discord_connect.py`:
+  passed.
+
 ## Remaining Deferred Or Skipped Upstream Areas
 
-No unconditional P0/P1 remains from the reviewed `e71d7468..93a2f680f`
+No unconditional P0/P1 remains from the reviewed
+`e71d746820bf262214e4e1887683d3f65d211cc1..08b1c44a5330cb690a26a5e1983ff7719ec4439c`
 increment. Deferred areas remain intentionally unmerged:
 
 - model catalog/default/picker/visibility and model steering changes, including
@@ -412,7 +467,7 @@ increment. Deferred areas remain intentionally unmerged:
   model-policy review.
 - desktop remote filesystem APIs and desktop UI fixes (`51f47f9a9`,
   `db79e9013`, `8878484f8`, `56a0f48ba`, `9121834b3`, `8505e9d66`,
-  `93a2f680f`).
+  `93a2f680f`, `743c55efa`).
 - cron/automation blueprint feature stack (`9a09ea69f`, `1593ca540`,
   `e976faac7`, `e8b757845`, `cb29e8a82`).
 - broad dashboard/profile management and SKILL.md editor surfaces
