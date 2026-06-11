@@ -36,6 +36,8 @@ def _isolated_cwd(tmp_path, monkeypatch):
         previous_activity = dict(terminal_tool._last_activity)
         terminal_tool._active_environments.clear()
         terminal_tool._last_activity.clear()
+    previous_overrides = dict(terminal_tool._task_env_overrides)
+    terminal_tool._task_env_overrides.clear()
     monkeypatch.setattr(
         ft,
         "_SENSITIVE_PATH_PREFIXES",
@@ -63,6 +65,8 @@ def _isolated_cwd(tmp_path, monkeypatch):
             terminal_tool._active_environments.update(previous_envs)
             terminal_tool._last_activity.clear()
             terminal_tool._last_activity.update(previous_activity)
+        terminal_tool._task_env_overrides.clear()
+        terminal_tool._task_env_overrides.update(previous_overrides)
 
 
 def test_relative_terminal_cwd_anchors_to_absolute_not_process_cwd(_isolated_cwd, monkeypatch):
@@ -316,3 +320,42 @@ def test_patch_reports_resolved_absolute_path(_isolated_cwd, monkeypatch):
     assert "WORKSPACE_PATCHED" in (workspace / "target.py").read_text()
     # And the decoy copy is untouched.
     assert (decoy / "target.py").read_text() == "DECOY_ORIGINAL\n"
+
+
+def test_file_ops_creation_reads_raw_task_cwd_override(_isolated_cwd, monkeypatch):
+    """A CWD-only session override collapses to the shared container but must
+    still seed the first file-tool environment from the raw session task id.
+    """
+    workspace, decoy = _isolated_cwd
+    from tools import terminal_tool
+
+    terminal_tool.register_task_env_overrides("session-key", {"cwd": str(workspace)})
+    monkeypatch.setattr(
+        terminal_tool,
+        "_get_env_config",
+        lambda: {
+            "env_type": "local",
+            "cwd": str(decoy),
+            "timeout": 30,
+        },
+    )
+    created: dict[str, str] = {}
+
+    def fake_create_environment(**kwargs):
+        created.update(kwargs)
+
+        class _Env:
+            cwd = kwargs["cwd"]
+
+            def execute(self, *_args, **_kwargs):
+                return {"stdout": "", "stderr": "", "exit_code": 0, "cwd": self.cwd}
+
+        return _Env()
+
+    monkeypatch.setattr(terminal_tool, "_create_environment", fake_create_environment)
+    monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
+
+    ft._get_file_ops("session-key")
+
+    assert created["task_id"] == "default"
+    assert created["cwd"] == str(workspace)

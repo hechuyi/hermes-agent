@@ -112,6 +112,110 @@ def test_tui_verbose_tool_events_omit_details_when_redaction_fails(monkeypatch):
     assert "result_text" not in events[1][2]
 
 
+def _write_profile_cfg(home: Path, cwd: str | None) -> Path:
+    import yaml
+
+    home.mkdir(parents=True, exist_ok=True)
+    cfg = {"terminal": {"cwd": cwd}} if cwd is not None else {}
+    (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return home
+
+
+def test_profile_configured_cwd_reads_target_profile(tmp_path):
+    project = tmp_path / "proj"
+    project.mkdir()
+    home = _write_profile_cfg(tmp_path / "home", str(project))
+
+    assert server._profile_configured_cwd(home) == str(project)
+
+
+def test_profile_configured_cwd_skips_placeholders_and_missing(tmp_path):
+    assert server._profile_configured_cwd(None) is None
+    assert server._profile_configured_cwd(tmp_path / "nope") is None
+    for placeholder in (".", "auto", "cwd", ""):
+        home = _write_profile_cfg(tmp_path / placeholder.strip("."), placeholder)
+        assert server._profile_configured_cwd(home) is None
+    home = _write_profile_cfg(tmp_path / "ghost", str(tmp_path / "missing"))
+    assert server._profile_configured_cwd(home) is None
+
+
+def test_completion_cwd_prefers_profile_over_stale_env(monkeypatch, tmp_path):
+    profile_project = tmp_path / "profile-project"
+    profile_project.mkdir()
+    profile_home = _write_profile_cfg(tmp_path / "profile-home", str(profile_project))
+    stale = tmp_path / "launch-project"
+    stale.mkdir()
+
+    monkeypatch.setenv("TERMINAL_CWD", str(stale))
+    monkeypatch.setattr(server, "_profile_home", lambda name: profile_home if name else None)
+
+    assert server._completion_cwd({"profile": "target"}) == str(profile_project)
+    assert server._completion_cwd({}) == str(stale)
+
+
+def test_completion_cwd_explicit_cwd_wins_over_profile(monkeypatch, tmp_path):
+    explicit = tmp_path / "explicit"
+    explicit.mkdir()
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    profile_home = _write_profile_cfg(tmp_path / "profile-home", str(configured))
+
+    monkeypatch.setattr(server, "_profile_home", lambda name: profile_home if name else None)
+
+    assert server._completion_cwd({"cwd": str(explicit), "profile": "target"}) == str(explicit)
+
+
+def test_terminal_task_cwd_local_backend_uses_session_cwd(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+
+    assert server._terminal_task_cwd({"cwd": str(project)}) == str(project)
+
+
+def test_terminal_task_cwd_ssh_uses_remote_path_unvalidated(monkeypatch):
+    remote = "/home/example/workspace"
+    assert not os.path.isdir(remote)
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.setenv("TERMINAL_CWD", remote)
+
+    assert server._terminal_task_cwd({"cwd": "/host/session"}) == remote
+
+
+def test_terminal_task_cwd_ssh_falls_back_to_config(monkeypatch):
+    remote = "/home/example/from-config"
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    monkeypatch.setattr(server, "_load_cfg", lambda: {"terminal": {"cwd": remote}})
+
+    assert server._terminal_task_cwd({"cwd": "/host/session"}) == remote
+
+
+def test_terminal_task_cwd_ssh_sentinel_falls_back_to_session(monkeypatch):
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    monkeypatch.setenv("TERMINAL_CWD", "auto")
+    monkeypatch.setattr(server, "_load_cfg", lambda: {"terminal": {"cwd": "."}})
+
+    assert server._terminal_task_cwd({"cwd": "/host/session"}) == "/host/session"
+
+
+def test_set_session_context_uses_session_cwd(monkeypatch, tmp_path):
+    from agent.runtime_cwd import resolve_agent_cwd
+
+    project = tmp_path / "project"
+    project.mkdir()
+    server._sessions["cwd-test"] = {"session_key": "cwd-key", "cwd": str(project)}
+    try:
+        tokens = server._set_session_context("cwd-key")
+        try:
+            assert resolve_agent_cwd() == project
+        finally:
+            server._clear_session_context(tokens)
+    finally:
+        server._sessions.pop("cwd-test", None)
+
+
 def test_dispatch_rejects_non_object_request():
     resp = server.dispatch([])
 
@@ -620,7 +724,7 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
 
     monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
     monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
-    monkeypatch.setattr(server, "_set_session_context", lambda target: [])
+    monkeypatch.setattr(server, "_set_session_context", lambda target, cwd=None: [])
     monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
     monkeypatch.setattr(
         server,
@@ -2172,6 +2276,53 @@ def test_prompt_submit_sets_approval_session_key(monkeypatch):
 
     assert resp["result"]["status"] == "streaming"
     assert captured["session_key"] == "session-key"
+
+
+def test_prompt_submit_passes_session_task_id_and_cwd(monkeypatch, tmp_path):
+    from agent.runtime_cwd import resolve_agent_cwd
+
+    project = tmp_path / "project"
+    project.mkdir()
+    captured = {}
+
+    class _Agent:
+        def run_conversation(self, prompt, **kwargs):
+            captured["task_id"] = kwargs.get("task_id")
+            captured["cwd"] = str(resolve_agent_cwd())
+            return {
+                "final_response": "ok",
+                "messages": [{"role": "assistant", "content": "ok"}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    server._sessions["sid"] = _session(agent=_Agent(), cwd=str(project))
+    try:
+        monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+        monkeypatch.setattr(server, "_emit", lambda *args, **kwargs: None)
+        monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+        monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+
+        resp = server.handle_request(
+            {
+                "id": "1",
+                "method": "prompt.submit",
+                "params": {"session_id": "sid", "text": "ping"},
+            }
+        )
+
+        assert resp["result"]["status"] == "streaming"
+        assert captured == {"task_id": "session-key", "cwd": str(project)}
+    finally:
+        from tools.terminal_tool import clear_task_env_overrides
+
+        clear_task_env_overrides("session-key")
+        server._sessions.pop("sid", None)
 
 
 def test_prompt_submit_expands_context_refs(monkeypatch):

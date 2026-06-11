@@ -586,7 +586,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
             _notify_session_boundary("on_session_reset", key)
 
-            info = _session_info(agent)
+            info = _session_info_for(agent, current)
             warn = _probe_credentials(agent)
             if warn:
                 info["credential_warning"] = warn
@@ -644,6 +644,152 @@ def _normalize_completion_path(path_part: str) -> str:
     return expanded
 
 
+def _profile_home(profile: str | None) -> Path | None:
+    """Resolve a named local profile home, or None for the launch profile."""
+    name = (profile or "").strip()
+    if not name:
+        return None
+    try:
+        from hermes_cli import profiles as profiles_mod
+
+        home = Path(profiles_mod.get_profile_dir(name))
+    except Exception:
+        return None
+    try:
+        if home.resolve() == Path(_hermes_home).resolve():
+            return None
+    except Exception:
+        pass
+    return home if (home / "state.db").exists() or home.exists() else None
+
+
+# Placeholder terminal.cwd values that don't name a real directory.
+_CWD_PLACEHOLDERS = {".", "auto", "cwd"}
+
+
+def _profile_configured_cwd(profile_home: Path | None) -> str | None:
+    """Read a non-launch profile's terminal.cwd from its own config.yaml."""
+    if profile_home is None:
+        return None
+    try:
+        import yaml
+
+        path = Path(profile_home) / "config.yaml"
+        if not path.exists():
+            return None
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        raw = str((data.get("terminal") or {}).get("cwd") or "").strip()
+        if not raw or raw.lower() in _CWD_PLACEHOLDERS:
+            return None
+        resolved = os.path.abspath(os.path.expanduser(raw))
+        return resolved if os.path.isdir(resolved) else None
+    except Exception:
+        return None
+
+
+def _completion_cwd(params: dict | None = None) -> str:
+    """Host-validated cwd for file completion and local session metadata."""
+    params = params or {}
+    raw = (
+        params.get("cwd")
+        or _sessions.get(params.get("session_id") or "", {}).get("cwd")
+        or _profile_configured_cwd(_profile_home(params.get("profile")))
+        or os.environ.get("TERMINAL_CWD")
+        or os.getcwd()
+    )
+    try:
+        resolved = os.path.abspath(os.path.expanduser(str(raw)))
+        if os.path.isdir(resolved):
+            return resolved
+    except Exception:
+        pass
+    return os.getcwd()
+
+
+def _session_cwd(session: dict | None) -> str:
+    if session and session.get("cwd"):
+        return str(session["cwd"])
+    return _completion_cwd()
+
+
+def _terminal_task_cwd(session: dict | None) -> str:
+    """Return the cwd terminal_tool should use for this TUI session.
+
+    Non-local terminal backends use remote paths that may not exist on the host,
+    so they must not be filtered through _completion_cwd's host isdir check.
+    """
+    backend = (os.environ.get("TERMINAL_ENV") or "").strip().lower()
+    if backend and backend != "local":
+        raw = os.environ.get("TERMINAL_CWD", "").strip()
+        if not raw:
+            try:
+                terminal_cfg = _load_cfg().get("terminal", {})
+                if isinstance(terminal_cfg, dict):
+                    raw = str(terminal_cfg.get("cwd") or "").strip()
+            except Exception:
+                raw = ""
+        if raw and raw.lower() not in _CWD_PLACEHOLDERS:
+            return raw
+    return _session_cwd(session)
+
+
+def _register_session_cwd(session: dict | None) -> None:
+    if not session:
+        return
+    try:
+        from tools.terminal_tool import register_task_env_overrides
+
+        register_task_env_overrides(
+            session["session_key"], {"cwd": _terminal_task_cwd(session)}
+        )
+    except Exception:
+        pass
+
+
+def _set_session_cwd(session: dict, cwd: str) -> str:
+    resolved = os.path.abspath(os.path.expanduser(str(cwd)))
+    if not os.path.isdir(resolved):
+        raise ValueError(f"working directory does not exist: {cwd}")
+    session["cwd"] = resolved
+    session["explicit_cwd"] = True
+    _register_session_cwd(session)
+    try:
+        from tools.terminal_tool import cleanup_vm
+
+        cleanup_vm(session["session_key"])
+    except Exception:
+        pass
+    return resolved
+
+
+def _git_branch_for_cwd(cwd: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+        if result.returncode == 0:
+            branch = result.stdout.strip()
+            if branch:
+                return branch
+        head = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+        return head.stdout.strip() if head.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 # ── Config I/O ────────────────────────────────────────────────────────
 
 
@@ -695,11 +841,21 @@ def _save_cfg(cfg: dict):
             _cfg_mtime = None
 
 
-def _set_session_context(session_key: str) -> list:
+def _cwd_for_session_key(session_key: str) -> str:
+    if not session_key:
+        return ""
+    for sess in list(_sessions.values()):
+        if sess.get("session_key") == session_key:
+            return str(sess.get("cwd") or "")
+    return ""
+
+
+def _set_session_context(session_key: str, cwd: str | None = None) -> list:
     try:
         from gateway.session_context import set_session_vars
 
-        return set_session_vars(session_key=session_key)
+        resolved = cwd if cwd is not None else _cwd_for_session_key(session_key)
+        return set_session_vars(session_key=session_key, cwd=resolved)
     except Exception:
         return []
 
@@ -1174,7 +1330,7 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
             api_mode=result.api_mode,
         )
         _restart_slash_worker(session)
-        _emit("session.info", sid, _session_info(agent))
+        _emit("session.info", sid, _session_info_for(agent, session))
 
     os.environ["HERMES_MODEL"] = result.new_model
     os.environ["HERMES_INFERENCE_MODEL"] = result.new_model
@@ -1318,6 +1474,7 @@ def _sync_session_key_after_compress(
 
     if clear_pending_title:
         session["pending_title"] = None
+    _register_session_cwd(session)
     if restart_slash_worker:
         try:
             _restart_slash_worker(session)
@@ -1424,7 +1581,13 @@ def _current_profile_name() -> str:
         return "default"
 
 
-def _session_info(agent) -> dict:
+def _session_info(agent, session: dict | None = None) -> dict:
+    if session is None:
+        for candidate in list(_sessions.values()):
+            if candidate.get("agent") is agent:
+                session = candidate
+                break
+    cwd = _session_cwd(session)
     reasoning_config = getattr(agent, "reasoning_config", None)
     reasoning_effort = ""
     if (
@@ -1440,7 +1603,8 @@ def _session_info(agent) -> dict:
         "fast": service_tier == "priority",
         "tools": {},
         "skills": {},
-        "cwd": os.getenv("TERMINAL_CWD", os.getcwd()),
+        "cwd": cwd,
+        "branch": _git_branch_for_cwd(cwd),
         "version": "",
         "release_date": "",
         "update_behind": None,
@@ -1490,6 +1654,13 @@ def _session_info(agent) -> dict:
     except Exception:
         pass
     return info
+
+
+def _session_info_for(agent, session: dict | None = None) -> dict:
+    try:
+        return _session_info(agent, session)
+    except TypeError:
+        return _session_info(agent)
 
 
 def _tool_ctx(name: str, args: dict) -> str:
@@ -1909,7 +2080,7 @@ def _apply_personality_to_session(
         with session["history_lock"]:
             session["history"].append({"role": "user", "content": marker})
             session["history_version"] = int(session.get("history_version", 0)) + 1
-        info = _session_info(agent)
+        info = _session_info_for(agent, session)
         _emit("session.info", sid, info)
         return False, info
     return False, None
@@ -1995,7 +2166,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     with session["history_lock"]:
         session["history"] = []
         session["history_version"] = int(session.get("history_version", 0)) + 1
-    info = _session_info(new_agent)
+    info = _session_info_for(new_agent, session)
     _emit("session.info", sid, info)
     _restart_slash_worker(session)
     return info
@@ -2071,7 +2242,14 @@ def _make_agent(sid: str, key: str, session_id: str | None = None):
     )
 
 
-def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
+def _init_session(
+    sid: str,
+    key: str,
+    agent,
+    history: list,
+    cols: int = 80,
+    cwd: str | None = None,
+):
     now = time.time()
     _sessions[sid] = {
         "agent": agent,
@@ -2085,6 +2263,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         "running": False,
         "attached_images": [],
         "image_counter": 0,
+        "cwd": cwd or _completion_cwd(),
         "cols": cols,
         "slash_worker": None,
         "show_reasoning": _load_show_reasoning(),
@@ -2095,6 +2274,13 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
         "transport": current_transport() or _stdio_transport,
     }
+    try:
+        row = (_get_db().get_session(key) if _get_db() is not None else None) or {}
+        if row.get("cwd"):
+            _sessions[sid]["cwd"] = row["cwd"]
+    except Exception:
+        pass
+    _register_session_cwd(_sessions[sid])
     try:
         _sessions[sid]["slash_worker"] = _SlashWorker(
             key, getattr(agent, "model", _resolve_model())
@@ -2125,7 +2311,35 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
     _wire_callbacks(sid)
     _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
     _notify_session_boundary("on_session_reset", key)
-    _emit("session.info", sid, _session_info(agent))
+    _emit("session.info", sid, _session_info_for(agent, _sessions[sid]))
+
+
+def _init_session_for_cwd(
+    sid: str,
+    key: str,
+    agent,
+    history: list,
+    *,
+    cols: int = 80,
+    cwd: str | None = None,
+) -> None:
+    try:
+        import inspect
+
+        sig = inspect.signature(_init_session)
+        supports_cwd = (
+            "cwd" in sig.parameters
+            or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            )
+        )
+    except (TypeError, ValueError):
+        supports_cwd = True
+    if supports_cwd:
+        _init_session(sid, key, agent, history, cols=cols, cwd=cwd)
+    else:
+        _init_session(sid, key, agent, history, cols=cols)
 
 
 def _new_session_key() -> str:
@@ -2133,7 +2347,27 @@ def _new_session_key() -> str:
 
 
 def _with_checkpoints(session, fn):
-    return fn(session["agent"]._checkpoint_mgr, os.getenv("TERMINAL_CWD", os.getcwd()))
+    return fn(session["agent"]._checkpoint_mgr, _session_cwd(session))
+
+
+def _agent_run_conversation(agent, *args, task_id: str | None = None, **kwargs):
+    if task_id:
+        try:
+            import inspect
+
+            sig = inspect.signature(agent.run_conversation)
+            supports_task_id = (
+                "task_id" in sig.parameters
+                or any(
+                    p.kind is inspect.Parameter.VAR_KEYWORD
+                    for p in sig.parameters.values()
+                )
+            )
+        except (TypeError, ValueError):
+            supports_task_id = True
+        if supports_task_id:
+            kwargs["task_id"] = task_id
+    return agent.run_conversation(*args, **kwargs)
 
 
 def _resolve_checkpoint_hash(mgr, cwd: str, ref: str) -> str:
@@ -2309,6 +2543,15 @@ def _(rid, params: dict) -> dict:
     sid = uuid.uuid4().hex[:8]
     key = _new_session_key()
     cols = int(params.get("cols", 80))
+    raw_cwd = str(params.get("cwd") or "").strip()
+    try:
+        explicit_cwd = bool(raw_cwd) and os.path.isdir(
+            os.path.abspath(os.path.expanduser(raw_cwd))
+        )
+    except Exception:
+        explicit_cwd = False
+    resolved_cwd = _completion_cwd(params)
+    profile_home = _profile_home((params.get("profile") or "").strip() or None)
     _enable_gateway_prompts()
 
     ready = threading.Event()
@@ -2326,9 +2569,12 @@ def _(rid, params: dict) -> dict:
         "history_lock": threading.Lock(),
         "history_version": 0,
         "image_counter": 0,
+        "cwd": resolved_cwd,
+        "explicit_cwd": explicit_cwd,
         "inflight_turn": None,
         "last_active": now,
         "pending_title": None,
+        "profile_home": str(profile_home) if profile_home is not None else None,
         "running": False,
         "session_key": key,
         "show_reasoning": _load_show_reasoning(),
@@ -2337,6 +2583,7 @@ def _(rid, params: dict) -> dict:
         "tool_started_at": {},
         "transport": current_transport() or _stdio_transport,
     }
+    _register_session_cwd(_sessions[sid])
 
     # Return the lightweight session immediately so Ink can paint the composer
     # + skeleton panel, then build the real AIAgent just after this response is
@@ -2359,7 +2606,8 @@ def _(rid, params: dict) -> dict:
                 "model": _resolve_model(),
                 "tools": {},
                 "skills": {},
-                "cwd": os.getenv("TERMINAL_CWD", os.getcwd()),
+                "cwd": resolved_cwd,
+                "branch": _git_branch_for_cwd(resolved_cwd),
                 "lazy": True,
                 "profile_name": _current_profile_name(),
             },
@@ -2474,6 +2722,7 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4007, "session not found")
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
+    resume_cwd = _completion_cwd(params)
     try:
         db.reopen_session(target)
         history = db.get_messages_as_conversation(target)
@@ -2481,12 +2730,19 @@ def _(rid, params: dict) -> dict:
             target, include_ancestors=True
         )
         messages = _history_to_messages(display_history)
-        tokens = _set_session_context(target)
+        tokens = _set_session_context(target, cwd=resume_cwd)
         try:
             agent = _make_agent(sid, target, session_id=target)
         finally:
             _clear_session_context(tokens)
-        _init_session(sid, target, agent, history, cols=int(params.get("cols", 80)))
+        _init_session_for_cwd(
+            sid,
+            target,
+            agent,
+            history,
+            cols=int(params.get("cols", 80)),
+            cwd=resume_cwd,
+        )
     except Exception as e:
         return _err(rid, 5000, f"resume failed: {e}")
     return _ok(
@@ -2496,7 +2752,7 @@ def _(rid, params: dict) -> dict:
             "resumed": target,
             "message_count": len(messages),
             "messages": messages,
-            "info": _session_info(agent),
+            "info": _session_info_for(agent, _sessions.get(sid)),
         },
     )
 
@@ -2568,9 +2824,11 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
 def _fallback_session_info(session: dict) -> dict:
     agent = session.get("agent")
     if agent is not None:
-        return _session_info(agent)
+        return _session_info_for(agent, session)
+    cwd = _session_cwd(session)
     return {
-        "cwd": os.getenv("TERMINAL_CWD", os.getcwd()),
+        "cwd": cwd,
+        "branch": _git_branch_for_cwd(cwd),
         "lazy": True,
         "model": _resolve_model(),
         "skills": {},
@@ -2812,6 +3070,30 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"output": "\n".join(lines)})
 
 
+@method("session.cwd.set")
+def _(rid, params: dict) -> dict:
+    session, err = _sess_nowait(params, rid)
+    if err:
+        return err
+    if session.get("running"):
+        return _err(rid, 4009, "session busy")
+    raw = str(params.get("cwd", "") or "").strip()
+    if not raw:
+        return _err(rid, 4016, "cwd required")
+    try:
+        cwd = _set_session_cwd(session, raw)
+    except ValueError as e:
+        return _err(rid, 4017, str(e))
+    agent = session.get("agent")
+    info = (
+        _session_info_for(agent, session)
+        if agent is not None
+        else {"cwd": cwd, "branch": _git_branch_for_cwd(cwd), "lazy": True}
+    )
+    _emit("session.info", params.get("session_id", ""), info)
+    return _ok(rid, info)
+
+
 @method("session.history")
 def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
@@ -2933,7 +3215,7 @@ def _(rid, params: dict) -> dict:
             summary = summarize_manual_compression(
                 before_messages, messages, before_tokens, after_tokens
             )
-            info = _session_info(agent)
+            info = _session_info_for(agent, session)
             _emit("session.info", sid, info)
             return _ok(
                 rid,
@@ -3051,14 +3333,20 @@ def _(rid, params: dict) -> dict:
     except Exception as e:
         return _err(rid, 5008, f"branch failed: {e}")
     new_sid = uuid.uuid4().hex[:8]
+    branch_cwd = _session_cwd(session)
     try:
-        tokens = _set_session_context(new_key)
+        tokens = _set_session_context(new_key, cwd=branch_cwd)
         try:
             agent = _make_agent(new_sid, new_key, session_id=new_key)
         finally:
             _clear_session_context(tokens)
-        _init_session(
-            new_sid, new_key, agent, list(history), cols=session.get("cols", 80)
+        _init_session_for_cwd(
+            new_sid,
+            new_key,
+            agent,
+            list(history),
+            cols=session.get("cols", 80),
+            cwd=branch_cwd,
         )
     except Exception as e:
         return _err(rid, 5000, f"agent init failed on branch: {e}")
@@ -3507,7 +3795,9 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             )
 
             approval_token = set_current_session_key(session["session_key"])
-            session_tokens = _set_session_context(session["session_key"])
+            cwd = _session_cwd(session)
+            _register_session_cwd(session)
+            session_tokens = _set_session_context(session["session_key"], cwd=cwd)
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
             prompt = text
@@ -3527,8 +3817,8 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 )
                 ctx = preprocess_context_references(
                     prompt,
-                    cwd=os.environ.get("TERMINAL_CWD", os.getcwd()),
-                    allowed_root=os.environ.get("TERMINAL_CWD", os.getcwd()),
+                    cwd=cwd,
+                    allowed_root=cwd,
                     context_length=ctx_len,
                 )
                 if ctx.blocked:
@@ -3608,10 +3898,12 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     payload["rendered"] = r
                 _emit("message.delta", sid, payload)
 
-            result = agent.run_conversation(
+            result = _agent_run_conversation(
+                agent,
                 run_message,
                 conversation_history=list(history),
                 stream_callback=_stream,
+                task_id=session["session_key"],
             )
 
             last_reasoning = None
@@ -4027,7 +4319,7 @@ def _(rid, params: dict) -> dict:
     task_id = f"bg_{uuid.uuid4().hex[:6]}"
 
     def run():
-        session_tokens = _set_session_context(task_id)
+        session_tokens = _set_session_context(task_id, cwd=_session_cwd(session))
         try:
             from run_agent import AIAgent
 
@@ -4216,7 +4508,7 @@ def _(rid, params: dict) -> dict:
             _emit(
                 "session.info",
                 params.get("session_id", ""),
-                _session_info(agent),
+                _session_info_for(agent, session),
             )
         return _ok(rid, {"key": key, "value": nv})
 
@@ -4726,7 +5018,7 @@ def _(rid, params: dict) -> dict:
                     "Failed to refresh cached agent tools after /reload-mcp: %s",
                     _exc,
                 )
-            _emit("session.info", params.get("session_id", ""), _session_info(agent))
+            _emit("session.info", params.get("session_id", ""), _session_info_for(agent, session))
 
         # Honor `always=true` by persisting the opt-out to config.
         if bool(params.get("always", False)):
@@ -5408,6 +5700,7 @@ def _(rid, params: dict) -> dict:
 
     items: list[dict] = []
     try:
+        root = _completion_cwd(params)
         is_context = word.startswith("@")
         query = word[1:] if is_context else word
 
@@ -5441,7 +5734,6 @@ def _(rid, params: dict) -> dict:
         # `/`, `./`, `~/`, `/abs`) fall through to the directory-listing
         # path so explicit navigation intent is preserved.
         if is_context and path_part and "/" not in path_part and prefix_tag != "folder":
-            root = os.getcwd()
             ranked: list[tuple[tuple[int, int], str, str]] = []
             for rel in _list_repo_files(root):
                 basename = os.path.basename(rel)
@@ -5474,6 +5766,9 @@ def _(rid, params: dict) -> dict:
             search_dir = os.path.dirname(expanded) or "."
             match = os.path.basename(expanded)
 
+        search_dir = (
+            search_dir if os.path.isabs(search_dir) else os.path.join(root, search_dir)
+        )
         if not os.path.isdir(search_dir):
             return _ok(rid, {"items": []})
 
@@ -5491,7 +5786,7 @@ def _(rid, params: dict) -> dict:
             # which used to defeat the prefix and let `@folder:` list files.
             if prefix_tag and want_dir != is_dir:
                 continue
-            rel = os.path.relpath(full)
+            rel = os.path.relpath(full, root).replace(os.sep, "/")
             suffix = "/" if is_dir else ""
 
             if is_context and prefix_tag:
@@ -5895,14 +6190,14 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
         elif name == "compress" and agent:
             _compress_session_history(session, arg)
             _sync_session_key_after_compress(sid, session)
-            _emit("session.info", sid, _session_info(agent))
+            _emit("session.info", sid, _session_info_for(agent, session))
         elif name == "fast" and agent:
             mode = arg.lower()
             if mode in {"fast", "on"}:
                 agent.service_tier = "priority"
             elif mode in {"normal", "off"}:
                 agent.service_tier = None
-            _emit("session.info", sid, _session_info(agent))
+            _emit("session.info", sid, _session_info_for(agent, session))
         elif name == "reload-mcp" and agent and hasattr(agent, "reload_mcp_tools"):
             agent.reload_mcp_tools()
         elif name == "stop":
@@ -7018,8 +7313,10 @@ def _(rid, params: dict) -> dict:
     except ImportError:
         return _err(rid, 5001, "shell.exec unavailable: approval safety module not importable")
     try:
+        session = _sessions.get(params.get("session_id") or "")
+        cwd = _session_cwd(session) if session else _completion_cwd(params)
         r = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd()
+            cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=cwd
         )
         return _ok(
             rid,

@@ -558,6 +558,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
     )
     import time
 
+    raw_task_id = task_id
     task_id = _resolve_container_task_id(task_id)
 
     # Fast path: check cache -- but also verify the underlying environment
@@ -595,7 +596,10 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
 
             config = _get_env_config()
             env_type = config["env_type"]
-            overrides = _task_env_overrides.get(task_id, {})
+            overrides = (
+                (_task_env_overrides.get(raw_task_id) if raw_task_id else None)
+                or _task_env_overrides.get(task_id, {})
+            )
 
             if env_type == "docker":
                 image = overrides.get("docker_image") or config["docker_image"]
