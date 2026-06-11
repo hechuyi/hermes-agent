@@ -2182,6 +2182,7 @@ class TestCardActionCallbackResponse:
         adapter = _make_audited_adapter(tmp_path)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._allowed_group_users = {"ou_bob"}
         adapter._update_prompt_state[1] = {
             "session_key": "sess-up-1",
             "message_id": "msg_up_003",
@@ -2268,6 +2269,7 @@ class TestCardActionCallbackResponse:
         adapter = _make_audited_adapter(tmp_path)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._allowed_group_users = {"ou_bob"}
         adapter._update_prompt_state[8] = {
             "session_key": "sess-up-8",
             "message_id": "om_update_8",
@@ -2333,6 +2335,7 @@ class TestCardActionCallbackResponse:
     ):
         adapter = _make_audited_adapter(tmp_path)
         adapter._loop = asyncio.get_running_loop()
+        adapter._allowed_group_users = {"ou_bob"}
         events = _install_event_recorder(adapter)
         with patch.object(
             adapter,
@@ -2395,6 +2398,7 @@ class TestCardActionCallbackResponse:
         adapter = _make_audited_adapter(tmp_path)
         adapter._loop = MagicMock()
         adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._allowed_group_users = {"ou_user1"}
         adapter._update_prompt_state[2] = {
             "session_key": "sess-up-2",
             "message_id": "msg_up_004",
@@ -2417,6 +2421,58 @@ class TestCardActionCallbackResponse:
         assert response is not None
         assert response.card is None
         mock_submit.assert_called_once()
+
+    def test_update_prompt_empty_allowlists_fail_closed(self, tmp_path, _patch_callback_card_types):
+        adapter = _make_audited_adapter(tmp_path)
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._update_prompt_state[7] = {
+            "session_key": "sess-up-7",
+            "message_id": "msg_up_007",
+            "chat_id": "oc_12345",
+        }
+        data = _make_card_action_data(
+            {"hermes_update_prompt_action": "y", "update_prompt_id": 7},
+            open_id="ou_intruder",
+        )
+
+        with (
+            _broker_context(),
+            patch("asyncio.run_coroutine_threadsafe") as mock_submit,
+        ):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is None
+        assert 7 in adapter._update_prompt_state
+        mock_submit.assert_not_called()
+
+    def test_update_prompt_chat_mismatch_returns_no_card(self, tmp_path, _patch_callback_card_types):
+        adapter = _make_audited_adapter(tmp_path)
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._allowed_group_users = {"ou_bob"}
+        adapter._update_prompt_state[8] = {
+            "session_key": "sess-up-8",
+            "message_id": "msg_up_008",
+            "chat_id": "oc_expected",
+        }
+        data = _make_card_action_data(
+            {"hermes_update_prompt_action": "y", "update_prompt_id": 8},
+            chat_id="oc_mismatch",
+            open_id="ou_bob",
+        )
+
+        with (
+            _broker_context(),
+            patch("asyncio.run_coroutine_threadsafe") as mock_submit,
+        ):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is None
+        assert 8 in adapter._update_prompt_state
+        mock_submit.assert_not_called()
 
     def test_ignores_missing_update_prompt_id(self, _patch_callback_card_types):
         adapter = _make_adapter()
@@ -2546,6 +2602,30 @@ class TestResolveUpdatePrompt:
         assert request.request_body.msg_type == "interactive"
         assert (hermes_home / ".update_response").read_text() == "y"
         assert 9 not in adapter._update_prompt_state
+
+    @pytest.mark.asyncio
+    async def test_chat_mismatch_does_not_write_response_file(self, tmp_path, monkeypatch):
+        adapter = _make_adapter()
+        adapter._allowed_group_users = {"ou_bob"}
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        adapter._update_prompt_state[10] = {
+            "session_key": "sess-up-10",
+            "message_id": "msg_up_010",
+            "chat_id": "oc_expected",
+        }
+
+        await adapter._resolve_update_prompt(
+            10,
+            "y",
+            "Bob",
+            open_id="ou_bob",
+            chat_id="oc_wrong",
+        )
+
+        assert not (hermes_home / ".update_response").exists()
+        assert 10 in adapter._update_prompt_state
 
     @pytest.mark.asyncio
     async def test_update_prompt_update_operation_matrix_is_distinct_from_approval_update(

@@ -6,6 +6,7 @@ import os
 import tempfile
 import time
 import unittest
+from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict
@@ -4908,7 +4909,7 @@ class TestFeishuFetchMessageText(unittest.TestCase):
         adapter._bot_open_id = "ou_bot"
         adapter._bot_user_id = ""
         adapter._bot_name = "Hermes"
-        adapter._message_text_cache = {}
+        adapter._message_text_cache = OrderedDict()
         adapter._client = Mock()
         adapter._build_get_message_request = Mock(return_value=object())
         return adapter
@@ -4984,6 +4985,53 @@ class TestFeishuFetchMessageText(unittest.TestCase):
         # The rendered text should still have the bot name substituted.
         result = asyncio.run(adapter._fetch_message_text("m_parent"))
         self.assertEqual(result, "@Hermes hi")
+
+    def test_fetch_message_text_cache_is_lru_bounded(self):
+        from gateway.platforms.feishu import _FEISHU_MESSAGE_TEXT_CACHE_SIZE
+
+        adapter = self._build_adapter()
+        parent = SimpleNamespace(
+            body=SimpleNamespace(content=json.dumps({"text": "parent text"})),
+            msg_type="text",
+            mentions=[],
+        )
+        response = Mock()
+        response.success = Mock(return_value=True)
+        response.data = SimpleNamespace(items=[parent])
+        adapter._client.im.v1.message.get = Mock(return_value=response)
+
+        for i in range(_FEISHU_MESSAGE_TEXT_CACHE_SIZE + 1):
+            result = asyncio.run(adapter._fetch_message_text(f"m_parent_{i}"))
+            self.assertEqual(result, "parent text")
+
+        self.assertNotIn("m_parent_0", adapter._message_text_cache)
+        self.assertIn(f"m_parent_{_FEISHU_MESSAGE_TEXT_CACHE_SIZE}", adapter._message_text_cache)
+        self.assertEqual(len(adapter._message_text_cache), _FEISHU_MESSAGE_TEXT_CACHE_SIZE)
+
+    def test_fetch_message_text_cache_hit_refreshes_lru_order(self):
+        from gateway.platforms.feishu import _FEISHU_MESSAGE_TEXT_CACHE_SIZE
+
+        adapter = self._build_adapter()
+        adapter._message_text_cache["m_keep"] = "keep"
+        for i in range(_FEISHU_MESSAGE_TEXT_CACHE_SIZE - 1):
+            adapter._message_text_cache[f"m_{i}"] = f"text {i}"
+
+        self.assertEqual(asyncio.run(adapter._fetch_message_text("m_keep")), "keep")
+
+        parent = SimpleNamespace(
+            body=SimpleNamespace(content=json.dumps({"text": "new text"})),
+            msg_type="text",
+            mentions=[],
+        )
+        response = Mock()
+        response.success = Mock(return_value=True)
+        response.data = SimpleNamespace(items=[parent])
+        adapter._client.im.v1.message.get = Mock(return_value=response)
+
+        self.assertEqual(asyncio.run(adapter._fetch_message_text("m_new")), "new text")
+        self.assertIn("m_keep", adapter._message_text_cache)
+        self.assertNotIn("m_0", adapter._message_text_cache)
+        self.assertEqual(len(adapter._message_text_cache), _FEISHU_MESSAGE_TEXT_CACHE_SIZE)
 
     def test_build_mentions_map_string_id_shape(self):
         """_build_mentions_map accepts the reply-history shape (id as str +

@@ -161,3 +161,34 @@ uv run pytest -q tests/tools/test_approval.py tests/tools/test_file_tools.py
 ```
 
 Result: `244 passed`.
+
+### 2026-06-11 — Feishu Card Action And Message Text Cache Hardening
+
+Manually ported upstream semantics:
+
+- `3fa15b33dd910699f18a0529f448f97eb8f02042` — fail closed for update-prompt
+  card actions when the operator is not authorized for the target chat, or when
+  the callback chat does not match the stored prompt chat.
+- `e8cacb57d531137dec3109617e807b30ff5187c9` plus the Feishu part of
+  `32899279a744805350be891ccf3ae08289efc702` — bound
+  `_message_text_cache` with an LRU cap.
+
+Fork-local integration notes:
+
+- The update-prompt callback keeps this fork's existing broker-context and
+  delivery-audit preconditions; the upstream authorization and chat-mismatch
+  checks were inserted after those fail-closed gates rather than replacing them.
+- `_resolve_update_prompt()` repeats the operator/chat checks when evidence is
+  supplied, so bypassing the synchronous card-action entrypoint does not skip
+  the scope guard.
+- The message-text cache uses `OrderedDict` and refreshes entries on cache hits;
+  new inserts rely on normal insertion order and evict oldest entries after the
+  configured cap.
+
+Verification:
+
+```bash
+uv run pytest -q tests/gateway/test_feishu_approval_buttons.py tests/gateway/test_feishu.py::TestFeishuFetchMessageText
+```
+
+Result: `86 passed, 2 warnings`.

@@ -286,6 +286,7 @@ _FEISHU_REACTION_FAILURE = "CrossMark"
 # drain on completion; the cap is a safeguard against unbounded growth from
 # delete-failures, not a capacity plan.
 _FEISHU_PROCESSING_REACTION_CACHE_SIZE = 1024
+_FEISHU_MESSAGE_TEXT_CACHE_SIZE = 512
 
 # QR onboarding constants
 _ONBOARD_ACCOUNTS_URLS = {
@@ -1520,7 +1521,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._sent_message_ids_to_chat: Dict[str, str] = {}  # message_id → chat_id (for reaction routing)
         self._sent_message_id_order: List[str] = []  # LRU order for _sent_message_ids_to_chat
         self._chat_info_cache: Dict[str, Dict[str, Any]] = {}
-        self._message_text_cache: Dict[str, Optional[str]] = {}
+        self._message_text_cache: "OrderedDict[str, Optional[str]]" = OrderedDict()
         self._app_lock_identity: Optional[str] = None
         self._text_batch_state = FeishuBatchState()
         self._pending_text_batches = self._text_batch_state.events
@@ -4584,12 +4585,33 @@ class FeishuAdapter(BasePlatformAdapter):
 
         operator = getattr(event, "operator", None)
         open_id = str(getattr(operator, "open_id", "") or "")
-        if not self._is_interactive_operator_authorized(open_id):
+        sender_id = SimpleNamespace(open_id=open_id, user_id=str(getattr(operator, "user_id", "") or ""))
+        if not self._allow_group_message(sender_id, state.get("chat_id", ""), is_bot=False):
             logger.warning("[Feishu] Unauthorized update prompt click by %s", open_id or "<unknown>")
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
+        callback_chat_id = str(getattr(getattr(event, "context", None), "open_chat_id", "") or "")
+        expected_chat_id = str(state.get("chat_id", "") or "")
+        if callback_chat_id and expected_chat_id and callback_chat_id != expected_chat_id:
+            logger.warning(
+                "[Feishu] Update prompt callback chat mismatch for %s (expected=%s, got=%s)",
+                prompt_id,
+                expected_chat_id,
+                callback_chat_id,
+            )
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+
         user_name = self._get_cached_sender_name(open_id) or open_id
-        if not self._submit_on_loop(loop, self._resolve_update_prompt(prompt_id, answer, user_name)):
+        if not self._submit_on_loop(
+            loop,
+            self._resolve_update_prompt(
+                prompt_id,
+                answer,
+                user_name,
+                open_id=open_id,
+                chat_id=callback_chat_id,
+            ),
+        ):
             return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
         if P2CardActionTriggerResponse is None:
@@ -4795,11 +4817,33 @@ class FeishuAdapter(BasePlatformAdapter):
             return
         self._approval_state.pop(approval_id, None)
 
-    async def _resolve_update_prompt(self, prompt_id: Any, answer: str, user_name: str) -> None:
+    async def _resolve_update_prompt(
+        self,
+        prompt_id: Any,
+        answer: str,
+        user_name: str,
+        *,
+        open_id: str = "",
+        chat_id: str = "",
+    ) -> None:
         """Persist an update prompt answer for the detached update process."""
         state = self._update_prompt_state.get(prompt_id)
         if not state:
             logger.debug("[Feishu] Update prompt %s already resolved or unknown", prompt_id)
+            return
+        if open_id:
+            sender_id = SimpleNamespace(open_id=open_id, user_id="")
+            if not self._allow_group_message(sender_id, state.get("chat_id", ""), is_bot=False):
+                logger.warning("[Feishu] Unauthorized update prompt click by %s for prompt %s", open_id, prompt_id)
+                return
+        expected_chat_id = str(state.get("chat_id", "") or "")
+        if expected_chat_id and chat_id and expected_chat_id != chat_id:
+            logger.warning(
+                "[Feishu] Update prompt %s chat mismatch (expected=%s, got=%s)",
+                prompt_id,
+                expected_chat_id,
+                chat_id,
+            )
             return
         if self._gateway_event_state_dir is not None:
             claim = self._claim_audited_prompt_resolution(
@@ -6796,6 +6840,7 @@ class FeishuAdapter(BasePlatformAdapter):
         if not self._client or not message_id:
             return None
         if message_id in self._message_text_cache:
+            self._message_text_cache.move_to_end(message_id)
             return self._message_text_cache[message_id]
         try:
             request = self._build_get_message_request(message_id)
@@ -6817,6 +6862,8 @@ class FeishuAdapter(BasePlatformAdapter):
                 mentions=parent_mentions,
             )
             self._message_text_cache[message_id] = text
+            while len(self._message_text_cache) > _FEISHU_MESSAGE_TEXT_CACHE_SIZE:
+                self._message_text_cache.popitem(last=False)
             return text
         except Exception:
             logger.warning("[Feishu] Failed to fetch parent message %s", message_id, exc_info=True)
