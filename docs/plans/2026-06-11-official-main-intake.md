@@ -3,7 +3,7 @@
 > Date: 2026-06-11
 > Working branch: `fix/live-gateway-hermes-tools`
 > Local fork main: `origin/main` at `5921d667855880b0aa2083a50f001748aed52f3e`
-> Official main ref: `upstream/main` at `4d22b8293374fd9eaeac75e1f607b20ddea3a1b3`
+> Official main ref: `upstream/main` at `e71d746820bf262214e4e1887683d3f65d211cc1`
 > Deployed fork head at intake start: `38144944bde7fd5e16051a4e8f739b9e417121ae`
 
 ## Scope
@@ -33,6 +33,14 @@ Results:
 - `origin/main..upstream/main`: 1228 commits
 - `HEAD..upstream/main`: 1493 commits
 - `HEAD...upstream/main` right-only after patch-equivalence filtering: 1450 commits
+
+Continuation refresh:
+
+- `git fetch https://github.com/NousResearch/hermes-agent.git refs/heads/main:refs/remotes/upstream/main`
+  advanced `upstream/main` from `4d22b8293374fd9eaeac75e1f607b20ddea3a1b3`
+  to `e71d746820bf262214e4e1887683d3f65d211cc1`.
+- A follow-up read-only subagent review was dispatched for
+  `4d22b8293374fd9eaeac75e1f607b20ddea3a1b3..upstream/main`.
 
 High-level file-surface distribution from `origin/main..upstream/main`:
 
@@ -240,6 +248,42 @@ Observed results:
 - `tests/test_packaging_metadata.py tests/test_project_metadata.py`: `16 passed`.
 - `tests/hermes_cli/test_config.py`: `89 passed`.
 
+### 2026-06-11 — Gateway Local-Path And Media Safety
+
+Absorbed upstream commits:
+
+- `02d1da49de5086946256cc157ff928dcffbe8ca1` — block active-profile and
+  shared Hermes root config/control files from native media delivery.
+- `bdfba45247ed2b742d6f452353e6dbcdaaf8e9e6` — skip bare local-path
+  auto-upload detection for `EphemeralReply` system/command notices.
+- `9b78f411c8be21ff90136cafefae65451c24804b` — backtick-wrap mutation
+  verifier footer paths so gateway bare-path extraction cannot turn them into
+  native attachments.
+
+Fork-local integration notes:
+
+- `gateway/platforms/base.py` already had Feishu/live-gateway delivery
+  metadata changes, so the `02d1da49` conflict was resolved manually by
+  preserving local behavior and adding the upstream `_HERMES_ROOT` denylist
+  semantics.
+- The tips text no longer embeds literal `~/.hermes/...` paths in ephemeral
+  user-facing notices. This keeps system notices readable without turning
+  sensitive local paths into delivery candidates.
+
+Verification:
+
+```bash
+uv run pytest -q tests/gateway/test_platform_base.py tests/gateway/test_ephemeral_reply.py tests/run_agent/test_file_mutation_verifier.py
+uv run pytest -q tests/gateway/test_feishu.py tests/gateway/test_feishu_approval_buttons.py tests/gateway/test_feishu_upload_denial.py
+```
+
+Observed results:
+
+- `tests/gateway/test_platform_base.py tests/gateway/test_ephemeral_reply.py tests/run_agent/test_file_mutation_verifier.py`:
+  `171 passed, 2 skipped`.
+- `tests/gateway/test_feishu.py tests/gateway/test_feishu_approval_buttons.py tests/gateway/test_feishu_upload_denial.py`:
+  `317 passed, 2 warnings`.
+
 ## Outstanding P0/P1 Follow-Up
 
 ### Runtime CWD And File Anchoring
@@ -271,25 +315,12 @@ These changes do not directly alter the fork's event-ledger schema, but they
 affect Feishu by deciding where tool writes, context-file reads, and prompt
 cwd claims are anchored.
 
-### Gateway Local-Path And Media Safety
-
-The same review identified three gateway-facing safety fixes that should be
-ported before deployment:
-
-- `02d1da49de5086946256cc157ff928dcffbe8ca1` — block Hermes root/config
-  paths in media delivery.
-- `bdfba45247ed2b742d6f452353e6dbcdaaf8e9e6` — stop system tips from
-  auto-uploading local files.
-- `9b78f411c8be21ff90136cafefae65451c24804b` — neutralize local file paths
-  in the mutation-verifier footer.
-
-Recommended verification after these batches:
+Recommended verification after the remaining runtime CWD batch:
 
 ```bash
 uv run pytest -q tests/tools/test_file_tools.py tests/tools/test_file_tools_cwd_resolution.py
 uv run pytest -q tests/tools/test_terminal_task_cwd.py tests/tools/test_shared_container_task_id.py
 uv run pytest -q tests/agent/test_runtime_cwd.py tests/agent/test_prompt_builder.py tests/agent/test_system_prompt.py
 uv run pytest -q tests/test_tui_gateway_server.py -k "cwd or terminal_task_cwd or profile_configured_cwd or completion_cwd"
-uv run pytest -q tests/gateway/test_platform_base.py tests/gateway/test_ephemeral_reply.py tests/run_agent/test_file_mutation_verifier.py
 uv run pytest -q tests/gateway/test_feishu.py tests/gateway/test_feishu_approval_buttons.py tests/gateway/test_feishu_upload_denial.py tests/gateway/test_gateway_event_ledger.py tests/gateway/test_hermes_tools_gateway_event.py
 ```
