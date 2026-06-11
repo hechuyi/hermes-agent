@@ -690,7 +690,8 @@ class TestLaunchdServiceRecovery:
         label = gateway_cli.get_launchd_label()
         domain = gateway_cli._launchd_domain()
         assert "--replace" in plist_path.read_text(encoding="utf-8")
-        assert calls[:2] == [
+        service_calls = [cmd for cmd in calls if "bootout" in cmd or "bootstrap" in cmd]
+        assert service_calls[:2] == [
             ["launchctl", "bootout", f"{domain}/{label}"],
             ["launchctl", "bootstrap", domain, str(plist_path)],
         ]
@@ -873,6 +874,110 @@ class TestLaunchdServiceRecovery:
         assert str(plist_path) in output
         assert "stale" in output.lower()
         assert "not loaded" in output.lower()
+
+
+class TestLaunchdDomainDetection:
+    """Regression coverage for launchd domain probing."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_launchd_domain_cache(self):
+        gateway_cli._resolved_launchd_domain = None
+        yield
+        gateway_cli._resolved_launchd_domain = None
+
+    def test_prefers_gui_domain_when_service_is_loaded_there(self, monkeypatch):
+        monkeypatch.setattr(os, "getuid", lambda: 501)
+        label = gateway_cli.get_launchd_label()
+        calls = []
+
+        def fake_run(cmd, check=False, **kwargs):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        assert gateway_cli._launchd_domain() == "gui/501"
+        assert calls == [["launchctl", "print", f"gui/501/{label}"]]
+
+    def test_falls_back_to_user_domain_when_gui_probe_fails(self, monkeypatch):
+        monkeypatch.setattr(os, "getuid", lambda: 501)
+        label = gateway_cli.get_launchd_label()
+        calls = []
+
+        def fake_run(cmd, check=False, **kwargs):
+            calls.append(cmd)
+            if cmd == ["launchctl", "print", f"gui/501/{label}"]:
+                raise subprocess.CalledProcessError(3, cmd, stderr="not found")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        assert gateway_cli._launchd_domain() == "user/501"
+        assert calls == [
+            ["launchctl", "print", f"gui/501/{label}"],
+            ["launchctl", "print", f"user/501/{label}"],
+        ]
+
+    def test_uses_managername_aqua_when_service_is_not_loaded(self, monkeypatch):
+        monkeypatch.setattr(os, "getuid", lambda: 501)
+        label = gateway_cli.get_launchd_label()
+        calls = []
+
+        def fake_run(cmd, check=False, **kwargs):
+            calls.append(cmd)
+            if "print" in cmd:
+                raise subprocess.CalledProcessError(3, cmd, stderr="not found")
+            if cmd == ["launchctl", "managername"]:
+                return SimpleNamespace(returncode=0, stdout="Aqua\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        assert gateway_cli._launchd_domain() == "gui/501"
+        assert calls == [
+            ["launchctl", "print", f"gui/501/{label}"],
+            ["launchctl", "print", f"user/501/{label}"],
+            ["launchctl", "managername"],
+        ]
+
+    def test_managername_background_selects_user_domain(self, monkeypatch):
+        monkeypatch.setattr(os, "getuid", lambda: 501)
+
+        def fake_run(cmd, check=False, **kwargs):
+            if "print" in cmd:
+                raise subprocess.CalledProcessError(3, cmd, stderr="not found")
+            if cmd == ["launchctl", "managername"]:
+                return SimpleNamespace(returncode=0, stdout="Background\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        assert gateway_cli._launchd_domain() == "user/501"
+
+    def test_falls_back_to_user_domain_when_all_probes_fail(self, monkeypatch):
+        monkeypatch.setattr(os, "getuid", lambda: 501)
+
+        def fake_run(cmd, check=False, **kwargs):
+            raise subprocess.CalledProcessError(3, cmd, stderr="not found")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        assert gateway_cli._launchd_domain() == "user/501"
+
+    def test_caches_resolved_domain_in_process(self, monkeypatch):
+        monkeypatch.setattr(os, "getuid", lambda: 501)
+        calls = []
+
+        def fake_run(cmd, check=False, **kwargs):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        assert gateway_cli._launchd_domain() == "gui/501"
+        assert gateway_cli._launchd_domain() == "gui/501"
+        assert calls == [["launchctl", "print", f"gui/501/{gateway_cli.get_launchd_label()}"]]
+
 
 class TestGatewayServiceDetection:
     def test_supports_systemd_services_requires_systemctl_binary(self, monkeypatch):
