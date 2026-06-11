@@ -24,9 +24,9 @@ Pure helpers that read the agent's state.  AIAgent keeps thin forwarders.
 from __future__ import annotations
 
 import json
-import os
 from typing import Any, Dict, List, Optional
 
+from agent.runtime_cwd import resolve_context_cwd
 from agent.prompt_builder import (
     DEFAULT_AGENT_IDENTITY,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
@@ -275,11 +275,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         context_parts.append(system_message)
 
     if not agent.skip_context_files:
-        # Use TERMINAL_CWD for context file discovery when set (gateway
-        # mode).  The gateway process runs from the hermes-agent install
-        # dir, so os.getcwd() would pick up the repo's AGENTS.md and
-        # other dev files — inflating token usage by ~10k for no benefit.
-        _context_cwd = os.getenv("TERMINAL_CWD") or None
+        # Use the runtime cwd resolver for context file discovery. Gateway
+        # sessions can pin this per async task so concurrent chats do not
+        # read context files from the daemon launch directory.
+        _context_cwd = resolve_context_cwd()
         context_files_prompt = _r.build_context_files_prompt(
             cwd=_context_cwd, skip_soul=_soul_loaded)
         if context_files_prompt:

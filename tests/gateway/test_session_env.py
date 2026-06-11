@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+from agent.runtime_cwd import resolve_agent_cwd, resolve_context_cwd
 from gateway.config import Platform
 from gateway.run import GatewayRunner
 from gateway.session import SessionContext, SessionSource
@@ -190,6 +191,33 @@ def test_session_key_falls_back_to_os_environ(monkeypatch):
     assert get_session_env("HERMES_SESSION_KEY") == ""
 
 
+def test_session_id_set_via_contextvars(monkeypatch):
+    """set_session_vars should set HERMES_SESSION_ID via contextvars."""
+    monkeypatch.setenv("HERMES_SESSION_ID", "stale-env-session")
+
+    tokens = set_session_vars(session_id="ctx-session-456")
+    assert get_session_env("HERMES_SESSION_ID") == "ctx-session-456"
+
+    clear_session_vars(tokens)
+    assert get_session_env("HERMES_SESSION_ID") == ""
+
+
+def test_session_cwd_overrides_terminal_cwd(monkeypatch, tmp_path):
+    """Session context cwd wins over process TERMINAL_CWD."""
+    session_cwd = tmp_path / "session"
+    session_cwd.mkdir()
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
+
+    tokens = set_session_vars(cwd=str(session_cwd))
+    try:
+        assert resolve_agent_cwd() == session_cwd
+        assert resolve_context_cwd() == session_cwd
+    finally:
+        clear_session_vars(tokens)
+
+    assert resolve_agent_cwd() == tmp_path
+
+
 def test_set_session_env_includes_session_key():
     """_set_session_env should propagate session_key from SessionContext."""
     runner = object.__new__(GatewayRunner)
@@ -205,12 +233,20 @@ def test_set_session_env_includes_session_key():
         connected_platforms=[],
         home_channels={},
         session_key="tg:-1001:17585",
+        session_id="session-123",
+        conversation_scope_id="scope-1",
+        platform_account_id="bot-1",
+        route_partition_key="feishu:bot-1:chat-1",
     )
 
     # Capture baseline value before setting (may be non-empty from another
     # test in the same pytest-xdist worker sharing the context).
     tokens = runner._set_session_env(context)
     assert get_session_env("HERMES_SESSION_KEY") == "tg:-1001:17585"
+    assert get_session_env("HERMES_SESSION_ID") == "session-123"
+    assert get_session_env("HERMES_CONVERSATION_SCOPE_ID") == "scope-1"
+    assert get_session_env("HERMES_PLATFORM_ACCOUNT_ID") == "bot-1"
+    assert get_session_env("HERMES_ROUTE_PARTITION_KEY") == "feishu:bot-1:chat-1"
     runner._clear_session_env(tokens)
     # After clearing, the session key must not retain the value we just set.
     # The exact post-clear value depends on context propagation from other

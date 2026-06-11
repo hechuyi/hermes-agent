@@ -112,10 +112,12 @@ def set_session_vars(
     user_id: str = "",
     user_name: str = "",
     session_key: str = "",
+    session_id: str = "",
     message_id: str = "",
     conversation_scope_id: str = "",
     platform_account_id: str = "",
     route_partition_key: str = "",
+    cwd: str = "",
 ) -> list:
     """Set all session context variables and return reset tokens.
 
@@ -133,11 +135,18 @@ def set_session_vars(
         _SESSION_USER_ID.set(user_id),
         _SESSION_USER_NAME.set(user_name),
         _SESSION_KEY.set(session_key),
+        _SESSION_ID.set(session_id),
         _CONVERSATION_SCOPE_ID.set(conversation_scope_id),
         _PLATFORM_ACCOUNT_ID.set(platform_account_id),
         _ROUTE_PARTITION_KEY.set(route_partition_key),
         _SESSION_MESSAGE_ID.set(message_id),
     ]
+    try:
+        from agent.runtime_cwd import set_session_cwd
+
+        set_session_cwd(cwd)
+    except Exception:
+        pass
     return tokens
 
 
@@ -160,12 +169,19 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_USER_ID,
         _SESSION_USER_NAME,
         _SESSION_KEY,
+        _SESSION_ID,
         _CONVERSATION_SCOPE_ID,
         _PLATFORM_ACCOUNT_ID,
         _ROUTE_PARTITION_KEY,
         _SESSION_MESSAGE_ID,
     ):
         var.set("")
+    try:
+        from agent.runtime_cwd import clear_session_cwd
+
+        clear_session_cwd()
+    except Exception:
+        pass
 
 
 def get_session_env(name: str, default: str = "") -> str:

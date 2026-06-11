@@ -15339,10 +15339,12 @@ class GatewayRunner:
             user_id=str(context.source.user_id) if context.source.user_id else "",
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
+            session_id=getattr(context, "session_id", "") or "",
             message_id=str(context.source.message_id) if context.source.message_id else "",
             conversation_scope_id=getattr(context, "conversation_scope_id", "") or "",
             platform_account_id=getattr(context, "platform_account_id", "") or "",
             route_partition_key=getattr(context, "route_partition_key", "") or "",
+            cwd=os.environ.get("TERMINAL_CWD", ""),
         )
 
     def _clear_session_env(self, tokens: list) -> None:
