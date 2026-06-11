@@ -120,13 +120,33 @@ def _is_gateway_approval_context() -> bool:
     return bool(_get_session_platform())
 
 # Sensitive write targets that should trigger approval even when referenced
-# via shell expansions like $HOME or $HERMES_HOME.
+# via shell expansions like $HOME or $HERMES_HOME, or by the resolved absolute
+# active profile home path such as /home/hermes/.hermes/config.yaml. The
+# resolved-absolute form is folded into the ~/.hermes/ patterns at detection
+# time by _normalize_command_for_detection() — see the rewrite step there — so
+# these static patterns stay free of any import-time path snapshot (which would
+# go stale when HERMES_HOME is set after this module is imported, e.g. under the
+# hermetic test conftest or any deferred-profile-resolution path).
 _SSH_SENSITIVE_PATH = r'(?:~|\$home|\$\{home\})/\.ssh(?:/|$)'
 _HERMES_ENV_PATH = (
     r'(?:~\/\.hermes/|'
     r'(?:\$home|\$\{home\})/\.hermes/|'
     r'(?:\$hermes_home|\$\{hermes_home\})/)'
     r'\.env\b'
+)
+# ~/.hermes/config.yaml IS the security policy: approvals.mode, yolo, and the
+# permanent-approval allowlist live here, and the config cache is mtime-keyed
+# so a write takes effect mid-session (the agent could flip approvals.mode=off
+# and immediately bypass the gate). Pair the write_file/patch deny (file_tools
+# _check_sensitive_path) with terminal-side coverage so `sed -i`, `tee`, `>`,
+# `cp`, etc. targeting it are gated too — otherwise the deny is unpaired
+# theater. Mirrors _HERMES_ENV_PATH; matches the HERMES_HOME override form as
+# well as ~/.hermes/.
+_HERMES_CONFIG_PATH = (
+    r'(?:~\/\.hermes/|'
+    r'(?:\$home|\$\{home\})/\.hermes/|'
+    r'(?:\$hermes_home|\$\{hermes_home\})/)'
+    r'config\.yaml\b'
 )
 _PROJECT_ENV_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*\.env(?:\.[^/\s"\'`]+)*)'
 _PROJECT_CONFIG_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*config\.yaml)'
@@ -153,6 +173,7 @@ _SENSITIVE_WRITE_TARGET = (
     rf'(?:{_SYSTEM_CONFIG_PATH}|/dev/sd|'
     rf'{_SSH_SENSITIVE_PATH}|'
     rf'{_HERMES_ENV_PATH}|'
+    rf'{_HERMES_CONFIG_PATH}|'
     rf'{_SHELL_RC_FILES}|'
     rf'{_CREDENTIAL_FILES})'
 )
@@ -391,6 +412,21 @@ DANGEROUS_PATTERNS = [
     (rf'\b(cp|mv|install)\b.*\s["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config file"),
     (rf'\bsed\s+-[^\s]*i.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config"),
     (rf'\bsed\s+--in-place\b.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config (long flag)"),
+    # In-place edit of a Hermes-managed security file (~/.hermes/config.yaml or
+    # .env). sed -i bypasses the redirection/tee patterns above because it
+    # mutates the file directly. Pairs the file_tools write_file/patch deny so
+    # the terminal side is not an open door. See #14639.
+    (rf'\bsed\s+-[^\s]*i.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env"),
+    (rf'\bsed\s+--in-place\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (long flag)"),
+    # perl -i and ruby -i perform the same in-place mutation as sed -i but are
+    # not caught by the -e/-c script-execution pattern above (which targets code
+    # evaluation, not file mutation). Pairs the sed -i coverage from #14639.
+    # The -i flag can appear as its own token after other flags
+    # (`perl -p -i -e ... config.yaml`), combined (`perl -pi -e`), or with a
+    # backup suffix (`perl -i.bak`). Match any flag token containing `i`
+    # anywhere in the args, not just the first token — `perl -e '...'` (code
+    # eval, no -i) does not trip because it has no `-...i` flag token.
+    (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
     # Script execution via heredoc — bypasses the -e/-c flag patterns above.
     # `python3 << 'EOF'` feeds arbitrary code via stdin without -c/-e flags.
     (r'\b(python[23]?|perl|ruby|node)\s+<<', "script execution via heredoc"),
@@ -476,6 +512,51 @@ def _normalize_command_for_detection(command: str) -> str:
     command = command.replace('\x00', '')
     # Normalize Unicode (fullwidth Latin, halfwidth Katakana, etc.)
     command = unicodedata.normalize('NFKC', command)
+    # Strip shell backslash-escapes: r\m → rm. Prevents \-injection bypass.
+    command = re.sub(r'\\([^\n])', r'\1', command)
+    # Strip empty-string literals that split tokens: r''m → rm, r"\"m → rm.
+    command = re.sub(r"''|\"\"", '', command)
+    # Fold the resolved absolute active-profile home path into the canonical
+    # ~/.hermes/ form so the Hermes config/env patterns catch it. In Docker and
+    # gateway deployments the agent often references the resolved absolute path
+    # directly (e.g. `sed -i ... /home/hermes/.hermes/config.yaml`) rather than
+    # ~, $HOME, or $HERMES_HOME. Done at detection time (not via an import-time
+    # pattern snapshot) so it tracks the live HERMES_HOME even when that is set
+    # after this module is imported — as the hermetic test conftest does.
+    command = _rewrite_resolved_hermes_home(command)
+    return command
+
+
+def _rewrite_resolved_hermes_home(command: str) -> str:
+    """Rewrite the resolved absolute Hermes home prefix to ``~/.hermes/``.
+
+    Resolves the active ``HERMES_HOME`` at call time (and its symlink-resolved
+    form) and replaces an occurrence of ``<home>/`` in *command* with
+    ``~/.hermes/`` so the static ``_HERMES_CONFIG_PATH`` / ``_HERMES_ENV_PATH``
+    patterns match. No-op when the path can't be resolved or doesn't appear.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        home = get_hermes_home().expanduser()
+        candidates = [
+            str(home).rstrip("/"),
+            str(home.resolve(strict=False)).rstrip("/"),
+        ]
+    except Exception:
+        return command
+    seen: set[str] = set()
+    for path in candidates:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        # Guard against a degenerate HERMES_HOME (e.g. "/" or "") rewriting
+        # unrelated paths: require an absolute path with at least one non-root
+        # component. The active profile home is always a real directory like
+        # /home/hermes/.hermes or a per-test tempdir, never a bare root.
+        normalized = path.rstrip("/")
+        if not normalized.startswith("/") or normalized.count("/") < 2:
+            continue
+        command = command.replace(normalized + "/", "~/.hermes/")
     return command
 
 

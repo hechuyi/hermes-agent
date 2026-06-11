@@ -95,3 +95,69 @@ Four read-only subagent tracks were dispatched:
 
 Their findings will be merged below before any code absorption batch.
 
+## Subagent Findings
+
+### Desktop / Dashboard / Kanban / Skills Surface
+
+Read-only review classified most desktop and dashboard work as deferred for the
+Backend1 Feishu target. The dashboard admin/profile builder/file browser,
+desktop remote-gateway attachment surface, public-bind/OAuth/OIDC/BasicAuth
+work, new external platforms, and external tool integrations all expand runtime
+or supply-chain surface and should not be folded into the first upstream intake.
+
+The same review identified lower-risk candidates for later batches:
+
+- Kanban stability fixes that do not define the Feishu production path.
+- Skill safety and reliability fixes, especially path traversal and write
+  approval gates.
+- Skill catalog path corrections and moving risky skills out of the built-in
+  default surface.
+
+### Agent / CLI / Tooling Runtime
+
+Read-only review identified three P0 groups:
+
+- Configuration and approval write-bypass protections.
+- Runtime CWD and file-tool workspace anchoring.
+- Compression/session-handoff contamination and session-id rotation fixes.
+
+The first group has the smallest conflict surface and was selected as the first
+absorption batch. The CWD and compression groups are still important but touch
+file-tool/runtime and gateway/session paths that overlap the fork's live
+gateway changes, so they require separate manual-port batches.
+
+## Absorbed Batches
+
+### 2026-06-11 — P0 Approval And Hermes Config Write Gates
+
+Absorbed upstream commits:
+
+- `8f2931e3ee518ddbb78789fc013fbc69aa868851` — block file-tool writes to
+  `~/.hermes/config.yaml`.
+- `4e9d886d9d9391d096093071cd79ece7e543f3e0` — add terminal-side approval
+  gate for Hermes config writes.
+- `a6a4e6f9d756a1a35ae8125b4e6c3fafb6807165` — gate `perl`/`ruby -i`
+  in-place edits of Hermes config/env files.
+- `b04c6e95f60e0ab9bf926bbf566faa9ec523a43b` — catch `perl`/`ruby -i` when
+  `-i` appears as a separate flag token.
+- `621bf3a873b6b466b7fca6fbd6f4c7cf83a70fdd` — strip shell escapes in the
+  denylist normalizer and fail closed when the approval module is unavailable.
+- `b0efe1d64b3ab005e9c3096b7023eb5e076a3a61` — gate resolved Hermes config
+  paths, not only `~` or `$HERMES_HOME` spelling.
+- `89d380261d1b5ebd69c3b87504da2f89fb0666f5` — resolve Hermes home at
+  detection time rather than import time.
+
+Fork-local adjustment:
+
+- `tools/file_tools.py` now checks the exact resolved Hermes config path before
+  generic sensitive system prefixes. This preserves the fork's existing
+  `/private/var/` guard while keeping the new Hermes-config failure class
+  observable on macOS temporary paths.
+
+Verification:
+
+```bash
+uv run pytest -q tests/tools/test_approval.py tests/tools/test_file_tools.py
+```
+
+Result: `244 passed`.
