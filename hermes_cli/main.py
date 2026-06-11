@@ -13620,6 +13620,26 @@ Examples:
         help="Reclaim disk space: merge FTS5 segments + VACUUM (no data change)",
     )
 
+    sessions_repair = sessions_subparsers.add_parser(
+        "repair",
+        help="Repair a malformed state.db schema so hidden sessions reappear",
+        description=(
+            "Recover a state.db whose schema is malformed before SessionDB can "
+            "open it. A backup is made first by default; sessions/messages are "
+            "preserved, and derived FTS schema is rebuilt only if required."
+        ),
+    )
+    sessions_repair.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Only report whether the database opens cleanly; do not modify it",
+    )
+    sessions_repair.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Skip the timestamped backup copy (not recommended)",
+    )
+
     sessions_subparsers.add_parser("stats", help="Show session store statistics")
 
     sessions_rename = sessions_subparsers.add_parser(
@@ -13649,6 +13669,55 @@ Examples:
     def cmd_sessions(args):
         import json as _json
 
+        action = args.sessions_action
+
+        if action == "repair":
+            from hermes_state import DEFAULT_DB_PATH, _db_opens_cleanly, repair_state_db_schema
+
+            db_path = DEFAULT_DB_PATH
+            if not db_path.exists():
+                print("No session database found (nothing to repair).")
+                return
+            reason = _db_opens_cleanly(db_path)
+            if reason is None:
+                print("state.db opens cleanly — no repair needed.")
+                return
+            print(f"state.db does not open cleanly: {reason}")
+            if getattr(args, "check_only", False):
+                return
+            print("Repairing state.db schema...")
+            report = repair_state_db_schema(
+                db_path,
+                backup=not getattr(args, "no_backup", False),
+            )
+            if report.get("repaired"):
+                if report.get("backup_name"):
+                    print(f"  backup: {report['backup_name']}")
+                print(f"  strategy: {report.get('strategy')}")
+                try:
+                    from hermes_state import SessionDB
+
+                    db = SessionDB()
+                    try:
+                        n = db._conn.execute(
+                            "SELECT COUNT(*) FROM sessions"
+                        ).fetchone()[0]
+                    finally:
+                        db.close()
+                    print(f"Repaired state.db — {n} sessions visible.")
+                except Exception:
+                    print("Repaired state.db.")
+            else:
+                print(
+                    "state.db repair failed: "
+                    f"failure_class={report.get('failure_class')} "
+                    f"stage={report.get('stage')} error={report.get('error')}"
+                )
+                if report.get("backup_name"):
+                    print(f"  backup preserved: {report['backup_name']}")
+                print("Keep state.db and its backup; do not delete either file.")
+            return
+
         try:
             from hermes_state import SessionDB
 
@@ -13656,8 +13725,6 @@ Examples:
         except Exception as e:
             print(f"Error: Could not open session database: {e}")
             return
-
-        action = args.sessions_action
 
         # Hide third-party tool sessions by default, but honour explicit --source
         _source = getattr(args, "source", None)

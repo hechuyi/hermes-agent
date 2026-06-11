@@ -1087,7 +1087,52 @@ def run_doctor(args):
             conn.close()
             check_ok(f"{_DHH}/state.db exists ({count} sessions)")
         except Exception as e:
-            check_warn(f"{_DHH}/state.db exists but has issues: {e}")
+            from hermes_state import is_malformed_db_error, repair_state_db_schema
+
+            if is_malformed_db_error(e):
+                check_warn(
+                    f"{_DHH}/state.db schema is malformed",
+                    "(sessions may be hidden until repaired)",
+                )
+                if should_fix:
+                    report = repair_state_db_schema(state_db_path)
+                    if report.get("repaired"):
+                        try:
+                            conn = sqlite3.connect(str(state_db_path))
+                            cursor = conn.execute("SELECT COUNT(*) FROM sessions")
+                            count = cursor.fetchone()[0]
+                            conn.close()
+                        except Exception:
+                            count = "?"
+                        detail = f"(strategy: {report.get('strategy')}"
+                        if report.get("backup_name"):
+                            detail += f"; backup: {report['backup_name']}"
+                        detail += ")"
+                        check_ok(
+                            f"Repaired state.db schema ({count} sessions visible)",
+                            detail,
+                        )
+                        fixed_count += 1
+                    else:
+                        check_warn(
+                            "state.db schema repair failed",
+                            (
+                                f"(failure_class: {report.get('failure_class')}; "
+                                f"stage: {report.get('stage')}; "
+                                f"backup: {report.get('backup_name') or 'n/a'})"
+                            ),
+                        )
+                        issues.append(
+                            "state.db schema malformed and auto-repair failed — "
+                            "preserve state.db plus the backup and repair manually"
+                        )
+                else:
+                    issues.append(
+                        "state.db schema malformed — run 'hermes doctor --fix' "
+                        "or 'hermes sessions repair'"
+                    )
+            else:
+                check_warn(f"{_DHH}/state.db exists but has issues: {e}")
     else:
         check_info(f"{_DHH}/state.db not created yet (will be created on first session)")
 

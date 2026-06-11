@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
+_SQLITE_CONNECT = sqlite3.connect
 
 SCHEMA_VERSION = 15
 SCOPE_ONLY_SCHEMA_VERSION = 14
@@ -270,6 +271,182 @@ def _log_wal_fallback_once(db_label: str, exc: Exception) -> None:
         db_label,
         exc,
     )
+
+
+# ---------------------------------------------------------------------------
+# Malformed schema recovery
+# ---------------------------------------------------------------------------
+
+_MALFORMED_SCHEMA_MARKERS = (
+    "malformed database schema",
+    "database disk image is malformed",
+)
+
+_repair_attempted_paths: set[str] = set()
+_repair_attempt_lock = threading.Lock()
+
+
+def is_malformed_db_error(exc: BaseException) -> bool:
+    """Return True for SQLite errors where the schema itself cannot parse."""
+    if not isinstance(exc, sqlite3.DatabaseError):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _MALFORMED_SCHEMA_MARKERS)
+
+
+def _claim_repair_attempt(db_path: Path) -> bool:
+    """Allow at most one automatic repair attempt per DB path per process."""
+    try:
+        key = str(db_path.resolve())
+    except OSError:
+        key = str(db_path)
+    with _repair_attempt_lock:
+        if key in _repair_attempted_paths:
+            return False
+        _repair_attempted_paths.add(key)
+        return True
+
+
+def _backup_db_file(db_path: Path) -> Optional[Path]:
+    """Copy a malformed DB and any WAL/SHM sidecars before schema surgery."""
+    import datetime
+    import shutil
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = db_path.with_name(f"{db_path.name}.malformed-backup-{stamp}")
+    try:
+        shutil.copy2(db_path, backup_path)
+        for suffix in ("-wal", "-shm"):
+            sidecar = db_path.with_name(db_path.name + suffix)
+            if sidecar.exists():
+                shutil.copy2(
+                    sidecar,
+                    backup_path.with_name(backup_path.name + suffix),
+                )
+        return backup_path
+    except Exception as exc:  # pragma: no cover - best effort
+        logger.warning(
+            "state.db malformed-schema backup failed: failure_class=backup_failed "
+            "stage=pre_repair reason=%s db=%s",
+            type(exc).__name__,
+            db_path.name,
+        )
+        return None
+
+
+def _db_opens_cleanly(db_path: Path) -> Optional[str]:
+    """Return None when a DB opens and passes basic checks, else a reason."""
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
+    try:
+        conn.execute("PRAGMA journal_mode").fetchone()
+        rows = conn.execute("PRAGMA integrity_check").fetchall()
+        problems = [str(row[0]) for row in rows if row and str(row[0]).lower() != "ok"]
+        if problems:
+            return "; ".join(problems[:3])
+        conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+        return None
+    except sqlite3.DatabaseError as exc:
+        return str(exc)
+    finally:
+        conn.close()
+
+
+def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, Any]:
+    """Repair a state.db whose ``sqlite_master`` schema is malformed.
+
+    The repair ladder is deliberately narrow:
+    1. de-duplicate duplicate ``sqlite_master`` rows, preserving the FTS index;
+    2. drop ``messages_fts*`` schema objects and let SessionDB rebuild them.
+
+    Canonical ``sessions`` and ``messages`` rows are never modified.
+    """
+    report: Dict[str, Any] = {
+        "repaired": False,
+        "failure_class": "malformed_schema",
+        "stage": "precheck",
+        "strategy": None,
+        "backup_created": False,
+        "backup_name": None,
+        "backup_path": None,
+        "error": None,
+    }
+
+    db_path = Path(db_path)
+    if not db_path.exists():
+        report.update(
+            {
+                "failure_class": "missing_database",
+                "error": "state.db does not exist",
+            }
+        )
+        return report
+
+    if backup:
+        backup_path = _backup_db_file(db_path)
+        if backup_path is not None:
+            report["backup_created"] = True
+            report["backup_name"] = backup_path.name
+            report["backup_path"] = str(backup_path)
+
+    report["stage"] = "dedup_schema"
+    try:
+        conn = sqlite3.connect(str(db_path), isolation_level=None)
+        try:
+            conn.execute("PRAGMA writable_schema=ON")
+            dupes = conn.execute(
+                "SELECT type, name, COUNT(*) AS c, MIN(rowid) AS keep "
+                "FROM sqlite_master GROUP BY type, name HAVING c > 1"
+            ).fetchall()
+            for obj_type, name, _count, keep in dupes:
+                conn.execute(
+                    "DELETE FROM sqlite_master "
+                    "WHERE type IS ? AND name IS ? AND rowid <> ?",
+                    (obj_type, name, keep),
+                )
+            conn.execute("PRAGMA writable_schema=OFF")
+            conn.commit()
+        finally:
+            conn.close()
+        if _db_opens_cleanly(db_path) is None:
+            report["repaired"] = True
+            report["strategy"] = "dedup_schema"
+            return report
+    except sqlite3.DatabaseError as exc:
+        logger.warning(
+            "state.db malformed-schema repair pass failed: "
+            "failure_class=malformed_schema stage=dedup_schema reason=%s",
+            type(exc).__name__,
+        )
+
+    report["stage"] = "drop_fts_rebuild"
+    try:
+        conn = sqlite3.connect(str(db_path), isolation_level=None)
+        try:
+            conn.execute("PRAGMA writable_schema=ON")
+            conn.execute("DELETE FROM sqlite_master WHERE name LIKE 'messages_fts%'")
+            conn.execute("PRAGMA writable_schema=OFF")
+            conn.commit()
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+        reason = _db_opens_cleanly(db_path)
+        if reason is None:
+            report["repaired"] = True
+            report["strategy"] = "drop_fts_rebuild"
+            return report
+        report["error"] = reason
+    except sqlite3.DatabaseError as exc:
+        report["error"] = str(exc)
+
+    logger.error(
+        "state.db malformed-schema repair failed: failure_class=%s stage=%s "
+        "backup_created=%s backup_name=%s",
+        report["failure_class"],
+        report["stage"],
+        report["backup_created"],
+        report["backup_name"],
+    )
+    return report
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -521,25 +698,45 @@ class SessionDB:
         self._write_count = 0
         self._fts_enabled = False
         self._degraded_capabilities: Dict[str, Dict[str, str]] = {}
+        self._conn = None
         try:
-            self._conn = sqlite3.connect(
-                str(self.db_path),
-                check_same_thread=False,
-                # Short timeout — application-level retry with random jitter
-                # handles contention instead of sitting in SQLite's internal
-                # busy handler for up to 30s.
-                timeout=1.0,
-                # Autocommit mode: Python's default isolation_level=""
-                # auto-starts transactions on DML, which conflicts with our
-                # explicit BEGIN IMMEDIATE.  None = we manage transactions
-                # ourselves.
-                isolation_level=None,
-            )
-            self._conn.row_factory = sqlite3.Row
-            apply_wal_with_fallback(self._conn, db_label="state.db")
-            self._conn.execute("PRAGMA foreign_keys=ON")
+            def _connect_and_init() -> None:
+                self._conn = sqlite3.connect(
+                    str(self.db_path),
+                    check_same_thread=False,
+                    # Short timeout — application-level retry with random jitter
+                    # handles contention instead of sitting in SQLite's internal
+                    # busy handler for up to 30s.
+                    timeout=1.0,
+                    # Autocommit mode: Python's default isolation_level=""
+                    # auto-starts transactions on DML, which conflicts with our
+                    # explicit BEGIN IMMEDIATE.  None = we manage transactions
+                    # ourselves.
+                    isolation_level=None,
+                )
+                self._conn.row_factory = sqlite3.Row
+                apply_wal_with_fallback(self._conn, db_label="state.db")
+                self._conn.execute("PRAGMA foreign_keys=ON")
+                self._init_schema()
 
-            self._init_schema()
+            try:
+                _connect_and_init()
+            except sqlite3.DatabaseError as exc:
+                if not is_malformed_db_error(exc) or not _claim_repair_attempt(self.db_path):
+                    raise
+                logger.error(
+                    "state.db schema is malformed; attempting one automatic "
+                    "repair: failure_class=malformed_schema stage=open",
+                )
+                try:
+                    if self._conn is not None:
+                        self._conn.close()
+                except Exception:
+                    pass
+                report = repair_state_db_schema(self.db_path)
+                if not report.get("repaired"):
+                    raise
+                _connect_and_init()
         except Exception as exc:
             # Capture the cause so /resume and friends can surface WHY the
             # session DB is unavailable instead of a bare "Session database
@@ -740,7 +937,7 @@ class SessionDB:
         Adding a column to SCHEMA_SQL is all that's needed; the
         reconciliation loop picks it up automatically.
         """
-        ref = sqlite3.connect(":memory:")
+        ref = _SQLITE_CONNECT(":memory:")
         try:
             ref.executescript(schema_sql)
             table_columns: Dict[str, Dict[str, str]] = {}
@@ -772,7 +969,7 @@ class SessionDB:
 
     @staticmethod
     def _parse_schema_column_info(schema_sql: str) -> Dict[str, Dict[str, Dict[str, Any]]]:
-        ref = sqlite3.connect(":memory:")
+        ref = _SQLITE_CONNECT(":memory:")
         try:
             ref.executescript(schema_sql)
             info: Dict[str, Dict[str, Dict[str, Any]]] = {}
