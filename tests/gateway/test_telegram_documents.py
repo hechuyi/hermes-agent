@@ -124,6 +124,13 @@ def _make_video(file_obj=None):
     return video
 
 
+def _make_inbound_audio(file_size=1024, file_obj=None):
+    audio = MagicMock()
+    audio.file_size = file_size
+    audio.get_file = AsyncMock(return_value=file_obj or _make_file_obj(b"audio-bytes"))
+    return audio
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -429,6 +436,44 @@ class TestVideoDownloadBlock:
         assert len(event.media_urls) == 1
         assert os.path.exists(event.media_urls[0])
         assert event.media_types == [SUPPORTED_VIDEO_TYPES[".mp4"]]
+
+
+class TestVoiceAudioSizeGate:
+    @pytest.mark.asyncio
+    async def test_oversized_voice_is_rejected_before_download(self, adapter):
+        adapter._max_doc_bytes = 1024
+        voice = _make_inbound_audio(file_size=2048)
+        msg = _make_message(caption="please transcribe")
+        msg.voice = voice
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+
+        voice.get_file.assert_not_awaited()
+        event = adapter.handle_message.call_args[0][0]
+        assert event.message_type == MessageType.VOICE
+        assert event.media_urls == []
+        assert "please transcribe" in event.text
+        assert "voice message" in event.text
+        assert "exceeds the 1 MB limit" in event.text
+
+    @pytest.mark.asyncio
+    async def test_oversized_audio_is_rejected_before_download(self, adapter):
+        adapter._max_doc_bytes = 1024
+        audio = _make_inbound_audio(file_size=2048)
+        msg = _make_message(caption="listen to this")
+        msg.audio = audio
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+
+        audio.get_file.assert_not_awaited()
+        event = adapter.handle_message.call_args[0][0]
+        assert event.message_type == MessageType.AUDIO
+        assert event.media_urls == []
+        assert "listen to this" in event.text
+        assert "audio file" in event.text
+        assert "exceeds the 1 MB limit" in event.text
 
 
 # ---------------------------------------------------------------------------
