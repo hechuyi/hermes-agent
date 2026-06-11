@@ -246,6 +246,43 @@ class TestMcpAdd:
         assert srv["command"] == "npx"
         assert srv["args"] == ["@mcp/github"]
 
+    def test_add_stdio_server_strips_remainder_separator(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """argparse.REMAINDER may include `--`; config should store child argv."""
+        fake_tools = [FakeTool("search", "Search repos")]
+
+        def mock_probe(name, config, **kw):
+            assert config["args"] == [
+                "mcp",
+                "gateway",
+                "run",
+                "--profile",
+                "research",
+            ]
+            return [(t.name, t.description) for t in fake_tools]
+
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server", mock_probe
+        )
+        monkeypatch.setattr("builtins.input", lambda _: "")
+
+        from hermes_cli.mcp_config import cmd_mcp_add
+
+        cmd_mcp_add(_make_args(
+            name="docker",
+            mcp_command="docker",
+            args=["--", "mcp", "gateway", "run", "--profile", "research"],
+        ))
+        out = capsys.readouterr().out
+        assert "Saved" in out
+
+        from hermes_cli.config import load_config
+
+        config = load_config()
+        srv = config["mcp_servers"]["docker"]
+        assert srv["args"] == ["mcp", "gateway", "run", "--profile", "research"]
+
     def test_add_connection_failure_save_disabled(
         self, tmp_path, capsys, monkeypatch
     ):
@@ -654,4 +691,3 @@ class TestMcpLogin:
 
         assert "Authenticated — 3 tool(s) available" in out
         assert "no OAuth token" not in out
-

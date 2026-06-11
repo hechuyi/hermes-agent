@@ -139,3 +139,33 @@ class TestApplyProfileOverrideHermesHomeGuard:
         _apply_profile_override()
 
         assert os.environ.get("HERMES_HOME") is None
+
+    def test_mcp_add_args_profile_flag_is_not_consumed(self, tmp_path, monkeypatch):
+        """Flags after `mcp add --args` belong to the child MCP command."""
+        hermes_root = tmp_path / ".hermes"
+        hermes_root.mkdir(parents=True, exist_ok=True)
+        argv = [
+            "hermes",
+            "mcp",
+            "add",
+            "docker-research",
+            "--command",
+            "docker",
+            "--args",
+            "mcp",
+            "gateway",
+            "run",
+            "--profile",
+            "research",
+        ]
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setattr(sys, "argv", list(argv))
+
+        from hermes_cli.main import _apply_profile_override
+
+        _apply_profile_override()
+
+        assert os.environ.get("HERMES_HOME") is None
+        assert sys.argv == argv
