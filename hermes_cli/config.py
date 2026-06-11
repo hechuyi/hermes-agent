@@ -5183,19 +5183,21 @@ def save_env_value(key: str, value: str):
             f.flush()
             os.fsync(f.fileno())
         atomic_replace(tmp_path, env_path)
-        # Restore original permissions before _secure_file may tighten them.
+        # Preserve the original file mode (e.g. 0640 for Docker volume mounts)
+        # instead of letting _secure_file unconditionally tighten to 0600.
         if original_mode is not None:
             try:
                 os.chmod(env_path, original_mode)
             except OSError:
                 pass
+        else:
+            _secure_file(env_path)
     except BaseException:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
         raise
-    _secure_file(env_path)
 
     os.environ[key] = value
     invalidate_env_cache()
@@ -5240,18 +5242,22 @@ def remove_env_value(key: str) -> bool:
                 f.flush()
                 os.fsync(f.fileno())
             atomic_replace(tmp_path, env_path)
+            # Preserve the original file mode (e.g. 0640 for Docker volume
+            # mounts) instead of letting _secure_file unconditionally tighten
+            # to 0600. Mirrors save_env_value().
             if original_mode is not None:
                 try:
                     os.chmod(env_path, original_mode)
                 except OSError:
                     pass
+            else:
+                _secure_file(env_path)
         except BaseException:
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
             raise
-        _secure_file(env_path)
 
     os.environ.pop(key, None)
     invalidate_env_cache()
