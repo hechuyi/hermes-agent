@@ -120,6 +120,10 @@ class TestGatewayEventPreflight:
 
 
 class TestSystemdServiceRefresh:
+    @pytest.fixture(autouse=True)
+    def _skip_user_systemd_preflight(self, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda: None)
+
     def test_systemd_install_repairs_outdated_unit_without_force(self, tmp_path, monkeypatch):
         unit_path = tmp_path / "hermes-gateway.service"
         unit_path.write_text("old unit\n", encoding="utf-8")
@@ -370,6 +374,105 @@ class TestSystemdServiceRefresh:
             "daemon-reload" in str(c) for c in ran
         ), "daemon-reload must not run when write was refused"
 
+    def test_refresh_refuses_to_bake_any_tempdir_home_into_real_user_unit(
+        self, tmp_path, monkeypatch
+    ):
+        """Structural guard: a manual E2E HERMES_HOME like
+        ``/tmp/hermes-e2e-41264`` carries none of the pytest markers but
+        poisons the unit identically (seen live 2026-06-11 — an E2E probe ran
+        ``hermes gateway restart`` with a /tmp HERMES_HOME exported; the
+        restart's unit refresh baked it into the production unit and the
+        post-update restart produced a 7-hour zombie gateway). The refresh
+        must refuse ANY temp-dir HERMES_HOME, not just pytest-shaped ones.
+        """
+        unit_path = tmp_path / "hermes-gateway.service"
+        unit_path.write_text("old unit\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path
+        )
+        polluted_unit = (
+            "[Service]\n"
+            'Environment="HERMES_HOME=/tmp/hermes-e2e-41264"\n'
+            "WorkingDirectory=/tmp/hermes-e2e-41264\n"
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "generate_systemd_unit",
+            lambda system=False, run_as_user=None: polluted_unit,
+        )
+
+        ran = []
+
+        def fake_run(cmd, check=True, **kwargs):
+            ran.append(cmd)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        result = gateway_cli.refresh_systemd_unit_if_needed(system=False)
+
+        assert result is False, "refresh should refuse to write a temp-home unit"
+        assert (
+            unit_path.read_text(encoding="utf-8") == "old unit\n"
+        ), "installed unit must be left untouched"
+        assert not any(
+            "daemon-reload" in str(c) for c in ran
+        ), "daemon-reload must not run when write was refused"
+
+
+class TestTempHomeServiceDefinitionGuard:
+    """_temp_home_in_service_definition() — structural temp-dir detection."""
+
+    def test_detects_tmp_home_in_systemd_unit(self):
+        unit = '[Service]\nEnvironment="HERMES_HOME=/tmp/hermes-e2e-41264"\n'
+        assert (
+            gateway_cli._temp_home_in_service_definition(unit)
+            == "/tmp/hermes-e2e-41264"
+        )
+
+    def test_detects_var_tmp_home(self):
+        unit = '[Service]\nEnvironment="HERMES_HOME=/var/tmp/hermes-x"\n'
+        assert gateway_cli._temp_home_in_service_definition(unit) is not None
+
+    def test_detects_tempdir_env_home(self, monkeypatch, tmp_path):
+        import tempfile as _tempfile
+
+        monkeypatch.setattr(_tempfile, "gettempdir", lambda: str(tmp_path))
+        unit = f'[Service]\nEnvironment="HERMES_HOME={tmp_path}/hermes-home"\n'
+        assert gateway_cli._temp_home_in_service_definition(unit) is not None
+
+    def test_detects_tmp_home_in_launchd_plist(self):
+        plist = (
+            "<dict>\n  <key>HERMES_HOME</key>\n"
+            "  <string>/tmp/hermes-e2e-99999</string>\n</dict>\n"
+        )
+        assert (
+            gateway_cli._temp_home_in_service_definition(plist)
+            == "/tmp/hermes-e2e-99999"
+        )
+
+    def test_accepts_real_home(self):
+        unit = '[Service]\nEnvironment="HERMES_HOME=/home/alice/.hermes"\n'
+        assert gateway_cli._temp_home_in_service_definition(unit) is None
+
+    def test_accepts_macos_real_home_plist(self):
+        plist = (
+            "<dict>\n  <key>HERMES_HOME</key>\n"
+            "  <string>/Users/alice/.hermes</string>\n</dict>\n"
+        )
+        assert gateway_cli._temp_home_in_service_definition(plist) is None
+
+    def test_accepts_unit_without_hermes_home(self):
+        unit = "[Service]\nExecStart=/usr/bin/python -m hermes_cli.main gateway run\n"
+        assert gateway_cli._temp_home_in_service_definition(unit) is None
+
+    def test_tmp_prefixed_non_temp_path_is_accepted(self):
+        # /tmpfs-data is NOT under /tmp — prefix matching must be
+        # component-wise, not string startswith.
+        unit = '[Service]\nEnvironment="HERMES_HOME=/tmpfs-data/.hermes"\n'
+        assert gateway_cli._temp_home_in_service_definition(unit) is None
+
 
 class TestRequireServiceInstalled:
     def test_exits_with_install_hint_when_unit_missing(self, tmp_path, monkeypatch, capsys):
@@ -562,6 +665,17 @@ class TestLaunchdServiceRecovery:
         plist_path.write_text("<plist>old content</plist>", encoding="utf-8")
 
         monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        # Patch the generator with synthetic content carrying a real-looking
+        # home — the temp-home guard refuses to write plists whose
+        # HERMES_HOME resolves under the (pytest tmp) test HERMES_HOME.
+        monkeypatch.setattr(
+            gateway_cli,
+            "generate_launchd_plist",
+            lambda: (
+                "<plist>--replace\n<key>HERMES_HOME</key>"
+                "<string>/Users/alice/.hermes</string></plist>"
+            ),
+        )
 
         calls = []
 
@@ -760,7 +874,6 @@ class TestLaunchdServiceRecovery:
         assert "stale" in output.lower()
         assert "not loaded" in output.lower()
 
-
 class TestGatewayServiceDetection:
     def test_supports_systemd_services_requires_systemctl_binary(self, monkeypatch):
         monkeypatch.setattr(gateway_cli, "is_linux", lambda: True)
@@ -819,6 +932,10 @@ class TestGatewayServiceDetection:
         assert gateway_cli._is_service_running() is False
 
 class TestGatewaySystemServiceRouting:
+    @pytest.fixture(autouse=True)
+    def _skip_user_systemd_preflight(self, monkeypatch):
+        monkeypatch.setattr(gateway_cli, "_preflight_user_systemd", lambda: None)
+
     def test_systemd_restart_gracefully_restarts_running_service_and_waits(self, monkeypatch, capsys):
         calls = []
 
