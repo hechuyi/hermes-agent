@@ -895,15 +895,29 @@ class DiscordAdapter(BasePlatformAdapter):
 
         except asyncio.TimeoutError:
             logger.error("[%s] Timeout waiting for connection to Discord", self.name, exc_info=True)
+            await self._cancel_bot_task()
             self._release_platform_lock()
             return False
         except Exception as e:  # pragma: no cover - defensive logging
             logger.error("[%s] Failed to connect to Discord: %s", self.name, e, exc_info=True)
+            await self._cancel_bot_task()
             self._release_platform_lock()
             return False
 
+    async def _cancel_bot_task(self) -> None:
+        """Cancel and await the background client.start() task, if running."""
+        if self._bot_task and not self._bot_task.done():
+            self._bot_task.cancel()
+            try:
+                await self._bot_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._bot_task = None
+
     async def disconnect(self) -> None:
         """Disconnect from Discord."""
+        await self._cancel_bot_task()
+
         # Clean up all active voice connections before closing the client
         for guild_id in list(self._voice_clients.keys()):
             try:

@@ -280,6 +280,70 @@ async def test_connect_releases_token_lock_on_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_connect_timeout_cancels_bot_task(monkeypatch):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+    monkeypatch.setattr("gateway.status.acquire_scoped_lock", lambda scope, identity, metadata=None: (True, None))
+    monkeypatch.setattr("gateway.status.release_scoped_lock", lambda scope, identity: None)
+
+    intents = SimpleNamespace(
+        message_content=False, dm_messages=False, guild_messages=False,
+        members=False, voice_states=False,
+    )
+    monkeypatch.setattr(discord_platform.Intents, "default", lambda: intents)
+
+    class NeverReadyBot(FakeBot):
+        async def start(self, token):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        discord_platform.commands,
+        "Bot",
+        lambda **kwargs: NeverReadyBot(
+            intents=kwargs["intents"],
+            proxy=kwargs.get("proxy"),
+            allowed_mentions=kwargs.get("allowed_mentions"),
+        ),
+    )
+
+    async def fake_wait_for(awaitable, timeout):
+        awaitable.close()
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(discord_platform.asyncio, "wait_for", fake_wait_for)
+
+    ok = await adapter.connect()
+
+    assert ok is False
+    assert adapter._bot_task is None
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cancels_running_bot_task(monkeypatch):
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+    monkeypatch.setattr("gateway.status.acquire_scoped_lock", lambda scope, identity, metadata=None: (True, None))
+    monkeypatch.setattr("gateway.status.release_scoped_lock", lambda scope, identity: None)
+
+    async def _forever():
+        await asyncio.Event().wait()
+
+    zombie_task = asyncio.create_task(_forever())
+    adapter._bot_task = zombie_task
+    adapter._client = AsyncMock()
+    adapter._post_connect_task = None
+    adapter._voice_clients = {}
+    adapter._running = True
+    adapter._ready_event = asyncio.Event()
+
+    await adapter.disconnect()
+
+    assert adapter._bot_task is None
+    assert zombie_task.done()
+    assert zombie_task.cancelled()
+
+
+@pytest.mark.asyncio
 async def test_connect_does_not_wait_for_slash_sync(monkeypatch):
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
 
