@@ -3,7 +3,7 @@
 > Date: 2026-06-11
 > Working branch: `fix/live-gateway-hermes-tools`
 > Local fork main: `origin/main` at `5921d667855880b0aa2083a50f001748aed52f3e`
-> Official main ref: `upstream/main` at `e71d746820bf262214e4e1887683d3f65d211cc1`
+> Official main ref: `upstream/main` at `93a2f680fd18f08f70eaf5c96944cdf4dc477143`
 > Deployed fork head at intake start: `38144944bde7fd5e16051a4e8f739b9e417121ae`
 
 ## Scope
@@ -28,17 +28,27 @@ git rev-list --count HEAD..upstream/main
 git rev-list --count --cherry-pick --right-only HEAD...upstream/main
 ```
 
-Results:
+Initial results:
 
 - `origin/main..upstream/main`: 1228 commits
 - `HEAD..upstream/main`: 1493 commits
 - `HEAD...upstream/main` right-only after patch-equivalence filtering: 1450 commits
+
+Current refresh after the 2026-06-12 intake continuation:
+
+- `upstream/main`: `93a2f680fd18f08f70eaf5c96944cdf4dc477143`
+- `origin/main..upstream/main`: 1288 commits
+- `HEAD..upstream/main`: 1553 commits
+- `HEAD...upstream/main` right-only after patch-equivalence filtering: 1509 commits
 
 Continuation refresh:
 
 - `git fetch https://github.com/NousResearch/hermes-agent.git refs/heads/main:refs/remotes/upstream/main`
   advanced `upstream/main` from `4d22b8293374fd9eaeac75e1f607b20ddea3a1b3`
   to `e71d746820bf262214e4e1887683d3f65d211cc1`.
+- A later refresh advanced `upstream/main` from
+  `e71d746820bf262214e4e1887683d3f65d211cc1` to
+  `93a2f680fd18f08f70eaf5c96944cdf4dc477143`.
 - A follow-up read-only subagent review was dispatched for
   `4d22b8293374fd9eaeac75e1f607b20ddea3a1b3..upstream/main`.
 
@@ -284,43 +294,131 @@ Observed results:
 - `tests/gateway/test_feishu.py tests/gateway/test_feishu_approval_buttons.py tests/gateway/test_feishu_upload_denial.py`:
   `317 passed, 2 warnings`.
 
-## Outstanding P0/P1 Follow-Up
+### 2026-06-12 — Runtime CWD And File Anchoring
 
-### Runtime CWD And File Anchoring
+Absorbed manually across several small commits:
 
-Read-only subagent review found that the fork still lacks the official runtime
-CWD/file anchoring chain. These commits should be manually ported as a focused
-batch because they touch shared tool/runtime code used by Feishu sessions:
+- `730ac6deb` — route prompt construction through runtime cwd.
+- `64271e071` — preserve terminal session cwd and raw task-id overrides.
+- `2e6c351a4` — anchor file tools to runtime cwd.
+- `3b7571b31` — preserve TUI session/profile/remote cwd.
+- `7be85c4be` — keep SSH maintenance subprocesses from inheriting TUI stdin.
 
-- `e45b74583589424970c4af47366464178378e31f` — reject sentinel
-  `TERMINAL_CWD` and anchor file-tool edits before a live cwd exists.
-- `7a315bd702a8df0fe01d235a1d3ddc477fa8a8ea` — preserve live session cwd in
-  terminal execution.
-- `6459b3d9913f3dd2cc4e83857b5ebd7fd81908f3` and
-  `329c33dac3d1dafe81ffa83e7194f7ff1e734c61` — avoid isolating containers
-  for cwd-only overrides and repair raw task-id lookup after collapse.
-- `ad69d3edc7359310233fa789b300bfcc5a5c3f7a` — guard `os.getcwd()` when the
-  current directory has been deleted.
-- `4bc72960427a8d56631dcead9af6ddd920f86661`,
-  `16047655b5260acf40e2a9e932d0569f2520f389`, and
-  `f90777a6b8d5b1166a1b4cd3e156054b2466e460` — introduce
-  `agent/runtime_cwd.py` as the single cwd resolver and route prompt/context
-  file anchoring through it.
-- `0e0d704f2da60d14a7e42483b700285e40400893`,
-  `f9ea4927f27f4e4369ec26ab13aad6ef4e181f88`, and
-  `93340fa3c1b8548c92d4c92e5e9dfd3a201d89e6` — preserve remote/profile
-  cwd through TUI gateway terminal sessions.
+Upstream semantic sources include `e45b7458`, `7a315bd7`, `6459b3d9`,
+`329c33da`, `ad69d3ed`, `4bc72960`, `16047655`, `f90777a6`, `0e0d704f`,
+`f9ea4927`, and `93340fa3`.
 
-These changes do not directly alter the fork's event-ledger schema, but they
-affect Feishu by deciding where tool writes, context-file reads, and prompt
-cwd claims are anchored.
+Verification:
 
-Recommended verification after the remaining runtime CWD batch:
+- `uv run pytest -q tests/tools/test_file_tools_cwd_resolution.py tests/tools/test_resolve_path.py tests/tools/test_file_ops_cwd_tracking.py tests/tools/test_file_tools.py`:
+  `69 passed`.
+- `uv run pytest -q tests/agent/test_runtime_cwd.py tests/gateway/test_session_env.py tests/agent/test_prompt_builder.py tests/agent/test_system_prompt.py`:
+  `160 passed, 1 skipped`.
+- `uv run pytest -q tests/tools/test_terminal_task_cwd.py tests/tools/test_shared_container_task_id.py`:
+  `22 passed`.
+- `uv run pytest -q tests/test_tui_gateway_server.py tests/tools/test_file_tools_cwd_resolution.py tests/tools/test_resolve_path.py tests/tools/test_file_ops_cwd_tracking.py tests/tools/test_file_tools.py`:
+  `266 passed, 1 warning`.
+- `uv run pytest -q tests/tools/test_ssh_environment.py tests/tools/test_ssh_bulk_upload.py`:
+  `36 passed, 11 skipped`.
 
-```bash
-uv run pytest -q tests/tools/test_file_tools.py tests/tools/test_file_tools_cwd_resolution.py
-uv run pytest -q tests/tools/test_terminal_task_cwd.py tests/tools/test_shared_container_task_id.py
-uv run pytest -q tests/agent/test_runtime_cwd.py tests/agent/test_prompt_builder.py tests/agent/test_system_prompt.py
-uv run pytest -q tests/test_tui_gateway_server.py -k "cwd or terminal_task_cwd or profile_configured_cwd or completion_cwd"
-uv run pytest -q tests/gateway/test_feishu.py tests/gateway/test_feishu_approval_buttons.py tests/gateway/test_feishu_upload_denial.py tests/gateway/test_gateway_event_ledger.py tests/gateway/test_hermes_tools_gateway_event.py
-```
+### 2026-06-12 — Gateway Service And Restart Reliability
+
+Absorbed:
+
+- `1447b6d39` — refuse service definition writes when `HERMES_HOME` is a
+  temporary test/home path.
+- `275f6276d` — preserve detached restart watcher environment and scrub
+  `_HERMES_GATEWAY` on Windows and POSIX restart watchers.
+- `6b1243997` — probe launchd domain (`gui/<uid>` vs `user/<uid>`) instead of
+  hardcoding one domain.
+
+Verification:
+
+- `uv run pytest -q tests/hermes_cli/test_gateway_service.py tests/hermes_cli/test_gateway.py tests/hermes_cli/test_gateway_linger.py`:
+  `186 passed` for the temp-home guard batch and `192 passed` after launchd
+  domain probing.
+- `uv run pytest -q tests/gateway/test_restart_drain.py`: `19 passed`.
+- `uv run python -m py_compile hermes_cli/gateway.py tests/hermes_cli/test_gateway_service.py`:
+  passed.
+
+### 2026-06-12 — Backup, MCP, And Provider Runtime Fixes
+
+Absorbed:
+
+- `38c6c17a6` — stage SQLite snapshots beside the backup archive and include
+  nested `skills/.../hermes-agent/` directories while excluding only the root
+  repo checkout.
+- `e19dea6c0` — preserve MCP argv passthrough, propagate profile-scoped
+  `HERMES_HOME` onto the MCP event loop, and represent configured/connecting/
+  disabled MCP startup states without false failed status.
+- `418e2a5e4` — fall back to non-streaming Bedrock InvokeModel when streaming
+  is denied by IAM.
+
+Verification:
+
+- `uv run pytest -q tests/hermes_cli/test_backup.py`: `117 passed`.
+- `uv run pytest tests/hermes_cli/test_apply_profile_override.py tests/hermes_cli/test_mcp_add_command_dest.py tests/hermes_cli/test_mcp_config.py tests/hermes_cli/test_banner.py tests/tools/test_mcp_loop_profile_override.py tests/tools/test_mcp_tool.py -q`:
+  `253 passed, 1 warning`.
+- `uv run pytest -q tests/agent/test_bedrock_adapter.py tests/run_agent/test_streaming.py::TestStreamingFallback`:
+  `132 passed, 1 warning`.
+
+### 2026-06-12 — Messaging And Dashboard Safety Fixes
+
+Absorbed:
+
+- `d5467a645` — gate oversized Telegram voice/audio files before download.
+- `9481b15e` — normalize dashboard main model assignments at the
+  `/api/model/set` persistence chokepoint without changing model catalog or
+  defaults.
+- `cf7e55f47` — fix a non-secret web test fixture so dashboard web tests run
+  under current redaction semantics.
+
+Verification:
+
+- `uv run pytest -q tests/gateway/test_telegram_documents.py tests/gateway/test_telegram_audio_vs_voice.py tests/gateway/test_telegram_max_doc_bytes.py`:
+  `51 passed`.
+- `uv run pytest -q tests/hermes_cli/test_web_server.py`: `153 passed,
+  1 warning`.
+
+### 2026-06-12 — State Database Recovery
+
+Absorbed:
+
+- `f75191fcd` — recover from malformed `sqlite_master` state.db schemas
+  (duplicate FTS schema objects) by backing up the raw DB, applying a narrow
+  repair ladder, and reopening once. The fork-local implementation keeps stable
+  failure evidence (`failure_class`, `stage`, `strategy`, `backup_name`) and
+  does not downgrade non-malformed SQLite errors into success.
+
+Verification:
+
+- `uv run pytest -q tests/test_state_db_malformed_repair.py tests/test_hermes_state.py tests/test_hermes_state_wal_fallback.py`:
+  `297 passed`.
+- `uv run pytest -q tests/hermes_cli/test_doctor.py tests/hermes_cli/test_sessions_optimize.py`:
+  `60 passed, 1 warning`.
+- `uv run python -m py_compile hermes_state.py hermes_cli/main.py hermes_cli/doctor.py tests/test_state_db_malformed_repair.py`:
+  passed.
+- `uv run ruff check hermes_state.py hermes_cli/main.py hermes_cli/doctor.py tests/test_state_db_malformed_repair.py`:
+  passed.
+
+## Remaining Deferred Or Skipped Upstream Areas
+
+No unconditional P0/P1 remains from the reviewed `e71d7468..93a2f680f`
+increment. Deferred areas remain intentionally unmerged:
+
+- model catalog/default/picker/visibility and model steering changes, including
+  `a4f179c50` and later model-policy commits. These conflict with the current
+  "do not add models; current channel is 5.5" constraint and require separate
+  model-policy review.
+- desktop remote filesystem APIs and desktop UI fixes (`51f47f9a9`,
+  `db79e9013`, `8878484f8`, `56a0f48ba`, `9121834b3`, `8505e9d66`,
+  `93a2f680f`).
+- cron/automation blueprint feature stack (`9a09ea69f`, `1593ca540`,
+  `e976faac7`, `e8b757845`, `cb29e8a82`).
+- broad dashboard/profile management and SKILL.md editor surfaces
+  (`875aa8f1`, `a09343cc`, `c7bfc938d`) except for the narrow main-model
+  assignment normalization already absorbed.
+- generic gateway topic/session routing and platform-specific stacks that
+  overlap Feishu routing or are not in the Backend1 production target, including
+  Matrix room isolation and WhatsApp stale-bridge restart. These should be
+  reviewed as platform-specific work, not broad intake.
