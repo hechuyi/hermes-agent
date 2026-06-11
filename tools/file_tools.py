@@ -85,6 +85,34 @@ def _resolve_path(filepath: str, task_id: str = "default") -> Path:
     return _resolve_path_for_task(filepath, task_id)
 
 
+# Sentinel ``TERMINAL_CWD`` values that mean "not configured", NOT a literal
+# directory to resolve against. A stale config / .env commonly leaves the
+# literal "." here; "auto"/"cwd" are setup-wizard placeholders. Treating any of
+# these as a real relative base silently anchors edits to the agent PROCESS cwd
+# (e.g. the main repo while a worktree session is active), routing writes to the
+# wrong checkout. The gateway sanitizes the same set at import time
+# (gateway/run.py); the file/terminal-tool layer must do likewise so CLI
+# sessions get the same protection. See references/worktree-cwd-discipline.md.
+_TERMINAL_CWD_SENTINELS = frozenset({"", ".", "./", "auto", "cwd"})
+
+
+def _configured_terminal_cwd() -> str | None:
+    """Return ``$TERMINAL_CWD`` only when it names a real directory anchor.
+
+    Sentinel values (see ``_TERMINAL_CWD_SENTINELS``) and relative paths are
+    rejected — a relative anchor is meaningless without knowing which cwd it is
+    relative to, which is exactly the ambiguity that misroutes worktree edits.
+    Only an absolute, sentinel-free value is honored.
+    """
+    raw = (os.environ.get("TERMINAL_CWD") or "").strip()
+    if raw.lower() in _TERMINAL_CWD_SENTINELS:
+        return None
+    expanded = os.path.expanduser(raw)
+    if not os.path.isabs(expanded):
+        return None
+    return expanded
+
+
 def _get_live_tracking_cwd(task_id: str = "default") -> str | None:
     """Return the task's live terminal cwd for bookkeeping when available."""
     try:
@@ -116,15 +144,101 @@ def _get_live_tracking_cwd(task_id: str = "default") -> str | None:
     return None
 
 
+def _authoritative_workspace_root(task_id: str = "default") -> str | None:
+    """Best-effort absolute workspace root for divergence checks.
+
+    Prefers the live terminal cwd (the directory the agent is actually working
+    in). When no terminal command has run yet -- so the live registry is empty --
+    falls back to a sentinel-free absolute ``$TERMINAL_CWD``. This is what lets
+    a worktree session warn about (and resolve into) the worktree from the very
+    first ``write_file``/``patch``, before any ``cd`` has populated the live cwd.
+
+    Returns ``None`` only when there is genuinely no reliable anchor, in which
+    case callers fall back to the process cwd.
+    """
+    live = _get_live_tracking_cwd(task_id)
+    if live:
+        return live
+    return _configured_terminal_cwd()
+
+
+def _resolve_base_dir(task_id: str = "default") -> Path:
+    """Return the ABSOLUTE base directory for resolving relative paths.
+
+    Resolution order:
+      1. The task's live terminal cwd (the directory the agent is actually
+         working in, e.g. a git worktree). Authoritative when known.
+      2. A sentinel-free, absolute ``$TERMINAL_CWD`` (the worktree path set by
+         ``cli.py``/``main.py`` for ``-w`` sessions). Used even before any
+         terminal command has populated the live cwd registry.
+      3. The process cwd.
+
+    The returned base is ALWAYS absolute. This is the core invariant that
+    prevents the worktree-cwd divergence bug: a relative or sentinel
+    ``TERMINAL_CWD`` (commonly the literal ``"."`` from a stale config) is
+    meaningless as a resolution anchor; left to ``Path.resolve()`` it silently
+    resolves against whatever the agent PROCESS cwd happens to be (e.g. the main
+    repo while the terminal is in a worktree), routing edits to the wrong
+    checkout. We therefore reject sentinel/relative ``TERMINAL_CWD`` values
+    outright (rather than anchoring them to the process cwd) and fall through to
+    the process cwd only as a last resort, deterministically.
+    """
+    root = _authoritative_workspace_root(task_id)
+    if root:
+        base = Path(root).expanduser()
+    else:
+        base = Path(os.getcwd())
+    if not base.is_absolute():
+        # Last-resort anchoring: a live cwd should already be absolute, but if a
+        # terminal backend ever reports a relative cwd, anchor it to the process
+        # cwd once, here, so the result no longer depends on cwd at resolve().
+        base = Path(os.getcwd()) / base
+    return base.resolve()
+
+
 def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
-    """Resolve *filepath* against the task's live terminal cwd when possible."""
+    """Resolve *filepath* against the task's absolute base directory."""
     p = Path(filepath).expanduser()
-    if not p.is_absolute():
-        base = _get_live_tracking_cwd(task_id) or os.environ.get(
-            "TERMINAL_CWD", os.getcwd()
-        )
-        p = Path(base) / p
-    return p.resolve()
+    if p.is_absolute():
+        return p.resolve()
+    return (_resolve_base_dir(task_id) / p).resolve()
+
+
+def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "default") -> str | None:
+    """Warn when a relative path resolved OUTSIDE the task's workspace root.
+
+    Surfaces the worktree-cwd divergence the moment it would matter: if the
+    agent passes a relative path but it resolves under a directory that is not
+    the workspace root (i.e. the edit is about to land in a different checkout
+    than the one the agent is working in), return a message naming the absolute
+    target. ``None`` when the path is absolute, the base is unknown, or the
+    resolved path is correctly under the workspace root.
+
+    The workspace root is the live terminal cwd when known, else a sentinel-free
+    absolute ``$TERMINAL_CWD``; so a worktree session whose terminal registry
+    is still empty (no ``cd`` run yet) is warned on the very first write.
+    """
+    try:
+        if Path(filepath).expanduser().is_absolute():
+            return None
+        workspace_root = _authoritative_workspace_root(task_id)
+        if not workspace_root:
+            return None  # No authoritative workspace root to compare against.
+        root = Path(workspace_root).expanduser().resolve()
+        # Is `resolved` inside `root`?
+        try:
+            resolved.relative_to(root)
+            return None  # Inside the workspace — expected.
+        except ValueError:
+            return (
+                f"Relative path {filepath!r} resolved to {str(resolved)!r}, which is "
+                f"OUTSIDE the active workspace ({str(root)!r}). The edit will land in "
+                f"a different directory than the terminal's cwd. If this is not "
+                f"intended (e.g. a git-worktree session writing into the main "
+                f"checkout), pass an absolute path under the workspace instead."
+            )
+    except Exception:
+        return None
 
 
 def _is_blocked_device_path(path: str) -> bool:
@@ -961,12 +1075,16 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
             # fire — its message names the sibling subagent.
             cross_warning = file_state.check_stale(task_id, _resolved)
             stale_warning = _check_file_staleness(path, task_id)
+            cwd_warning = _path_resolution_warning(path, Path(_resolved), task_id)
             file_ops = _get_file_ops(task_id)
-            result = file_ops.write_file(path, content)
+            result = file_ops.write_file(_resolved, content)
             result_dict = result.to_dict()
-            effective_warning = cross_warning or stale_warning
+            effective_warning = cross_warning or stale_warning or cwd_warning
             if effective_warning:
                 result_dict["_warning"] = effective_warning
+            result_dict["resolved_path"] = _resolved
+            if not result_dict.get("error"):
+                result_dict["files_modified"] = [_resolved]
             # Refresh stamps after the successful write so consecutive
             # writes by this task don't trigger false staleness warnings.
             _update_read_timestamp(path, task_id)
@@ -1058,6 +1176,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                 _path_to_resolved[_p] = _r
                 _cross = file_state.check_stale(task_id, _r) if _r else None
                 _sw = _cross or _check_file_staleness(_p, task_id)
+                if not _sw and _r:
+                    _sw = _path_resolution_warning(_p, Path(_r), task_id)
                 if _sw:
                     stale_warnings.append(_sw)
 
@@ -1068,7 +1188,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                     return tool_error("path required")
                 if old_string is None or new_string is None:
                     return tool_error("old_string and new_string required")
-                result = file_ops.patch_replace(path, old_string, new_string, replace_all)
+                _replace_target = _path_to_resolved.get(path) or path
+                result = file_ops.patch_replace(_replace_target, old_string, new_string, replace_all)
             elif mode == "patch":
                 if not patch:
                     return tool_error("patch content required")
@@ -1079,9 +1200,15 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             result_dict = result.to_dict()
             if stale_warnings:
                 result_dict["_warning"] = stale_warnings[0] if len(stale_warnings) == 1 else " | ".join(stale_warnings)
+            _resolved_modified = [
+                _path_to_resolved.get(_p) or _p for _p in _paths_to_check
+            ]
             # Refresh stored timestamps for all successfully-patched paths so
             # consecutive edits by this task don't trigger false warnings.
             if not result_dict.get("error"):
+                result_dict["files_modified"] = _resolved_modified
+                if len(_resolved_modified) == 1:
+                    result_dict["resolved_path"] = _resolved_modified[0]
                 for _p in _paths_to_check:
                     _update_read_timestamp(_p, task_id)
                     _r = _path_to_resolved.get(_p)

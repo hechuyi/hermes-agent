@@ -7,6 +7,30 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clean_file_ops_cache():
+    from tools import file_tools
+    from tools import terminal_tool
+
+    with file_tools._file_ops_lock:
+        previous = dict(file_tools._file_ops_cache)
+        file_tools._file_ops_cache.clear()
+    with terminal_tool._env_lock:
+        previous_envs = dict(terminal_tool._active_environments)
+        previous_activity = dict(terminal_tool._last_activity)
+        terminal_tool._active_environments.clear()
+        terminal_tool._last_activity.clear()
+    yield
+    with file_tools._file_ops_lock:
+        file_tools._file_ops_cache.clear()
+        file_tools._file_ops_cache.update(previous)
+    with terminal_tool._env_lock:
+        terminal_tool._active_environments.clear()
+        terminal_tool._active_environments.update(previous_envs)
+        terminal_tool._last_activity.clear()
+        terminal_tool._last_activity.update(previous_activity)
+
+
 class TestResolvePath:
     """Verify _resolve_path respects TERMINAL_CWD for worktree isolation."""
 
