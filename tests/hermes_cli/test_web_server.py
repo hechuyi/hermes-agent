@@ -1039,6 +1039,56 @@ class TestNewEndpoints:
         except Exception:
             pass
 
+    def test_model_set_normalizes_vendor_slug_for_native_main_provider(self):
+        """The dashboard must not persist an aggregator slug for a native provider."""
+        from hermes_cli.config import load_config
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "anthropic",
+                "model": "anthropic/claude-opus-4.6",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["provider"] == "anthropic"
+        assert data["model"] == "claude-opus-4-6"
+
+        cfg = load_config()
+        assert cfg["model"]["provider"] == "anthropic"
+        assert cfg["model"]["default"] == "claude-opus-4-6"
+
+    def test_model_set_maps_unknown_vendor_provider_to_current_aggregator(self):
+        """Analytics vendor fallbacks are not Hermes providers."""
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config()
+        cfg["model"] = {"provider": "openrouter", "default": "openai/gpt-5.5"}
+        save_config(cfg)
+
+        resp = self.client.post(
+            "/api/model/set",
+            json={
+                "scope": "main",
+                "provider": "moonshotai",
+                "model": "moonshotai/kimi-k2.6",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["provider"] == "openrouter"
+        assert data["model"] == "moonshotai/kimi-k2.6"
+
+        cfg = load_config()
+        assert cfg["model"]["provider"] == "openrouter"
+        assert cfg["model"]["default"] == "moonshotai/kimi-k2.6"
+
 
 # ---------------------------------------------------------------------------
 # Model context length: normalize/denormalize + /api/model/info

@@ -504,6 +504,48 @@ class ModelAssignment(BaseModel):
     task: str = ""
 
 
+def _normalize_main_model_assignment(
+    provider: str,
+    model: str,
+    cfg: Optional[Dict[str, Any]] = None,
+) -> tuple[str, str]:
+    """Normalize dashboard main-model assignments before persisting them."""
+    from hermes_cli.model_normalize import normalize_model_for_provider
+    from hermes_cli.models import (
+        _AGGREGATOR_PROVIDERS,
+        _KNOWN_PROVIDER_NAMES,
+        normalize_provider,
+    )
+
+    provider_in = (provider or "").strip()
+    model_in = (model or "").strip()
+    canonical_provider = normalize_provider(provider_in)
+
+    if canonical_provider not in _KNOWN_PROVIDER_NAMES and "/" in model_in:
+        current_provider = ""
+        current_model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+        if isinstance(current_model_cfg, dict):
+            current_provider = str(current_model_cfg.get("provider", "") or "").strip()
+
+        current_canonical = normalize_provider(current_provider)
+        if current_provider and current_canonical in _AGGREGATOR_PROVIDERS:
+            provider_in = current_provider
+            canonical_provider = current_canonical
+        else:
+            provider_in = "openrouter"
+            canonical_provider = "openrouter"
+
+    if (
+        canonical_provider in _KNOWN_PROVIDER_NAMES
+        and not canonical_provider.startswith("custom")
+    ):
+        normalized_model = normalize_model_for_provider(model_in, canonical_provider)
+        if normalized_model:
+            model_in = normalized_model
+
+    return provider_in, model_in
+
+
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
 try:
     _GATEWAY_HEALTH_TIMEOUT = float(os.getenv("GATEWAY_HEALTH_TIMEOUT", "3"))
@@ -1115,6 +1157,7 @@ async def set_model_assignment(body: ModelAssignment):
         if scope == "main":
             if not provider or not model:
                 raise HTTPException(status_code=400, detail="provider and model required for main")
+            provider, model = _normalize_main_model_assignment(provider, model, cfg)
             model_cfg = cfg.get("model", {})
             if not isinstance(model_cfg, dict):
                 model_cfg = {}
