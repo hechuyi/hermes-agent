@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import shlex
+import site
 import sys
 import signal
 import tempfile
@@ -136,6 +137,50 @@ _GATEWAY_SECRET_PATTERNS = (
     re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b"),
     re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._\-]{20,}\b"),
 )
+
+
+def _ensure_windows_gateway_venv_imports() -> None:
+    """Make detached Windows gateway runs see Hermes venv packages."""
+    if sys.platform != "win32":
+        return
+
+    project_root = Path(__file__).resolve().parent.parent
+    candidates: list[Path] = []
+    if os.environ.get("VIRTUAL_ENV"):
+        candidates.append(Path(os.environ["VIRTUAL_ENV"]))
+    candidates.append(project_root / "venv")
+
+    seen: set[str] = set()
+    for venv_dir in candidates:
+        try:
+            resolved_venv = venv_dir.resolve()
+        except OSError:
+            resolved_venv = venv_dir
+        venv_key = str(resolved_venv).lower()
+        if venv_key in seen:
+            continue
+        seen.add(venv_key)
+
+        site_packages = resolved_venv / "Lib" / "site-packages"
+        if not site_packages.exists():
+            continue
+
+        project_entry = str(project_root)
+        site_entry = str(site_packages)
+        if project_entry not in sys.path:
+            sys.path.insert(0, project_entry)
+        site.addsitedir(site_entry)
+        if site_entry in sys.path:
+            sys.path.remove(site_entry)
+        insert_at = 1 if sys.path and sys.path[0] == project_entry else 0
+        sys.path.insert(insert_at, site_entry)
+
+        os.environ["VIRTUAL_ENV"] = str(resolved_venv)
+        pythonpath = [project_entry, site_entry]
+        if os.environ.get("PYTHONPATH"):
+            pythonpath.append(os.environ["PYTHONPATH"])
+        os.environ["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(pythonpath))
+        return
 
 
 def _tool_result_messages_for_media_scan(result_messages: Any, history_len: int) -> list:
@@ -4258,10 +4303,24 @@ class GatewayRunner:
                 )
                 """
             ).strip()
+            watcher_env = os.environ.copy()
+            # The watcher is intentionally outside the running gateway. If it
+            # inherits the marker, the CLI self-restart guard refuses restart.
+            watcher_env.pop("_HERMES_GATEWAY", None)
+            project_root = Path(__file__).resolve().parent.parent
+            venv_dir = Path(watcher_env.get("VIRTUAL_ENV") or project_root / "venv")
+            site_packages = venv_dir / "Lib" / "site-packages"
+            if site_packages.exists():
+                watcher_env["VIRTUAL_ENV"] = str(venv_dir)
+                pythonpath = [str(project_root), str(site_packages)]
+                if watcher_env.get("PYTHONPATH"):
+                    pythonpath.append(watcher_env["PYTHONPATH"])
+                watcher_env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(pythonpath))
             subprocess.Popen(
                 [sys.executable, "-c", watcher, str(current_pid), *cmd_argv],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=watcher_env,
                 **windows_detach_popen_kwargs(),
             )
             return
@@ -4271,12 +4330,17 @@ class GatewayRunner:
             f"while kill -0 {current_pid} 2>/dev/null; do sleep 0.2; done; "
             f"{cmd} gateway restart"
         )
+        # This watcher runs outside the gateway. If it inherits the marker, the
+        # CLI self-restart guard refuses `hermes gateway restart`.
+        watcher_env = os.environ.copy()
+        watcher_env.pop("_HERMES_GATEWAY", None)
         setsid_bin = shutil.which("setsid")
         if setsid_bin:
             subprocess.Popen(
                 [setsid_bin, "bash", "-lc", shell_cmd],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=watcher_env,
                 start_new_session=True,
             )
         else:
@@ -4284,6 +4348,7 @@ class GatewayRunner:
                 ["bash", "-lc", shell_cmd],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                env=watcher_env,
                 start_new_session=True,
             )
 
@@ -19350,6 +19415,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                  Useful for systemd services to avoid restart-loop deadlocks
                  when the previous process hasn't fully exited yet.
     """
+    _ensure_windows_gateway_venv_imports()
+
     # ── Duplicate-instance guard ──────────────────────────────────────
     # Prevent two gateways from running under the same HERMES_HOME.
     # The PID file is scoped to HERMES_HOME, so future multi-profile
