@@ -1474,3 +1474,203 @@ class TestCallConverseInvalidatesOnStaleError:
         )
 
         assert _bedrock_runtime_client_cache.get("us-east-1") is live_client
+
+
+class TestStreamingAccessDeniedDetection:
+    """Recognize IAM denial of bedrock:InvokeModelWithResponseStream."""
+
+    def _denied_client_error(self):
+        from botocore.exceptions import ClientError
+        return ClientError(
+            error_response={
+                "Error": {
+                    "Code": "AccessDeniedException",
+                    "Message": (
+                        "User: arn:aws:iam::123456789012:user/x is not "
+                        "authorized to perform: "
+                        "bedrock:InvokeModelWithResponseStream on resource: "
+                        "arn:aws:bedrock:us-east-1::foundation-model/"
+                        "anthropic.claude-3-sonnet-20240229-v1:0"
+                    ),
+                }
+            },
+            operation_name="ConverseStream",
+        )
+
+    def test_matches_access_denied_client_error(self):
+        pytest.importorskip("botocore", reason="botocore required for Bedrock exception tests")
+        from agent.bedrock_adapter import is_streaming_access_denied_error
+
+        assert is_streaming_access_denied_error(self._denied_client_error()) is True
+
+    def test_ignores_access_denied_for_invoke_model(self):
+        pytest.importorskip("botocore", reason="botocore required for Bedrock exception tests")
+        from agent.bedrock_adapter import is_streaming_access_denied_error
+        from botocore.exceptions import ClientError
+
+        exc = ClientError(
+            error_response={
+                "Error": {
+                    "Code": "AccessDeniedException",
+                    "Message": "User is not authorized to perform: bedrock:InvokeModel",
+                }
+            },
+            operation_name="Converse",
+        )
+
+        assert is_streaming_access_denied_error(exc) is False
+
+    def test_ignores_validation_error_mentioning_stream_action(self):
+        pytest.importorskip("botocore", reason="botocore required for Bedrock exception tests")
+        from agent.bedrock_adapter import is_streaming_access_denied_error
+        from botocore.exceptions import ClientError
+
+        exc = ClientError(
+            error_response={
+                "Error": {
+                    "Code": "ValidationException",
+                    "Message": "InvokeModelWithResponseStream input malformed",
+                }
+            },
+            operation_name="ConverseStream",
+        )
+
+        assert is_streaming_access_denied_error(exc) is False
+
+    def test_matches_wrapped_sdk_permission_error(self):
+        from agent.bedrock_adapter import is_streaming_access_denied_error
+
+        exc = RuntimeError(
+            "PermissionDeniedError: user is not authorized to perform: "
+            "bedrock:InvokeModelWithResponseStream"
+        )
+
+        assert is_streaming_access_denied_error(exc) is True
+
+    def test_ignores_unrelated_errors(self):
+        from agent.bedrock_adapter import is_streaming_access_denied_error
+
+        assert is_streaming_access_denied_error(ValueError("boom")) is False
+        assert is_streaming_access_denied_error(
+            RuntimeError("streaming is not supported")
+        ) is False
+
+
+class TestCallConverseStreamIamFallback:
+    """InvokeModel-only policies fall back from ConverseStream to Converse."""
+
+    def test_falls_back_to_converse_on_streaming_denial(self):
+        from agent.bedrock_adapter import (
+            _bedrock_runtime_client_cache,
+            call_converse_stream,
+            reset_client_cache,
+        )
+
+        reset_client_cache()
+        client = MagicMock()
+        client.converse_stream.side_effect = RuntimeError(
+            "PermissionDeniedError: user is not authorized to perform: "
+            "bedrock:InvokeModelWithResponseStream"
+        )
+        client.converse.return_value = {
+            "output": {"message": {"role": "assistant", "content": [{"text": "hi"}]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2},
+        }
+        _bedrock_runtime_client_cache["us-east-1"] = client
+
+        result = call_converse_stream(
+            region="us-east-1",
+            model="anthropic.claude-3-sonnet-20240229-v1:0",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        client.converse.assert_called_once()
+        assert result.choices[0].message.content == "hi"
+        assert _bedrock_runtime_client_cache.get("us-east-1") is client
+
+
+class TestChatCompletionHelperBedrockIamFallback:
+    """Bedrock streaming calls disable streaming when IAM denies the stream action."""
+
+    def test_bedrock_converse_streaming_falls_back_inline(self):
+        from agent.bedrock_adapter import _bedrock_runtime_client_cache, reset_client_cache
+        from agent.chat_completion_helpers import interruptible_streaming_api_call
+
+        reset_client_cache()
+        client = MagicMock()
+        client.converse_stream.side_effect = RuntimeError(
+            "PermissionDeniedError: user is not authorized to perform: "
+            "bedrock:InvokeModelWithResponseStream"
+        )
+        client.converse.return_value = {
+            "output": {"message": {"role": "assistant", "content": [{"text": "hi"}]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2},
+        }
+        _bedrock_runtime_client_cache["us-east-1"] = client
+        agent = SimpleNamespace(
+            api_mode="bedrock_converse",
+            _interrupt_requested=False,
+            _disable_streaming=False,
+            _safe_print=MagicMock(),
+            _has_stream_consumers=lambda: False,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            _fire_stream_delta=MagicMock(),
+            _fire_tool_gen_started=MagicMock(),
+            _fire_reasoning_delta=MagicMock(),
+        )
+
+        result = interruptible_streaming_api_call(
+            agent,
+            {
+                "__bedrock_region__": "us-east-1",
+                "__bedrock_converse__": True,
+                "modelId": "anthropic.claude-3-sonnet-20240229-v1:0",
+                "messages": [],
+            },
+        )
+
+        client.converse.assert_called_once()
+        assert result.choices[0].message.content == "hi"
+        assert agent._disable_streaming is True
+        agent._safe_print.assert_called_once()
+
+    def test_chat_completions_bedrock_sdk_denial_disables_streaming(self):
+        from agent.chat_completion_helpers import interruptible_streaming_api_call
+
+        client = MagicMock()
+        client.chat.completions.create.side_effect = RuntimeError(
+            "PermissionDeniedError: user is not authorized to perform: "
+            "bedrock:InvokeModelWithResponseStream"
+        )
+        agent = SimpleNamespace(
+            api_mode="chat_completions",
+            provider="bedrock",
+            model="anthropic.claude-3-sonnet-20240229-v1:0",
+            base_url="https://bedrock-runtime.us-east-1.amazonaws.com",
+            _interrupt_requested=False,
+            _disable_streaming=False,
+            _safe_print=MagicMock(),
+            _create_request_openai_client=MagicMock(return_value=client),
+            _close_request_openai_client=MagicMock(),
+            _abort_request_openai_client=MagicMock(),
+            _touch_activity=MagicMock(),
+            _stream_diag_init=MagicMock(return_value={}),
+            _capture_rate_limits=MagicMock(),
+            _stream_diag_capture_response=MagicMock(),
+            _check_openrouter_cache_status=MagicMock(),
+            _is_provider_stream_parse_error=MagicMock(return_value=False),
+            _emit_stream_drop=MagicMock(),
+            _replace_primary_openai_client=MagicMock(),
+            _log_stream_retry=MagicMock(),
+            _buffer_status=MagicMock(),
+            _current_streamed_assistant_text="",
+        )
+
+        with pytest.raises(RuntimeError, match="InvokeModelWithResponseStream"):
+            interruptible_streaming_api_call(agent, {"model": agent.model, "messages": []})
+
+        assert agent._disable_streaming is True
+        agent._safe_print.assert_called_once()

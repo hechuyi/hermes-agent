@@ -208,6 +208,30 @@ def is_stale_connection_error(exc: BaseException) -> bool:
     return False
 
 
+def is_streaming_access_denied_error(exc: BaseException) -> bool:
+    """Return True when AWS denies ``bedrock:InvokeModelWithResponseStream``.
+
+    InvokeModel-only IAM policies reject ``converse_stream()`` with an
+    access-denied error naming the streaming action. Retrying the stream cannot
+    succeed within the same session, but the non-streaming ``converse()`` path
+    can still work because it maps to ``bedrock:InvokeModel``.
+    """
+    msg = str(exc).lower()
+    if "invokemodelwithresponsestream" not in msg:
+        return False
+
+    try:
+        from botocore.exceptions import ClientError
+    except ImportError:  # pragma: no cover — botocore is present with boto3
+        ClientError = None  # type: ignore[assignment]
+
+    if ClientError is not None and isinstance(exc, ClientError):
+        code = (getattr(exc, "response", None) or {}).get("Error", {}).get("Code", "")
+        return code in ("AccessDeniedException", "UnauthorizedException")
+
+    return "not authorized" in msg or "accessdenied" in msg
+
+
 # ---------------------------------------------------------------------------
 # AWS credential detection
 # ---------------------------------------------------------------------------
@@ -1003,6 +1027,13 @@ def call_converse_stream(
     try:
         response = client.converse_stream(**kwargs)
     except Exception as exc:
+        if is_streaming_access_denied_error(exc):
+            logger.info(
+                "bedrock: converse_stream denied by IAM on (region=%s, model=%s) — "
+                "falling back to non-streaming converse().",
+                region, model,
+            )
+            return normalize_converse_response(client.converse(**kwargs))
         if is_stale_connection_error(exc):
             logger.warning(
                 "bedrock: stale-connection error on converse_stream(region=%s, "
