@@ -6687,12 +6687,18 @@ def _run_npm_install_deterministic(
     the working tree dirty and causes the next ``hermes update`` to stash the
     lockfile — repeatedly.
     """
+    # Some transitive packages animate from postinstall directly to /dev/tty,
+    # bypassing captured output. CI=1 suppresses those hooks while preserving
+    # the process environment used by the rest of the install path.
+    run_env = {**os.environ, "CI": "1"}
+
     lockfile = cwd / "package-lock.json"
     if lockfile.exists():
         ci_cmd = [npm, "ci", *extra_args]
         ci_result = subprocess.run(
             ci_cmd,
             cwd=cwd,
+            env=run_env,
             capture_output=capture_output,
             text=True,
             encoding="utf-8",
@@ -6707,6 +6713,7 @@ def _run_npm_install_deterministic(
     return subprocess.run(
         install_cmd,
         cwd=cwd,
+        env=run_env,
         capture_output=capture_output,
         text=True,
         encoding="utf-8",

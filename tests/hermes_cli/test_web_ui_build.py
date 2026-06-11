@@ -139,6 +139,17 @@ class TestBuildWebUISkipsWhenFresh:
         assert kwargs["encoding"] == "utf-8"
         assert kwargs["errors"] == "replace"
 
+    def test_npm_install_sets_ci_to_suppress_postinstall_tty_output(self, tmp_path):
+        web_dir, _ = _make_web_dir(tmp_path)
+        (web_dir / "package-lock.json").write_text("{}", encoding="utf-8")
+
+        mock_cp = __import__("subprocess").CompletedProcess([], 0, stdout="", stderr="")
+        with patch("hermes_cli.main.subprocess.run", return_value=mock_cp) as mock_run:
+            _run_npm_install_deterministic("/usr/bin/npm", web_dir)
+
+        _, kwargs = mock_run.call_args
+        assert kwargs["env"]["CI"] == "1"
+
     def test_web_build_uses_idle_timeout_helper(self, tmp_path):
         """npm run build now goes through _run_with_idle_timeout (issue #33788).
 

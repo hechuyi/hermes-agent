@@ -134,6 +134,9 @@ async def test_audio_attachment_context_note_format():
     assert "audio file attachment" in result.lower()
     # Should NOT contain the voice-message transcription wrapper text
     assert "voice message" not in result.lower()
+    # Should guide the agent to process the file instead of punting to the user.
+    assert "transcri" in result.lower()
+    assert "ask the user what they'd like" not in result.lower()
 
 
 # ---------------------------------------------------------------------------

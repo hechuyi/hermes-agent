@@ -1628,6 +1628,23 @@ def _build_media_placeholder(event) -> str:
     return "\n".join(parts)
 
 
+def _build_document_context_note(display_name: str, agent_path: str, mtype: str) -> str:
+    """Build the context note prepended for document attachments."""
+    if mtype.startswith("text/"):
+        return (
+            f"[The user sent a text document: '{display_name}'. "
+            f"Its content has been included below. "
+            f"The file is also saved at: {agent_path}]"
+        )
+
+    return (
+        f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
+        f"Its text is not inlined here because it is a binary document format such as PDF or DOCX. "
+        f"To read it, extract the document text yourself with an available terminal or document "
+        f"extraction tool before answering, instead of asking the user to paste the contents.]"
+    )
+
+
 def _format_duration(seconds: float) -> str:
     total = int(round(seconds))
     if total < 0:
@@ -8652,7 +8669,10 @@ class GatewayRunner:
                 _note = (
                     f"[The user sent an audio file attachment: '{_display}'. "
                     f"It is saved at: {_agent_path}. "
-                    f"Ask the user what they'd like you to do with it, or pass the path to a transcription or media tool.]"
+                    f"Its content is not inlined here. If the user's request involves what the audio contains, "
+                    f"transcribe or process it yourself by passing the path to a transcription or media tool, "
+                    f"instead of asking the user to describe it. Only ask what to do with it if their intent "
+                    f"is genuinely unclear.]"
                 )
                 message_text = f"{_note}\n\n{message_text}"
 
@@ -8684,18 +8704,7 @@ class GatewayRunner:
                 # cache directories are auto-mounted at /root/.hermes/cache/* by get_cache_directory_mounts().
                 agent_path = to_agent_visible_cache_path(path)
 
-                if mtype.startswith("text/"):
-                    context_note = (
-                        f"[The user sent a text document: '{display_name}'. "
-                        f"Its content has been included below. "
-                        f"The file is also saved at: {agent_path}]"
-                    )
-                else:
-                    context_note = (
-                        f"[The user sent a document: '{display_name}'. "
-                        f"The file is saved at: {agent_path}. "
-                        f"Ask the user what they'd like you to do with it.]"
-                    )
+                context_note = _build_document_context_note(display_name, agent_path, mtype)
                 message_text = f"{context_note}\n\n{message_text}"
 
         if getattr(event, "reply_to_text", None) and event.reply_to_message_id:
