@@ -201,6 +201,60 @@ class TestSSHPreflight:
         assert env.user == "alice"
 
 
+class TestSSHSubprocessStdin:
+    def test_noninteractive_subprocesses_do_not_inherit_stdin(self, monkeypatch, tmp_path):
+        env = SSHEnvironment.__new__(SSHEnvironment)
+        env.host = "example.com"
+        env.user = "alice"
+        env.port = 2222
+        env.key_path = "/tmp/key"
+        env.control_dir = tmp_path
+        env.control_socket = tmp_path / "control.sock"
+        env.control_socket.write_text("", encoding="utf-8")
+        env._remote_home = "/home/alice"
+        env._sync_manager = MagicMock()
+
+        local_file = tmp_path / "payload.txt"
+        local_file.write_text("payload", encoding="utf-8")
+
+        run_kwargs = []
+        popen_kwargs = []
+        tar_stdout = MagicMock()
+
+        def fake_run(cmd, **kwargs):
+            run_kwargs.append(kwargs)
+            stdout = "/home/alice\n" if cmd[-1] == "echo $HOME" else ""
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+        def fake_popen(cmd, **kwargs):
+            popen_kwargs.append(kwargs)
+            proc = MagicMock()
+            proc.stdout = tar_stdout if len(popen_kwargs) == 1 else MagicMock()
+            proc.stderr = MagicMock()
+            proc.stderr.read.return_value = b""
+            proc.poll.return_value = 0
+            proc.communicate.return_value = (b"", b"")
+            proc.returncode = 0
+            return proc
+
+        monkeypatch.setattr(ssh_env.subprocess, "run", fake_run)
+        monkeypatch.setattr(ssh_env.subprocess, "Popen", fake_popen)
+
+        env._establish_connection()
+        assert env._detect_remote_home() == "/home/alice"
+        env._ensure_remote_dirs()
+        env._scp_upload(str(local_file), "/home/alice/.hermes/payload.txt")
+        env._ssh_bulk_upload([(str(local_file), "/home/alice/.hermes/bulk/payload.txt")])
+        env._ssh_bulk_download(tmp_path / "download.tar")
+        env._ssh_delete(["/home/alice/.hermes/payload.txt"])
+        env.cleanup()
+
+        assert run_kwargs
+        assert all(kwargs.get("stdin") is subprocess.DEVNULL for kwargs in run_kwargs)
+        assert popen_kwargs[0].get("stdin") is subprocess.DEVNULL
+        assert popen_kwargs[1].get("stdin") is tar_stdout
+
+
 def _setup_ssh_env(monkeypatch, persistent: bool):
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
     monkeypatch.setenv("TERMINAL_SSH_HOST", _SSH_HOST)
