@@ -146,6 +146,12 @@ class TestShouldExclude:
         from hermes_cli.backup import _should_exclude
         assert not _should_exclude(Path("logs/agent.log"))
 
+    def test_includes_nested_hermes_agent_in_skills(self):
+        """Only the root-level hermes-agent/ repo is excluded."""
+        from hermes_cli.backup import _should_exclude
+        assert not _should_exclude(Path("skills/autonomous-ai-agents/hermes-agent/SKILL.md"))
+        assert not _should_exclude(Path("skills/autonomous-ai-agents/hermes-agent/sub/item.txt"))
+
 
 # ---------------------------------------------------------------------------
 # Backup tests
@@ -186,6 +192,58 @@ class TestBackup:
             # Skins
             assert "skins/cyber.yaml" in names
 
+    def test_db_snapshots_staged_beside_output_zip(self, tmp_path, monkeypatch):
+        """SQLite staging temp files are created beside the output zip."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_dir = tmp_path / "external-drive"
+        out_dir.mkdir()
+        out_zip = out_dir / "backup.zip"
+        args = Namespace(output=str(out_zip))
+
+        import hermes_cli.backup as backup_mod
+        staged_dirs = []
+        real_ntf = backup_mod.tempfile.NamedTemporaryFile
+
+        def _spy(*args, **kwargs):
+            staged_dirs.append(kwargs.get("dir"))
+            return real_ntf(*args, **kwargs)
+
+        monkeypatch.setattr(backup_mod.tempfile, "NamedTemporaryFile", _spy)
+        backup_mod.run_backup(args)
+
+        assert staged_dirs, "no SQLite snapshot was staged"
+        assert all(d == str(out_dir) for d in staged_dirs), staged_dirs
+
+    def test_write_full_zip_db_snapshots_staged_beside_output_zip(self, tmp_path, monkeypatch):
+        """The shared full-zip helper stages SQLite snapshots beside its zip."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        out_zip = hermes_home / "backups" / "pre-update-test.zip"
+        out_zip.parent.mkdir(parents=True, exist_ok=True)
+
+        import hermes_cli.backup as backup_mod
+        staged_dirs = []
+        real_ntf = backup_mod.tempfile.NamedTemporaryFile
+
+        def _spy(*args, **kwargs):
+            staged_dirs.append(kwargs.get("dir"))
+            return real_ntf(*args, **kwargs)
+
+        monkeypatch.setattr(backup_mod.tempfile, "NamedTemporaryFile", _spy)
+        result = backup_mod._write_full_zip_backup(out_zip, hermes_home)
+
+        assert result == out_zip
+        assert staged_dirs, "no SQLite snapshot was staged"
+        assert all(d == str(out_zip.parent) for d in staged_dirs), staged_dirs
+
     def test_excludes_hermes_agent(self, tmp_path, monkeypatch):
         """Backup does NOT include hermes-agent/ directory."""
         hermes_home = tmp_path / ".hermes"
@@ -205,6 +263,60 @@ class TestBackup:
             names = zf.namelist()
             agent_files = [n for n in names if "hermes-agent" in n]
             assert agent_files == [], f"hermes-agent files leaked into backup: {agent_files}"
+
+    def test_includes_nested_hermes_agent_in_skills(self, tmp_path, monkeypatch):
+        """Backup includes skills/.../hermes-agent/ but not root hermes-agent/."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        nested = hermes_home / "skills" / "autonomous-ai-agents" / "hermes-agent"
+        nested.mkdir(parents=True)
+        (nested / "SKILL.md").write_text("# Hermes Agent Skill\n")
+        (nested / "sub").mkdir()
+        (nested / "sub" / "item.txt").write_text("nested content\n")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        out_zip = tmp_path / "backup.zip"
+        args = Namespace(output=str(out_zip))
+
+        from hermes_cli.backup import run_backup
+        run_backup(args)
+
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            names = zf.namelist()
+            root_agent = [n for n in names if n.startswith("hermes-agent/")]
+            assert root_agent == [], f"root hermes-agent leaked: {root_agent}"
+            assert "skills/autonomous-ai-agents/hermes-agent/SKILL.md" in names
+            assert "skills/autonomous-ai-agents/hermes-agent/sub/item.txt" in names
+
+    def test_write_full_zip_includes_nested_hermes_agent_in_skills(self, tmp_path):
+        """Shared full-zip backups include nested skill dirs named hermes-agent."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        _make_hermes_tree(hermes_home)
+
+        nested = hermes_home / "skills" / "autonomous-ai-agents" / "hermes-agent"
+        nested.mkdir(parents=True)
+        (nested / "SKILL.md").write_text("# Hermes Agent Skill\n")
+        (nested / "sub").mkdir()
+        (nested / "sub" / "item.txt").write_text("nested content\n")
+
+        out_zip = hermes_home / "backups" / "pre-update-test.zip"
+        out_zip.parent.mkdir(parents=True, exist_ok=True)
+
+        from hermes_cli.backup import _write_full_zip_backup
+        result = _write_full_zip_backup(out_zip, hermes_home)
+
+        assert result == out_zip
+        with zipfile.ZipFile(out_zip, "r") as zf:
+            names = zf.namelist()
+            root_agent = [n for n in names if n.startswith("hermes-agent/")]
+            assert root_agent == [], f"root hermes-agent leaked: {root_agent}"
+            assert "skills/autonomous-ai-agents/hermes-agent/SKILL.md" in names
+            assert "skills/autonomous-ai-agents/hermes-agent/sub/item.txt" in names
 
     def test_excludes_pycache(self, tmp_path, monkeypatch):
         """Backup does NOT include __pycache__ dirs."""

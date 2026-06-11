@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 # Exclusion rules
 # ---------------------------------------------------------------------------
 
-# Directory names to skip entirely (matched against each path component)
+# Directory names to skip entirely. Most names match at any path depth;
+# hermes-agent is root-only so skill directories with that name are preserved.
 _EXCLUDED_DIRS = {
     "hermes-agent",     # the codebase repo — re-clone instead
     "__pycache__",      # bytecode caches — regenerated on import
@@ -70,9 +71,8 @@ def _should_exclude(rel_path: Path) -> bool:
     """Return True if *rel_path* (relative to hermes root) should be skipped."""
     parts = rel_path.parts
 
-    # Any path component matches an excluded dir name
-    for part in parts:
-        if part in _EXCLUDED_DIRS:
+    for idx, part in enumerate(parts):
+        if _is_excluded_dir_component(part, idx):
             return True
 
     name = rel_path.name
@@ -84,6 +84,20 @@ def _should_exclude(rel_path: Path) -> bool:
         return True
 
     return False
+
+
+def _is_excluded_dir_component(dirname: str, depth: int) -> bool:
+    """Return True if a directory name is excluded at its path depth."""
+    if dirname not in _EXCLUDED_DIRS:
+        return False
+    if dirname == "hermes-agent":
+        return depth == 0
+    return True
+
+
+def _should_prune_backup_dir(rel_dir: Path, dirname: str) -> bool:
+    """Return True when os.walk should prune dirname below rel_dir."""
+    return _is_excluded_dir_component(dirname, len(rel_dir.parts))
 
 
 def _should_skip_backup_file(abs_path: Path, rel_path: Path, out_path: Path) -> bool:
@@ -127,6 +141,16 @@ def _safe_copy_db(src: Path, dst: Path) -> bool:
         except Exception as exc2:
             logger.error("Raw copy also failed for %s: %s", src, exc2)
             return False
+
+
+def _new_db_snapshot_temp(out_path: Path) -> Path:
+    """Create a SQLite snapshot temp file beside the destination zip."""
+    with tempfile.NamedTemporaryFile(
+        suffix=".db",
+        delete=False,
+        dir=str(out_path.parent),
+    ) as tmp:
+        return Path(tmp.name)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +205,7 @@ def run_backup(args) -> None:
         orig_dirnames = dirnames[:]
         dirnames[:] = [
             d for d in dirnames
-            if d not in _EXCLUDED_DIRS
+            if not _should_prune_backup_dir(rel_dir, d)
         ]
         for removed in set(orig_dirnames) - set(dirnames):
             skipped_dirs.add(str(rel_dir / removed))
@@ -212,8 +236,7 @@ def run_backup(args) -> None:
             try:
                 # Safe copy for SQLite databases (handles WAL mode)
                 if abs_path.suffix == ".db":
-                    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-                        tmp_db = Path(tmp.name)
+                    tmp_db = _new_db_snapshot_temp(out_path)
                     if _safe_copy_db(abs_path, tmp_db):
                         zf.write(tmp_db, arcname=str(rel_path))
                         total_bytes += tmp_db.stat().st_size
@@ -1013,8 +1036,12 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
     try:
         for dirpath, dirnames, filenames in os.walk(hermes_root, followlinks=False):
             dp = Path(dirpath)
+            rel_dir = dp.relative_to(hermes_root)
             # Prune excluded directories in-place so os.walk doesn't descend
-            dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+            dirnames[:] = [
+                d for d in dirnames
+                if not _should_prune_backup_dir(rel_dir, d)
+            ]
 
             for fname in filenames:
                 fpath = dp / fname
@@ -1039,8 +1066,7 @@ def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
             for abs_path, rel_path in files_to_add:
                 try:
                     if abs_path.suffix == ".db":
-                        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-                            tmp_db = Path(tmp.name)
+                        tmp_db = _new_db_snapshot_temp(out_path)
                         try:
                             if _safe_copy_db(abs_path, tmp_db):
                                 zf.write(tmp_db, arcname=str(rel_path))
