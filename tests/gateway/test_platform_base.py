@@ -400,6 +400,121 @@ class TestExtractMedia:
         assert media == []
         assert "MEDIA:'/tmp/data.weirdext'" in cleaned
 
+    def test_media_in_fenced_code_block_ignored(self):
+        content = "Here is an example:\n```text\nMEDIA:/path/to/example.png\n```\nDone."
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert "MEDIA:/path/to/example.png" in cleaned
+
+    def test_media_in_inline_code_ignored(self):
+        content = "Use `MEDIA:/path/to/file.png` in your response."
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert "`MEDIA:/path/to/file.png`" in cleaned
+
+    def test_media_in_blockquote_ignored(self):
+        content = "> To send an image, include MEDIA:/path/to/image.jpg\nEnd."
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert "MEDIA:/path/to/image.jpg" in cleaned
+
+    def test_media_mixed_code_and_prose(self):
+        content = (
+            "Here is your file:\n"
+            "MEDIA:/output/report.pdf\n"
+            "Example usage:\n"
+            "```text\nMEDIA:/example/path.pdf\n```\n"
+            "Done."
+        )
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert [path for path, _ in media] == ["/output/report.pdf"]
+        assert "MEDIA:/output/report.pdf" not in cleaned
+        assert "```text\nMEDIA:/example/path.pdf\n```" in cleaned
+        assert "Done." in cleaned
+
+    def test_inline_code_survives_when_real_media_present(self):
+        content = "See MEDIA:/r/a.png and `MEDIA:/ex/b.png` inline"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert [path for path, _ in media] == ["/r/a.png"]
+        assert "`MEDIA:/ex/b.png`" in cleaned
+
+
+class TestMediaInsideSerializedJson:
+    """MEDIA inside serialized JSON text is stored data, not a directive."""
+
+    def test_media_in_json_value_not_extracted(self):
+        content = '{"result": "MEDIA:/tmp/stale.png"}'
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert "MEDIA:/tmp/stale.png" in cleaned
+
+    def test_media_in_pretty_json_value_not_extracted(self):
+        content = '{\n  "tool_result": "MEDIA:/var/old.jpg"\n}'
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert "MEDIA:/var/old.jpg" in cleaned
+
+    def test_media_in_json_array_not_extracted(self):
+        content = '["MEDIA:/a/b.png", "other"]'
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert "MEDIA:/a/b.png" in cleaned
+
+    def test_media_in_nested_json_value_not_extracted(self):
+        content = '{"a":{"b":"see MEDIA:/x/y.pdf here"}}'
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert "MEDIA:/x/y.pdf" in cleaned
+
+    def test_media_in_embedded_serialized_reply_not_extracted(self):
+        content = (
+            '{"content":"previous reply MEDIA:/Users/ex/.hermes/media/'
+            'generated/stale.png and more text"}'
+        )
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == []
+        assert "MEDIA:/Users/ex/.hermes/media/generated/stale.png" in cleaned
+
+    def test_media_at_line_start_still_extracted(self):
+        media, cleaned = BasePlatformAdapter.extract_media("MEDIA:/real/file.png")
+        assert media == [("/real/file.png", False)]
+        assert cleaned == ""
+
+    def test_media_after_prose_same_line_still_extracted(self):
+        media, _ = BasePlatformAdapter.extract_media(
+            "Here is your file: MEDIA:/out/report.pdf"
+        )
+        assert [path for path, _ in media] == ["/out/report.pdf"]
+
+    def test_media_indented_still_extracted(self):
+        media, _ = BasePlatformAdapter.extract_media("  MEDIA:/tmp/x.png")
+        assert [path for path, _ in media] == ["/tmp/x.png"]
+
+    def test_quoted_path_media_still_extracted(self):
+        media, _ = BasePlatformAdapter.extract_media(
+            'MEDIA:"/path/with space/file.png"'
+        )
+        assert [path for path, _ in media] == ["/path/with space/file.png"]
+
+    def test_tts_two_line_still_extracted(self):
+        media, _ = BasePlatformAdapter.extract_media(
+            "[[audio_as_voice]]\nMEDIA:/tmp/v.ogg"
+        )
+        assert media == [("/tmp/v.ogg", True)]
+
+    def test_json_embedded_media_kept_verbatim_in_cleaned_text(self):
+        content = 'MEDIA:/real/r.png\nlog: {"old":"MEDIA:/stale/s.png"}'
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert [path for path, _ in media] == ["/real/r.png"]
+        assert '{"old":"MEDIA:/stale/s.png"}' in cleaned
+
+    def test_cleaned_text_after_directive_not_truncated(self):
+        content = "See [[as_document]] MEDIA:/d/report.pdf now"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert [path for path, _ in media] == ["/d/report.pdf"]
+        assert "MEDIA:" not in cleaned
+        assert cleaned.endswith("now")
+
 
 class TestMediaDeliveryPathValidation:
     def _patch_roots(self, monkeypatch, *roots):

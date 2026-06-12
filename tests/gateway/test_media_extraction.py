@@ -10,7 +10,10 @@ times per reply. (Regression test for #160)
 import pytest
 import re
 
-from gateway.run import _tool_result_messages_for_media_scan
+from gateway.run import (
+    _collect_auto_append_media_tags,
+    _tool_result_messages_for_media_scan,
+)
 
 
 def extract_media_tags_fixed(result_messages, history_len):
@@ -69,25 +72,167 @@ def extract_media_tags_broken(result_messages):
 
 def extract_media_tags_production(result_messages, history_len, history_media_paths):
     """Mirror the production scan boundary and path-dedup contract."""
-    media_tags = []
-    has_voice_directive = False
-
-    for msg in _tool_result_messages_for_media_scan(result_messages, history_len):
-        if msg.get("role") == "tool" or msg.get("role") == "function":
-            content = msg.get("content", "")
-            if "MEDIA:" in content:
-                for match in re.finditer(r'MEDIA:(\S+)', content):
-                    path = match.group(1).strip().rstrip('",}')
-                    if path and path not in history_media_paths:
-                        media_tags.append(f"MEDIA:{path}")
-                if "[[audio_as_voice]]" in content:
-                    has_voice_directive = True
-
-    return media_tags, has_voice_directive
+    return _collect_auto_append_media_tags(
+        result_messages,
+        history_offset=history_len,
+        history_media_paths=history_media_paths,
+    )
 
 
 class TestMediaExtraction:
     """Tests for MEDIA tag extraction from tool results."""
+
+    def test_gateway_auto_append_ignores_media_examples_in_skill_docs(self):
+        messages = [
+            {"role": "user", "content": "How should I format gateway media?"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_skill", "function": {"name": "skill_view"}},
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_skill",
+                "content": (
+                    "Recommended pattern:\n"
+                    "```text\nMEDIA:/absolute/path/to/image.png\n```\n"
+                    "Second message:\n```text\ncaption\n```\n"
+                ),
+            },
+            {"role": "assistant", "content": "Use a standalone media message."},
+        ]
+
+        tags, voice = _collect_auto_append_media_tags(messages, history_offset=0)
+        assert tags == []
+        assert voice is False
+
+    def test_gateway_auto_append_keeps_real_tts_media_tag(self):
+        messages = [
+            {"role": "user", "content": "Say this as audio"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_tts", "function": {"name": "text_to_speech"}},
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_tts",
+                "content": '{"success": true, "media_tag": "[[audio_as_voice]]\\nMEDIA:/tmp/voice.ogg"}',
+            },
+            {"role": "assistant", "content": "Done."},
+        ]
+
+        tags, voice = _collect_auto_append_media_tags(messages, history_offset=0)
+        assert tags == ["MEDIA:/tmp/voice.ogg"]
+        assert voice is True
+
+    def test_gateway_auto_append_keeps_execute_code_media_tag(self):
+        messages = [
+            {"role": "user", "content": "Build a chart"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_code", "function": {"name": "execute_code"}},
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_code",
+                "content": "Generated chart\nMEDIA:/tmp/chart.png",
+            },
+            {"role": "assistant", "content": "Here is the chart."},
+        ]
+
+        tags, voice = _collect_auto_append_media_tags(messages, history_offset=0)
+        assert tags == ["MEDIA:/tmp/chart.png"]
+        assert voice is False
+
+    def test_gateway_auto_append_image_generate_json_path(self):
+        messages = [
+            {"role": "user", "content": "Make me a cat"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_img", "function": {"name": "image_generate"}},
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_img",
+                "content": '{"success": true, "image": "/tmp/gen/cat.png", "agent_visible_image": "/tmp/gen/cat.png"}',
+            },
+            {"role": "assistant", "content": "Here's your cat."},
+        ]
+
+        tags, voice = _collect_auto_append_media_tags(messages, history_offset=0)
+        assert tags == ["MEDIA:/tmp/gen/cat.png"]
+        assert voice is False
+
+    def test_gateway_auto_append_image_generate_prefers_host_path(self):
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "call_img", "function": {"name": "image_generate"}},
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_img",
+                "content": '{"success": true, "host_image": "/host/dog.jpg", "image": "/host/dog.jpg", "agent_visible_image": "/sandbox/dog.jpg"}',
+            },
+        ]
+
+        tags, _ = _collect_auto_append_media_tags(messages, history_offset=0)
+        assert tags == ["MEDIA:/host/dog.jpg"]
+
+    def test_gateway_auto_append_image_generate_failure_and_url_ignored(self):
+        def _img_msgs(content):
+            return [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"id": "c", "function": {"name": "image_generate"}},
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "c", "content": content},
+            ]
+
+        tags, _ = _collect_auto_append_media_tags(
+            _img_msgs('{"success": false, "image": null, "error": "boom"}'),
+            history_offset=0,
+        )
+        assert tags == []
+
+        tags, _ = _collect_auto_append_media_tags(
+            _img_msgs('{"success": true, "image": "https://fal.media/x/cat.png"}'),
+            history_offset=0,
+        )
+        assert tags == []
+
+    def test_gateway_auto_append_image_generate_dedupes_history(self):
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "c", "function": {"name": "image_generate"}},
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c",
+                "content": '{"success": true, "image": "/tmp/gen/cat.png"}',
+            },
+        ]
+
+        tags, _ = _collect_auto_append_media_tags(
+            messages,
+            history_offset=0,
+            history_media_paths={"/tmp/gen/cat.png"},
+        )
+        assert tags == []
     
     def test_media_tags_not_extracted_from_history(self):
         """MEDIA tags from previous turns should NOT be extracted again."""

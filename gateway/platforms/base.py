@@ -2643,6 +2643,53 @@ class BasePlatformAdapter(ABC):
         return safe_paths
 
     @staticmethod
+    def _mask_protected_spans(content: str) -> str:
+        """Mask code, inline-code, and blockquote spans before MEDIA scanning.
+
+        The returned string has the same length as ``content`` so regex match
+        offsets can still be applied to the original text.
+        """
+        chars = list(content)
+        spans: list[tuple[int, int]] = []
+
+        for match in re.finditer(r"```[^\n]*\n.*?```", content, re.DOTALL):
+            spans.append((match.start(), match.end()))
+
+        for match in re.finditer(r"`[^`\n]+`", content):
+            prefix = content[max(0, match.start() - 20):match.start()]
+            if re.search(r"MEDIA:\s*$", prefix):
+                continue
+            spans.append((match.start(), match.end()))
+
+        for match in re.finditer(r"^>.*$", content, re.MULTILINE):
+            spans.append((match.start(), match.end()))
+
+        for start, end in spans:
+            for idx in range(start, end):
+                if chars[idx] != "\n":
+                    chars[idx] = " "
+        return "".join(chars)
+
+    @staticmethod
+    def _mask_json_string_media(content: str) -> str:
+        """Mask MEDIA bare paths embedded inside serialized JSON values.
+
+        Stored tool results can contain a previous reply such as
+        ``{"result": "MEDIA:/tmp/old.png"}``. That text is data, not an
+        outbound attachment directive. The mask is offset-preserving.
+        """
+        if '"' not in content or "MEDIA:" not in content:
+            return content
+        chars = list(content)
+        for match in re.finditer(r'(?<=[:,{\[])\s*"((?:[^"\\\n]|\\.)*)"', content):
+            segment = match.group(1)
+            if re.search(r"MEDIA:\s*(?:~/|/|[A-Za-z]:[/\\])", segment):
+                for idx in range(match.start(1), match.end(1)):
+                    if chars[idx] != "\n":
+                        chars[idx] = " "
+        return "".join(chars)
+
+    @staticmethod
     def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
         """
         Extract MEDIA:<path> tags and [[audio_as_voice]] directives from response text.
@@ -2684,7 +2731,9 @@ class BasePlatformAdapter(ABC):
         # extension set is shared with extract_local_files and the display
         # cleanup regex, so supported attachment types cannot drift.
         media_pattern = MEDIA_TAG_CLEANUP_RE
-        for match in media_pattern.finditer(content):
+        scan_content = BasePlatformAdapter._mask_protected_spans(content)
+        scan_content = BasePlatformAdapter._mask_json_string_media(scan_content)
+        for match in media_pattern.finditer(scan_content):
             path = match.group("path").strip()
             if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
                 path = path[1:-1].strip()
@@ -2697,8 +2746,15 @@ class BasePlatformAdapter(ABC):
 
         # Remove MEDIA tags from content (including surrounding quote/backtick wrappers)
         if media:
-            cleaned = media_pattern.sub('', cleaned)
-            cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+            masked_cleaned = BasePlatformAdapter._mask_protected_spans(cleaned)
+            masked_cleaned = BasePlatformAdapter._mask_json_string_media(masked_cleaned)
+            spans = [match.span() for match in media_pattern.finditer(masked_cleaned)]
+            if spans:
+                chars = list(cleaned)
+                for start, end in sorted(spans, reverse=True):
+                    del chars[start:end]
+                cleaned = "".join(chars)
+                cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         
         return media, cleaned
 

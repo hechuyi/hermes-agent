@@ -53,7 +53,7 @@ _TOOL_MEDIA_RE_PRE_FIX = re.compile(
 )
 def test_windows_paths_match(media_tag, expected):
     patterns = _tool_media_patterns_from_run_py()
-    assert len(patterns) == 2
+    assert len(patterns) == 1
     for pattern in patterns:
         match = pattern.search(media_tag)
         assert match is not None
