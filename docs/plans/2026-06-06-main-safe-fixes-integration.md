@@ -5701,6 +5701,48 @@ suite `336 passed, 1 warning`; provider/transport filtered suite `37 passed,
 55 deselected`; Feishu/max-token regression `119 passed`; ruff passed;
 py_compile passed; diff check passed.
 
+## 2026-06-13 — Gateway DM session isolation absorption
+
+Official commit `5408013369c06bd8fe7de3559764ee5bd85d6854` was manually
+absorbed for gateway session-key construction.
+
+DM sources that arrive without a `chat_id` now fall back to
+`user_id_alt`/`user_id` before the bare per-platform DM sink. This prevents
+synthetic or non-standard adapter DM events from collapsing multiple users into
+`agent:main:<platform>:dm` and sharing one cached agent conversation. Existing
+Feishu live inbound `require_conversation_identity` checks still fail closed
+before this fallback when a live Feishu source lacks conversation identity.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/gateway/test_session.py -k "dm_without_chat_id"
+```
+
+Result before code changes: `3 failed, 1 passed, 80 deselected`; missing
+`chat_id` DMs still produced the shared `agent:main:telegram:dm` key.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/gateway/test_session.py -k "dm_without_chat_id"
+uv run ruff check gateway/session.py tests/gateway/test_session.py
+uv run python -m py_compile gateway/session.py tests/gateway/test_session.py
+git diff --check
+```
+
+Result: targeted session-key tests `4 passed, 80 deselected`; ruff passed;
+py_compile passed; diff check passed.
+
+Note: a broader exploratory run of
+`tests/gateway/test_session.py tests/gateway/test_feishu_current_conversation_admission.py tests/gateway/test_feishu_inbound_idempotency.py`
+surfaced the existing
+`TestRewriteTranscriptPreservesReasoning::test_db_rewrite_is_atomic_on_insert_failure`
+expectation mismatch: it calls `rewrite_transcript()` without expecting the
+typed `SessionPersistenceError` that the same file already requires for DB
+replace failures. That is unrelated to DM key construction and was not changed
+in this absorption.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work

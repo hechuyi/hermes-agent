@@ -672,8 +672,9 @@ def build_session_key(
     DM rules:
       - DMs include chat_id when present, so each private conversation is isolated.
       - thread_id further differentiates threaded DMs within the same DM chat.
-      - Without chat_id, thread_id is used as a best-effort fallback.
-      - Without thread_id or chat_id, DMs share a single session.
+      - Without chat_id, user_id_alt/user_id isolates synthetic or non-standard
+        DM sources before falling back to thread_id.
+      - Without any identifier, DMs share a single per-platform sink.
 
     Group/channel rules:
       - chat_id identifies the parent group/channel.
@@ -708,6 +709,16 @@ def build_session_key(
             if source.thread_id:
                 return f"agent:main:{platform}:dm:{dm_chat_id}:{source.thread_id}"
             return f"agent:main:{platform}:dm:{dm_chat_id}"
+        dm_participant_id = source.user_id_alt or source.user_id
+        if dm_participant_id and source.platform == Platform.WHATSAPP:
+            dm_participant_id = (
+                canonical_whatsapp_identifier(str(dm_participant_id))
+                or dm_participant_id
+            )
+        if dm_participant_id:
+            if source.thread_id:
+                return f"agent:main:{platform}:dm:{dm_participant_id}:{source.thread_id}"
+            return f"agent:main:{platform}:dm:{dm_participant_id}"
         if source.thread_id:
             return f"agent:main:{platform}:dm:{source.thread_id}"
         return f"agent:main:{platform}:dm"

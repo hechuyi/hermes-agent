@@ -810,6 +810,62 @@ class TestWhatsAppSessionKeyConsistency:
             == "agent:main:whatsapp:group:120363000000000000@g.us"
         )
 
+    def test_dm_without_chat_id_falls_back_to_user_id(self):
+        """A DM source missing chat_id must still isolate by sender."""
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="",
+            chat_type="dm",
+            user_id="jordan",
+        )
+
+        assert build_session_key(source) == "agent:main:telegram:dm:jordan"
+
+    def test_dm_without_chat_id_distinct_users_do_not_collide(self):
+        first = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="",
+            chat_type="dm",
+            user_id="jordan",
+        )
+        second = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="",
+            chat_type="dm",
+            user_id="dima",
+        )
+
+        assert build_session_key(first) == "agent:main:telegram:dm:jordan"
+        assert build_session_key(second) == "agent:main:telegram:dm:dima"
+        assert build_session_key(first) != build_session_key(second)
+
+    def test_dm_without_chat_id_prefers_user_id_alt(self):
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="",
+            chat_type="dm",
+            user_id="primary",
+            user_id_alt="alt",
+        )
+
+        assert build_session_key(source) == "agent:main:telegram:dm:alt"
+
+    def test_dm_without_chat_id_or_user_id_falls_back_to_thread_then_sink(self):
+        threaded = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="",
+            chat_type="dm",
+            thread_id="7",
+        )
+        bare = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="",
+            chat_type="dm",
+        )
+
+        assert build_session_key(threaded) == "agent:main:telegram:dm:7"
+        assert build_session_key(bare) == "agent:main:telegram:dm"
+
     def test_store_delegates_to_build_session_key(self, store):
         """SessionStore._generate_session_key must produce the same result."""
         source = SessionSource(
