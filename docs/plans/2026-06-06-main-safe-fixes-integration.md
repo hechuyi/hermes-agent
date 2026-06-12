@@ -5608,6 +5608,42 @@ git diff --check
 Result: adapter tests `158 passed`; ruff passed; py_compile passed; diff check
 passed.
 
+## 2026-06-13 — Thinking-signature retry persistence absorption
+
+Official commit `9f95f72b987fcad6c9b11b22d595691af9f9168c` was manually
+absorbed for the fork's conversation retry path.
+
+The thinking-signature recovery now strips `reasoning_details` from
+`api_messages`, the API-call-time shallow-copy list consumed by
+`_build_api_kwargs()` on retry. It no longer mutates canonical `messages`, so a
+single Anthropic 400 recovery cannot silently erase signed thinking blocks from
+the persisted session state while still retrying the same rejected wire payload.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/run_agent/test_thinking_sig_recovery_persistence.py
+```
+
+Result before code changes: collection failed with
+`ImportError: cannot import name '_strip_reasoning_details_for_thinking_signature_retry'`,
+showing the production recovery helper and its API-message boundary contract did
+not exist.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/run_agent/test_thinking_sig_recovery_persistence.py
+uv run pytest -q tests/run_agent/test_thinking_sig_recovery_persistence.py tests/agent/test_error_classifier.py tests/run_agent/test_run_agent.py -k "thinking or retry or signature or recovery"
+uv run ruff check agent/conversation_loop.py tests/run_agent/test_thinking_sig_recovery_persistence.py
+uv run python -m py_compile agent/conversation_loop.py tests/run_agent/test_thinking_sig_recovery_persistence.py
+git diff --check
+```
+
+Result: focused recovery tests `3 passed, 1 warning`; related filtered suite
+`49 passed, 476 deselected, 1 warning`; ruff passed; py_compile passed; diff
+check passed.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work

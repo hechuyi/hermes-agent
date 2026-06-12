@@ -73,6 +73,18 @@ from utils import base_url_host_matches, env_var_enabled
 logger = logging.getLogger(__name__)
 
 
+def _strip_reasoning_details_for_thinking_signature_retry(
+    api_messages: List[Dict[str, Any]],
+) -> int:
+    """Strip thinking replay fields from the API-call-time message copies."""
+    stripped = 0
+    for message in api_messages:
+        if isinstance(message, dict) and "reasoning_details" in message:
+            message.pop("reasoning_details", None)
+            stripped += 1
+    return stripped
+
+
 def _with_persistence(
     agent: Any,
     messages: List[Dict[str, Any]],
@@ -2470,30 +2482,33 @@ def run_conversation(
                     print(f"{agent.log_prefix}     • Legacy cleanup: hermes config set ANTHROPIC_TOKEN \"\"")
                     print(f"{agent.log_prefix}     • Clear stale keys: hermes config set ANTHROPIC_API_KEY \"\"")
 
-                # ── Thinking block signature recovery ─────────────────
+                # Thinking block signature recovery.
+                #
                 # Anthropic signs thinking blocks against the full turn
-                # content.  Any upstream mutation (context compression,
+                # content. Any upstream mutation (context compression,
                 # session truncation, message merging) invalidates the
-                # signature → HTTP 400.  Recovery: strip reasoning_details
-                # from all messages so the next retry sends no thinking
-                # blocks at all.  One-shot — don't retry infinitely.
+                # signature and the API replies HTTP 400. Recovery strips
+                # reasoning_details from api_messages only, so the retry's
+                # wire payload omits thinking blocks while canonical messages
+                # remain intact for persistence.
                 if (
                     classified.reason == FailoverReason.thinking_signature
                     and not thinking_sig_retry_attempted
                 ):
                     thinking_sig_retry_attempted = True
-                    for _m in messages:
-                        if isinstance(_m, dict):
-                            _m.pop("reasoning_details", None)
+                    stripped = _strip_reasoning_details_for_thinking_signature_retry(
+                        api_messages,
+                    )
                     agent._vprint(
-                        f"{agent.log_prefix}⚠️  Thinking block signature invalid — "
-                        f"stripped all thinking blocks, retrying...",
+                        f"{agent.log_prefix}⚠️  Thinking block signature invalid, "
+                        f"stripped API thinking blocks, retrying...",
                         force=True,
                     )
                     logger.warning(
                         "%sThinking block signature recovery: stripped "
-                        "reasoning_details from %d messages",
-                        agent.log_prefix, len(messages),
+                        "reasoning_details from %d api_messages "
+                        "(canonical messages unchanged)",
+                        agent.log_prefix, stripped,
                     )
                     continue
 
