@@ -107,6 +107,28 @@ class TestAuxiliaryMaxTokensParam:
              patch("agent.auxiliary_client._read_nous_auth", return_value=None):
             assert auxiliary_max_tokens_param(2048) == {"max_completion_tokens": 2048}
 
+    def test_uses_max_completion_tokens_for_gpt5_on_custom_endpoint(self):
+        with patch("agent.auxiliary_client._resolve_custom_runtime", return_value=("https://my-gateway.example.com/v1", "key", None)), \
+             patch("agent.auxiliary_client._read_nous_auth", return_value=None):
+            assert auxiliary_max_tokens_param(2048, model="gpt-5.4") == {
+                "max_completion_tokens": 2048,
+            }
+
+    def test_uses_max_completion_tokens_for_gpt4o_on_openrouter(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+        with patch("agent.auxiliary_client._resolve_custom_runtime", return_value=("https://openrouter.ai/api/v1", "key", None)), \
+             patch("agent.auxiliary_client._read_nous_auth", return_value=None):
+            assert auxiliary_max_tokens_param(2048, model="openai/gpt-4o-mini") == {
+                "max_completion_tokens": 2048,
+            }
+
+    def test_keeps_max_tokens_for_classic_model_on_custom_endpoint(self):
+        with patch("agent.auxiliary_client._resolve_custom_runtime", return_value=("https://my-gateway.example.com/v1", "key", None)), \
+             patch("agent.auxiliary_client._read_nous_auth", return_value=None):
+            assert auxiliary_max_tokens_param(2048, model="llama3") == {
+                "max_tokens": 2048,
+            }
+
 
 class TestBuildCallKwargsMaxTokens:
     @pytest.mark.parametrize(

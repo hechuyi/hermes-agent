@@ -33,6 +33,26 @@ def env_var_enabled(name: str, default: str = "") -> bool:
     return is_truthy_value(os.getenv(name, default), default=False)
 
 
+def model_forces_max_completion_tokens(model: Any) -> bool:
+    """Return True when chat completions must use max_completion_tokens."""
+    if not isinstance(model, str):
+        return False
+    normalized = model.strip().lower()
+    if not normalized:
+        return False
+    normalized = normalized.rsplit("/", 1)[-1]
+    for prefix in ("gpt-5", "gpt-4o", "gpt-4.1", "o1", "o3", "o4"):
+        if normalized == prefix:
+            return True
+        if normalized.startswith(prefix) and normalized[len(prefix):len(prefix) + 1] in {
+            "-",
+            ".",
+            "_",
+        }:
+            return True
+    return False
+
+
 def _preserve_file_mode(path: Path) -> "int | None":
     """Capture the permission bits of *path* if it exists, else ``None``."""
     try:

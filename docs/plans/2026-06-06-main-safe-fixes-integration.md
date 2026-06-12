@@ -5176,6 +5176,73 @@ git diff --check
 
 Result: all three commands exited `0`.
 
+## 2026-06-12 — Model header and max-completion-token absorption
+
+The following model/provider protocol fixes were reviewed and absorbed with
+fork-local adaptation:
+
+- `a216ff839b4ec6cea53d249610aa8210a6658963`
+- `ffe665277ccff676d313b0f0f37d2cb9775a6930`
+- `19c07c40379ba711e9db6a522bd0b7454d9d971f`
+
+The local `model.default_headers` port applies user-configured OpenAI-wire
+request headers on both the primary `AIAgent` client and auxiliary client
+construction paths. User values override provider/SDK defaults, `None` values
+are skipped, and native Anthropic/Bedrock modes remain untouched. The
+configuration example now documents this as an OpenAI-compatible endpoint
+escape hatch, not as a model-selection policy.
+
+The local max-token parameter port adds a shared
+`utils.model_forces_max_completion_tokens()` helper and uses it in the primary
+agent and auxiliary `auxiliary_max_tokens_param()` helper. It treats
+`gpt-4o`, `gpt-4.1`, `gpt-5`, `o1`, `o3`, and `o4` families as requiring
+`max_completion_tokens` even when served through custom/OpenRouter-style model
+names, while preserving `max_tokens` for classic `gpt-4`, local models, and
+non-OpenAI families. This preserves model/catalog compatibility and does not
+freeze the fork to the operator's current `gpt-5.5` channel.
+
+`2062a8400` was reviewed as already equivalent in this fork's auxiliary call
+builder: OpenAI-compatible auxiliary calls already omit explicit output caps by
+default, and only Anthropic Messages wire keeps mandatory `max_tokens`. That
+local behavior was preserved rather than mechanically re-porting upstream's
+older `_build_call_kwargs` hunk.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/run_agent/test_provider_attribution_headers.py tests/agent/test_auxiliary_user_default_headers.py
+```
+
+Result before code changes: `9 failed, 10 passed, 1 warning`.
+
+```bash
+uv run pytest -q tests/test_model_forces_max_completion_tokens.py tests/run_agent/test_run_agent.py::TestMaxTokensParam tests/agent/test_auxiliary_client.py::TestAuxiliaryMaxTokensParam
+```
+
+Result before code changes: collection failed because
+`utils.model_forces_max_completion_tokens` did not exist.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/agent/test_auxiliary_client.py tests/agent/test_auxiliary_named_custom_providers.py tests/agent/test_auxiliary_main_first.py tests/agent/test_codex_cloudflare_headers.py tests/run_agent/test_provider_attribution_headers.py tests/agent/test_auxiliary_user_default_headers.py
+```
+
+Result: `267 passed, 1 warning`.
+
+```bash
+uv run pytest -q tests/test_model_forces_max_completion_tokens.py tests/agent/test_auxiliary_client.py tests/run_agent/test_run_agent.py
+```
+
+Result: `559 passed, 1 warning`.
+
+```bash
+uv run ruff check utils.py run_agent.py agent/agent_init.py agent/auxiliary_client.py tests/test_model_forces_max_completion_tokens.py tests/run_agent/test_run_agent.py tests/run_agent/test_provider_attribution_headers.py tests/agent/test_auxiliary_client.py tests/agent/test_auxiliary_user_default_headers.py
+uv run python -m py_compile utils.py run_agent.py agent/agent_init.py agent/auxiliary_client.py tests/test_model_forces_max_completion_tokens.py tests/run_agent/test_run_agent.py tests/run_agent/test_provider_attribution_headers.py tests/agent/test_auxiliary_client.py tests/agent/test_auxiliary_user_default_headers.py
+```
+
+Result: both commands exited `0`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work
