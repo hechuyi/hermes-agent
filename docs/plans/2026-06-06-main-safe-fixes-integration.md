@@ -6129,16 +6129,25 @@ several auth paths. Removing it may be desirable later, but it is an auth
 policy migration rather than a low-risk upstream sync and needs live credential
 evidence before absorption.
 
-Deferred non-Feishu platform batching/topic recovery:
+Non-Feishu platform batching/topic recovery split:
 
 - `b0ce47daac99f032a1e4ec2f0f9085e4cd5f585b`
 - `cddb7283d9d10bcea9df2bd8b39eb0b19be39f3d`
 - `100536134cd9eb798f69fc9e928a604062990f8d`
 - `db96fc60d0d3dc3f9e95dc6541d8edcccb2f2171`
 
-These target WhatsApp/WeChat text debounce and Telegram topic binding recovery.
-The current fork objective is Feishu-based Hermes; non-Feishu platform behavior
-is not a priority unless it shares a generic gateway contract needed by Feishu.
+`b0ce47daac99f032a1e4ec2f0f9085e4cd5f585b` and
+`cddb7283d9d10bcea9df2bd8b39eb0b19be39f3d` are already locally equivalent via
+the 2026-06-07 WhatsApp/Weixin text batching absorption (`2553c07`). They remain
+`git cherry` positives only because the fork port preserved local access-policy
+ordering and test-helper contracts instead of applying the upstream patch
+literally.
+
+`100536134cd9eb798f69fc9e928a604062990f8d` and
+`db96fc60d0d3dc3f9e95dc6541d8edcccb2f2171` remain deferred. They target
+Telegram topic binding recovery and compression-child alignment, not Feishu
+runtime behavior. They should be reviewed only if a generic gateway session
+identity contract needed by Feishu emerges.
 
 Deferred dashboard/UI auth change:
 
