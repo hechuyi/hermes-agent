@@ -3,7 +3,11 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX
+from agent.context_compressor import (
+    ContextCompressor,
+    HISTORICAL_TASK_HEADING,
+    SUMMARY_PREFIX,
+)
 
 
 @pytest.fixture()
@@ -859,7 +863,7 @@ class TestSummaryFailureTrackingForGatewayWarning:
             if isinstance(m.get("content"), str)
             and "Summary generation was unavailable" in m["content"]
         )
-        assert "## Active Task" in fallback
+        assert HISTORICAL_TASK_HEADING in fallback
         assert "Please fix the compression summary failure" in fallback
         assert "Called tool(s): read_file" in fallback
         assert "agent/context_compressor.py" in fallback
@@ -1256,7 +1260,8 @@ class TestCompressWithClient:
         """When the summary lands as standalone role='user' (e.g. head ends
         with assistant/tool), the message body must include the explicit
         '--- END OF CONTEXT SUMMARY ---' marker. Without it, weak models
-        read the verbatim past user request quoted in '## Active Task' as
+        read the verbatim past user request quoted in the historical task
+        snapshot as
         fresh input (#11475, #14521).
         """
         mock_response = MagicMock()

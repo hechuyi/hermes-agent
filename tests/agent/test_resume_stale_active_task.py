@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 from agent.context_compressor import (
+    HISTORICAL_TASK_HEADING,
     LEGACY_SUMMARY_PREFIX,
     SUMMARY_PREFIX,
     ContextCompressor,
@@ -38,7 +39,7 @@ def _compressor() -> ContextCompressor:
 def test_historical_conflicting_prefix_is_renormalized():
     stale_handoff = (
         f"{_OLD_CONFLICTING_PREFIX}\n"
-        "## Active Task\n"
+        f"{HISTORICAL_TASK_HEADING}\n"
         "User asked: 'finish task A'\n"
     )
 
@@ -56,7 +57,7 @@ def test_historical_conflicting_handoff_is_detected_and_stripped():
         {"role": "system", "content": "system prompt"},
         {
             "role": "user",
-            "content": f"{_OLD_CONFLICTING_PREFIX}\n## Active Task\nUser asked: 'task A'",
+            "content": f"{_OLD_CONFLICTING_PREFIX}\n{HISTORICAL_TASK_HEADING}\nUser asked: 'task A'",
         },
         {"role": "assistant", "content": "ok"},
         {"role": "user", "content": "unrelated task B"},
@@ -72,7 +73,7 @@ def test_historical_conflicting_handoff_is_detected_and_stripped():
 
 def test_legacy_prefix_still_renormalizes():
     renormalized = ContextCompressor._with_summary_prefix(
-        f"{LEGACY_SUMMARY_PREFIX} ## Active Task\nUser asked: 'task A'"
+        f"{LEGACY_SUMMARY_PREFIX} {HISTORICAL_TASK_HEADING}\nUser asked: 'task A'"
     )
 
     assert renormalized.startswith(SUMMARY_PREFIX)
@@ -82,7 +83,7 @@ def test_legacy_prefix_still_renormalizes():
 
 def test_active_task_prompt_captures_unanswered_questions_and_decisions():
     compressor = _compressor()
-    compressor._previous_summary = "## Active Task\nUser asked: 'old task'\n"
+    compressor._previous_summary = f"{HISTORICAL_TASK_HEADING}\nUser asked: 'old task'\n"
     turns = [
         {"role": "user", "content": "Should we use option A or option B?"},
         {"role": "assistant", "content": "I need to inspect the current code first."},
