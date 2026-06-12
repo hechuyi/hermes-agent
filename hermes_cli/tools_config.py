@@ -136,6 +136,13 @@ _TOOLSET_PLATFORM_RESTRICTIONS: Dict[str, Set[str]] = {
     "discord_admin": {"discord"},
 }
 
+# Platform default composites intentionally exclude some broker-gated legacy
+# toolsets from their direct aliases. Keep those toolset keys enabled for the
+# platform default without adding their business tools to the base alias itself.
+_PLATFORM_IMPLICIT_NON_CONFIGURABLE_TOOLSETS: Dict[str, Set[str]] = {
+    "feishu": {"feishu_doc", "feishu_drive"},
+}
+
 
 def _toolset_allowed_for_platform(ts_key: str, platform: str) -> bool:
     """Return True if ``ts_key`` is configurable on ``platform``.
@@ -1268,6 +1275,8 @@ def _get_platform_tools(
     _plat_info = PLATFORMS.get(platform)
     _default_ts = _plat_info["default_toolset"] if _plat_info else f"hermes-{platform}"
     platform_tool_universe = set(resolve_toolset(_default_ts))
+    for implicit_ts in _PLATFORM_IMPLICIT_NON_CONFIGURABLE_TOOLSETS.get(platform, set()):
+        platform_tool_universe.update(resolve_toolset(implicit_ts))
     configurable_tool_universe = set()
     for ck in configurable_keys:
         configurable_tool_universe.update(resolve_toolset(ck))
@@ -2001,8 +2010,13 @@ def _toolset_needs_configuration_prompt(
         tts_cfg = config.get("tts", {})
         return not isinstance(tts_cfg, dict) or "provider" not in tts_cfg
     if ts_key == "web":
-        web_cfg = config.get("web", {})
-        return not isinstance(web_cfg, dict) or "backend" not in web_cfg
+        # Web works out of the box via Parallel's free Search MCP (no key), so
+        # don't force setup just because ``web.backend`` is unset — only prompt
+        # when web isn't actually usable (e.g. an explicit backend configured
+        # without its credentials). Lazy import: web_tools is heavy and most
+        # tools_config callers don't need it.
+        from tools.web_tools import check_web_api_key
+        return not check_web_api_key()
     if ts_key == "browser":
         browser_cfg = config.get("browser", {})
         return not isinstance(browser_cfg, dict) or "cloud_provider" not in browser_cfg
