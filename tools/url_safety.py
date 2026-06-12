@@ -23,6 +23,7 @@ Limitations (documented, not fixable at pre-flight level):
     where redirect handling is on their servers.
 """
 
+import asyncio
 import ipaddress
 import logging
 import os
@@ -349,3 +350,8 @@ def is_safe_url(url: str) -> bool:
         # become SSRF bypass vectors
         logger.warning("Blocked request — URL safety check error for %s: %s", url, exc)
         return False
+
+
+async def async_is_safe_url(url: str) -> bool:
+    """Return is_safe_url(url) without blocking the event loop during DNS."""
+    return await asyncio.to_thread(is_safe_url, url)

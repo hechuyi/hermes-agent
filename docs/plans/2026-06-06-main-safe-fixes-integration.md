@@ -5743,6 +5743,42 @@ typed `SessionPersistenceError` that the same file already requires for DB
 replace failures. That is unrelated to DM key construction and was not changed
 in this absorption.
 
+## 2026-06-13 — Async URL safety absorption
+
+Official commit `c60952ba9441a87f572d6bd095b4f98cde69d466` was manually
+absorbed for async web and media URL safety paths.
+
+The fork now exposes `async_is_safe_url()` as the async counterpart to
+`is_safe_url()`, running the blocking DNS resolution through
+`asyncio.to_thread()`. Async tool paths now use it in `web_extract_tool`,
+vision image/video URL preflight, and both image/video redirect guards. The
+existing sync `_validate_image_url()` remains for sync callers and URL-shape
+unit tests; async callers go through `_validate_image_url_async()` so DNS cannot
+freeze the event loop.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/tools/test_url_safety.py tests/tools/test_vision_tools.py -k "async_is_safe_url or analysis_error_logs_exc_info or cleanup_error_logs_exc_info or blocked_remote_url_short_circuits"
+```
+
+Result before code changes: collection failed with
+`ImportError: cannot import name 'async_is_safe_url'`.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/tools/test_url_safety.py::TestAsyncIsSafeUrl tests/tools/test_vision_tools.py::TestErrorLoggingExcInfo::test_analysis_error_logs_exc_info tests/tools/test_vision_tools.py::TestErrorLoggingExcInfo::test_cleanup_error_logs_exc_info tests/tools/test_vision_tools.py::TestVisionSafetyGuards::test_blocked_remote_url_short_circuits_before_download
+uv run pytest -q tests/tools/test_url_safety.py tests/tools/test_vision_tools.py tests/tools/test_web_providers.py -k "safe_url or validate_image_url or ssrf or web_extract or vision"
+uv run ruff check tools/url_safety.py tools/web_tools.py tools/vision_tools.py tests/tools/test_url_safety.py tests/tools/test_vision_tools.py
+uv run python -m py_compile tools/url_safety.py tools/web_tools.py tools/vision_tools.py tests/tools/test_url_safety.py tests/tools/test_vision_tools.py
+git diff --check
+```
+
+Result: focused async/vision tests `5 passed`; broader URL/vision/web filtered
+suite `81 passed, 6 skipped, 117 deselected, 1 warning`; ruff passed;
+py_compile passed; diff check passed.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work
