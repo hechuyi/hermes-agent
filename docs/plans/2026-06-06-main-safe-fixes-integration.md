@@ -5523,6 +5523,55 @@ uv run pytest -q tests/agent/test_error_classifier.py
 Result: sanitizer run `6 passed, 1 warning`; full classifier run
 `161 passed`.
 
+## 2026-06-13 — OpenRouter adaptive Anthropic reasoning absorption
+
+The OpenRouter/Anthropic adaptive-reasoning chain was manually absorbed for
+runtime code and tests:
+
+- `1febb08240000d9e82e719992c17706dd9854187`
+- `46fedef07fdae6942d4feee41ff5031530c26f90`
+- `183d86b3e04ebdc65e1d0d8b050ae19bfcf880c6`
+
+Native Anthropic model classification now defaults unknown/new Claude model
+names to the modern adaptive-thinking contract, with explicit legacy Claude
+families kept on the manual-thinking path. Non-Claude Anthropic-compatible
+models such as MiniMax, Qwen, and Kimi remain manual. The fallback metadata also
+knows `claude-fable`/`claude-fable-5` as 1M-context Claude-family models.
+
+OpenRouter now treats reasoning-mandatory Anthropic models (Claude 4.6+,
+Fable, and future Claude names) specially: it never emits
+`extra_body.reasoning` for them, because OpenRouter can translate that into
+Anthropic `thinking: disabled` on tool-replay turns. When an enabled
+`reasoning_config.effort` is present, the profile routes it to top-level
+`verbosity`, preserving the user's existing reasoning-effort knob while keeping
+the harmful `reasoning` field absent. Legacy Anthropic models and
+non-Anthropic reasoning models continue to receive `extra_body.reasoning`.
+Grok session affinity headers remain merged into the same top-level kwargs map.
+
+Website/docs hunks from `183d86b3e` were intentionally not absorbed in this
+pass; this fork is being kept focused on Feishu-based Hermes runtime behavior
+and repo slimming will be handled separately.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/agent/test_anthropic_adapter.py -k "unknown_claude_models or legacy_and_non_claude_models or claude_46_is_adaptive"
+uv run pytest -q tests/providers/test_provider_profiles.py -k "mandatory_anthropic or non_mandatory_reasoning_model or reasoning_disable_kept"
+```
+
+Result before code changes: Anthropic adapter run failed because
+`claude-fable-5` was not adaptive; OpenRouter provider tests failed because
+mandatory Anthropic models still emitted `extra_body.reasoning` and did not
+route effort to `verbosity`.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/agent/test_anthropic_adapter.py tests/providers/test_provider_profiles.py tests/providers/test_profile_wiring.py tests/providers/test_transport_parity.py -k "anthropic or claude or openrouter or reasoning or verbosity"
+```
+
+Result: `192 passed, 56 deselected`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work

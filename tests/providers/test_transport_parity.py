@@ -145,7 +145,7 @@ class TestOpenRouterParity:
         """OpenRouter passes the FULL reasoning_config dict, not just effort."""
         rc = {"enabled": True, "effort": "high"}
         kw = transport.build_kwargs(
-            model="anthropic/claude-sonnet-4.6",
+            model="deepseek/deepseek-chat",
             messages=_simple_messages(),
             tools=None,
             provider_profile=get_provider_profile("openrouter"),
@@ -157,7 +157,7 @@ class TestOpenRouterParity:
     def test_default_reasoning_when_no_config(self, transport):
         """When supports_reasoning=True but no config, adds default."""
         kw = transport.build_kwargs(
-            model="anthropic/claude-sonnet-4.6",
+            model="deepseek/deepseek-chat",
             messages=_simple_messages(),
             tools=None,
             provider_profile=get_provider_profile("openrouter"),

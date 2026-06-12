@@ -1236,6 +1236,58 @@ class TestBuildAnthropicKwargs:
         assert _supports_fast_mode("claude-haiku-4-5") is False
         assert _supports_fast_mode("") is False
 
+    def test_unknown_claude_models_default_to_modern_thinking_contract(self):
+        from agent.anthropic_adapter import (
+            _forbids_sampling_params,
+            _get_anthropic_max_output,
+            _supports_adaptive_thinking,
+            _supports_xhigh_effort,
+        )
+
+        for model in (
+            "claude-fable-5",
+            "anthropic/claude-fable-5",
+            "claude-saga-2",
+            "anthropic/claude-opus-9",
+        ):
+            assert _supports_adaptive_thinking(model) is True, model
+            assert _supports_xhigh_effort(model) is True, model
+            assert _forbids_sampling_params(model) is True, model
+        assert _get_anthropic_max_output("anthropic/claude-fable-5") == 128_000
+
+    def test_legacy_and_non_claude_models_keep_manual_thinking_contract(self):
+        from agent.anthropic_adapter import (
+            _forbids_sampling_params,
+            _supports_adaptive_thinking,
+            _supports_xhigh_effort,
+        )
+
+        for model in (
+            "claude-3-5-sonnet",
+            "claude-3-7-sonnet",
+            "anthropic/claude-opus-4.5",
+            "anthropic/claude-sonnet-4.5",
+            "claude-haiku-4-5",
+            "minimax-m2",
+            "qwen3-max",
+            "moonshotai/kimi-k2.5",
+        ):
+            assert _supports_adaptive_thinking(model) is False, model
+            assert _supports_xhigh_effort(model) is False, model
+            assert _forbids_sampling_params(model) is False, model
+
+    def test_claude_46_is_adaptive_but_not_xhigh_or_no_sampling(self):
+        from agent.anthropic_adapter import (
+            _forbids_sampling_params,
+            _supports_adaptive_thinking,
+            _supports_xhigh_effort,
+        )
+
+        for model in ("claude-opus-4.6", "claude-sonnet-4-6"):
+            assert _supports_adaptive_thinking(model) is True, model
+            assert _supports_xhigh_effort(model) is False, model
+            assert _forbids_sampling_params(model) is False, model
+
     def test_fast_mode_omitted_for_unsupported_model(self):
         """fast_mode=True on Opus 4.7 must NOT inject speed=fast (API 400s)."""
         kwargs = build_anthropic_kwargs(

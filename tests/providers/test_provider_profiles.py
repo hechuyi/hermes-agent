@@ -166,6 +166,81 @@ class TestOpenRouterProfile:
         )
         assert eb["reasoning"] == {"enabled": False}
 
+    def test_reasoning_omitted_for_mandatory_anthropic(self):
+        p = get_provider_profile("openrouter")
+        for model in (
+            "anthropic/claude-fable-5",
+            "anthropic/claude-some-future-7",
+            "anthropic/claude-opus-4.8",
+            "anthropic/claude-opus-4.6",
+        ):
+            for cfg in (
+                {"enabled": False},
+                {"effort": "none"},
+                {"enabled": True},
+                {"enabled": True, "effort": "high"},
+            ):
+                eb, _ = p.build_api_kwargs_extras(
+                    reasoning_config=cfg,
+                    supports_reasoning=True,
+                    model=model,
+                )
+                assert "reasoning" not in eb, (model, cfg, eb)
+
+    def test_reasoning_disable_kept_for_legacy_and_non_anthropic_models(self):
+        p = get_provider_profile("openrouter")
+        for model in (
+            "anthropic/claude-3.7-sonnet",
+            "anthropic/claude-opus-4.5",
+            "deepseek/deepseek-chat",
+            "qwen/qwen3-max",
+            "openai/gpt-5.4",
+        ):
+            eb, _ = p.build_api_kwargs_extras(
+                reasoning_config={"enabled": False},
+                supports_reasoning=True,
+                model=model,
+            )
+            assert eb["reasoning"] == {"enabled": False}, (model, eb)
+
+    def test_mandatory_anthropic_effort_routes_to_verbosity(self):
+        p = get_provider_profile("openrouter")
+        for effort in ("minimal", "low", "medium", "high", "xhigh"):
+            eb, tl = p.build_api_kwargs_extras(
+                reasoning_config={"enabled": True, "effort": effort},
+                supports_reasoning=True,
+                model="anthropic/claude-fable-5",
+            )
+            assert "reasoning" not in eb
+            assert tl["verbosity"] == effort
+
+    def test_mandatory_anthropic_no_verbosity_when_effort_absent_or_disabled(self):
+        p = get_provider_profile("openrouter")
+        for cfg in (
+            None,
+            {},
+            {"enabled": True},
+            {"effort": "none"},
+            {"enabled": False, "effort": "high"},
+        ):
+            eb, tl = p.build_api_kwargs_extras(
+                reasoning_config=cfg,
+                supports_reasoning=True,
+                model="anthropic/claude-fable-5",
+            )
+            assert "reasoning" not in eb
+            assert "verbosity" not in tl
+
+    def test_non_mandatory_reasoning_model_has_no_verbosity(self):
+        p = get_provider_profile("openrouter")
+        eb, tl = p.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "high"},
+            supports_reasoning=True,
+            model="deepseek/deepseek-chat",
+        )
+        assert eb["reasoning"] == {"enabled": True, "effort": "high"}
+        assert "verbosity" not in tl
+
     def test_default_reasoning(self):
         p = get_provider_profile("openrouter")
         eb, _ = p.build_api_kwargs_extras(supports_reasoning=True)

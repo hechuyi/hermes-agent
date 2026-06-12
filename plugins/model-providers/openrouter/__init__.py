@@ -10,6 +10,24 @@ logger = logging.getLogger(__name__)
 
 _CACHE: list[str] | None = None
 
+_ANTHROPIC_REASONING_OPTIONAL_SUBSTRINGS = (
+    "claude-3",
+    "claude-opus-4-0", "claude-opus-4.0", "claude-opus-4-1", "claude-opus-4.1",
+    "claude-sonnet-4-0", "claude-sonnet-4.0",
+    "claude-opus-4-2025", "claude-sonnet-4-2025",
+    "claude-opus-4-5", "claude-opus-4.5",
+    "claude-sonnet-4-5", "claude-sonnet-4.5",
+    "claude-haiku-4-5", "claude-haiku-4.5",
+)
+
+
+def _anthropic_reasoning_is_mandatory(model: str | None) -> bool:
+    """Return True for Anthropic/Claude models that reject disable-thinking."""
+    m = (model or "").lower()
+    if not m.startswith(("anthropic/", "claude")) and "claude" not in m:
+        return False
+    return not any(sub in m for sub in _ANTHROPIC_REASONING_OPTIONAL_SUBSTRINGS)
+
 
 class OpenRouterProfile(ProviderProfile):
     """OpenRouter aggregator — provider preferences, reasoning config passthrough."""
@@ -83,8 +101,14 @@ class OpenRouterProfile(ProviderProfile):
         the same backend server across turns.
         """
         extra_body: dict[str, Any] = {}
+        top_level: dict[str, Any] = {}
         if supports_reasoning:
-            if reasoning_config is not None:
+            if _anthropic_reasoning_is_mandatory(model):
+                cfg = reasoning_config or {}
+                effort = cfg.get("effort")
+                if cfg.get("enabled", True) is not False and effort and effort != "none":
+                    top_level["verbosity"] = effort
+            elif reasoning_config is not None:
                 extra_body["reasoning"] = dict(reasoning_config)
             else:
                 extra_body["reasoning"] = {"enabled": True, "effort": "medium"}
@@ -92,8 +116,10 @@ class OpenRouterProfile(ProviderProfile):
         extra_headers: dict[str, Any] = {}
         if session_id and model and model.startswith(("x-ai/grok-", "xai/grok-")):
             extra_headers["x-grok-conv-id"] = session_id
+        if extra_headers:
+            top_level["extra_headers"] = extra_headers
 
-        return extra_body, {"extra_headers": extra_headers} if extra_headers else {}
+        return extra_body, top_level
 
 
 openrouter = OpenRouterProfile(
