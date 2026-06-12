@@ -624,6 +624,93 @@ def test_labels_attribute_populated_after_init(monkeypatch):
     }
 
 
+def test_labels_do_not_enable_cross_process_container_reuse(monkeypatch):
+    """This fork currently tags containers for observability/future matching
+    only. Startup must still create a fresh container instead of probing
+    ``docker ps --filter label=...`` and reusing a prior process's container.
+    """
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    calls = _mock_subprocess_run(monkeypatch)
+
+    _make_dummy_env(task_id="reuse-contract")
+
+    run_calls = [
+        call for call in calls
+        if isinstance(call[0], list) and len(call[0]) >= 2 and call[0][1] == "run"
+    ]
+    ps_or_inspect_calls = [
+        call for call in calls
+        if isinstance(call[0], list)
+        and any(part in {"ps", "inspect", "start"} for part in call[0][1:2])
+    ]
+
+    assert len(run_calls) == 1
+    assert ps_or_inspect_calls == []
+
+
+def test_no_startup_orphan_reaper_contract_present():
+    """The upstream Docker lifecycle series adds a startup orphan reaper.
+
+    The Feishu fork has not adopted that sandbox lifecycle contract yet; the
+    labels are present, but no module-level reaper entry point exists.
+    """
+    assert not hasattr(docker_env, "reap_orphan_containers")
+
+
+def test_persistent_cleanup_stops_with_rm_fallback_but_no_delayed_rm(monkeypatch):
+    """Current fork semantics: ``persistent_filesystem=True`` preserves bind
+    mounts but cleanup still stops the running container. The stop command has
+    a best-effort ``rm -f`` fallback if stop itself fails, but persistent mode
+    does not schedule the extra delayed removal used by ephemeral containers.
+
+    This deliberately differs from upstream's later persist-across-processes
+    contract, where graceful cleanup becomes a container no-op unless forced.
+    """
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+    _mock_subprocess_run(monkeypatch)
+
+    popen_cmds = []
+
+    class _Popen:
+        def __init__(self, cmd, **kwargs):
+            self.cmd = cmd
+            self.kwargs = kwargs
+            self.returncode = 0
+            self.stdout = iter([])
+            self.stdin = None
+            popen_cmds.append(cmd)
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, **kwargs):
+            return self.returncode
+
+    monkeypatch.setattr(docker_env.subprocess, "Popen", _Popen)
+
+    env = _make_dummy_env(persistent_filesystem=True, task_id="persistent-cleanup")
+    container_id = env._container_id
+
+    env.cleanup()
+
+    rendered = "\n".join(str(cmd) for cmd in popen_cmds)
+    assert container_id in rendered
+    assert " stop " in rendered
+    assert " rm -f " in rendered
+    assert "sleep 3" not in rendered
+    assert env._container_id is None
+
+
+def test_cleanup_has_no_force_remove_keyword():
+    """Document the current API boundary before considering the upstream
+    ``force_remove`` cleanup split.
+    """
+    import inspect
+
+    signature = inspect.signature(docker_env.DockerEnvironment.cleanup)
+    assert "force_remove" not in signature.parameters
+
+
 def test_credential_mount_skipped_when_source_is_directory(monkeypatch, tmp_path, caplog):
     """Credential mount should be skipped when source path is a directory."""
     corrupted_dir = tmp_path / "google_token.json"

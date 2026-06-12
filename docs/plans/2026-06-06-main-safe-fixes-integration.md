@@ -6266,3 +6266,33 @@ decision groups: Docker lifecycle/persist/reuse semantics, progressive
 tool-search/bridge-disclosure architecture, Nous JWT-only auth migration,
 Telegram topic/compression session identity, dashboard/UI auth policy, and
 adapter-owned gateway access-policy default-deny changes.
+
+## 2026-06-13 — Docker lifecycle characterization before absorption
+
+The Docker lifecycle/persist/reuse group remains intentionally unabsorbed:
+
+- `ac8e238bc87ffd37c5c04d0f401d2aab697068b3`
+- `d77d877665bab7a6035140d142d5670cc05ad15d`
+- `5c2170a7c62b9cfd18431de78b462116df57d199`
+- `2f0f03c40d133d568e786d45275ad6a1bffdebd7`
+
+The fork has absorbed the adjacent label infrastructure only. Current tests now
+lock the fork's actual behavior so future review cannot confuse label presence
+with lifecycle absorption:
+
+- Docker startup still creates a fresh container and does not probe
+  `docker ps` / `docker inspect` / `docker start` by `hermes-agent`,
+  `hermes-task-id`, or `hermes-profile` labels for cross-process reuse.
+- No `reap_orphan_containers` startup reaper entry point exists in
+  `tools.environments.docker`.
+- `persistent_filesystem=True` still preserves bind mounts but schedules
+  container stop with an `rm -f` failure fallback; it does not implement the
+  upstream persist-across-processes cleanup no-op contract.
+- `DockerEnvironment.cleanup()` still has no `force_remove` keyword, so the
+  upstream explicit-teardown split is not present.
+
+This is deliberate evidence, not rejection of the feature forever. A later
+Docker runtime batch can still decide to absorb some or all of the upstream
+lifecycle contract, but it must do so as a sandbox lifecycle change with real
+Docker/s6 verification rather than treating the existing labels as proof of
+reuse/reaper/persist semantics.
