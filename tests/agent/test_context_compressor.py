@@ -63,6 +63,57 @@ class TestUpdateFromResponse:
         assert compressor.last_prompt_tokens == 0
 
 
+class TestMediaDirectiveStripping:
+    def test_serialize_for_summary_strips_media_directives(self, compressor):
+        turns = [
+            {
+                "role": "assistant",
+                "content": "Generated image is available. MEDIA:/tmp/hermes/cat.png",
+                "tool_calls": [
+                    {
+                        "id": "call_image",
+                        "type": "function",
+                        "function": {
+                            "name": "image_generate",
+                            "arguments": '{"path": "MEDIA:/tmp/hermes/cat.png"}',
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_image",
+                "content": "Saved artifact MEDIA:file:///tmp/hermes/cat.png for upload.",
+            },
+        ]
+
+        serialized = compressor._serialize_for_summary(turns)
+
+        assert "MEDIA:" not in serialized
+        assert "Generated image is available." in serialized
+        assert "Saved artifact" in serialized
+
+    def test_static_fallback_summary_strips_media_directives(self, compressor):
+        summary = compressor._build_static_fallback_summary(
+            [
+                {
+                    "role": "user",
+                    "content": "Please send this generated image MEDIA:/tmp/hermes/cat.png",
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_image",
+                    "content": "Created MEDIA:file:///tmp/hermes/cat.png",
+                },
+            ],
+            reason="test failure",
+        )
+
+        assert "MEDIA:" not in summary
+        assert "Please send this generated image" in summary
+        assert "Created" in summary
+
+
 class TestPreflightDeferral:
     def test_defers_when_recent_real_usage_fit_and_rough_growth_is_small(self, compressor):
         compressor.threshold_tokens = 85_000

@@ -138,6 +138,17 @@ _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
 _FALLBACK_SUMMARY_MAX_CHARS = 8_000
 _FALLBACK_TURN_MAX_CHARS = 700
 _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\)[^\s`'\")\]}<>]+")
+_MEDIA_DIRECTIVE_RE = re.compile(r"\bMEDIA:\S+")
+
+
+def _sanitize_summary_text(text: Any) -> str:
+    """Redact sensitive values and remove executable media-delivery directives."""
+    if text is None:
+        text = ""
+    elif not isinstance(text, str):
+        text = str(text)
+    sanitized = redact_sensitive_text(text)
+    return _MEDIA_DIRECTIVE_RE.sub("[attached media stripped]", sanitized)
 
 
 def _dedupe_append(items: list[str], value: str, *, limit: int) -> None:
@@ -984,7 +995,7 @@ class ContextCompressor(ContextEngine):
         parts = []
         for msg in turns:
             role = msg.get("role", "unknown")
-            content = redact_sensitive_text(msg.get("content") or "")
+            content = _sanitize_summary_text(msg.get("content") or "")
 
             # Tool results: keep enough content for the summarizer
             if role == "tool":
@@ -1005,7 +1016,7 @@ class ContextCompressor(ContextEngine):
                         if isinstance(tc, dict):
                             fn = tc.get("function", {})
                             name = fn.get("name", "?")
-                            args = redact_sensitive_text(fn.get("arguments", ""))
+                            args = _sanitize_summary_text(fn.get("arguments", ""))
                             # Truncate long arguments but keep enough for context
                             if len(args) > self._TOOL_ARGS_MAX:
                                 args = args[:self._TOOL_ARGS_HEAD] + "..."
@@ -1040,7 +1051,7 @@ class ContextCompressor(ContextEngine):
         call_id_to_tool: dict[str, tuple[str, str]] = {}
 
         def _compact_fallback_turn(value: Any) -> str:
-            text = redact_sensitive_text(_content_text_for_contains(value))
+            text = _sanitize_summary_text(_content_text_for_contains(value))
             text = re.sub(r"\bgh[pousr]_[A-Za-z0-9_]{8,}\b", "[REDACTED]", text)
             text = re.sub(r"\s+", " ", text).strip()
             if len(text) > _FALLBACK_TURN_MAX_CHARS:
@@ -1077,7 +1088,7 @@ class ContextCompressor(ContextEngine):
                 continue
             for tool_call in msg.get("tool_calls") or []:
                 name, raw_args = _extract_tool_call_name_and_args(tool_call)
-                args = redact_sensitive_text(raw_args)
+                args = _sanitize_summary_text(raw_args)
                 call_id = _extract_tool_call_id(tool_call)
                 if call_id:
                     call_id_to_tool[call_id] = (name, args)
@@ -1208,7 +1219,7 @@ Continue from the most recent unfulfilled user ask and protected tail messages. 
 
 ## Critical Context
 Summary generation was unavailable, so this is a best-effort deterministic fallback for {len(turns_to_summarize)} compacted message(s).{reason_text}"""
-        summary = self._with_summary_prefix(redact_sensitive_text(body.strip()))
+        summary = self._with_summary_prefix(_sanitize_summary_text(body.strip()))
         if len(summary) > _FALLBACK_SUMMARY_MAX_CHARS:
             summary = (
                 summary[: _FALLBACK_SUMMARY_MAX_CHARS - 42].rstrip()
@@ -1367,12 +1378,13 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         if self._previous_summary:
             # Iterative update: preserve existing info, add new progress
+            previous_summary = _sanitize_summary_text(self._previous_summary)
             prompt = f"""{_summarizer_preamble}
 
 You are updating a context compaction summary. A previous compaction produced the summary below. New conversation turns have occurred since then and need to be incorporated.
 
 PREVIOUS SUMMARY:
-{self._previous_summary}
+{previous_summary}
 
 NEW TURNS TO INCORPORATE:
 {content_to_summarize}
@@ -1424,7 +1436,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                 content = str(content) if content else ""
             # Redact the summary output as well — the summarizer LLM may
             # ignore prompt instructions and echo back secrets verbatim.
-            summary = redact_sensitive_text(content.strip())
+            summary = _sanitize_summary_text(content.strip())
             # Store for iterative updates on next compaction
             self._previous_summary = summary
             self._summary_failure_cooldown_until = 0.0

@@ -5779,6 +5779,46 @@ Result: focused async/vision tests `5 passed`; broader URL/vision/web filtered
 suite `81 passed, 6 skipped, 117 deselected, 1 warning`; ruff passed;
 py_compile passed; diff check passed.
 
+## 2026-06-13 — Compressor MEDIA directive stripping
+
+Official gateway/media review identified the upstream
+`286ecd26`/`8e5b759` class of fixes: context compression summaries must not
+carry old `MEDIA:` delivery directives forward. The fork already had current
+turn MEDIA scanning and historical image-payload stripping, but compressor
+summary input and deterministic fallback summaries still preserved `MEDIA:\S+`
+text if it appeared in compacted assistant/tool turns.
+
+This pass adds a summary-local sanitizer that keeps existing secret redaction
+and removes executable media-delivery directives before content enters the
+auxiliary summarizer, deterministic fallback summary, iterative previous-summary
+prompt, or persisted LLM summary output. Gateway MEDIA delivery remains current
+turn scoped; the compressor only strips stale historical directives from
+handoff context.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/agent/test_context_compressor.py::TestMediaDirectiveStripping
+```
+
+Result before code changes: `2 failed`; both summary serialization and static
+fallback summary contained `MEDIA:`.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/agent/test_context_compressor.py::TestMediaDirectiveStripping
+uv run pytest -q tests/agent/test_context_compressor.py tests/agent/test_compressor_historical_media.py tests/agent/test_context_compressor_summary_continuity.py
+uv run pytest -q tests/gateway/test_media_extraction.py tests/gateway/test_platform_base.py tests/gateway/test_run_tool_media_re.py tests/gateway/test_feishu_upload_denial.py tests/gateway/test_feishu_attachment_provenance.py
+uv run ruff check agent/context_compressor.py tests/agent/test_context_compressor.py
+uv run python -m py_compile agent/context_compressor.py tests/agent/test_context_compressor.py
+git diff --check
+```
+
+Result: focused compressor MEDIA tests `2 passed`; broader compressor suite
+`123 passed, 1 warning`; gateway/media regression `219 passed, 2 skipped,
+2 warnings`; ruff passed; py_compile passed; diff check passed.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work
