@@ -22,12 +22,13 @@ High-risk prune items requiring explicit confirmation:
 
 Upstream intake todo:
 
-- [ ] Absorb MCP capability gating (`5affecb44`) and run MCP tool tests.
-- [ ] Absorb plugin discovery failed-sweep cache fix (`114e26573`) and run plugin tests.
-- [ ] Absorb keyless web-search default fallback (`93764b930`, `32a73010b`) and run web tool/provider tests.
-- [ ] Absorb context-compaction stale-task handoff fixes (`d5e2fbf24`, `8f8cad7ec`, `acb2954d8`, `6c752ca3a`) and run context compressor/resume tests.
-- [ ] Absorb coding-context terminal persistence fixes (`96cc7ee1`, `ab06ef8ed`) and run coding context plus terminal tests.
+- [x] Absorb MCP capability gating (`5affecb44`) and run MCP tool tests.
+- [x] Absorb plugin discovery failed-sweep cache fix (`114e26573`) and run plugin tests.
+- [x] Absorb bundled web-provider discovery fallback from `93764b930`/`32a73010b` and run web tool/provider tests. Scope note: this guarantees provider registration after a failed plugin sweep; it does not by itself import the larger Parallel free-MCP/keyless runtime from `e0e257171`.
+- [x] Absorb context-compaction stale-task handoff fixes (`d5e2fbf24`, `8f8cad7ec`, `acb2954d8`, `6c752ca3a`) and run context compressor/resume tests.
+- [x] Absorb terminal persistence guidance/test subset from `ab06ef8ed` and run terminal tests. `96cc7ee1` and the `agent/coding_context.py` part of `ab06ef8ed` are not applicable to the current fork because that coding-context module is absent.
 - [ ] Consider Discord runtime recovery (`c3464ecf4`) only if non-Feishu platform plugins remain in scope.
+- [ ] Separately review Parallel free-MCP/keyless web runtime (`e0e257171`). It is a broad feature commit touching provider implementation, CLI tools config, display labels, dependency lockfiles, and many tests; do not merge it as part of the low-risk fallback-registration batch.
 
 Upstream items intentionally deferred:
 

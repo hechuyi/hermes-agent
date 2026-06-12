@@ -36,10 +36,10 @@ Initial results:
 
 Current refresh after the 2026-06-12 intake continuation:
 
-- `upstream/main`: `08b1c44a5330cb690a26a5e1983ff7719ec4439c`
-- `origin/main..upstream/main`: 1295 commits
-- `HEAD..upstream/main`: 1560 commits
-- `HEAD...upstream/main` right-only after patch-equivalence filtering: 1516 commits
+- `upstream/main`: `4d67ac617296be2581461837085c807a7a9db99b`
+- `origin/main..upstream/main`: 1331 commits
+- `HEAD..upstream/main`: 1596 commits
+- `HEAD...upstream/main` right-only after patch-equivalence filtering: 1551 commits
 
 Continuation refresh:
 
@@ -52,6 +52,9 @@ Continuation refresh:
 - A further refresh advanced `upstream/main` from
   `93a2f680fd18f08f70eaf5c96944cdf4dc477143` to
   `08b1c44a5330cb690a26a5e1983ff7719ec4439c`.
+- A further refresh advanced `upstream/main` from
+  `9e484f052a99ca4ed312e8232b91a3c77a289cab` to
+  `4d67ac617296be2581461837085c807a7a9db99b`.
 - A follow-up read-only subagent review was dispatched for
   `4d22b8293374fd9eaeac75e1f607b20ddea3a1b3..upstream/main`.
 
@@ -455,11 +458,109 @@ Verification:
 - `uv run python -m py_compile plugins/platforms/discord/adapter.py tests/gateway/test_discord_connect.py`:
   passed.
 
+### 2026-06-12 — MCP, Plugin Discovery, And Web Provider Registration
+
+Absorbed:
+
+- `5affecb44` — gate MCP `tools/list` and keepalive probing on the server's
+  advertised `tools` capability, so prompt-only/resource-only MCP servers do
+  not fail with method-not-found during discovery or keepalive.
+- `114e26573` — reset plugin-manager discovery state when a sweep raises, so
+  a swallowed plugin discovery failure is not cached as a permanently empty
+  registry.
+- `93764b930` and `32a73010b` — guarantee bundled `plugins/web/*` provider
+  registration after a failed or incomplete plugin sweep.
+
+Fork-local integration notes:
+
+- The web provider fallback was intentionally scoped to registration recovery.
+  The larger Parallel free-MCP/keyless runtime from `e0e257171` was not folded
+  into this batch because it touches provider transport, CLI tools config,
+  display labels, dependency lockfiles, and a broad test set.
+- No dashboard/frontend web surface was restored; `tools/web_tools.py` and
+  `plugins/web/*` are runtime tools, not the pruned visual frontend.
+
+Verification:
+
+- `uv run pytest -q tests/tools/test_mcp_capability_gating.py tests/tools/test_mcp_tool.py tests/hermes_cli/test_plugins.py`:
+  `282 passed, 1 warning`.
+- `uv run pytest -q tests/tools/test_web_keyless_default_fallback.py tests/integration/test_web_tools.py tests/tools/test_web_providers.py tests/tools/test_web_tools_config.py tests/plugins/web/test_web_search_provider_plugins.py`:
+  `119 passed, 1 warning`.
+- `uv run ruff check tools/web_tools.py tests/tools/test_web_keyless_default_fallback.py`:
+  passed.
+
+### 2026-06-12 — Stale Compaction Handoff Safeguards
+
+Manually backported the semantics from:
+
+- `d5e2fbf24` — frame compaction handoff task/pending/remain-work sections as
+  historical context.
+- `8f8cad7ec` — remove the "consistent -> use as background" carveout that
+  allowed stale-task resumption on topic overlap, and strengthen the
+  latest-user-message-wins rule.
+- `acb2954d8` — freeze the retired carveout-era `SUMMARY_PREFIX` for
+  detection and renormalization after upgrade.
+- `6c752ca3a` — tighten the final prefix wording and stale heading references.
+
+Fork-local integration notes:
+
+- This was a manual backport rather than a cherry-pick because the fork already
+  had earlier compaction-handoff changes and diverged heavily from upstream's
+  file layout.
+- The live prefix now points at `## Historical Task Snapshot`,
+  `## Historical In-Progress State`, `## Historical Pending User Asks`, and
+  `## Historical Remaining Work`; old summaries containing the previous
+  `## Active Task` wording remain detectable through frozen historical
+  prefixes.
+
+Verification:
+
+- Red check before production changes:
+  `uv run pytest -q tests/agent/test_summary_prefix_semantics.py` produced
+  `3 failed, 3 passed` on the new stale-handoff assertions.
+- Green checks after the backport:
+  `uv run pytest -q tests/agent/test_summary_prefix_semantics.py`:
+  `6 passed`.
+- `uv run pytest -q tests/agent/test_context_compressor.py tests/agent/test_resume_stale_active_task.py tests/agent/test_summary_prefix_semantics.py tests/agent/test_context_compressor_summary_continuity.py`:
+  `104 passed, 1 warning`.
+- `uv run ruff check agent/context_compressor.py tests/agent/test_context_compressor.py tests/agent/test_resume_stale_active_task.py tests/agent/test_summary_prefix_semantics.py`:
+  passed.
+
+### 2026-06-12 — Terminal Environment Persistence Guidance
+
+Absorbed the applicable terminal subset from `ab06ef8ed`:
+
+- terminal tool description now states that filesystem, current working
+  directory, and exported environment variables persist between calls;
+- tests pin that exported env changes and virtualenv-style activation survive
+  across `LocalEnvironment.execute()` calls.
+
+Not applicable:
+
+- `96cc7ee1` and the `agent/coding_context.py` part of `ab06ef8ed` target an
+  `agent/coding_context.py` module that is absent from this fork. No new
+  coding-context module was created for intake bookkeeping.
+
+Verification:
+
+- Red check before the description change:
+  `uv run pytest -q tests/tools/test_terminal_tool.py tests/tools/test_local_shell_init.py`
+  produced `1 failed, 30 passed`; the failure was the new terminal schema
+  persistence assertion.
+- Green checks:
+  `uv run pytest -q tests/tools/test_terminal_tool.py tests/tools/test_local_shell_init.py`:
+  `31 passed`.
+- `uv run pytest -q tests/tools/test_terminal_tool.py tests/tools/test_local_shell_init.py tests/tools/test_terminal_task_cwd.py tests/tools/test_terminal_config_env_sync.py`:
+  `46 passed`.
+- `uv run ruff check tools/terminal_tool.py tests/tools/test_local_shell_init.py tests/tools/test_terminal_tool.py`:
+  passed.
+
 ## Remaining Deferred Or Skipped Upstream Areas
 
-No unconditional P0/P1 remains from the reviewed
+No unconditional P0/P1 remains from the previously reviewed
 `e71d746820bf262214e4e1887683d3f65d211cc1..08b1c44a5330cb690a26a5e1983ff7719ec4439c`
-increment. Deferred areas remain intentionally unmerged:
+increment after the 2026-06-12 continuation above. Deferred areas remain
+intentionally unmerged:
 
 - model catalog/default/picker/visibility and model steering changes, including
   `a4f179c50` and later model-policy commits. These conflict with the current
@@ -477,3 +578,6 @@ increment. Deferred areas remain intentionally unmerged:
   overlap Feishu routing or are not in the Backend1 production target, including
   Matrix room isolation and WhatsApp stale-bridge restart. These should be
   reviewed as platform-specific work, not broad intake.
+- Parallel free-MCP/keyless web runtime (`e0e257171`). This is a broad feature
+  batch and should be reviewed separately from the low-risk bundled provider
+  registration fallback.
