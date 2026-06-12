@@ -5856,6 +5856,44 @@ git diff --check
 Result: focused sandbox mirror tests `8 passed`; broader file-safety/file-tools
 suite `98 passed`; ruff passed; py_compile passed; diff check passed.
 
+## 2026-06-13 — URL/IRI request normalization
+
+Official runtime/tools review identified the upstream `333f01bc7` class of
+web-tool fixes: browser navigation and web extraction should normalize HTTP(S)
+IRI input to ASCII request URIs, then re-run secret-exfiltration checks on the
+normalized form.
+
+This pass adds `normalize_url_for_request()` to `tools.url_safety`, covering
+IDNA hostnames and percent-encoding for path/query/fragment while preserving
+existing escapes. `browser_navigate()` now normalizes before SSRF/policy/routing
+and browser open. `web_extract_tool()` normalizes the URL list before debug
+metadata, SSRF filtering, and provider dispatch. Both paths check raw, decoded,
+normalized, and decoded-normalized URLs for secret prefixes before any request.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/tools/test_url_safety.py::TestNormalizeUrlForRequest tests/tools/test_browser_secret_exfil.py::TestBrowserSecretExfil::test_normalizes_non_ascii_url_before_navigation tests/tools/test_browser_secret_exfil.py::TestWebExtractSecretExfil::test_normalizes_non_ascii_url_before_extract_provider
+```
+
+Result before code changes: collection failed with
+`ImportError: cannot import name 'normalize_url_for_request'`.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/tools/test_url_safety.py::TestNormalizeUrlForRequest tests/tools/test_browser_secret_exfil.py::TestBrowserSecretExfil::test_normalizes_non_ascii_url_before_navigation tests/tools/test_browser_secret_exfil.py::TestWebExtractSecretExfil::test_normalizes_non_ascii_url_before_extract_provider
+uv run pytest -q tests/tools/test_url_safety.py tests/tools/test_browser_secret_exfil.py
+uv run pytest -q tests/tools/test_web_providers.py tests/tools/test_web_tools_tavily.py -k "web_extract_tool or extract"
+uv run ruff check tools/url_safety.py tools/browser_tool.py tools/web_tools.py tests/tools/test_url_safety.py tests/tools/test_browser_secret_exfil.py
+uv run python -m py_compile tools/url_safety.py tools/browser_tool.py tools/web_tools.py tests/tools/test_url_safety.py tests/tools/test_browser_secret_exfil.py
+git diff --check
+```
+
+Result: focused normalization tests `6 passed`; full URL/browser-secret suite
+`130 passed, 1 warning`; web extract provider filtered suite `7 passed,
+23 deselected, 1 warning`; ruff passed; py_compile passed; diff check passed.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work

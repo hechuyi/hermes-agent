@@ -1,7 +1,7 @@
 """Tests for secret exfiltration prevention in browser and web tools."""
 
 import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 import pytest
 
 
@@ -42,6 +42,25 @@ class TestBrowserSecretExfil:
         # Should NOT be blocked by secret detection
         assert "API key or token" not in parsed.get("error", "")
 
+    def test_normalizes_non_ascii_url_before_navigation(self):
+        from tools.browser_tool import browser_navigate
+
+        calls = []
+
+        def fake_run(_task_id, command, args, **_kwargs):
+            calls.append((command, args))
+            return {"success": True, "data": {"title": "ok", "url": args[0]}}
+
+        with patch("tools.browser_tool._run_browser_command", side_effect=fake_run), \
+             patch("tools.browser_tool._get_cloud_provider", return_value=None), \
+             patch("tools.browser_tool._get_session_info", return_value={"_first_nav": False}), \
+             patch("tools.browser_tool._is_local_backend", return_value=True):
+            result = browser_navigate("https://wttr.in/Köln")
+
+        parsed = json.loads(result)
+        assert parsed["success"] is True
+        assert calls[0] == ("open", ["https://wttr.in/K%C3%B6ln"])
+
 
 class TestWebExtractSecretExfil:
     """Verify web_extract_tool blocks URLs containing secrets."""
@@ -64,6 +83,55 @@ class TestWebExtractSecretExfil:
         parsed = json.loads(result)
         # Should fail for API/config reason, not secret blocking
         assert "API key" not in parsed.get("error", "") or "Blocked" not in parsed.get("error", "")
+
+    @pytest.mark.asyncio
+    async def test_normalizes_non_ascii_url_before_extract_provider(self, monkeypatch):
+        from agent.web_search_provider import WebSearchProvider
+        from agent import web_search_registry
+        from tools import web_tools
+
+        captured = {}
+
+        class FakeExtractProvider(WebSearchProvider):
+            @property
+            def name(self):
+                return "fake-extract"
+
+            @property
+            def display_name(self):
+                return "Fake Extract"
+
+            def is_available(self):
+                return True
+
+            def supports_extract(self):
+                return True
+
+            async def extract(self, urls, format=None):
+                captured["urls"] = list(urls)
+                return [
+                    {
+                        "url": urls[0],
+                        "title": "ok",
+                        "content": "ok",
+                        "raw_content": "ok",
+                        "metadata": {},
+                    }
+                ]
+
+        web_search_registry.register_provider(FakeExtractProvider())
+        monkeypatch.setattr(web_tools, "_ensure_web_plugins_loaded", lambda: None)
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {"extract_backend": "fake-extract"})
+        monkeypatch.setattr(web_tools, "async_is_safe_url", AsyncMock(return_value=True))
+
+        result = await web_tools.web_extract_tool(
+            urls=["https://wttr.in/Köln"],
+            use_llm_processing=False,
+        )
+
+        parsed = json.loads(result)
+        assert parsed["results"][0]["url"] == "https://wttr.in/K%C3%B6ln"
+        assert captured["urls"] == ["https://wttr.in/K%C3%B6ln"]
 
 
 class TestBrowserSnapshotRedaction:

@@ -28,7 +28,7 @@ import ipaddress
 import logging
 import os
 import socket
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse, urlsplit, urlunsplit
 
 from utils import is_truthy_value
 
@@ -145,6 +145,50 @@ def _reset_allow_private_cache() -> None:
     global _allow_private_resolved, _cached_allow_private
     _allow_private_resolved = False
     _cached_allow_private = False
+
+
+def normalize_url_for_request(url: str) -> str:
+    """Normalize HTTP(S) IRI input into an ASCII request URI.
+
+    Browser and web providers are stricter than humans about non-ASCII input:
+    hostnames must be IDNA-encoded and path/query/fragment bytes must be
+    percent-encoded. Existing percent escapes and URL delimiters are preserved.
+    Non-HTTP(S) strings are returned unchanged after trimming.
+    """
+    raw = (url or "").strip()
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return raw
+    if parts.scheme.lower() not in {"http", "https"} or not parts.netloc:
+        return raw
+
+    netloc = parts.netloc
+    userinfo = ""
+    hostport = netloc
+    if "@" in hostport:
+        userinfo, hostport = hostport.rsplit("@", 1)
+        userinfo += "@"
+
+    if hostport.startswith("["):
+        end = hostport.find("]")
+        if end == -1:
+            return raw
+        host_ascii = hostport[: end + 1]
+        port = hostport[end + 1:]
+    else:
+        host, sep, port_tail = hostport.partition(":")
+        try:
+            host_ascii = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            return raw
+        port = f"{sep}{port_tail}" if sep else ""
+
+    normalized_netloc = f"{userinfo}{host_ascii}{port}"
+    path = quote(parts.path, safe="/%:@!$&'()*+,;=")
+    query = quote(parts.query, safe="/%?:@!$&'()*+,;=")
+    fragment = quote(parts.fragment, safe="/%?:@!$&'()*+,;=")
+    return urlunsplit((parts.scheme.lower(), normalized_netloc, path, query, fragment))
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:

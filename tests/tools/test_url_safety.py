@@ -7,6 +7,7 @@ from tools.url_safety import (
     async_is_safe_url,
     is_safe_url,
     is_always_blocked_url,
+    normalize_url_for_request,
     _is_blocked_ip,
     _global_allow_private_urls,
     _reset_allow_private_cache,
@@ -14,6 +15,29 @@ from tools.url_safety import (
 
 import ipaddress
 import pytest
+
+
+class TestNormalizeUrlForRequest:
+    def test_non_ascii_path_is_percent_encoded(self):
+        assert (
+            normalize_url_for_request("https://wttr.in/Köln")
+            == "https://wttr.in/K%C3%B6ln"
+        )
+
+    def test_non_ascii_hostname_is_idna_encoded(self):
+        assert (
+            normalize_url_for_request("https://münich.example/straße?q=Köln")
+            == "https://xn--mnich-kva.example/stra%C3%9Fe?q=K%C3%B6ln"
+        )
+
+    def test_existing_percent_escapes_are_preserved(self):
+        assert (
+            normalize_url_for_request("https://example.com/a%20b?q=x%2Fy")
+            == "https://example.com/a%20b?q=x%2Fy"
+        )
+
+    def test_non_http_url_is_returned_unchanged(self):
+        assert normalize_url_for_request("mailto:hello@example.com") == "mailto:hello@example.com"
 
 
 class TestIsSafeUrl:
