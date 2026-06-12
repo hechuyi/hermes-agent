@@ -785,16 +785,16 @@ toolset scope through dispatch, fail closed on out-of-scope bridged calls, and
 cover restricted gateway, subagent, plugin, MCP allowlist/no-MCP, approval, and
 hook visibility tests.
 
-The remaining gateway/media items also stay deferred. The already absorbed
-slices cover Windows MEDIA paths, extension allowlisting, current-turn
+The remaining gateway/media items were split after this checkpoint. Absorbed
+slices now cover Windows MEDIA paths, extension allowlisting, current-turn
 tool-result scan, diagnosable MEDIA rejection, Yuanbao resource caching, nested
-platform config hooks, transient reconnect retry, and self-targeted
-planned-stop markers. The remaining `45bc65abb` silence-narration filter
-changes delivery outcome semantics by returning success for a non-delivery, and
-`100536134` / `db96fc60d` move topic recovery into session/compression identity
-paths. Those are not narrow cleanups; they need a separate review of gateway
-ledger attribution, delivery result contracts, compression-child session
-binding, busy-session guards, and pending-queue keys.
+platform config hooks, transient reconnect retry, self-targeted planned-stop
+markers, and the delivery-router silence-narration anti-loop filter. The still
+deferred gateway/media items are the topic/session identity changes in
+`100536134` / `db96fc60d`, which move topic recovery into session/compression
+identity paths. Those are not narrow cleanups; they need a separate review of
+gateway ledger attribution, compression-child session binding, busy-session
+guards, and pending-queue keys.
 
 Adapter-owned access-policy commits remain a hard conflict with this fork's
 default-deny gateway boundary: adapters may add platform-local checks, but the
@@ -823,11 +823,14 @@ These must not be merged mechanically:
   access-policy changes, including default-deny semantics.
 - Media extraction and tool-result scan semantics were split after this
   initial deferral. The Windows path regex slice, extension allowlist, and
-  current-turn tool-result scan were absorbed separately on 2026-06-07. Any
-  further media/delivery outcome changes remain protected and must still be
-  reviewed against gateway ledger event attribution.
-- `45bc65abb`: delivery outcome semantics for silence narration filtering.
-- `0bfe19ba1` / `44f3e5186`: nested gateway platform config handling.
+  current-turn tool-result scan were absorbed separately on 2026-06-07. The
+  silence-narration anti-loop filter was later absorbed on 2026-06-13 as a
+  delivery-router-only change. Any further media/delivery outcome changes
+  remain protected and must still be reviewed against gateway ledger event
+  attribution.
+- `0bfe19ba1` / `44f3e5186`: nested gateway platform config handling was
+  absorbed later with the nested platform config batch; keep this entry only as
+  a historical note that it was not mechanically merged at this checkpoint.
 
 ### Tooling and runtime commits requiring separate batches
 
@@ -6224,3 +6227,42 @@ architecture decisions, not forgotten low-risk fixes: Docker lifecycle
 semantics, progressive tool disclosure/tool-search, Nous JWT-only auth
 migration, non-Feishu platform batching/topic recovery, dashboard/UI auth, and
 adapter-owned access-policy default-deny changes.
+
+## 2026-06-13 — Subagent rescan disposition cleanup
+
+Two read-only subagent rescans of the refreshed `origin/main` history found no
+unrecorded upstream positives. The only actionable follow-up was ledger hygiene:
+older deferral paragraphs still described `45bc65abbe4767b327cea3b44300a25e5e7d97aa`
+as protected and `0bfe19ba179e21849a8b74eee066d388b41d2e72` /
+`44f3e5186502167e68b6073b4f7bdfae7bfb4fbe` as unported. Those statements are
+now historical only: the silence-narration anti-loop filter was absorbed as a
+delivery-router-only change on 2026-06-13, and nested gateway platform config
+handling was absorbed in the auth/provider-runtime reconciliation.
+
+The fresh candidate list was also rechecked against current code:
+
+- `44df52005a1b59ae2c8439c4e68e7696851b7035`: already absorbed in
+  `432f41f80`; `has_direct_modal_credentials()` fails closed on
+  `Path.home()` / probe `PermissionError` or `OSError`.
+- `6baf0016bebe060f055b5466c6ea604f628d1217`: already absorbed in
+  `a9f95f920`; concurrent checkpoint preflight is gated behind plugin and
+  guardrail block evaluation.
+- `636ff636d7d819503035b87655d2c7247e84def7`: already absorbed in
+  `11f81076d`; max-iterations summary requests are hand-built with only
+  provider-schema-safe message fields.
+- `0c6e133c0434ec856d4aea2b08f216f36c0e7dac`: already absorbed in
+  `e53a6fb11`; CLI agent-capable startup no longer blocks on slow MCP
+  discovery.
+- `1386a7e4789c9b886395804e8475a4252217e4ac`: already absorbed in
+  `6ca3d8a47`; xAI tool-schema sanitization deep-copies request tool arrays
+  before mutation.
+- `e38b0b55d12cfa39a6ac71d553d224c0711856f2` and
+  `9dbc3722aeb3fba31adfa181c4b05049d8c997bf`: already absorbed in
+  `b775a46bb`; noisy schema-heavy rough estimates do not repeatedly trigger
+  preflight compaction after real provider prompt usage has fit.
+
+The remaining not-yet-absorbed upstream groups are still the same protected
+decision groups: Docker lifecycle/persist/reuse semantics, progressive
+tool-search/bridge-disclosure architecture, Nous JWT-only auth migration,
+Telegram topic/compression session identity, dashboard/UI auth policy, and
+adapter-owned gateway access-policy default-deny changes.
