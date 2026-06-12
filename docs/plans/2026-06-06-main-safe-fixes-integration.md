@@ -6158,3 +6158,60 @@ access-control boundary change. It should not be applied to this fork unless a
 Feishu-specific authorization proof exists and tests show that empty
 `FEISHU_ALLOWED_USERS` / pairing states still fail closed. The bare-runner
 guard has no independent value without the access-policy helper.
+
+## 2026-06-13 — Reconciliation checkpoint after fresh upstream fetch
+
+Fresh upstream coverage check:
+
+```bash
+git fetch origin main
+comm -23 <(git cherry -v HEAD origin/main | awk '$1=="+"{print $2}' | sort) \
+         <(rg -o '[0-9a-f]{40}' docs/plans/2026-06-06-main-safe-fixes-integration.md | sort -u) \
+  | while read h; do git log -1 --oneline "$h"; done
+```
+
+Result: no output. Every current `git cherry +` upstream commit is either
+locally absorbed/equivalent or explicitly deferred in this document.
+
+Repeated re-review confirmed the following upstream positives are already
+covered by local fork commits and should not be cherry-picked again:
+
+- `51d165a8e71ca84112708af4a9add7a71e4ee424`,
+  `1b955450e31734bd0398f4d80d995dcee6d1ab28`, and
+  `20d073fd0b1f21ae6baaff954961d56a7f64973a`: Windows absolute `MEDIA:`
+  paths and bare local-file extraction are already implemented in
+  `gateway/platforms/base.py`, `gateway/run.py`, and the media regex tests.
+- `45465b0d5d8c7b2db7df6d9e466589cdef9136c0`: retryable gateway reconnect
+  failures already keep retrying without automatic pause; manual
+  `/platform pause|resume` remains the only pause path.
+- `333f01bc7`, `794519c6ad4918b5c7a5475f8ddd0052be9a54e5`,
+  `e1945ff697ab300a09a8ac8ad081397e17994116`, the no-FTS5 group,
+  `44df52005a1b59ae2c8439c4e68e7696851b7035`,
+  `1386a7e4789c9b886395804e8475a4252217e4ac`,
+  `0bfe19ba179e21849a8b74eee066d388b41d2e72`,
+  `44f3e5186502167e68b6073b4f7bdfae7bfb4fbe`,
+  `5f84c9144a2c1f1248e92f53eeb2ea8146ad0883`,
+  `433bffff51ec1a731fabc29637a17d5f4fc9f422`, and
+  `bede3cf12d1492043f4ca604fdb2158ffd6bc619`: all were rechecked against
+  the current tree and remain locally equivalent.
+
+Fresh verification from this checkpoint:
+
+```bash
+uv run pytest -q tests/gateway/test_run_tool_media_re.py tests/gateway/test_extract_local_files.py tests/gateway/test_platform_base.py -q
+```
+
+Result: all selected media tests passed (`179 passed, 2 skipped` in the test
+suite's own progress output).
+
+```bash
+uv run pytest -q tests/gateway/test_platform_reconnect.py
+```
+
+Result: `30 passed`.
+
+The remaining deferred categories after this checkpoint are still policy or
+architecture decisions, not forgotten low-risk fixes: Docker lifecycle
+semantics, progressive tool disclosure/tool-search, Nous JWT-only auth
+migration, non-Feishu platform batching/topic recovery, dashboard/UI auth, and
+adapter-owned access-policy default-deny changes.
