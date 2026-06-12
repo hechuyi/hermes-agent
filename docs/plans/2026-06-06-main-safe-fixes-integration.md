@@ -6084,3 +6084,77 @@ git diff --check
 Result: delivery/config suite `56 passed`; Feishu delivery lifecycle/upload
 denial/event-ledger suite `259 passed, 2 warnings`; webhook/delivery suite
 `61 passed`; ruff passed; py_compile passed; diff check passed.
+
+## 2026-06-13 — Remaining upstream candidates deferred after re-review
+
+After absorbing the low-risk runtime/model/delivery fixes above, the remaining
+`git cherry` positives were re-reviewed and intentionally left unabsorbed for
+now:
+
+Deferred high-coupling Docker lifecycle/persistence series:
+
+- `ac8e238bc87ffd37c5c04d0f401d2aab697068b3`
+- `d77d877665bab7a6035140d142d5670cc05ad15d`
+- `5c2170a7c62b9cfd18431de78b462116df57d199`
+- `2f0f03c40d133d568e786d45275ad6a1bffdebd7`
+
+These change container reuse, orphan reaping, persist-mode cleanup semantics,
+and default `cleanup_vm()` behavior. They affect terminal/backend lifecycle
+rather than the Feishu assistant surface and should be handled only in a
+separate sandbox-lifecycle review with explicit tests for the fork's current
+Docker/s6 contract.
+
+Deferred tool-search/progressive-disclosure base:
+
+- `369075dc95bb998fdf493ef0f97dfa2d19c43d82`
+- `7427b9d5812f3bd4deb47340ab64ef86e605c27e`
+- `17097761207d65a385362696ff1698075e0b0c7a`
+- `18c9e8910685fefee2fb5f67e7fdd1cb37b67750`
+- `a87f0a82a52178b05ff7405e9af7137e20a70bbf`
+
+This is a broad MCP/plugin tool-disclosure architecture change with live
+harness changes. It should not be folded into the Feishu gateway reconciliation
+without a dedicated tool-registry/tool-search design review.
+
+Deferred Nous JWT-only authentication series:
+
+- `41ff6e59371faca2b4f0599c634dbba1475a659b`
+- `7e958dafc2185678532137314596083b9f588c68`
+- `4e4984a11a417c684658e781e5609aa86975f64f`
+- `95cf8f9842d7a368afe183dd5ae0ec138d36d172`
+- `a22c250001c2835aaa406480d0d378fcb5420237`
+
+The fork still retains legacy Nous session-key/inference-key compatibility in
+several auth paths. Removing it may be desirable later, but it is an auth
+policy migration rather than a low-risk upstream sync and needs live credential
+evidence before absorption.
+
+Deferred non-Feishu platform batching/topic recovery:
+
+- `b0ce47daac99f032a1e4ec2f0f9085e4cd5f585b`
+- `cddb7283d9d10bcea9df2bd8b39eb0b19be39f3d`
+- `100536134cd9eb798f69fc9e928a604062990f8d`
+- `db96fc60d0d3dc3f9e95dc6541d8edcccb2f2171`
+
+These target WhatsApp/WeChat text debounce and Telegram topic binding recovery.
+The current fork objective is Feishu-based Hermes; non-Feishu platform behavior
+is not a priority unless it shares a generic gateway contract needed by Feishu.
+
+Deferred dashboard/UI auth change:
+
+- `a618789dbabf396a00fb061a491f54e12f536a45`
+
+This touches dashboard OAuth/public allowlist behavior. The fork does not need
+Hermes desktop/dashboard UI surfaces, so this stays out of the runtime fork.
+
+Deferred adapter-owned access-policy series:
+
+- `fd09b2c55e55f7e16805b1b6abaf4a41bd1b8f96`
+- `6a2e3c2d269f0fbef2a38beeb858f3abfe8f2d00`
+
+The upstream change allows selected adapters to bypass gateway env
+default-deny when they enforce their own access policy. That is an
+access-control boundary change. It should not be applied to this fork unless a
+Feishu-specific authorization proof exists and tests show that empty
+`FEISHU_ALLOWED_USERS` / pairing states still fail closed. The bare-runner
+guard has no independent value without the access-policy helper.
