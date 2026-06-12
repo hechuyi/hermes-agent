@@ -310,7 +310,10 @@ gateway request/client paths still use the refresh-aware token reader.
 This batch does not modify curated model catalogs or current local `5.5`
 channel availability. Nous JWT-only behavior remains deferred separately
 because this fork still intentionally retains legacy Nous session-key inference
-paths.
+paths. Local tests now characterize that boundary: `legacy` remains a valid
+Nous inference auth mode, AUTO mode may still reuse a cached opaque legacy
+agent key when invoke JWT is unusable, forced legacy env still bypasses invoke
+JWT storage, and proxy retry behavior may still request a legacy session key.
 
 ### xAI schema sanitizer batch
 
@@ -838,7 +841,10 @@ These must not be merged mechanically:
   progressive tool-search base exists in this fork.
 - `41ff6e593`, `7e958dafc`, `4e4984a`, `95cf8f984`, `a22c25000`: Nous
   JWT-only behavior. Defer until there is an explicit decision to remove this
-  fork's retained legacy Nous session-key inference paths.
+  fork's retained legacy Nous session-key inference paths. Characterization
+  coverage in `tests/hermes_cli/test_auth_nous_provider.py` pins the retained
+  legacy mode, cached opaque-agent-key AUTO fallback, forced legacy env, and
+  missing-invoke-scope fallback behavior.
 - `5ad2b4c6d`, `97ecfa0fc`, `4fa20f9a8`, `a7421dc7d`: no-FTS5
   session/state behavior. This was later absorbed as local commit
   `069e183e2`, with explicit degraded-capability semantics rather than
@@ -6130,7 +6136,11 @@ Deferred Nous JWT-only authentication series:
 The fork still retains legacy Nous session-key/inference-key compatibility in
 several auth paths. Removing it may be desirable later, but it is an auth
 policy migration rather than a low-risk upstream sync and needs live credential
-evidence before absorption.
+evidence before absorption. Current characterization tests explicitly preserve
+`NOUS_INFERENCE_AUTH_MODE_LEGACY`, `HERMES_AGENT_USE_LEGACY_SESSION_KEYS`, and
+AUTO-mode reuse of cached opaque agent keys when invoke JWT is unavailable, so
+the JWT-only upstream series remains intentionally deferred rather than
+unreviewed.
 
 Non-Feishu platform batching/topic recovery split:
 

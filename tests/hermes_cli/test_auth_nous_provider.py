@@ -429,6 +429,37 @@ def test_legacy_auth_mode_bypasses_usable_invoke_jwt(tmp_path, monkeypatch):
     assert payload["providers"]["nous"]["agent_key"] == _dummy_agent_key("legacy-after-jwt-401")
 
 
+def test_legacy_inference_auth_mode_remains_valid():
+    import hermes_cli.auth as auth_mod
+
+    assert (
+        auth_mod._normalize_nous_inference_auth_mode(
+            auth_mod.NOUS_INFERENCE_AUTH_MODE_LEGACY
+        )
+        == auth_mod.NOUS_INFERENCE_AUTH_MODE_LEGACY
+    )
+
+
+def test_auto_inference_auth_reuses_cached_legacy_agent_key_when_invoke_jwt_unusable():
+    import hermes_cli.auth as auth_mod
+
+    state = {
+        "access_token": "opaque-oauth-access-token",
+        "scope": auth_mod.NOUS_LEGACY_AGENT_KEY_SCOPE,
+        "expires_at": _future_iso(3600),
+        "agent_key": _dummy_agent_key("cached-legacy"),
+        "agent_key_expires_at": _future_iso(3600),
+    }
+
+    auth_path, reason = auth_mod._choose_nous_inference_auth_path(
+        state,
+        min_key_ttl_seconds=300,
+    )
+
+    assert auth_path == auth_mod.NOUS_AUTH_PATH_LEGACY_SESSION_KEY_CACHE
+    assert reason is None
+
+
 def test_resolve_nous_runtime_credentials_falls_back_when_invoke_scope_missing(
     tmp_path,
     monkeypatch,
