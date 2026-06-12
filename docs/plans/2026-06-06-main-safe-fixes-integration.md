@@ -6009,3 +6009,24 @@ uv run pytest -q tests/agent/test_context_compressor.py::TestUpdateFromResponse 
 
 Result: compression lock/concurrent-fork suite `13 passed, 1 warning`;
 rough-estimate deferral suite `7 passed, 1 warning`.
+
+## 2026-06-13 — Model catalog Gemini fallback update
+
+`5e7c2ffa9ff5c8280a8fd8e3cbf5605be409fcf3`
+(`chore(models): gemini-3.5-flash replaces gemini-3-flash-preview in
+OpenRouter + Nous lists`) was manually absorbed for the runtime catalog in
+`hermes_cli/models.py`.
+
+The upstream generated website catalog file is not present in this fork and was
+not reintroduced. The port is intentionally limited to the OpenRouter fallback
+snapshot and Nous provider fallback list, preserving the fork's broader
+model/catalog compatibility policy and not treating local `5.5` availability as
+a catalog constraint.
+
+Verification:
+
+```bash
+uv run pytest -q tests/hermes_cli/test_models.py tests/hermes_cli/test_models_dev_preferred_merge.py tests/hermes_cli/test_opencode_go_in_model_list.py tests/hermes_cli/test_copilot_in_model_list.py tests/agent/test_bedrock_integration.py
+```
+
+Result: model catalog suite `147 passed, 1 warning`.
