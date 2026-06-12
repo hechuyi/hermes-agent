@@ -1548,9 +1548,8 @@ class TestBuildApiKwargs:
 
         assert "temperature" not in kwargs
 
-    def test_kimi_coding_endpoint_sends_max_tokens_and_reasoning(self, agent):
-        """Kimi endpoint should send max_tokens=32000 and reasoning_effort as
-        top-level params, matching Kimi CLI's default behavior."""
+    def test_kimi_coding_endpoint_sends_max_tokens_and_default_thinking(self, agent):
+        """Kimi endpoint sends max_tokens=32000 and defaults to thinking only."""
         agent.provider = "kimi-coding"
         agent.base_url = "https://api.kimi.com/coding/v1"
         agent._base_url_lower = agent.base_url.lower()
@@ -1560,7 +1559,8 @@ class TestBuildApiKwargs:
         kwargs = agent._build_api_kwargs(messages)
 
         assert kwargs["max_tokens"] == 32000
-        assert kwargs["reasoning_effort"] == "medium"
+        assert kwargs["extra_body"]["thinking"] == {"type": "enabled"}
+        assert "reasoning_effort" not in kwargs
 
     def test_kimi_coding_endpoint_respects_custom_effort(self, agent):
         """reasoning_effort should reflect reasoning_config.effort when set."""
@@ -1574,6 +1574,7 @@ class TestBuildApiKwargs:
         kwargs = agent._build_api_kwargs(messages)
 
         assert kwargs["reasoning_effort"] == "high"
+        assert "thinking" not in kwargs.get("extra_body", {})
 
     def test_kimi_coding_endpoint_sends_thinking_extra_body(self, agent):
         """Kimi endpoint should send extra_body.thinking={"type":"enabled"}
@@ -1604,7 +1605,7 @@ class TestBuildApiKwargs:
         assert kwargs["extra_body"]["thinking"] == {"type": "disabled"}
         assert "reasoning_effort" not in kwargs
 
-    def test_moonshot_endpoint_sends_max_tokens_and_reasoning(self, agent):
+    def test_moonshot_endpoint_sends_max_tokens_and_default_thinking(self, agent):
         """api.moonshot.ai should get the same Kimi-compatible params."""
         agent.provider = "kimi-coding"
         agent.base_url = "https://api.moonshot.ai/v1"
@@ -1615,10 +1616,10 @@ class TestBuildApiKwargs:
         kwargs = agent._build_api_kwargs(messages)
 
         assert kwargs["max_tokens"] == 32000
-        assert kwargs["reasoning_effort"] == "medium"
         assert kwargs["extra_body"]["thinking"] == {"type": "enabled"}
+        assert "reasoning_effort" not in kwargs
 
-    def test_moonshot_cn_endpoint_sends_max_tokens_and_reasoning(self, agent):
+    def test_moonshot_cn_endpoint_sends_max_tokens_and_default_thinking(self, agent):
         """api.moonshot.cn (China endpoint) should get the same params."""
         agent.provider = "kimi-coding-cn"
         agent.base_url = "https://api.moonshot.cn/v1"
@@ -1629,8 +1630,8 @@ class TestBuildApiKwargs:
         kwargs = agent._build_api_kwargs(messages)
 
         assert kwargs["max_tokens"] == 32000
-        assert kwargs["reasoning_effort"] == "medium"
         assert kwargs["extra_body"]["thinking"] == {"type": "enabled"}
+        assert "reasoning_effort" not in kwargs
 
     def test_provider_preferences_injected(self, agent):
         agent.provider = "openrouter"

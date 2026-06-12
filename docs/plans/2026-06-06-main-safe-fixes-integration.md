@@ -5368,6 +5368,46 @@ uv run pytest -q tests/providers/test_provider_profiles.py tests/providers/test_
 Result: targeted run `3 passed`; provider profile/wiring/transport/e2e run
 `93 passed`.
 
+## 2026-06-12 — Kimi/OpenCode Go reasoning XOR absorption
+
+The following upstream reasoning-parameter fixes were manually absorbed:
+
+- `ce4e74b35025c108a228700b53bd479eaafaa660`
+- `e18f14d928553d9c97dbacc120601b90ba9c070e`
+- `03392b67d6a66bf3f8e5226cf6b4ea04b9b95d2d`
+
+The local Kimi/Moonshot and OpenCode Go provider profiles now enforce an XOR
+contract between `extra_body.thinking` and top-level `reasoning_effort`.
+Explicit recognized efforts send only `reasoning_effort`; disabled reasoning
+sends only `thinking: disabled`; enabled-without-effort or unrecognized effort
+falls back to `thinking: enabled`. This avoids Moonshot/OpenCode Go HTTP 400
+responses caused by specifying both reasoning knobs in the same request.
+
+`8cf6b3da9d157bfced382cf139a9613eff90c006` remains recorded as already
+equivalent in this fork: `ProviderProfile.get_max_tokens(model)`,
+OpenCode Go's `mimo-v2.5-pro` cap, and the transport call through that hook
+were already present before this pass.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/plugins/model_providers/test_kimi_profile.py tests/plugins/model_providers/test_opencode_go_profile.py
+```
+
+Result before code changes: `23 failed, 27 passed, 1 warning`; failures showed
+Kimi/OpenCode Go emitting both `thinking` and `reasoning_effort` for explicit
+or default reasoning configurations.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/plugins/model_providers/test_kimi_profile.py tests/plugins/model_providers/test_opencode_go_profile.py
+uv run pytest -q tests/plugins/model_providers/test_kimi_profile.py tests/plugins/model_providers/test_opencode_go_profile.py tests/providers/test_profile_wiring.py tests/providers/test_provider_profiles.py tests/providers/test_transport_parity.py tests/run_agent/test_run_agent.py::TestBuildApiKwargs tests/agent/transports/test_chat_completions.py -k "kimi or moonshot or opencode"
+```
+
+Result: targeted plugin-profile run `50 passed, 1 warning`; broader
+Kimi/OpenCode surface run `85 passed, 150 deselected, 1 warning`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work

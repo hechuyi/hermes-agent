@@ -17,14 +17,14 @@ def opencode_go_profile():
 
 
 class TestOpenCodeGoKimiReasoning:
-    """Kimi K2 models use Moonshot's thinking + reasoning_effort shape on OpenCode Go."""
+    """Kimi K2 models use Moonshot's XOR reasoning shape on OpenCode Go."""
 
-    def test_high_effort_emits_thinking_and_effort(self, opencode_go_profile):
+    def test_high_effort_emits_effort_without_thinking(self, opencode_go_profile):
         extra_body, top_level = opencode_go_profile.build_api_kwargs_extras(
             reasoning_config={"enabled": True, "effort": "high"},
             model="kimi-k2.6",
         )
-        assert extra_body == {"thinking": {"type": "enabled"}}
+        assert extra_body == {}
         assert top_level == {"reasoning_effort": "high"}
 
     def test_disabled_emits_thinking_disabled_without_effort(self, opencode_go_profile):
@@ -56,7 +56,7 @@ class TestOpenCodeGoKimiReasoning:
             reasoning_config={"enabled": True, "effort": effort},
             model="moonshotai/kimi-k2.6",
         )
-        assert extra_body == {"thinking": {"type": "enabled"}}
+        assert extra_body == {}
         assert top_level == {"reasoning_effort": "high"}
 
     def test_low_and_medium_pass_through(self, opencode_go_profile):
@@ -65,7 +65,7 @@ class TestOpenCodeGoKimiReasoning:
                 reasoning_config={"enabled": True, "effort": effort},
                 model="kimi-k2.5",
             )
-            assert extra_body == {"thinking": {"type": "enabled"}}
+            assert extra_body == {}
             assert top_level == {"reasoning_effort": effort}
 
     def test_no_config_preserves_server_default(self, opencode_go_profile):
@@ -78,14 +78,14 @@ class TestOpenCodeGoKimiReasoning:
 
 
 class TestOpenCodeGoDeepSeekThinking:
-    """DeepSeek V4 models use DeepSeek-style thinking controls on OpenCode Go."""
+    """DeepSeek V4 models use XOR reasoning controls on OpenCode Go."""
 
-    def test_high_effort_emits_thinking_and_effort(self, opencode_go_profile):
+    def test_high_effort_emits_effort_without_thinking(self, opencode_go_profile):
         extra_body, top_level = opencode_go_profile.build_api_kwargs_extras(
             reasoning_config={"enabled": True, "effort": "high"},
             model="deepseek-v4-pro",
         )
-        assert extra_body == {"thinking": {"type": "enabled"}}
+        assert extra_body == {}
         assert top_level == {"reasoning_effort": "high"}
 
     def test_disabled_emits_thinking_disabled_without_effort(self, opencode_go_profile):
@@ -118,7 +118,7 @@ class TestOpenCodeGoDeepSeekThinking:
                 reasoning_config={"enabled": True, "effort": effort},
                 model="deepseek/deepseek-v4-pro",
             )
-            assert extra_body == {"thinking": {"type": "enabled"}}
+            assert extra_body == {}
             assert top_level == {"reasoning_effort": "max"}
 
 
@@ -177,7 +177,7 @@ class TestOpenCodeGoModelMaxTokens:
 class TestOpenCodeGoFullKwargsIntegration:
     """End-to-end transport kwargs include the profile-provided controls."""
 
-    def test_kimi_reasoning_reaches_extra_body_and_top_level(self, opencode_go_profile):
+    def test_kimi_reasoning_reaches_top_level_without_extra_body(self, opencode_go_profile):
         from agent.transports.chat_completions import ChatCompletionsTransport
 
         kwargs = ChatCompletionsTransport().build_kwargs(
@@ -188,7 +188,7 @@ class TestOpenCodeGoFullKwargsIntegration:
             reasoning_config={"enabled": True, "effort": "high"},
             base_url="https://opencode.ai/zen/go/v1",
         )
-        assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
+        assert "extra_body" not in kwargs
         assert kwargs["reasoning_effort"] == "high"
 
     def test_mimo_v25_pro_default_max_tokens_reaches_transport(self, opencode_go_profile):
@@ -233,7 +233,7 @@ class TestOpenCodeGoFullKwargsIntegration:
         )
         assert "max_tokens" not in kwargs
 
-    def test_deepseek_thinking_reaches_extra_body_and_top_level(
+    def test_deepseek_reasoning_reaches_top_level_without_extra_body(
         self, opencode_go_profile
     ):
         from agent.transports.chat_completions import ChatCompletionsTransport
@@ -246,5 +246,5 @@ class TestOpenCodeGoFullKwargsIntegration:
             reasoning_config={"enabled": True, "effort": "high"},
             base_url="https://opencode.ai/zen/go/v1",
         )
-        assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
+        assert "extra_body" not in kwargs
         assert kwargs["reasoning_effort"] == "high"

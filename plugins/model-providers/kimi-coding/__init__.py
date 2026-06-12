@@ -14,19 +14,23 @@ from providers.base import OMIT_TEMPERATURE, ProviderProfile
 
 
 class KimiProfile(ProviderProfile):
-    """Kimi/Moonshot — temperature omitted, thinking + reasoning_effort."""
+    """Kimi/Moonshot — temperature omitted, thinking xor reasoning_effort."""
 
     def build_api_kwargs_extras(
         self, *, reasoning_config: dict | None = None, **context
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Kimi uses extra_body.thinking + top-level reasoning_effort."""
+        """Kimi reasoning controls.
+
+        Moonshot treats extra_body.thinking and top-level reasoning_effort as
+        mutually exclusive. Send an explicit effort when requested; otherwise
+        fall back to the binary thinking toggle.
+        """
         extra_body = {}
         top_level = {}
 
         if not reasoning_config or not isinstance(reasoning_config, dict):
-            # No config → thinking enabled, default effort
+            # No config: enable thinking and let the server choose depth.
             extra_body["thinking"] = {"type": "enabled"}
-            top_level["reasoning_effort"] = "medium"
             return extra_body, top_level
 
         enabled = reasoning_config.get("enabled", True)
@@ -34,13 +38,13 @@ class KimiProfile(ProviderProfile):
             extra_body["thinking"] = {"type": "disabled"}
             return extra_body, top_level
 
-        # Enabled
-        extra_body["thinking"] = {"type": "enabled"}
+        # Enabled: prefer an explicit recognized effort; otherwise use the
+        # binary thinking toggle. Never send both.
         effort = (reasoning_config.get("effort") or "").strip().lower()
         if effort in {"low", "medium", "high"}:
             top_level["reasoning_effort"] = effort
         else:
-            top_level["reasoning_effort"] = "medium"
+            extra_body["thinking"] = {"type": "enabled"}
 
         return extra_body, top_level
 
