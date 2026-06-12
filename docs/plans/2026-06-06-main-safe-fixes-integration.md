@@ -786,7 +786,11 @@ design review would expand MCP/plugin discovery and dispatch visibility. A
 future port must first define the bridge catalog as session-scoped, pass
 toolset scope through dispatch, fail closed on out-of-scope bridged calls, and
 cover restricted gateway, subagent, plugin, MCP allowlist/no-MCP, approval, and
-hook visibility tests.
+hook visibility tests. The fork-local Feishu risk is explicit: Package B
+model-visible tools must either remain directly visible in Feishu gateway
+sessions or be bridged only under a session-scoped `hermes-feishu` catalog that
+cannot expose tools outside the session's enabled toolsets. Core `web_search`
+and `web_extract` must also remain non-deferred.
 
 The remaining gateway/media items were split after this checkpoint. Absorbed
 slices now cover Windows MEDIA paths, extension allowlisting, current-turn
@@ -3563,7 +3567,10 @@ Remaining upstream groups reviewed and left out of blind absorption:
   `17097761`, `18c9e891`, `a87f0a82`): deferred for design review. This group
   changes MCP/plugin tool discovery and dispatch scoping and touches the Hermes
   tools/live-gateway/access-control surface; upstream also needed a follow-up
-  leak fix.
+  leak fix. The useful contract is not the upstream patch shape, but a future
+  Feishu-aware bridge design: `hermes-feishu` model-visible tools need an
+  explicit direct-visibility or bridge-visibility rule before this can be
+  safely ported.
 - Adapter-owned gateway access policy (`fd09b2c55`, `6a2e3c2d`): deferred as a
   default-deny conflict. Upstream trusts adapters that claim to enforce their
   own policy; this fork keeps gateway-level `_is_user_authorized` as the final
@@ -6141,7 +6148,13 @@ Deferred tool-search/progressive-disclosure base:
 
 This is a broad MCP/plugin tool-disclosure architecture change with live
 harness changes. It should not be folded into the Feishu gateway reconciliation
-without a dedicated tool-registry/tool-search design review.
+without a dedicated tool-registry/tool-search design review. A re-review found
+no useful low-risk subset: the scoping fix depends on the feature base, the
+live harness depends on the feature behavior, and `.gitignore`-only fallout has
+no standalone value. Future tests must prove Feishu Package B model-visible
+tools, `enabled_toolsets=["hermes-feishu"]`, core web tools, subagent narrowed
+toolsets, restricted gateway sessions, and sandbox/code-exec tool assembly all
+preserve the fork's access boundary.
 
 Deferred Nous JWT-only authentication series:
 
@@ -6178,7 +6191,13 @@ literally.
 `db96fc60d0d3dc3f9e95dc6541d8edcccb2f2171` remain deferred. They target
 Telegram topic binding recovery and compression-child alignment, not Feishu
 runtime behavior. They should be reviewed only if a generic gateway session
-identity contract needed by Feishu emerges.
+identity contract needed by Feishu emerges. The generic contracts worth
+retaining for that future review are: external thread/topic normalization must
+complete before text-batch keys, busy-session guards, pending queues, session
+store creation, and ledger attribution derive a session key; and external
+thread/topic bindings must canonicalize to the compression tip after session
+rotation. Current local equivalence covers only the earlier text-batch slice,
+not the Telegram guard/pending-queue or stale-binding self-heal pieces.
 
 Deferred dashboard/UI auth change:
 
@@ -6186,6 +6205,9 @@ Deferred dashboard/UI auth change:
 
 This touches dashboard OAuth/public allowlist behavior. The fork does not need
 Hermes desktop/dashboard UI surfaces, so this stays out of the runtime fork.
+Current local tests intentionally preserve the opposite policy for gated
+dashboard mode: `/api/status` remains OAuth-gated instead of joining upstream's
+public API allowlist.
 
 Deferred adapter-owned access-policy series:
 
