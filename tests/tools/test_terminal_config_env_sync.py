@@ -169,6 +169,8 @@ def test_save_config_set_supports_critical_bridged_keys():
     required = {
         "docker_run_as_host_user",
         "docker_mount_cwd_to_workspace",
+        "docker_persist_across_processes",
+        "docker_orphan_reaper",
         "backend",
         "docker_image",
         "container_cpu",
@@ -224,3 +226,33 @@ def test_docker_env_is_bridged_everywhere():
     assert "docker_env" in _gateway_env_map_keys()
     assert "docker_env" in _save_config_env_sync_keys()
     assert "TERMINAL_DOCKER_ENV" in _terminal_tool_env_var_names()
+
+
+def test_docker_lifecycle_keys_are_bridged_everywhere():
+    assert "docker_persist_across_processes" in _cli_env_map_keys()
+    assert "docker_persist_across_processes" in _gateway_env_map_keys()
+    assert "docker_persist_across_processes" in _save_config_env_sync_keys()
+    assert "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES" in _terminal_tool_env_var_names()
+
+    assert "docker_orphan_reaper" in _cli_env_map_keys()
+    assert "docker_orphan_reaper" in _gateway_env_map_keys()
+    assert "docker_orphan_reaper" in _save_config_env_sync_keys()
+    assert "TERMINAL_DOCKER_ORPHAN_REAPER" in _terminal_tool_env_var_names()
+
+
+def test_docker_cross_process_persistence_defaults_to_cleanup_on_exit(monkeypatch):
+    monkeypatch.delenv("TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES", raising=False)
+
+    from hermes_cli.config import DEFAULT_CONFIG
+    from tools import terminal_tool
+
+    assert DEFAULT_CONFIG["terminal"]["docker_persist_across_processes"] is False
+    assert terminal_tool._get_env_config()["docker_persist_across_processes"] is False
+
+
+def test_docker_cross_process_persistence_can_be_enabled_explicitly(monkeypatch):
+    monkeypatch.setenv("TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES", "true")
+
+    from tools import terminal_tool
+
+    assert terminal_tool._get_env_config()["docker_persist_across_processes"] is True

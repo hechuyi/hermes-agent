@@ -800,6 +800,12 @@ DEFAULT_CONFIG = {
         # runs as a systemd service without access to the user's shell environment.
         # Example: {"SSH_AUTH_SOCK": "/run/user/1000/ssh-agent.sock"}
         "docker_env": {},
+        # Reuse Docker backend containers across Hermes processes by task/profile.
+        # Opt in explicitly; the default remains cleanup-on-exit to avoid
+        # accumulating long-running sleep-infinity containers on small hosts.
+        "docker_persist_across_processes": False,
+        # Conservative startup janitor for old exited Hermes-labeled containers.
+        "docker_orphan_reaper": True,
         "singularity_image": "docker://nikolaik/python-nodejs:python3.11-nodejs20",
         "modal_image": "nikolaik/python-nodejs:python3.11-nodejs20",
         "daytona_image": "nikolaik/python-nodejs:python3.11-nodejs20",
@@ -5624,6 +5630,8 @@ def set_config_value(key: str, value: str):
         "terminal.daytona_image": "TERMINAL_DAYTONA_IMAGE",
         "terminal.docker_mount_cwd_to_workspace": "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE",
         "terminal.docker_run_as_host_user": "TERMINAL_DOCKER_RUN_AS_HOST_USER",
+        "terminal.docker_persist_across_processes": "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES",
+        "terminal.docker_orphan_reaper": "TERMINAL_DOCKER_ORPHAN_REAPER",
         "terminal.docker_env": "TERMINAL_DOCKER_ENV",
         # terminal.cwd intentionally excluded — CLI resolves at runtime,
         # gateway bridges it in gateway/run.py. Persisting to .env causes

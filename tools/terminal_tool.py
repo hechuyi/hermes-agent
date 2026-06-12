@@ -861,6 +861,37 @@ _creation_locks: Dict[str, threading.Lock] = {}  # Per-task locks for sandbox cr
 _creation_locks_lock = threading.Lock()  # Protects _creation_locks dict itself
 _cleanup_thread = None
 _cleanup_running = False
+_docker_orphan_reaper_ran = False
+_docker_orphan_reaper_lock = threading.Lock()
+
+
+def _maybe_reap_docker_orphans(container_config: Dict[str, Any]) -> None:
+    """Run the conservative Docker orphan reaper once per process."""
+    global _docker_orphan_reaper_ran
+    if not container_config.get("docker_orphan_reaper", True):
+        return
+    if _docker_orphan_reaper_ran:
+        return
+    with _docker_orphan_reaper_lock:
+        if _docker_orphan_reaper_ran:
+            return
+        _docker_orphan_reaper_ran = True
+
+    try:
+        lifetime = int(os.getenv("TERMINAL_LIFETIME_SECONDS", "300"))
+    except (TypeError, ValueError):
+        lifetime = 300
+    max_age = max(60, lifetime) * 2
+
+    try:
+        from tools.environments.docker import reap_orphan_containers, _get_active_profile_name
+
+        profile = _get_active_profile_name()
+        removed = reap_orphan_containers(max_age_seconds=max_age, profile_filter=profile)
+        if removed:
+            logger.info("Docker orphan reaper removed %d stale container(s) for profile %s", removed, profile)
+    except Exception as e:
+        logger.debug("Docker orphan reaper raised: %s", e)
 
 # Per-task environment overrides registry.
 # Allows environments (e.g., TerminalBench2Env) to specify a custom Docker/Modal
@@ -1072,6 +1103,11 @@ def _get_env_config() -> Dict[str, Any]:
         "docker_env": _parse_env_var("TERMINAL_DOCKER_ENV", "{}", json.loads, "valid JSON"),
         "docker_run_as_host_user": os.getenv("TERMINAL_DOCKER_RUN_AS_HOST_USER", "false").lower() in {"true", "1", "yes"},
         "docker_extra_args": _parse_env_var("TERMINAL_DOCKER_EXTRA_ARGS", "[]", json.loads, "valid JSON"),
+        "docker_persist_across_processes": os.getenv(
+            "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES",
+            "false",
+        ).lower() in {"true", "1", "yes"},
+        "docker_orphan_reaper": os.getenv("TERMINAL_DOCKER_ORPHAN_REAPER", "true").lower() in {"true", "1", "yes"},
     }
 
 
@@ -1120,6 +1156,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         return _LocalEnvironment(cwd=cwd, timeout=timeout)
     
     elif env_type == "docker":
+        _maybe_reap_docker_orphans(cc)
         return _DockerEnvironment(
             image=image, cwd=cwd, timeout=timeout,
             cpu=cpu, memory=memory, disk=disk,
@@ -1131,6 +1168,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             env=docker_env,
             run_as_host_user=cc.get("docker_run_as_host_user", False),
             extra_args=docker_extra_args,
+            persist_across_processes=cc.get("docker_persist_across_processes", False),
         )
     
     elif env_type == "singularity":
@@ -1378,8 +1416,13 @@ def cleanup_all_environments():
     return cleaned
 
 
-def cleanup_vm(task_id: str):
-    """Manually clean up a specific environment by task_id."""
+def cleanup_vm(task_id: str, *, force_remove: bool = False):
+    """Manually clean up a specific environment by task_id.
+
+    ``force_remove`` is forwarded to backends that accept it. The default
+    honors Docker persist-across-processes mode; pass ``True`` for explicit
+    teardown.
+    """
     # Remove from tracking dicts while holding the lock, but defer the
     # actual (potentially slow) env.cleanup() call to outside the lock
     # so other tool calls aren't blocked.
@@ -1404,7 +1447,16 @@ def cleanup_vm(task_id: str):
 
     try:
         if hasattr(env, 'cleanup'):
-            env.cleanup()
+            import inspect
+
+            sig = inspect.signature(env.cleanup)
+            if "force_remove" in sig.parameters:
+                env.cleanup(force_remove=force_remove)
+            else:
+                env.cleanup()
+            wait_fn = getattr(env, "wait_for_cleanup", None)
+            if callable(wait_fn):
+                wait_fn(timeout=15.0)
         elif hasattr(env, 'stop'):
             env.stop()
         elif hasattr(env, 'terminate'):
@@ -1426,7 +1478,16 @@ def _atexit_cleanup():
     if _active_environments:
         count = len(_active_environments)
         logger.info("Shutting down %d remaining sandbox(es)...", count)
+        envs_to_wait = list(_active_environments.values())
         cleanup_all_environments()
+        for env in envs_to_wait:
+            wait_fn = getattr(env, "wait_for_cleanup", None)
+            if wait_fn is None:
+                continue
+            try:
+                wait_fn(timeout=15.0)
+            except Exception as e:
+                logger.debug("wait_for_cleanup raised on exit: %s", e)
 
 atexit.register(_atexit_cleanup)
 
@@ -1843,6 +1904,8 @@ def terminal_tool(
                                 "docker_env": config.get("docker_env", {}),
                                 "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
                                 "docker_extra_args": config.get("docker_extra_args", []),
+                                "docker_persist_across_processes": config.get("docker_persist_across_processes", False),
+                                "docker_orphan_reaper": config.get("docker_orphan_reaper", True),
                             }
 
                         local_config = None

@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -132,6 +133,108 @@ def _get_active_profile_name() -> str:
         return get_active_profile_name() or "default"
     except Exception:
         return "default"
+
+
+def _container_finished_at(docker_exe: str, container_id: str):
+    """Parse ``docker inspect`` FinishedAt for *container_id*.
+
+    Returns a timezone-aware datetime, or ``None`` if the field is missing,
+    unparseable, or Docker's never-finished zero value.
+    """
+    try:
+        result = subprocess.run(
+            [docker_exe, "inspect", "--format", "{{.State.FinishedAt}}", container_id],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("orphan reaper docker inspect %s failed: %s", container_id[:12], e)
+        return None
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    if not raw or raw.startswith("0001-01-01"):
+        return None
+    raw = re.sub(r"(\.\d{6})\d+", r"\1", raw).replace("Z", "+00:00")
+    try:
+        import datetime
+
+        return datetime.datetime.fromisoformat(raw)
+    except ValueError as e:
+        logger.debug("could not parse FinishedAt %r for %s: %s", raw, container_id[:12], e)
+        return None
+
+
+def reap_orphan_containers(
+    *,
+    max_age_seconds: int = 600,
+    profile_filter: str | None = None,
+    docker_exe: str | None = None,
+) -> int:
+    """Remove stale exited Hermes Docker containers left by hard process exits.
+
+    The reaper is deliberately conservative: it only considers containers with
+    ``hermes-agent=1`` and Docker ``status=exited``, optionally scoped to the
+    active profile, and removes them only after their FinishedAt timestamp is
+    older than ``max_age_seconds``. Running containers are never reaped.
+    """
+    docker = docker_exe or find_docker() or "docker"
+    filters = ["--filter", "label=hermes-agent=1", "--filter", "status=exited"]
+    if profile_filter:
+        filters.extend(["--filter", f"label=hermes-profile={_sanitize_label_value(profile_filter)}"])
+
+    try:
+        listing = subprocess.run(
+            [docker, "ps", "-a", *filters, "--format", "{{.ID}}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        logger.debug("orphan reaper docker ps failed: %s", e)
+        return 0
+    if listing.returncode != 0:
+        logger.debug(
+            "orphan reaper docker ps returned %d: %s",
+            listing.returncode,
+            listing.stderr.strip(),
+        )
+        return 0
+
+    candidate_ids = [line.strip() for line in listing.stdout.splitlines() if line.strip()]
+    if not candidate_ids:
+        return 0
+
+    import datetime
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    removed = 0
+    for cid in candidate_ids:
+        finished_at = _container_finished_at(docker, cid)
+        if finished_at is None:
+            continue
+        age = (now - finished_at).total_seconds()
+        if age < max_age_seconds:
+            continue
+        try:
+            result = subprocess.run(
+                [docker, "rm", "-f", cid],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.debug("orphan reaper docker rm %s failed: %s", cid[:12], e)
+            continue
+        if result.returncode == 0:
+            removed += 1
+            logger.info("Reaped orphan container %s (exited %d seconds ago)", cid[:12], int(age))
+        else:
+            logger.debug("docker rm -f %s failed: %s", cid[:12], result.stderr.strip())
+    return removed
 
 
 def find_docker() -> Optional[str]:
@@ -340,15 +443,18 @@ class DockerEnvironment(BaseEnvironment):
         auto_mount_cwd: bool = False,
         run_as_host_user: bool = False,
         extra_args: list = None,
+        persist_across_processes: bool = False,
     ):
         if cwd == "~":
             cwd = "/root"
         super().__init__(cwd=cwd, timeout=timeout)
         self._persistent = persistent_filesystem
+        self._persist_across_processes = persist_across_processes
         self._task_id = task_id
         self._forward_env = _normalize_forward_env_names(forward_env)
         self._env = _normalize_env_dict(env)
         self._container_id: Optional[str] = None
+        self._cleanup_thread: threading.Thread | None = None
         self._labels: dict[str, str] = {}
         logger.info(f"DockerEnvironment volumes: {volumes}")
         # Ensure volumes is a list (config.yaml could be malformed)
@@ -571,7 +677,7 @@ class DockerEnvironment(BaseEnvironment):
         # /usr/local/bin is not in PATH (common on macOS gateway/service).
         self._docker_exe = find_docker() or "docker"
 
-        # Start the container directly via `docker run -d`.
+        # Start or reuse the container.
         container_name = f"hermes-{uuid.uuid4().hex[:8]}"
         # Labels make hermes-created containers identifiable to:
         #   * the orphan reaper (`hermes-agent=1` for the global sweep filter)
@@ -592,26 +698,61 @@ class DockerEnvironment(BaseEnvironment):
             "hermes-task-id": task_label,
             "hermes-profile": profile_name,
         }
-        run_cmd = [
-            self._docker_exe, "run", "-d",
-            "--init",           # tini/catatonit as PID 1 — reaps zombie children
-            "--name", container_name,
-            *label_args,
-            "-w", cwd,
-            *all_run_args,
-            image,
-            "sleep", "infinity",  # no fixed lifetime — idle reaper handles cleanup
-        ]
-        logger.debug(f"Starting container: {' '.join(run_cmd)}")
-        result = subprocess.run(
-            run_cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,  # image pull may take a while
-            check=True,
-        )
-        self._container_id = result.stdout.strip()
-        logger.info(f"Started container {container_name} ({self._container_id[:12]})")
+
+        reused = False
+        if persist_across_processes:
+            existing = self._find_reusable_container(task_label, profile_name)
+            if existing is not None:
+                container_id, state = existing
+                self._container_id = container_id
+                if state != "running":
+                    try:
+                        subprocess.run(
+                            [self._docker_exe, "start", container_id],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            check=True,
+                        )
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+                        logger.warning(
+                            "Failed to start existing container %s (state=%s): %s; starting fresh",
+                            container_id[:12],
+                            state,
+                            e,
+                        )
+                        self._container_id = None
+                if self._container_id:
+                    logger.info(
+                        "Reusing container %s (task=%s, profile=%s, prior state=%s)",
+                        container_id[:12],
+                        task_label,
+                        profile_name,
+                        state,
+                    )
+                    reused = True
+
+        if not reused:
+            run_cmd = [
+                self._docker_exe, "run", "-d",
+                "--init",           # tini/catatonit as PID 1 — reaps zombie children
+                "--name", container_name,
+                *label_args,
+                "-w", cwd,
+                *all_run_args,
+                image,
+                "sleep", "infinity",  # no fixed lifetime — idle reaper handles cleanup
+            ]
+            logger.debug(f"Starting container: {' '.join(run_cmd)}")
+            result = subprocess.run(
+                run_cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,  # image pull may take a while
+                check=True,
+            )
+            self._container_id = result.stdout.strip()
+            logger.info(f"Started container {container_name} ({self._container_id[:12]})")
 
         # Build the init-time env forwarding args (used only by init_session
         # to inject host env vars into the snapshot; subsequent commands get
@@ -676,6 +817,49 @@ class DockerEnvironment(BaseEnvironment):
 
         return _popen_bash(cmd, stdin_data)
 
+    def _find_reusable_container(self, task_label: str, profile_label: str) -> Optional[tuple[str, str]]:
+        """Return a labeled reusable container as ``(container_id, state)``."""
+        try:
+            result = subprocess.run(
+                [
+                    self._docker_exe,
+                    "ps",
+                    "-a",
+                    "--filter",
+                    "label=hermes-agent=1",
+                    "--filter",
+                    f"label=hermes-task-id={task_label}",
+                    "--filter",
+                    f"label=hermes-profile={profile_label}",
+                    "--format",
+                    "{{.ID}}\t{{.State}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.debug("docker ps probe failed: %s; starting fresh", e)
+            return None
+        if result.returncode != 0:
+            logger.debug("docker ps probe returned %d: %s", result.returncode, result.stderr.strip())
+            return None
+
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        running: Optional[tuple[str, str]] = None
+        first: Optional[tuple[str, str]] = None
+        for line in lines:
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            cid, state = parts[0], parts[1].lower()
+            if first is None:
+                first = (cid, state)
+            if state == "running" and running is None:
+                running = (cid, state)
+        return running or first
+
     @staticmethod
     def _storage_opt_supported() -> bool:
         """Check if Docker's storage driver supports --storage-opt size=.
@@ -716,31 +900,54 @@ class DockerEnvironment(BaseEnvironment):
         logger.debug("Docker --storage-opt support: %s", _storage_opt_ok)
         return _storage_opt_ok
 
-    def cleanup(self):
-        """Stop and remove the container. Bind-mount dirs persist if persistent=True."""
-        if self._container_id:
-            try:
-                # Stop in background so cleanup doesn't block
-                stop_cmd = (
-                    f"(timeout 60 {self._docker_exe} stop {self._container_id} || "
-                    f"{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
-                )
-                subprocess.Popen(stop_cmd, shell=True)
-            except Exception as e:
-                logger.warning("Failed to stop container %s: %s", self._container_id, e)
-
+    def cleanup(self, *, force_remove: bool = False):
+        """Tear down the container according to reuse mode and *force_remove*."""
+        container_id = self._container_id
+        if not container_id:
             if not self._persistent:
-                # Also schedule removal (stop only leaves it as stopped)
-                try:
-                    subprocess.Popen(
-                        f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
-                        shell=True,
-                    )
-                except Exception:
-                    pass
+                for d in (self._workspace_dir, self._home_dir):
+                    if d:
+                        shutil.rmtree(d, ignore_errors=True)
+            return
+
+        if not force_remove and self._persist_across_processes:
             self._container_id = None
+            return
+
+        docker_exe = self._docker_exe
+        log_id = container_id[:12]
+
+        def _do_cleanup() -> None:
+            try:
+                subprocess.run(
+                    [docker_exe, "stop", "-t", "10", container_id],
+                    capture_output=True,
+                    timeout=30,
+                )
+            except (subprocess.TimeoutExpired, OSError) as e:
+                logger.warning("docker stop %s timed out / failed: %s", log_id, e)
+            try:
+                subprocess.run(
+                    [docker_exe, "rm", "-f", container_id],
+                    capture_output=True,
+                    timeout=30,
+                )
+            except (subprocess.TimeoutExpired, OSError) as e:
+                logger.warning("docker rm -f %s failed: %s", log_id, e)
+
+        thread = threading.Thread(target=_do_cleanup, daemon=True, name=f"hermes-cleanup-{log_id}")
+        thread.start()
+        self._cleanup_thread = thread
+        self._container_id = None
 
         if not self._persistent:
             for d in (self._workspace_dir, self._home_dir):
                 if d:
                     shutil.rmtree(d, ignore_errors=True)
+
+    def wait_for_cleanup(self, timeout: float = 30.0) -> bool:
+        thread = getattr(self, "_cleanup_thread", None)
+        if thread is None or not thread.is_alive():
+            return True
+        thread.join(timeout=timeout)
+        return not thread.is_alive()

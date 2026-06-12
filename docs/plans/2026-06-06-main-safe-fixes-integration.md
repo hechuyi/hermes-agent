@@ -6125,7 +6125,8 @@ After absorbing the low-risk runtime/model/delivery fixes above, the remaining
 `git cherry` positives were re-reviewed and intentionally left unabsorbed for
 now:
 
-Deferred high-coupling Docker lifecycle/persistence series:
+Docker lifecycle/persistence series, initially deferred at this checkpoint and
+later absorbed with fork-local safer defaults:
 
 - `ac8e238bc87ffd37c5c04d0f401d2aab697068b3`
 - `d77d877665bab7a6035140d142d5670cc05ad15d`
@@ -6133,10 +6134,9 @@ Deferred high-coupling Docker lifecycle/persistence series:
 - `2f0f03c40d133d568e786d45275ad6a1bffdebd7`
 
 These change container reuse, orphan reaping, persist-mode cleanup semantics,
-and default `cleanup_vm()` behavior. They affect terminal/backend lifecycle
-rather than the Feishu assistant surface and should be handled only in a
-separate sandbox-lifecycle review with explicit tests for the fork's current
-Docker/s6 contract.
+and default `cleanup_vm()` behavior. They were not folded into this first
+gateway reconciliation batch; see the later Docker lifecycle absorption note
+below for the final local disposition.
 
 Deferred tool-search/progressive-disclosure base:
 
@@ -6273,10 +6273,10 @@ uv run pytest -q tests/gateway/test_platform_reconnect.py
 Result: `30 passed`.
 
 The remaining deferred categories after this checkpoint are still policy or
-architecture decisions, not forgotten low-risk fixes: Docker lifecycle
-semantics, progressive tool disclosure/tool-search, Nous JWT-only auth
-migration, non-Feishu platform batching/topic recovery, dashboard/UI auth, and
-adapter-owned access-policy default-deny changes.
+architecture decisions, not forgotten low-risk fixes: progressive tool
+disclosure/tool-search, Nous JWT-only auth migration, non-Feishu platform
+batching/topic recovery, dashboard/UI auth, and adapter-owned access-policy
+default-deny changes.
 
 ## 2026-06-13 — Subagent rescan disposition cleanup
 
@@ -6311,41 +6311,48 @@ The fresh candidate list was also rechecked against current code:
   `b775a46bb`; noisy schema-heavy rough estimates do not repeatedly trigger
   preflight compaction after real provider prompt usage has fit.
 
-The remaining not-yet-absorbed upstream groups are still the same protected
-decision groups: Docker lifecycle/persist/reuse semantics, progressive
-tool-search/bridge-disclosure architecture, Nous JWT-only auth migration,
-Telegram topic/compression session identity, dashboard/UI auth policy, and
-adapter-owned gateway access-policy default-deny changes.
+The remaining not-yet-absorbed upstream groups are still protected decision
+groups: progressive tool-search/bridge-disclosure architecture, Nous JWT-only
+auth migration, Telegram topic/compression session identity, dashboard/UI auth
+policy, and adapter-owned gateway access-policy default-deny changes.
 
-## 2026-06-13 — Docker lifecycle characterization before absorption
+## 2026-06-13 — Docker lifecycle absorption with safe local defaults
 
-The Docker lifecycle/persist/reuse group remains intentionally unabsorbed:
+The Docker lifecycle/persist/reuse group is now absorbed with fork-local
+adaptation:
 
 - `ac8e238bc87ffd37c5c04d0f401d2aab697068b3`
 - `d77d877665bab7a6035140d142d5670cc05ad15d`
 - `5c2170a7c62b9cfd18431de78b462116df57d199`
 - `2f0f03c40d133d568e786d45275ad6a1bffdebd7`
 
-The fork has absorbed the adjacent label infrastructure only. Current tests now
-lock the fork's actual behavior so future review cannot confuse label presence
-with lifecycle absorption:
+The local port keeps the useful mechanics:
 
-- Docker startup still creates a fresh container and does not probe
-  `docker ps` / `docker inspect` / `docker start` by `hermes-agent`,
-  `hermes-task-id`, or `hermes-profile` labels for cross-process reuse.
-- No `reap_orphan_containers` startup reaper entry point exists in
-  `tools.environments.docker`.
-- `persistent_filesystem=True` still preserves bind mounts but schedules
-  container stop with an `rm -f` failure fallback; it does not implement the
-  upstream persist-across-processes cleanup no-op contract.
-- `DockerEnvironment.cleanup()` still has no `force_remove` keyword, so the
-  upstream explicit-teardown split is not present.
+- label-based reuse by sanitized `hermes-task-id` and `hermes-profile`;
+- stopped matching containers are restarted with `docker start`, and start
+  failure falls back to a fresh `docker run`;
+- a startup orphan reaper removes old `exited` `hermes-agent=1` containers,
+  scoped to the active profile and gated by `2 * TERMINAL_LIFETIME_SECONDS`
+  with a 60 second floor;
+- `cleanup(force_remove=True)` and
+  `cleanup_vm(task_id, force_remove=True)` provide explicit teardown;
+- cleanup no longer uses shell `Popen("... &")`; cleanup calls use bounded
+  `subprocess.run` and `cleanup_vm()` waits for `wait_for_cleanup()`.
 
-This is deliberate evidence, not rejection of the feature forever. A later
-Docker runtime batch can still decide to absorb some or all of the upstream
-lifecycle contract, but it must do so as a sandbox lifecycle change with real
-Docker/s6 verification rather than treating the existing labels as proof of
-reuse/reaper/persist semantics.
+The local port deliberately does **not** copy upstream's default long-running
+container policy. Upstream defaults `docker_persist_across_processes` to true,
+which makes ordinary cleanup a container no-op and leaves a `sleep infinity`
+container running for reuse. A read-only subagent review flagged that this does
+not answer the operator's concern about accumulating Docker containers: the
+reaper only handles `exited` containers and cannot safely reap running sibling
+containers. This fork therefore defaults `docker_persist_across_processes` to
+false in the config, CLI defaults, terminal env parser, and
+`DockerEnvironment` constructor. Cross-process reuse remains available as an
+explicit opt-in via `terminal.docker_persist_across_processes: true` or
+`TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES=true`.
+
+No `website/` Docker documentation was restored; this fork no longer carries
+that surface.
 
 ## 2026-06-13 — Adapter access-policy boundary characterization
 
