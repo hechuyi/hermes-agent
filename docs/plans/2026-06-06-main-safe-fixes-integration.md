@@ -5980,3 +5980,32 @@ uv run ruff check agent/conversation_compression.py agent/error_classifier.py to
 
 Result: focused tests `5 passed`; broader vision/image-shrink suite
 `110 passed, 1 warning`; ruff passed.
+
+## 2026-06-13 — Compression concurrency and rough-estimate anti-thrash
+
+The following upstream compression fixes were re-reviewed against the current
+fork and found already present as local equivalent implementations:
+
+- `a30480bd2b15ffd942ae3a24f1f993f575c89af2` — state-backed per-session
+  compression locks to prevent concurrent compressors from forking one parent
+  session into multiple children.
+- `db2ce9e7d2af89b2df192c34e10a3b232c6a1fb7` — fail open when the compression
+  lock subsystem is missing or version-skewed.
+- `e38b0b55d12cfa39a6ac71d553d224c0711856f2` — avoid repeat preflight
+  compaction from noisy rough estimates after a real provider prompt has fit.
+
+Mechanical cherry-pick of `a30480bd2` conflicted because the current fork
+already has `compression_locks` in schema version 15, lock acquisition/release
+around `compress_context()`, missing-lock fail-open behavior, and the
+concurrency regression tests. The cherry-pick was skipped to avoid duplicating
+lock APIs or downgrading the fork's schema contract.
+
+Verification:
+
+```bash
+uv run pytest -q tests/agent/test_compression_concurrent_fork.py tests/test_hermes_state_compression_locks.py
+uv run pytest -q tests/agent/test_context_compressor.py::TestUpdateFromResponse tests/agent/test_context_compressor.py::TestPreflightDeferral tests/run_agent/test_413_compression.py::TestPreflightCompression::test_preflight_defers_when_recent_real_usage_fit tests/run_agent/test_413_compression.py::TestPreflightCompression::test_preflight_compresses_when_rough_growth_after_fit_is_large
+```
+
+Result: compression lock/concurrent-fork suite `13 passed, 1 warning`;
+rough-estimate deferral suite `7 passed, 1 warning`.
