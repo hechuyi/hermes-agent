@@ -27,11 +27,11 @@ Upstream intake todo:
 - [x] Absorb bundled web-provider discovery fallback from `93764b930`/`32a73010b` and run web tool/provider tests. Scope note: this guarantees provider registration after a failed plugin sweep; it does not by itself import the larger Parallel free-MCP/keyless runtime from `e0e257171`.
 - [x] Absorb context-compaction stale-task handoff fixes (`d5e2fbf24`, `8f8cad7ec`, `acb2954d8`, `6c752ca3a`) and run context compressor/resume tests.
 - [x] Absorb terminal persistence guidance/test subset from `ab06ef8ed` and run terminal tests. `96cc7ee1` and the `agent/coding_context.py` part of `ab06ef8ed` are not applicable to the current fork because that coding-context module is absent.
+- [x] Absorb Parallel keyless/free-MCP web runtime (`e0e257171`) plus follow-ups (`0a5762c78`, `383d44bc9`, `2ee8c983c`, `7df81d055`) while retaining bundled provider fallback and Feishu default toolset recovery.
 - [ ] Consider Discord runtime recovery (`c3464ecf4`) only if non-Feishu platform plugins remain in scope.
-- [ ] Separately review Parallel free-MCP/keyless web runtime (`e0e257171`). It is a broad feature commit touching provider implementation, CLI tools config, display labels, dependency lockfiles, and many tests; do not merge it as part of the low-risk fallback-registration batch.
 
 Upstream items intentionally deferred:
 
-- [ ] Model directory, model default, custom endpoint onboarding, and model-picker policy changes: blocked by the current "5.5 only" constraint.
+- [ ] Model directory, model default, custom endpoint onboarding, and model-picker policy changes: preserve model/catalog compatibility. `gpt-5.5` is the current operating channel, not a repository policy freeze.
 - [ ] Desktop/Electron/UI/dashboard/profile large changes: conflicts with Feishu-runtime pruning.
 - [ ] Nix/npm large lockfile changes tied to removed `web/`, `ui-tui/`, `website/`, or desktop packages.

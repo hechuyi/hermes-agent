@@ -55,6 +55,8 @@ Continuation refresh:
 - A further refresh advanced `upstream/main` from
   `9e484f052a99ca4ed312e8232b91a3c77a289cab` to
   `4d67ac617296be2581461837085c807a7a9db99b`.
+- A later refresh advanced `upstream/main` to
+  `24f74eb88853162899fe345dc34a9c5a20f66657`.
 - A follow-up read-only subagent review was dispatched for
   `4d22b8293374fd9eaeac75e1f607b20ddea3a1b3..upstream/main`.
 
@@ -101,8 +103,9 @@ P2/deferred:
 - desktop/dashboard feature expansion, optional skills, new external platform
   integrations, visual/UI work, and generated docs unless they directly affect
   Backend1 operation;
-- model-catalog churn that would confuse the current `gpt-5.5` runtime channel
-  constraint;
+- model-catalog/default churn is reviewed for compatibility and operator
+  impact; `gpt-5.5` is the current runtime channel, not a repository-level
+  model/catalog freeze;
 - changes that move authorization into adapter-owned policy without preserving
   the fork's gateway-level final guard;
 - broad refactors of `gateway/run.py`, `gateway/platforms/feishu.py`,
@@ -555,6 +558,42 @@ Verification:
 - `uv run ruff check tools/terminal_tool.py tests/tools/test_local_shell_init.py tests/tools/test_terminal_tool.py`:
   passed.
 
+### 2026-06-12 — Parallel Keyless Web Runtime
+
+Absorbed upstream commits:
+
+- `e0e257171` — Parallel-backed web search/extract with keyless free Search
+  MCP when no `PARALLEL_API_KEY` is configured, and v1 REST when keyed.
+- `0a5762c78` — genericize the keyless MCP client identity.
+- `383d44bc9` — rank explicit credentials ahead of managed gateway probes in
+  web backend auto-detection.
+- `2ee8c983c` and `7df81d055` — make SearXNG and web backend lookup honor
+  Hermes config/env resolution, not only process environment variables.
+
+Fork-local integration notes:
+
+- Preserved the fork's bundled web-provider fallback registration path from
+  the earlier `93764b930`/`32a73010b` batch, so keyless Parallel does not
+  depend on a perfect plugin discovery sweep.
+- Kept runtime web tools (`tools/web_tools.py`, `plugins/web/*`) in scope.
+  This does not restore the removed visual frontend/dashboard web surface.
+- Resolved lockfile churn narrowly: `parallel-web` moved from `0.4.2` to
+  `0.6.0`; unrelated upstream lock/dependency changes were not imported.
+- Restored Feishu default toolset recovery for broker-gated legacy
+  `feishu_doc`/`feishu_drive` while keeping `hermes-feishu` itself free of the
+  legacy document/comment business tools required by Package B/C scope tests.
+
+Verification:
+
+- `uv run pytest -q tests/tools/test_web_providers_ddgs.py tests/tools/test_web_providers_searxng.py tests/hermes_cli/test_tools_config.py::test_get_platform_tools_feishu_includes_doc_and_drive tests/hermes_cli/test_tools_config.py::test_get_platform_tools_feishu_tools_not_on_other_platforms tests/gateway/test_feishu_package_b_scope.py::test_hermes_feishu_toolset_does_not_expose_legacy_doc_drive_tools tests/gateway/test_feishu_package_c_scope.py::test_legacy_feishu_doc_drive_toolsets_remain_visible_as_brokered_legacy_risk_only`:
+  `47 passed`.
+- `uv run pytest -q tests/plugins/web/test_parallel_keyless_mcp.py tests/plugins/web/test_web_search_provider_plugins.py tests/tools/test_web_providers.py tests/tools/test_web_tools_config.py tests/tools/test_web_providers_searxng.py tests/tools/test_web_providers_ddgs.py tests/tools/test_web_providers_brave_free.py tests/agent/test_display.py tests/hermes_cli/test_tools_config.py tests/tools/test_web_keyless_default_fallback.py`:
+  `350 passed, 1 warning`.
+- `uv run pytest -q tests/hermes_cli/test_plugins.py`:
+  `73 passed, 1 warning`.
+- `uv lock --check`, `git diff --check`, `uv run python -m py_compile ...`,
+  and `uv run ruff check ...`: passed.
+
 ## Remaining Deferred Or Skipped Upstream Areas
 
 No unconditional P0/P1 remains from the previously reviewed
@@ -563,9 +602,9 @@ increment after the 2026-06-12 continuation above. Deferred areas remain
 intentionally unmerged:
 
 - model catalog/default/picker/visibility and model steering changes, including
-  `a4f179c50` and later model-policy commits. These conflict with the current
-  "do not add models; current channel is 5.5" constraint and require separate
-  model-policy review.
+  `a4f179c50` and later model-policy commits. These remain under separate
+  model/catalog compatibility review; the current `gpt-5.5` runtime channel is
+  not a policy freeze.
 - desktop remote filesystem APIs and desktop UI fixes (`51f47f9a9`,
   `db79e9013`, `8878484f8`, `56a0f48ba`, `9121834b3`, `8505e9d66`,
   `93a2f680f`, `743c55efa`).
@@ -578,6 +617,3 @@ intentionally unmerged:
   overlap Feishu routing or are not in the Backend1 production target, including
   Matrix room isolation and WhatsApp stale-bridge restart. These should be
   reviewed as platform-specific work, not broad intake.
-- Parallel free-MCP/keyless web runtime (`e0e257171`). This is a broad feature
-  batch and should be reviewed separately from the low-risk bundled provider
-  registration fallback.
