@@ -2298,6 +2298,7 @@ class GatewayRunner:
         self.config = config or load_gateway_config()
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
         self._warn_if_docker_media_delivery_is_risky()
+        self._warn_if_manual_approval_without_risk_assessor()
         _gateway_runner_ref = _weakref.ref(self)
 
         # Load ephemeral config from config.yaml / env vars.
@@ -2568,6 +2569,38 @@ class GatewayRunner:
             "This is fine if the model already emits host-visible paths, but MEDIA file delivery can fail "
             "for container-local paths like '/workspace/...' or '/output/...'."
         )
+
+    @staticmethod
+    def _warn_if_manual_approval_without_risk_assessor() -> None:
+        """Warn when unattended gateways can only resolve risky actions manually."""
+        try:
+            from hermes_cli.config import load_config as _load_full_config
+
+            config = _load_full_config()
+            approval_mode = str(
+                cfg_get(config, "approvals", "mode", default="manual") or "manual"
+            ).strip().lower()
+            tirith_enabled = bool(
+                cfg_get(config, "security", "tirith_enabled", default=True)
+            )
+            auxiliary_approval = cfg_get(
+                config, "auxiliary", "approval", default=None
+            )
+            if (
+                approval_mode == "manual"
+                and not tirith_enabled
+                and not auxiliary_approval
+            ):
+                logger.warning(
+                    "Gateway approvals.mode=manual with no automated risk "
+                    "assessor (security.tirith_enabled is false and "
+                    "auxiliary.approval is unset): dangerous commands and "
+                    "execute_code scripts will BLOCK until a human approves "
+                    "them in chat. Enable security.tirith_enabled or configure "
+                    "auxiliary.approval for unattended operation."
+                )
+        except Exception:
+            logger.debug("approvals.mode startup check skipped", exc_info=True)
 
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -95,3 +96,35 @@ def test_gateway_runtime_loaders_expand_env_var_templates(
     loader = getattr(gateway_run.GatewayRunner, loader_name)
 
     assert loader() == expected
+
+
+def test_warns_when_manual_approvals_have_no_risk_assessor(monkeypatch, caplog):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "approvals": {"mode": "manual"},
+            "security": {"tirith_enabled": False},
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gateway.run"):
+        gateway_run.GatewayRunner._warn_if_manual_approval_without_risk_assessor()
+
+    assert "approvals.mode=manual" in caplog.text
+    assert "auxiliary.approval is unset" in caplog.text
+
+
+def test_no_manual_approval_warning_when_aux_approval_configured(monkeypatch, caplog):
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "approvals": {"mode": "manual"},
+            "security": {"tirith_enabled": False},
+            "auxiliary": {"approval": {"provider": "openrouter", "model": "x"}},
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="gateway.run"):
+        gateway_run.GatewayRunner._warn_if_manual_approval_without_risk_assessor()
+
+    assert "approvals.mode=manual" not in caplog.text

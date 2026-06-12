@@ -6030,3 +6030,23 @@ uv run pytest -q tests/hermes_cli/test_models.py tests/hermes_cli/test_models_de
 ```
 
 Result: model catalog suite `147 passed, 1 warning`.
+
+## 2026-06-13 — Gateway manual-approval startup warning
+
+`655090b3d337f212dd9484ca22ee6881d1c8179f`
+(`feat(gateway): warn at startup on manual approvals with no risk assessor`)
+was manually absorbed as a focused observability change.
+
+When `approvals.mode=manual`, `security.tirith_enabled=false`, and no
+`auxiliary.approval` model is configured, `GatewayRunner` now logs a startup
+warning that dangerous commands and `execute_code` scripts will block until a
+human approves them in chat. This does not change approval policy, Feishu event
+ledger behavior, media/delivery contracts, or default-deny access control.
+
+Verification:
+
+```bash
+uv run pytest -q tests/gateway/test_runtime_config_env_expansion.py tests/tools/test_approval.py tests/gateway/test_approve_deny_commands.py
+```
+
+Result: gateway runtime config plus approval suites `238 passed`.
