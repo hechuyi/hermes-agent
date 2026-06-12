@@ -5333,6 +5333,41 @@ uv run pytest -q tests/agent/test_error_classifier.py
 Result: targeted run `3 passed, 155 deselected`; full classifier run
 `158 passed`.
 
+## 2026-06-12 — Custom/Ollama default output cap absorption
+
+`09ec26c66a130051412e747d49a7ea96f2862b57`
+(`fix(ollama): set default_max_tokens for custom/Ollama provider`) was manually
+absorbed. The local `custom` provider profile now declares
+`default_max_tokens=65536`, which prevents Ollama-compatible endpoints from
+falling back to tiny internal defaults such as `num_predict=128` when the user
+has not configured an explicit output cap.
+
+This remains a default floor only. The existing transport precedence is still
+`ephemeral_max_output_tokens` > user `model.max_tokens` > provider profile
+default, and the regression coverage verifies that an explicit user value
+continues to override the custom/Ollama default.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/providers/test_transport_parity.py -k "TestCustomOllamaParity and default_max_tokens"
+uv run pytest -q tests/providers/test_provider_profiles.py::TestCustomProfile::test_default_max_tokens
+```
+
+Result before code changes: the transport-level case failed with no
+`max_completion_tokens` in kwargs, and the profile-level case failed because
+`custom.default_max_tokens` was `None`.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/providers/test_provider_profiles.py::TestCustomProfile::test_default_max_tokens tests/providers/test_transport_parity.py::TestCustomOllamaParity::test_default_max_tokens tests/providers/test_transport_parity.py::TestCustomOllamaParity::test_user_max_tokens_overrides_default
+uv run pytest -q tests/providers/test_provider_profiles.py tests/providers/test_profile_wiring.py tests/providers/test_transport_parity.py tests/providers/test_e2e_wiring.py
+```
+
+Result: targeted run `3 passed`; provider profile/wiring/transport/e2e run
+`93 passed`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work

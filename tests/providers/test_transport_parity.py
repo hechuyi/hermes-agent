@@ -238,6 +238,27 @@ class TestQwenParity:
 class TestCustomOllamaParity:
     """Custom/Ollama: num_ctx, thinking controls — now tested via profile."""
 
+    def test_default_max_tokens(self, transport):
+        kw = transport.build_kwargs(
+            model="llama3.1",
+            messages=_simple_messages(),
+            tools=None,
+            provider_profile=get_provider_profile("custom"),
+            max_tokens_param_fn=_max_tokens_fn,
+        )
+        assert kw.get("max_completion_tokens") == 65536
+
+    def test_user_max_tokens_overrides_default(self, transport):
+        kw = transport.build_kwargs(
+            model="llama3.1",
+            messages=_simple_messages(),
+            tools=None,
+            provider_profile=get_provider_profile("custom"),
+            max_tokens=2048,
+            max_tokens_param_fn=_max_tokens_fn,
+        )
+        assert kw["max_completion_tokens"] == 2048
+
     def test_ollama_num_ctx(self, transport):
         kw = transport.build_kwargs(
             model="llama3.1",

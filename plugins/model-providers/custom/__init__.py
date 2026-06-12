@@ -63,6 +63,10 @@ custom = CustomProfile(
     ),
     env_vars=(),  # No fixed key — custom endpoint
     base_url="",  # User-configured
+    # Without an explicit output cap, Ollama can fall back to num_predict=128
+    # and truncate otherwise healthy responses. User model.max_tokens still
+    # overrides this default through the normal max-token resolution chain.
+    default_max_tokens=65536,
 )
 
 register_provider(custom)

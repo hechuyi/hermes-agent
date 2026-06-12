@@ -282,6 +282,12 @@ class TestQwenProfile:
         assert "metadata" not in eb
 
 
+class TestCustomProfile:
+    def test_default_max_tokens(self):
+        p = get_provider_profile("custom")
+        assert p.default_max_tokens == 65536
+
+
 class TestBaseProfile:
     def test_prepare_messages_passthrough(self):
         p = ProviderProfile(name="test")
