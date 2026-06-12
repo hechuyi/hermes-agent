@@ -28,6 +28,7 @@ Upstream intake todo:
 - [x] Absorb context-compaction stale-task handoff fixes (`d5e2fbf24`, `8f8cad7ec`, `acb2954d8`, `6c752ca3a`) and run context compressor/resume tests.
 - [x] Absorb terminal persistence guidance/test subset from `ab06ef8ed` and run terminal tests. `96cc7ee1` and the `agent/coding_context.py` part of `ab06ef8ed` are not applicable to the current fork because that coding-context module is absent.
 - [x] Absorb Parallel keyless/free-MCP web runtime (`e0e257171`) plus follow-ups (`0a5762c78`, `383d44bc9`, `2ee8c983c`, `7df81d055`) while retaining bundled provider fallback and Feishu default toolset recovery.
+- [x] Absorb gateway MEDIA extraction hardening (`e8827ef70`, `fb1b681b3`, `3ccf4fdc6`, `6c73e8ffa`, `521d06975`, `9351cbafa`) with fork-local `execute_code` producer compatibility.
 - [ ] Consider Discord runtime recovery (`c3464ecf4`) only if non-Feishu platform plugins remain in scope.
 
 Upstream items intentionally deferred:

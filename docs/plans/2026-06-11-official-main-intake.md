@@ -594,6 +594,47 @@ Verification:
 - `uv lock --check`, `git diff --check`, `uv run python -m py_compile ...`,
   and `uv run ruff check ...`: passed.
 
+### 2026-06-12 — Gateway MEDIA Extraction Hardening
+
+Manually ported upstream MEDIA safety semantics from:
+
+- `e8827ef70` — ignore `MEDIA:` bare paths embedded inside serialized JSON
+  string values.
+- `fb1b681b3` — use masks only to locate real tag spans, so JSON-embedded
+  `MEDIA:` text remains verbatim in cleaned output.
+- `3ccf4fdc6` — ignore `MEDIA:` examples in fenced code blocks, inline code,
+  and blockquotes.
+- `6c73e8ffa` — verify protected spans remain verbatim when a real MEDIA tag is
+  stripped from the same response.
+- `521d06975` — auto-append tool-result media only from tools that intentionally
+  produce deliverable artifacts.
+- `9351cbafa` — auto-append `image_generate` JSON local paths without relying
+  on the model restating the path.
+
+Fork-local integration notes:
+
+- Preserved this fork's broader `MEDIA_DELIVERY_EXTS`, Windows path support,
+  path validation, Feishu upload provenance, and current-turn scan helper.
+- The producer gate intentionally keeps `execute_code` in addition to upstream
+  TTS/image producers, because this fork already supports current-turn generated
+  files from code execution as deliverable artifacts.
+- Skill docs, logs, stored JSON tool results, code blocks, inline code, and
+  blockquotes no longer become native attachments merely because they contain
+  example or historical `MEDIA:` text.
+
+Verification:
+
+- `uv run pytest -q tests/gateway/test_platform_base.py::TestExtractMedia tests/gateway/test_platform_base.py::TestMediaInsideSerializedJson tests/gateway/test_media_extraction.py tests/gateway/test_run_tool_media_re.py`:
+  `69 passed`.
+- `uv run pytest -q tests/gateway/test_platform_base.py tests/gateway/test_media_extraction.py tests/gateway/test_run_tool_media_re.py tests/gateway/test_feishu_upload_denial.py`:
+  `193 passed, 2 skipped, 2 warnings`.
+- `uv run pytest -q tests/gateway/test_stream_consumer.py::TestCleanForDisplay tests/gateway/test_stream_consumer.py::TestSendOrEditMediaStripping tests/gateway/test_stream_consumer.py::TestStreamRunMediaStripping`:
+  `20 passed`.
+- `uv run pytest -q tests/gateway/test_feishu_attachment_provenance.py::test_generated_attachment_bare_path_denies_despite_matching_provenance`:
+  `1 passed, 2 warnings`.
+- `uv run ruff check ...`, `uv run python -m py_compile ...`, and
+  `git diff --check`: passed.
+
 ## Remaining Deferred Or Skipped Upstream Areas
 
 No unconditional P0/P1 remains from the previously reviewed
