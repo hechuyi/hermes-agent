@@ -5444,6 +5444,41 @@ uv run pytest -q tests/agent/transports/test_chat_completions.py
 
 Result: adapter `13 passed`; chat-completions transport `73 passed`.
 
+## 2026-06-12 — Disabled auto-compaction overflow guard
+
+The remaining non-provider half of
+`ec46f5912e309330a68c49b273dc1346c1d018d0` was manually absorbed as a
+separate safety fix. Provider overflow recovery paths now respect
+`compression.enabled: false`: `long_context_tier`, `payload_too_large`, and
+`context_overflow` no longer trigger automatic `_compress_context()` when the
+operator explicitly disabled auto-compaction. The turn fails closed with
+`compaction_disabled: True` and guidance to run `/compress`, `/new`, switch to
+a larger context model, or reduce attachments. Manual `/compress` remains
+unaffected because it does not enter this provider-error recovery branch.
+
+The test fixture for 413/compression now defaults to production behavior
+(`compression_enabled=True`), and disabled behavior is set explicitly in the
+new regression cases.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/run_agent/test_413_compression.py::TestOverflowWithCompactionDisabled
+```
+
+Result before code changes: the disabled 413/context-overflow cases failed
+because recovery still entered `_compress_context()`.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/run_agent/test_413_compression.py::TestOverflowWithCompactionDisabled
+uv run pytest -q tests/run_agent/test_413_compression.py
+```
+
+Result: targeted disabled-overflow run `3 passed, 1 warning`; full file
+`23 passed, 1 warning`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work

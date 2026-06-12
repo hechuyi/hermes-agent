@@ -96,7 +96,7 @@ def agent():
         a._cached_system_prompt = "You are helpful."
         a._use_prompt_caching = False
         a.tool_delay = 0
-        a.compression_enabled = False
+        a.compression_enabled = True
         a.save_trajectories = False
         return a
 
@@ -417,6 +417,7 @@ class TestPreflightCompression:
 
     def test_compress_context_emits_lifecycle_status_before_work(self, agent):
         """Direct context compression should tell gateway users why the turn paused."""
+        agent.compression_enabled = False
         events = []
         agent.status_callback = lambda ev, msg: events.append((ev, msg))
 
@@ -580,6 +581,7 @@ class TestPreflightCompression:
         mock_compress.assert_called_once()
         assert result["completed"] is True
 
+
     def test_no_preflight_when_under_threshold(self, agent):
         """When history fits within context, no preflight compression needed."""
         agent.compression_enabled = True
@@ -725,6 +727,89 @@ class TestPreflightCompression:
 
         assert result["completed"] is True
         assert agent.context_compressor.last_prompt_tokens == 160_000
+
+
+class TestOverflowWithCompactionDisabled:
+    """Provider overflow recovery must respect compression.enabled=false."""
+
+    @staticmethod
+    def _prefill():
+        return [
+            {"role": "user", "content": "previous question"},
+            {"role": "assistant", "content": "previous answer"},
+        ]
+
+    def test_413_does_not_compress_when_disabled(self, agent):
+        agent.compression_enabled = False
+        err_413 = _make_413_error()
+        agent.client.chat.completions.create.side_effect = [err_413, _mock_response()]
+
+        with (
+            patch.object(agent, "_compress_context") as mock_compress,
+            patch.object(agent, "_persist_session") as mock_persist,
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "hello",
+                conversation_history=self._prefill(),
+            )
+
+        mock_compress.assert_not_called()
+        mock_persist.assert_called()
+        assert result.get("failed") is True
+        assert result.get("compaction_disabled") is True
+        assert "auto-compaction is disabled" in result["error"]
+
+    def test_context_overflow_does_not_compress_when_disabled(self, agent):
+        agent.compression_enabled = False
+        err_400 = Exception(
+            "Error code: 400 - {'type': 'error', 'error': {'type': "
+            "'invalid_request_error', 'message': 'prompt is too long: "
+            "233153 tokens > 200000 maximum'}}"
+        )
+        err_400.status_code = 400
+        agent.client.chat.completions.create.side_effect = [err_400, _mock_response()]
+
+        with (
+            patch.object(agent, "_compress_context") as mock_compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation(
+                "hello",
+                conversation_history=self._prefill(),
+            )
+
+        mock_compress.assert_not_called()
+        assert result.get("failed") is True
+        assert result.get("compaction_disabled") is True
+
+    def test_413_still_compresses_when_enabled(self, agent):
+        agent.compression_enabled = True
+        err_413 = _make_413_error()
+        ok_resp = _mock_response(content="Recovered", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [err_413, ok_resp]
+
+        with (
+            patch.object(agent, "_compress_context") as mock_compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            mock_compress.return_value = (
+                [{"role": "user", "content": "hello"}],
+                "compressed",
+            )
+            result = agent.run_conversation(
+                "hello",
+                conversation_history=self._prefill(),
+            )
+
+        mock_compress.assert_called_once()
+        assert result["completed"] is True
+        assert result.get("compaction_disabled") is not True
 
 
 class TestToolResultPreflightCompression:
