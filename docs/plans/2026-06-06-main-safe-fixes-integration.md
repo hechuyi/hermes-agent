@@ -6296,3 +6296,26 @@ Docker runtime batch can still decide to absorb some or all of the upstream
 lifecycle contract, but it must do so as a sandbox lifecycle change with real
 Docker/s6 verification rather than treating the existing labels as proof of
 reuse/reaper/persist semantics.
+
+## 2026-06-13 — Adapter access-policy boundary characterization
+
+The adapter-owned access-policy group remains intentionally deferred:
+
+- `fd09b2c55e55f7e16805b1b6abaf4a41bd1b8f96`
+- `6a2e3c2d269f0fbef2a38beeb858f3abfe8f2d00`
+
+This fork's authorization boundary is still gateway-final and fail-closed:
+
+- An adapter attribute such as `enforces_own_access_policy=True` does not
+  authorize a sender when gateway env allowlists are empty, pairing approval is
+  absent, and `GATEWAY_ALLOW_ALL_USERS` is not explicitly set.
+- The same rule is pinned for `Platform.FEISHU`; a generic adapter-trust helper
+  must not accidentally authorize live Feishu traffic merely because an adapter
+  object advertises local intake policy.
+- `GATEWAY_ALLOW_ALL_USERS=true` remains the explicit global escape hatch, so
+  the tests distinguish deliberate operator opt-in from implicit adapter trust.
+
+This preserves the fork's Feishu-oriented default-deny posture while still
+leaving room for a future, explicitly reviewed Feishu-specific authorization
+contract. The upstream bare-runner guard in `6a2e3c2d` still has no independent
+value without adopting the adapter-trust helper from `fd09b2c55`.
