@@ -5572,6 +5572,42 @@ uv run pytest -q tests/agent/test_anthropic_adapter.py tests/providers/test_prov
 
 Result: `192 passed, 56 deselected`.
 
+## 2026-06-13 — Anthropic orphan-strip thinking signature absorption
+
+Official commit `64628ea89b1d5624f47b402edd54b13afd335123` was manually
+absorbed for the fork's Anthropic message conversion path.
+
+When an extended-thinking assistant turn contains signed `thinking` plus
+parallel `tool_use` blocks, and replay strips an unanswered orphaned
+`tool_use`, the original Anthropic signature no longer matches the mutated
+turn. The adapter now marks that internal mutation, propagates the mark across
+assistant-message merging, and demotes the latest direct-Anthropic thinking
+block to plain text instead of replaying a dead signature. Intact turns still
+preserve signed thinking verbatim. The internal marker is removed before the
+API payload leaves the adapter.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/agent/test_anthropic_adapter.py -k "orphan_stripped_tool_use_demotes or signed_thinking_preserved_when_no_tool_use_stripped"
+```
+
+Result before code changes: `1 failed, 1 passed, 156 deselected`; the failure
+showed the mutated latest turn still retained a `thinking`/`redacted_thinking`
+block after orphan stripping.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/agent/test_anthropic_adapter.py
+uv run ruff check agent/anthropic_adapter.py tests/agent/test_anthropic_adapter.py
+uv run python -m py_compile agent/anthropic_adapter.py tests/agent/test_anthropic_adapter.py
+git diff --check
+```
+
+Result: adapter tests `158 passed`; ruff passed; py_compile passed; diff check
+passed.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work

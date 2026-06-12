@@ -1832,6 +1832,69 @@ class TestThinkingBlockSignatureManagement:
         assert len(thinking) == 1
         assert thinking[0]["thinking"] == "First thought."
 
+    def test_orphan_stripped_tool_use_demotes_dead_signed_thinking(self):
+        """Signed thinking is demoted when orphan stripping mutates the latest turn."""
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tc_kept", "function": {"name": "tool_a", "arguments": "{}"}},
+                    {"id": "tc_orphan", "function": {"name": "tool_b", "arguments": "{}"}},
+                ],
+                "reasoning_details": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Plan: call A and B.",
+                        "signature": "sig_dead",
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc_kept", "content": "result A"},
+        ]
+
+        _, result = convert_messages_to_anthropic(messages)
+
+        assistant = next(m for m in result if m["role"] == "assistant")
+        blocks = assistant["content"]
+        assert not any(
+            isinstance(b, dict) and b.get("type") in {"thinking", "redacted_thinking"}
+            for b in blocks
+        )
+        assert "Plan: call A and B." in [
+            b.get("text", "") for b in blocks if b.get("type") == "text"
+        ]
+        assert [b.get("id") for b in blocks if b.get("type") == "tool_use"] == ["tc_kept"]
+        assert "_thinking_signature_invalidated" not in assistant
+
+    def test_signed_thinking_preserved_when_no_tool_use_stripped(self):
+        """An intact latest turn keeps its signed thinking block verbatim."""
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tc_1", "function": {"name": "tool_a", "arguments": "{}"}},
+                ],
+                "reasoning_details": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Valid plan.",
+                        "signature": "sig_live",
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc_1", "content": "result A"},
+        ]
+
+        _, result = convert_messages_to_anthropic(messages)
+
+        assistant = next(m for m in result if m["role"] == "assistant")
+        thinking = [b for b in assistant["content"] if b.get("type") == "thinking"]
+        assert len(thinking) == 1
+        assert thinking[0]["signature"] == "sig_live"
+        assert "_thinking_signature_invalidated" not in assistant
+
     def test_empty_content_after_strip_gets_placeholder(self):
         """If stripping thinking leaves an empty message, a placeholder is added."""
         messages = [

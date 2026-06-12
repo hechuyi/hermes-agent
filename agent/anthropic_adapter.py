@@ -1815,11 +1815,17 @@ def _strip_orphaned_tool_blocks(result: List[Dict[str, Any]]) -> None:
                     tool_result_ids.add(block.get("tool_use_id"))
     for m in result:
         if m["role"] == "assistant" and isinstance(m["content"], list):
-            m["content"] = [
+            kept = [
                 b
                 for b in m["content"]
                 if b.get("type") != "tool_use" or b.get("id") in tool_result_ids
             ]
+            if len(kept) != len(m["content"]) and any(
+                isinstance(b, dict) and b.get("type") in {"thinking", "redacted_thinking"}
+                for b in m["content"]
+            ):
+                m["_thinking_signature_invalidated"] = True
+            m["content"] = kept
             if not m["content"]:
                 m["content"] = [{"type": "text", "text": "(tool call removed)"}]
 
@@ -1864,6 +1870,8 @@ def _merge_consecutive_roles(result: List[Dict[str, Any]]) -> List[Dict[str, Any
                     fixed[-1]["content"] = prev_content + curr_content
             else:
                 # Consecutive assistant messages — merge text content.
+                if m.get("_thinking_signature_invalidated"):
+                    fixed[-1]["_thinking_signature_invalidated"] = True
                 # Drop thinking blocks from the *second* message: their
                 # signature was computed against a different turn boundary
                 # and becomes invalid once merged.
@@ -1952,10 +1960,16 @@ def _manage_thinking_signatures(
         else:
             # Latest assistant on direct Anthropic: keep signed, downgrade unsigned
             # to text so the reasoning isn't lost.
+            signature_dead = bool(m.get("_thinking_signature_invalidated"))
             new_content = []
             for b in m["content"]:
                 if not isinstance(b, dict) or b.get("type") not in _THINKING_TYPES:
                     new_content.append(b)
+                    continue
+                if signature_dead:
+                    thinking_text = b.get("thinking", "")
+                    if thinking_text:
+                        new_content.append({"type": "text", "text": thinking_text})
                     continue
                 if b.get("type") == "redacted_thinking":
                     # Redacted blocks use 'data' for the signature payload —
@@ -1975,6 +1989,7 @@ def _manage_thinking_signatures(
         for b in m["content"]:
             if isinstance(b, dict) and b.get("type") in _THINKING_TYPES:
                 b.pop("cache_control", None)
+        m.pop("_thinking_signature_invalidated", None)
 
 
 def _evict_old_screenshots(result: List[Dict[str, Any]]) -> None:
