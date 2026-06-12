@@ -6050,3 +6050,37 @@ uv run pytest -q tests/gateway/test_runtime_config_env_expansion.py tests/tools/
 ```
 
 Result: gateway runtime config plus approval suites `238 passed`.
+
+## 2026-06-13 — Delivery silence-narration anti-loop filter
+
+`45bc65abbe4767b327cea3b44300a25e5e7d97aa`
+(`fix(gateway): drop outbound silence-narration messages pre-send`) was
+manually absorbed as a delivery-router fix.
+
+`DeliveryRouter` now filters finalized outbound content that is only a
+silence-narration token, such as `*(silent)*`, `no response`, a bare period, or
+the mute emoji. Filtered sends return
+`{"success": True, "filtered": "silence_narration", "delivered": False}` and do
+not call the adapter. The guard is length-limited and anchored to avoid
+filtering real prose that merely contains words such as "silent". Operators can
+disable it with `gateway.filter_silence_narration: false` or
+`HERMES_FILTER_SILENCE_NARRATION=0`.
+
+This port is intentionally limited to the cron/direct `DeliveryRouter` path.
+It does not change Feishu audited delivery, current-event lifecycle, media
+delivery contracts, or gateway event-ledger state transitions.
+
+Verification:
+
+```bash
+uv run pytest -q tests/gateway/test_delivery.py tests/gateway/test_runtime_config_env_expansion.py
+uv run pytest -q tests/gateway/test_feishu_current_delivery_lifecycle.py tests/gateway/test_feishu_upload_denial.py tests/gateway/test_gateway_event_ledger.py
+uv run pytest -q tests/gateway/test_webhook_deliver_only.py tests/gateway/test_delivery.py
+uv run ruff check gateway/config.py gateway/delivery.py tests/gateway/test_delivery.py
+uv run python -m py_compile gateway/config.py gateway/delivery.py tests/gateway/test_delivery.py
+git diff --check
+```
+
+Result: delivery/config suite `56 passed`; Feishu delivery lifecycle/upload
+denial/event-ledger suite `259 passed, 2 warnings`; webhook/delivery suite
+`61 passed`; ruff passed; py_compile passed; diff check passed.

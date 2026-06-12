@@ -3,7 +3,7 @@
 import pytest
 
 from gateway.config import GatewayConfig, Platform
-from gateway.delivery import DeliveryRouter, DeliveryTarget
+from gateway.delivery import DeliveryRouter, DeliveryTarget, _is_silence_narration
 from gateway.platforms.base import SendResult
 from gateway.session import SessionSource
 
@@ -157,6 +157,94 @@ class StaleTopicAdapter:
             {"chat_id": chat_id, "topic_name": topic_name, "force_create": force_create}
         )
         return "38064" if force_create else "32343"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "*(silent)*",
+        "*Silence.*",
+        "🔇",
+        ".",
+        "...",
+        "…",
+        "(silent)",
+        "_silent_",
+        "`silent`",
+        "~silent~",
+        "no response",
+        "No Reply.",
+    ],
+)
+def test_is_silence_narration_positive(content):
+    assert _is_silence_narration(content) is True
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "Silence is golden - here is the plan...",
+        "Silent install completed",
+        "The deployment ran silently in the background",
+        "ok",
+        "Here is the result:\n\n- item one\n- item two",
+        "silent " + "x" * 70,
+        "",
+        "   ",
+        None,
+    ],
+)
+def test_is_silence_narration_negative(content):
+    assert _is_silence_narration(content) is False
+
+
+@pytest.mark.asyncio
+async def test_silence_narration_dropped_pre_send(tmp_path, monkeypatch):
+    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_FILTER_SILENCE_NARRATION", raising=False)
+    adapter = RecordingAdapter()
+    router = DeliveryRouter(GatewayConfig(), adapters={Platform.DISCORD: adapter})
+    target = DeliveryTarget.parse("discord:99887766")
+
+    result = await router._deliver_to_platform(target, "*(silent)*", metadata=None)
+
+    assert adapter.calls == []
+    assert result == {
+        "success": True,
+        "filtered": "silence_narration",
+        "delivered": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_silence_filter_config_opt_out_delivers(tmp_path, monkeypatch):
+    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_FILTER_SILENCE_NARRATION", raising=False)
+    adapter = RecordingAdapter()
+    config = GatewayConfig(filter_silence_narration=False)
+    router = DeliveryRouter(config, adapters={Platform.DISCORD: adapter})
+    target = DeliveryTarget.parse("discord:99887766")
+
+    result = await router._deliver_to_platform(target, "*(silent)*", metadata=None)
+
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0]["content"] == "*(silent)*"
+    assert result == {"success": True}
+
+
+@pytest.mark.asyncio
+async def test_silence_filter_env_override_disables_filter(tmp_path, monkeypatch):
+    monkeypatch.setattr("gateway.delivery.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_FILTER_SILENCE_NARRATION", "0")
+    adapter = RecordingAdapter()
+    router = DeliveryRouter(GatewayConfig(), adapters={Platform.DISCORD: adapter})
+    target = DeliveryTarget.parse("discord:99887766")
+
+    result = await router._deliver_to_platform(target, "🔇", metadata=None)
+
+    assert len(adapter.calls) == 1
+    assert adapter.calls[0]["content"] == "🔇"
+    assert result == {"success": True}
 
 
 @pytest.mark.asyncio

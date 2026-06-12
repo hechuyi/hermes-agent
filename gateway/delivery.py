@@ -9,6 +9,8 @@ Routes messages to the appropriate destination based on:
 """
 
 import logging
+import os
+import re
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
@@ -21,8 +23,24 @@ logger = logging.getLogger(__name__)
 MAX_PLATFORM_OUTPUT = 4000
 TRUNCATED_VISIBLE = 3800
 
+_SILENCE_NARRATION_RE = re.compile(
+    r"^[\s*_~`]*\(?\s*(silent|silence|no\s+response|no\s+reply)\s*\.?\)?[\s*_~`]*$"
+    r"|^[\s*_~`]*[\U0001F507\.\u2026]+[\s*_~`]*$",
+    re.IGNORECASE,
+)
+
 from .config import Platform, GatewayConfig
 from .session import SessionSource
+
+
+def _is_silence_narration(content: Optional[str]) -> bool:
+    """Return True when content is only a silence-narration token."""
+    if not content:
+        return False
+    stripped = content.strip()
+    if not stripped or len(stripped) > 64:
+        return False
+    return bool(_SILENCE_NARRATION_RE.match(stripped))
 
 
 def _looks_like_telegram_private_chat_id(chat_id: Optional[str]) -> bool:
@@ -261,6 +279,12 @@ class DeliveryRouter:
         path.write_text(content)
         return path
 
+    def _filter_silence_narration_enabled(self) -> bool:
+        env = os.getenv("HERMES_FILTER_SILENCE_NARRATION")
+        if env is not None:
+            return env.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(getattr(self.config, "filter_silence_narration", True))
+
     async def _deliver_to_platform(
         self,
         target: DeliveryTarget,
@@ -285,6 +309,22 @@ class DeliveryRouter:
                 content[:TRUNCATED_VISIBLE]
                 + f"\n\n... [truncated, full output saved to {saved_path}]"
             )
+
+        if (
+            self._filter_silence_narration_enabled()
+            and _is_silence_narration(content)
+        ):
+            logger.warning(
+                "Dropped silence-narration outbound to %s (chat=%s): %r",
+                target.platform.value,
+                target.chat_id,
+                content[:40],
+            )
+            return {
+                "success": True,
+                "filtered": "silence_narration",
+                "delivered": False,
+            }
         
         send_metadata = dict(metadata or {})
         is_named_telegram_private_topic = False
@@ -366,7 +406,6 @@ class DeliveryRouter:
             if _send_result_failed(result):
                 raise RuntimeError(_send_result_error(result) or f"{target.platform.value} delivery failed")
         return result
-
 
 
 
