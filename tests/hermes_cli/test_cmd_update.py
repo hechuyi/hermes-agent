@@ -199,17 +199,12 @@ class TestCmdUpdateBranchFallback:
             if call.args and call.args[0][0] == "/usr/bin/npm"
         ]
 
-        # cmd_update runs npm commands in four locations:
-        #   1. repo root  — slash-command / TUI bridge deps  (subprocess.run)
-        #   2. ui-tui/    — Ink TUI deps                     (subprocess.run)
-        #   3. web/       — npm install                      (subprocess.run)
-        #   4. web/       — npm run build                    (_run_with_idle_timeout)
+        # cmd_update runs npm commands for the repo root dependencies.
         #
-        # Repo-root and ui-tui installs intentionally omit `--silent` and run
+        # The repo-root install intentionally omits `--silent` and runs
         # without `capture_output` so optional postinstall scripts (e.g.
         # `@askjo/camofox-browser`'s browser-binary fetch) print progress —
-        # otherwise long downloads look like a hang (#18840).  The web/ install
-        # keeps `--silent` because its build step is short and noisy.
+        # otherwise long downloads look like a hang (#18840).
         update_flags = [
             "/usr/bin/npm",
             "ci",
@@ -217,38 +212,29 @@ class TestCmdUpdateBranchFallback:
             "--no-audit",
             "--progress=false",
         ]
-        assert npm_calls[:2] == [
+        assert npm_calls == [
             (update_flags, PROJECT_ROOT),
-            (update_flags, PROJECT_ROOT / "ui-tui"),
         ]
-        if len(npm_calls) > 2:
-            # Only the web/ install is left in subprocess.run; the build moved
-            # to _run_with_idle_timeout to make Vite progress visible (#33788).
-            assert npm_calls[2:] == [
-                (["/usr/bin/npm", "ci", "--silent"], PROJECT_ROOT / "web"),
-            ]
 
-        # The web UI build itself went through the streaming helper.
-        mock_idle.assert_called_once()
-        idle_args, idle_kwargs = mock_idle.call_args
-        assert idle_args[0] == ["/usr/bin/npm", "run", "build"]
-        assert idle_kwargs["cwd"] == PROJECT_ROOT / "web"
+        # The stale web build helper is still mocked in this test path but is
+        # no longer reached when the visual frontend is absent.
+        mock_idle.assert_not_called()
 
-        # Regression for #18840: repo root + ui-tui installs must stream
-        # output (capture_output=False) so postinstall progress is visible
-        # to the user.
-        repo_and_tui_calls = [
+        # Regression for #18840: repo-root npm install must stream output
+        # (capture_output=False) so postinstall progress is visible to the
+        # user.
+        repo_calls = [
             call
             for call in mock_run.call_args_list
             if call.args
             and call.args[0][0] == "/usr/bin/npm"
             and call.args[0][1] == "ci"
-            and call.kwargs.get("cwd") in {PROJECT_ROOT, PROJECT_ROOT / "ui-tui"}
+            and call.kwargs.get("cwd") == PROJECT_ROOT
         ]
-        assert len(repo_and_tui_calls) == 2
-        for call in repo_and_tui_calls:
+        assert len(repo_calls) == 1
+        for call in repo_calls:
             assert call.kwargs.get("capture_output") is False, (
-                "repo-root / ui-tui npm install must stream output "
+                "repo-root npm install must stream output "
                 "(no capture_output) so postinstall progress is visible"
             )
 

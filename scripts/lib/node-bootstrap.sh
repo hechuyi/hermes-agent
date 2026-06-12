@@ -2,8 +2,8 @@
 # ============================================================================
 # scripts/lib/node-bootstrap.sh
 # ----------------------------------------------------------------------------
-# Sourceable helper: ensure Node.js >= MIN_VERSION is available for the TUI
-# (React + Ink), browser tools, and the WhatsApp bridge.
+# Sourceable helper: ensure Node.js >= MIN_VERSION is available for browser
+# tools and Node-backed bridges.
 #
 # Strategy (first hit wins — respects the user's existing tooling):
 #   1. modern `node` already on PATH

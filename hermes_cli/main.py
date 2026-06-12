@@ -8374,7 +8374,6 @@ def _update_node_dependencies() -> None:
 
     paths = (
         ("repo root", PROJECT_ROOT),
-        ("ui-tui", PROJECT_ROOT / "ui-tui"),
     )
     if not any((path / "package.json").exists() for _, path in paths):
         return

@@ -7,12 +7,9 @@ Verifies that ``HermesCLI._handle_update_command`` correctly:
 - Cancels cleanly when ``_prompt_text_input_modal`` returns None (timeout /
   modal dismissed)
 
-Also verifies that ``hermes_cli.main._launch_tui`` correctly handles exit
-code 42 (the TUI's signal to trigger an update) by calling
-``relaunch(["update"], preserve_inherited=False)`` from the Python wrapper
-side.  The companion Vitest (``ui-tui/src/__tests__/createSlashHandler.test.ts``)
-covers the TypeScript slash-handler that *emits* code 42; this file covers
-the Python wrapper branch that *acts on* it.
+Historically this also covered the TUI update handoff; the Feishu runtime
+prune removed that visual surface, so this file now stays scoped to the
+classic CLI slash command.
 """
 
 from __future__ import annotations

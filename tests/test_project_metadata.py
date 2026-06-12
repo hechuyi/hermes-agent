@@ -221,13 +221,25 @@ def test_feishu_extra_includes_qrcode_for_qr_login():
     assert any(dep.startswith("qrcode") for dep in feishu_extra)
 
 
-def test_dashboard_plugin_manifests_and_assets_are_packaged():
-    """Bundled dashboard plugins need their manifests and built assets in
-    wheel installs so /api/dashboard/plugins can discover them outside a
-    source checkout."""
+def test_dashboard_extra_not_in_default_install_profiles():
+    """The dashboard backend remains optional while visual surfaces are pruned."""
+    optional_dependencies = _load_optional_dependencies()
+
+    assert not any(
+        spec == "hermes-agent[web]"
+        for spec in optional_dependencies["all"]
+    )
+    assert not any(
+        spec == "hermes-agent[web]"
+        for spec in optional_dependencies["termux-all"]
+    )
+
+
+def test_dashboard_plugin_static_assets_are_not_packaged():
+    """Visual dashboard plugin bundles are not part of the Feishu runtime wheel."""
     package_data = _load_package_data()
     plugin_data = package_data["plugins"]
 
     assert "*/dashboard/manifest.json" in plugin_data
-    assert "*/dashboard/dist/*" in plugin_data
-    assert "*/dashboard/dist/**/*" in plugin_data
+    assert "*/dashboard/dist/*" not in plugin_data
+    assert "*/dashboard/dist/**/*" not in plugin_data
