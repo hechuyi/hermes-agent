@@ -963,6 +963,24 @@ def _classify_400(
             should_fallback=False,
         )
 
+    # Request-validation errors must be checked before context overflow:
+    # unsupported max_tokens errors contain a context pattern but are
+    # deterministic format failures. Do not match the generic
+    # invalid_request_error code because real overflow errors use it too.
+    if (
+        any(
+            pattern in error_msg
+            for pattern in _REQUEST_VALIDATION_PATTERNS
+            if pattern != "invalid_request_error"
+        )
+        or error_code_lower in {"unknown_parameter", "unsupported_parameter"}
+    ):
+        return result_fn(
+            FailoverReason.format_error,
+            retryable=False,
+            should_fallback=True,
+        )
+
     # Context overflow from 400
     if any(p in error_msg for p in _CONTEXT_OVERFLOW_PATTERNS):
         return result_fn(

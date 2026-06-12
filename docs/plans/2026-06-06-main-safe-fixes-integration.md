@@ -5300,6 +5300,39 @@ uv run python -m py_compile gateway/run.py cli.py hermes_cli/runtime_provider.py
 
 Result: both commands exited `0`.
 
+## 2026-06-12 — Unsupported-parameter classification absorption
+
+`2ce3ae3d16decaea907d44203f9ea2a6d4c7bae7`
+(`fix(error-classifier): don't misclassify unsupported-param 400s as context
+overflow`) was manually absorbed. The local port classifies explicit
+unsupported/unknown-parameter 400s as non-retryable `format_error` before the
+context-overflow heuristics run. This prevents GPT-5-family `max_tokens`
+rejections from being routed into the compression loop simply because the
+provider error message contains the literal `max_tokens` token.
+
+The guard deliberately excludes the generic `invalid_request_error` code:
+OpenAI-compatible providers also use that code for genuine context-overflow
+400s, so matching it would suppress compression for real oversized prompts.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/agent/test_error_classifier.py -k "unsupported_max_tokens or unknown_parameter_not_context_overflow or real_overflow_with_invalid_request_error"
+```
+
+Result before code changes: `1 failed, 2 passed, 155 deselected`; the failing
+case classified the GPT-5 `max_tokens` rejection as `context_overflow`.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/agent/test_error_classifier.py -k "unsupported_max_tokens or unknown_parameter_not_context_overflow or real_overflow_with_invalid_request_error"
+uv run pytest -q tests/agent/test_error_classifier.py
+```
+
+Result: targeted run `3 passed, 155 deselected`; full classifier run
+`158 passed`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work
