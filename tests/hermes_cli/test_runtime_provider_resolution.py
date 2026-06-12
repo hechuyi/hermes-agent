@@ -712,6 +712,52 @@ def test_named_custom_provider_uses_saved_credentials(monkeypatch):
     assert resolved["source"] == "custom_provider:Local"
 
 
+def test_named_custom_provider_lifts_max_output_tokens(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "Local",
+                    "base_url": "http://1.2.3.4:1234/v1",
+                    "api_key": "local-provider-key",
+                    "max_output_tokens": 12000,
+                }
+            ]
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="local")
+
+    assert resolved["max_output_tokens"] == 12000
+
+
+def test_named_custom_provider_accepts_max_tokens_alias(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "custom_providers": [
+                {
+                    "name": "Local",
+                    "base_url": "http://1.2.3.4:1234/v1",
+                    "api_key": "local-provider-key",
+                    "max_tokens": 4096,
+                }
+            ]
+        },
+    )
+
+    resolved = rp.resolve_runtime_provider(requested="local")
+
+    assert resolved["max_output_tokens"] == 4096
+
+
 def test_named_custom_provider_uses_providers_dict_when_list_missing(monkeypatch):
     """After v11→v12 migration deletes custom_providers, resolution should
     still find entries in the providers dict via get_compatible_custom_providers."""

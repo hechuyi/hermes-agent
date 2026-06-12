@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gateway.config import Platform
+from gateway import run as gateway_run
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource
 
@@ -319,7 +320,7 @@ class TestRunBackgroundTask:
         }
 
     @pytest.mark.asyncio
-    async def test_agent_cleanup_runs_when_background_agent_raises(self):
+    async def test_agent_cleanup_runs_when_background_agent_raises(self, monkeypatch):
         """Temporary background agents must be cleaned up on error paths too."""
         monkeypatch.setattr(
             gateway_run,
@@ -353,7 +354,7 @@ class TestRunBackgroundTask:
         mock_agent_instance.close.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_exception_sends_error_message(self):
+    async def test_exception_sends_error_message(self, monkeypatch):
         """When the agent raises an exception, an error message is sent."""
         monkeypatch.setattr(
             gateway_run,

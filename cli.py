@@ -797,6 +797,21 @@ def get_toolset_for_tool(*args, **kwargs):
 
     return _get_toolset_for_tool(*args, **kwargs)
 
+
+def _resolve_cli_max_tokens(model_config: Any) -> Optional[int]:
+    env_max_tokens = os.environ.get("HERMES_MAX_TOKENS")
+    if env_max_tokens:
+        try:
+            return int(env_max_tokens)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(model_config, dict):
+        max_tokens = model_config.get("max_tokens")
+        if isinstance(max_tokens, int):
+            return max_tokens
+    return None
+
+
 # Extracted CLI modules (Phase 3)
 from hermes_cli.banner import build_welcome_banner
 from hermes_cli.commands import SlashCommandCompleter, SlashCommandAutoSuggest
@@ -3036,6 +3051,7 @@ class HermesCLI:
         _config_model = (_model_config.get("default") or _model_config.get("model") or "") if isinstance(_model_config, dict) else (_model_config or "")
         _DEFAULT_CONFIG_MODEL = ""
         self.model = model or _config_model or _DEFAULT_CONFIG_MODEL
+        self.max_tokens = _resolve_cli_max_tokens(_model_config)
         # Auto-detect model from local server if still on default
         if self.model == _DEFAULT_CONFIG_MODEL:
             _base_url = (_model_config.get("base_url") or "") if isinstance(_model_config, dict) else ""
@@ -4699,6 +4715,7 @@ class HermesCLI:
         resolved_acp_command = runtime.get("command")
         resolved_acp_args = list(runtime.get("args") or [])
         resolved_credential_pool = runtime.get("credential_pool")
+        resolved_provider_max_tokens = runtime.get("max_output_tokens")
         # A callable api_key is a bearer-token provider (Azure Foundry
         # Entra ID — ``azure_identity_adapter.build_token_provider``).
         # The OpenAI SDK accepts ``Callable[[], str]`` for ``api_key`` and
@@ -4735,6 +4752,7 @@ class HermesCLI:
             or resolved_acp_command != self.acp_command
             or resolved_acp_args != self.acp_args
         )
+        previous_max_tokens = self.max_tokens
         self.provider = resolved_provider
         self.api_mode = resolved_api_mode
         self.acp_command = resolved_acp_command
@@ -4743,6 +4761,12 @@ class HermesCLI:
         self._provider_source = runtime.get("source")
         self.api_key = api_key
         self.base_url = base_url
+        if (
+            self.max_tokens is None
+            and isinstance(resolved_provider_max_tokens, int)
+            and resolved_provider_max_tokens > 0
+        ):
+            self.max_tokens = resolved_provider_max_tokens
 
         # When a custom_provider entry carries an explicit `model` field,
         # use it as the effective model name.  Without this, running
@@ -4782,7 +4806,13 @@ class HermesCLI:
 
         # AIAgent/OpenAI client holds auth at init time, so rebuild if key,
         # routing, or the effective model changed.
-        if (credentials_changed or routing_changed or model_changed) and self.agent is not None:
+        max_tokens_changed = previous_max_tokens != self.max_tokens
+        if (
+            credentials_changed
+            or routing_changed
+            or model_changed
+            or max_tokens_changed
+        ) and self.agent is not None:
             self.agent = None
             self._active_agent_route_signature = None
 
@@ -4806,6 +4836,7 @@ class HermesCLI:
             "command": self.acp_command,
             "args": list(self.acp_args or []),
             "credential_pool": getattr(self, "_credential_pool", None),
+            "max_tokens": self.max_tokens,
         }
         route = {
             "model": self.model,
@@ -4817,6 +4848,7 @@ class HermesCLI:
                 runtime["api_mode"],
                 runtime["command"],
                 tuple(runtime["args"]),
+                runtime["max_tokens"],
             ),
         }
 
@@ -4988,6 +5020,7 @@ class HermesCLI:
                 "command": self.acp_command,
                 "args": list(self.acp_args or []),
                 "credential_pool": getattr(self, "_credential_pool", None),
+                "max_tokens": self.max_tokens,
             }
             effective_model = model_override or self.model
             self.agent = AIAgent(
@@ -4999,6 +5032,7 @@ class HermesCLI:
                 acp_command=runtime.get("command"),
                 acp_args=runtime.get("args"),
                 credential_pool=runtime.get("credential_pool"),
+                max_tokens=runtime.get("max_tokens"),
                 max_iterations=self.max_turns,
                 enabled_toolsets=self.enabled_toolsets,
                 disabled_toolsets=self.disabled_toolsets,
@@ -8941,6 +8975,7 @@ class HermesCLI:
                     api_mode=turn_route["runtime"].get("api_mode"),
                     acp_command=turn_route["runtime"].get("command"),
                     acp_args=turn_route["runtime"].get("args"),
+                    max_tokens=turn_route["runtime"].get("max_tokens"),
                     max_iterations=self.max_turns,
                     enabled_toolsets=self.enabled_toolsets,
                     quiet_mode=True,

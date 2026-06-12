@@ -5243,6 +5243,63 @@ uv run python -m py_compile utils.py run_agent.py agent/agent_init.py agent/auxi
 
 Result: both commands exited `0`.
 
+## 2026-06-12 — Gateway max_tokens propagation absorption
+
+The following upstream commits were reviewed and absorbed with local routing
+adaptation:
+
+- `cf786593cd83f8cffd76d9faed561f7d92e24454`
+- `1c909e75e1a0ba6e5fde07da804066a1e42450e9`
+- `14275d7baa1a48844e58671f63ab49c4823c7cc0`
+- `2dda393f9f44e5030ca36cf2c8ab8065a9ac982f`
+
+The local port makes `max_tokens` an explicit runtime field for both CLI and
+gateway-created agents. Precedence is `HERMES_MAX_TOKENS` >
+`model.max_tokens` > named custom-provider `max_output_tokens`/`max_tokens` >
+unset. Gateway turn routing and CLI turn routing include the value in their
+route signatures so cached agents are rebuilt when the output cap changes.
+Session `/model` overrides can also carry `max_tokens`.
+
+The config compatibility layer now preserves `max_output_tokens` and
+`max_tokens` on `custom_providers`/`providers` entries, and
+`hermes_cli.runtime_provider` lifts either key onto the resolved runtime as
+`max_output_tokens`. This preserves custom provider compatibility without
+introducing a fixed model policy.
+
+During the verification pass, `tests/gateway/test_background_command.py`
+exposed an unrelated test bug: two tests used `monkeypatch` and `gateway_run`
+without declaring/importing them. The test harness was fixed without changing
+gateway product behavior.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/gateway/test_max_tokens_propagation.py tests/hermes_cli/test_cli_max_tokens_propagation.py tests/hermes_cli/test_runtime_provider_resolution.py -k "max_tokens or max_output_tokens"
+```
+
+Result before code changes: `11 failed, 127 deselected`.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/gateway/test_max_tokens_propagation.py tests/hermes_cli/test_cli_max_tokens_propagation.py tests/hermes_cli/test_runtime_provider_resolution.py -k "max_tokens or max_output_tokens"
+```
+
+Result: `11 passed, 127 deselected`.
+
+```bash
+uv run pytest -q tests/gateway/test_max_tokens_propagation.py tests/hermes_cli/test_cli_max_tokens_propagation.py tests/hermes_cli/test_runtime_provider_resolution.py tests/hermes_cli/test_custom_provider_model_switch.py tests/gateway/test_fast_command.py tests/gateway/test_background_command.py tests/gateway/test_compress_command.py
+```
+
+Result: `183 passed`.
+
+```bash
+uv run ruff check gateway/run.py cli.py hermes_cli/runtime_provider.py hermes_cli/config.py tests/gateway/test_max_tokens_propagation.py tests/hermes_cli/test_cli_max_tokens_propagation.py tests/hermes_cli/test_runtime_provider_resolution.py tests/gateway/test_background_command.py
+uv run python -m py_compile gateway/run.py cli.py hermes_cli/runtime_provider.py hermes_cli/config.py tests/gateway/test_max_tokens_propagation.py tests/hermes_cli/test_cli_max_tokens_propagation.py tests/hermes_cli/test_runtime_provider_resolution.py tests/gateway/test_background_command.py
+```
+
+Result: both commands exited `0`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work

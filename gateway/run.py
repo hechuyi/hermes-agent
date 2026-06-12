@@ -1582,6 +1582,28 @@ logger = logging.getLogger(__name__)
 _AGENT_PENDING_SENTINEL = object()
 
 
+def _resolve_runtime_max_tokens(runtime: dict) -> int | None:
+    from hermes_cli.runtime_provider import _get_model_config
+
+    env_max_tokens = os.environ.get("HERMES_MAX_TOKENS")
+    if env_max_tokens:
+        try:
+            return int(env_max_tokens)
+        except (TypeError, ValueError):
+            return None
+
+    model_cfg = _get_model_config()
+    if isinstance(model_cfg, dict):
+        configured = model_cfg.get("max_tokens")
+        if isinstance(configured, int):
+            return configured
+
+    provider_cap = runtime.get("max_output_tokens")
+    if isinstance(provider_cap, int) and provider_cap > 0:
+        return provider_cap
+    return None
+
+
 def _resolve_runtime_agent_kwargs() -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
 
@@ -1619,6 +1641,8 @@ def _resolve_runtime_agent_kwargs() -> dict:
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
 
+    max_tokens = _resolve_runtime_max_tokens(runtime)
+
     return {
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
@@ -1627,6 +1651,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
+        "max_tokens": max_tokens,
     }
 
 
@@ -1674,6 +1699,7 @@ def _try_resolve_fallback_provider() -> dict | None:
                     "command": runtime.get("command"),
                     "args": list(runtime.get("args") or []),
                     "credential_pool": runtime.get("credential_pool"),
+                    "max_tokens": _resolve_runtime_max_tokens(runtime),
                     "model": entry.get("model"),
                 }
             except Exception as fb_exc:
@@ -3000,6 +3026,7 @@ class GatewayRunner:
                 "api_key": override.get("api_key"),
                 "base_url": override.get("base_url"),
                 "api_mode": override.get("api_mode"),
+                "max_tokens": override.get("max_tokens"),
             }
             if override_runtime.get("api_key"):
                 logger.debug(
@@ -3087,6 +3114,7 @@ class GatewayRunner:
             "command": runtime_kwargs.get("command"),
             "args": list(runtime_kwargs.get("args") or []),
             "credential_pool": runtime_kwargs.get("credential_pool"),
+            "max_tokens": runtime_kwargs.get("max_tokens"),
         }
         route = {
             "model": model,
@@ -3098,6 +3126,7 @@ class GatewayRunner:
                 runtime["api_mode"],
                 runtime["command"],
                 tuple(runtime["args"]),
+                runtime["max_tokens"],
             ),
         }
 
@@ -16149,7 +16178,7 @@ class GatewayRunner:
         if not override:
             return model, runtime_kwargs
         model = override.get("model", model)
-        for key in ("provider", "api_key", "base_url", "api_mode"):
+        for key in ("provider", "api_key", "base_url", "api_mode", "max_tokens"):
             val = override.get(key)
             if val is not None:
                 runtime_kwargs[key] = val
