@@ -752,10 +752,9 @@ def _ensure_web_plugins_loaded() -> None:
     swallowed below as a warning, a packaged layout where discovery ran before
     the bundled tree was importable, or a stale empty-discovery cache). When
     that happens the registry is empty and *both* web_search and web_extract
-    dead-end on "No web {search,extract} provider configured" — even though the
-    keyless Parallel default is supposed to work with zero setup. So after
-    discovery we verify the keyless default landed and, if not, register the
-    bundled providers directly (see
+    dead-end on "No web {search,extract} provider configured". So after
+    discovery we verify the bundled Parallel provider landed and, if not,
+    register the bundled providers directly (see
     :func:`_register_bundled_web_providers_directly`).
     """
     try:
@@ -765,10 +764,9 @@ def _ensure_web_plugins_loaded() -> None:
     except Exception as exc:
         logger.warning("Web plugin discovery failed (non-fatal): %s", exc)
 
-    # Belt-and-suspenders: guarantee the keyless Parallel default (the
-    # documented zero-setup backend for both web_search and web_extract) is
-    # actually registered. The lookup is a cheap dict hit on the healthy path
-    # (discovery already registered it → no-op); only an empty registry pays
+    # Belt-and-suspenders: guarantee the bundled Parallel provider is actually
+    # registered. The lookup is a cheap dict hit on the healthy path
+    # (discovery already registered it -> no-op); only an empty registry pays
     # for the direct-registration sweep.
     try:
         from agent.web_search_registry import get_provider
@@ -786,9 +784,9 @@ def _register_bundled_web_providers_directly() -> None:
     (:func:`hermes_cli.plugins._ensure_plugins_discovered`), which auto-loads
     every ``plugins/web/<name>`` backend (they are ``kind: backend``). This
     fallback exists for the runtimes where that sweep does not leave the web
-    registry populated — so the keyless Parallel default (and any bundled
-    backend the user explicitly configured) keeps working instead of
-    surfacing a misleading "No web provider configured" error.
+    registry populated — so bundled backends the user explicitly configured
+    keep working instead of surfacing a misleading "No web provider configured"
+    error.
 
     Imports each bundled ``plugins/web/<name>`` package and calls its
     ``register()`` directly against :mod:`agent.web_search_registry`. Idempotent
