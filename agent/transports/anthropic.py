@@ -84,7 +84,7 @@ class AnthropicTransport(ProviderTransport):
         to OpenAI finish_reason, and collects reasoning_details in provider_data.
         """
         import json
-        from agent.anthropic_adapter import _to_plain_data
+        from agent.anthropic_adapter import _sanitize_replay_block, _to_plain_data
         from agent.transports.types import ToolCall
 
         strip_tool_prefix = kwargs.get("strip_tool_prefix", False)
@@ -93,14 +93,20 @@ class AnthropicTransport(ProviderTransport):
         text_parts = []
         reasoning_parts = []
         reasoning_details = []
+        ordered_blocks = []
         tool_calls = []
 
         for block in response.content:
+            block_dict = _to_plain_data(block)
+            if isinstance(block_dict, dict):
+                clean_block = _sanitize_replay_block(block_dict)
+                if clean_block is not None:
+                    ordered_blocks.append(clean_block)
             if block.type == "text":
                 text_parts.append(block.text)
-            elif block.type == "thinking":
-                reasoning_parts.append(block.thinking)
-                block_dict = _to_plain_data(block)
+            elif block.type in {"thinking", "redacted_thinking"}:
+                if block.type == "thinking":
+                    reasoning_parts.append(block.thinking)
                 if isinstance(block_dict, dict):
                     reasoning_details.append(block_dict)
             elif block.type == "tool_use":
@@ -130,6 +136,18 @@ class AnthropicTransport(ProviderTransport):
         provider_data = {}
         if reasoning_details:
             provider_data["reasoning_details"] = reasoning_details
+        has_signed_thinking = any(
+            isinstance(block, dict)
+            and block.get("type") in {"thinking", "redacted_thinking"}
+            and (block.get("signature") or block.get("data"))
+            for block in ordered_blocks
+        )
+        has_tool_use = any(
+            isinstance(block, dict) and block.get("type") == "tool_use"
+            for block in ordered_blocks
+        )
+        if has_signed_thinking and has_tool_use:
+            provider_data["anthropic_content_blocks"] = ordered_blocks
 
         return NormalizedResponse(
             content="\n".join(text_parts) if text_parts else None,

@@ -1543,6 +1543,11 @@ def _convert_content_part_to_anthropic(part: Any) -> Optional[Dict[str, Any]]:
 
     if ptype == "input_text":
         block: Dict[str, Any] = {"type": "text", "text": part.get("text", "")}
+    elif ptype == "text":
+        block = {"type": "text", "text": part.get("text", "")}
+        citations = part.get("citations")
+        if isinstance(citations, list) and citations:
+            block["citations"] = citations
     elif ptype in {"image_url", "input_image"}:
         image_value = part.get("image_url", {})
         url = image_value.get("url", "") if isinstance(image_value, dict) else str(image_value or "")
@@ -1657,6 +1662,57 @@ def _content_parts_to_anthropic_blocks(parts: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _redact_plain_data(value: Any) -> Any:
+    if isinstance(value, str):
+        from agent.redact import redact_sensitive_text
+
+        return redact_sensitive_text(value)
+    if isinstance(value, list):
+        return [_redact_plain_data(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_plain_data(item) for key, item in value.items()}
+    return value
+
+
+def _sanitize_replay_block(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return an Anthropic input-valid replay block, or None to drop it."""
+    if not isinstance(block, dict):
+        return None
+    block_type = block.get("type")
+    if block_type == "text":
+        out: Dict[str, Any] = {"type": "text", "text": block.get("text", "")}
+        citations = block.get("citations")
+        if isinstance(citations, list) and citations:
+            out["citations"] = citations
+        if isinstance(block.get("cache_control"), dict):
+            out["cache_control"] = dict(block["cache_control"])
+        return out
+    if block_type == "thinking":
+        out = {"type": "thinking", "thinking": block.get("thinking", "")}
+        if block.get("signature"):
+            out["signature"] = block["signature"]
+        return out
+    if block_type == "redacted_thinking":
+        if not block.get("data"):
+            return None
+        return {"type": "redacted_thinking", "data": block["data"]}
+    if block_type == "tool_use":
+        out = {
+            "type": "tool_use",
+            "id": _sanitize_tool_id(block.get("id", "")),
+            "name": block.get("name", ""),
+            "input": _redact_plain_data(block.get("input", {})),
+        }
+        if isinstance(block.get("cache_control"), dict):
+            out["cache_control"] = dict(block["cache_control"])
+        return out
+    if block_type == "image":
+        source = block.get("source")
+        if isinstance(source, dict):
+            return {"type": "image", "source": copy.deepcopy(source)}
+    return None
+
+
 def _convert_assistant_message(m: Dict[str, Any]) -> Dict[str, Any]:
     """Convert an assistant message to Anthropic content blocks.
 
@@ -1664,6 +1720,32 @@ def _convert_assistant_message(m: Dict[str, Any]) -> Dict[str, Any]:
     reasoning_content injection for Kimi/DeepSeek endpoints.
     """
     content = m.get("content", "")
+    ordered_blocks = m.get("anthropic_content_blocks")
+    if isinstance(ordered_blocks, list) and ordered_blocks:
+        redacted_input_by_id: Dict[str, Any] = {}
+        for tc in m.get("tool_calls", []) or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function", {}) or {}
+            raw_args = fn.get("arguments", "{}")
+            try:
+                parsed_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except (json.JSONDecodeError, ValueError):
+                parsed_args = {}
+            redacted_input_by_id[_sanitize_tool_id(tc.get("id", ""))] = parsed_args
+        replayed: List[Dict[str, Any]] = []
+        for block in ordered_blocks:
+            clean = _sanitize_replay_block(block)
+            if clean is None:
+                continue
+            if clean.get("type") == "tool_use":
+                redacted = redacted_input_by_id.get(clean.get("id", ""))
+                if redacted is not None:
+                    clean["input"] = redacted
+            replayed.append(clean)
+        if replayed:
+            return {"role": "assistant", "content": replayed}
+
     blocks = _extract_preserved_thinking_blocks(m)
     if content:
         if isinstance(content, list):

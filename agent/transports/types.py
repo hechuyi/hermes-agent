@@ -122,6 +122,11 @@ class NormalizedResponse:
         return pd.get("reasoning_details")
 
     @property
+    def anthropic_content_blocks(self):
+        pd = self.provider_data or {}
+        return pd.get("anthropic_content_blocks")
+
+    @property
     def codex_reasoning_items(self):
         pd = self.provider_data or {}
         return pd.get("codex_reasoning_items")

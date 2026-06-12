@@ -948,6 +948,10 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         if preserved:
             msg["reasoning_details"] = preserved
 
+    ordered_blocks = getattr(assistant_message, "anthropic_content_blocks", None)
+    if ordered_blocks:
+        msg["anthropic_content_blocks"] = ordered_blocks
+
     # Codex Responses API: preserve encrypted reasoning items for
     # multi-turn continuity. These get replayed as input on the next turn.
     codex_items = getattr(assistant_message, "codex_reasoning_items", None)

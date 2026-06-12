@@ -5644,6 +5644,63 @@ Result: focused recovery tests `3 passed, 1 warning`; related filtered suite
 `49 passed, 476 deselected, 1 warning`; ruff passed; py_compile passed; diff
 check passed.
 
+## 2026-06-13 — In-memory Anthropic ordered block absorption
+
+The final runtime shape of the Anthropic interleaved thinking/tool replay group
+was manually absorbed:
+
+- `aaccaada282bdf42d8a38e5f49bfa2b6e27efd63`
+- `529bb1c3d516f7580af39d6095f0a7d97f7e9ad5`
+- `7a1eed8268a7cb9112c8e4a29c868009d7137315`
+- `efcbbde48c38acbf3489ec1f7fc91ce1a30822f4`
+
+Native Anthropic responses that interleave signed `thinking` or
+`redacted_thinking` with `tool_use` now carry sanitized
+`anthropic_content_blocks` through `NormalizedResponse` and
+`build_assistant_message()` as an in-memory, provider-specific replay aid.
+`convert_messages_to_anthropic()` uses that ordered channel to preserve the
+original `thinking/tool_use/thinking/tool_use` sequence for the latest
+assistant turn, preventing signature invalidation caused by rebuilding from
+parallel `reasoning_details` and `tool_calls` lists.
+
+The ordered replay path was intentionally tightened for this fork:
+
+- SDK response-only fields such as `parsed_output`, `citations=None`, and
+  `caller` are stripped by whitelist before replay.
+- `tool_use.input` is re-sourced from already redacted
+  `tool_calls[].function.arguments` when available.
+- If a raw ordered block must be used, its plain data is recursively passed
+  through the existing redaction utility before replay.
+- The field remains in-memory only. No `hermes_state.py`, `run_agent.py`
+  persistence parameter, state.db column, or gateway replay schema was added.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/agent/test_anthropic_thinking_block_order.py tests/agent/test_anthropic_output_field_leak.py
+```
+
+Result before code changes: collection failed with
+`ImportError: cannot import name '_sanitize_replay_block'`, and the ordered
+provider-data channel did not exist.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/agent/test_anthropic_thinking_block_order.py tests/agent/test_anthropic_output_field_leak.py
+uv run pytest -q tests/agent/test_anthropic_thinking_block_order.py tests/agent/test_anthropic_output_field_leak.py tests/agent/test_anthropic_adapter.py tests/agent/test_error_classifier.py tests/agent/test_anthropic_kwargs_sanitize.py
+uv run pytest -q tests/providers/test_provider_profiles.py tests/providers/test_profile_wiring.py tests/providers/test_transport_parity.py -k "anthropic or reasoning or transport"
+uv run pytest -q tests/gateway/test_feishu_smoke.py tests/gateway/test_feishu_package_b_scope.py tests/gateway/test_feishu_package_c_scope.py tests/tools/test_feishu_tools.py tests/gateway/test_max_tokens_propagation.py
+uv run ruff check agent/anthropic_adapter.py agent/transports/anthropic.py agent/transports/types.py agent/chat_completion_helpers.py tests/agent/test_anthropic_thinking_block_order.py tests/agent/test_anthropic_output_field_leak.py
+uv run python -m py_compile agent/anthropic_adapter.py agent/transports/anthropic.py agent/transports/types.py agent/chat_completion_helpers.py tests/agent/test_anthropic_thinking_block_order.py tests/agent/test_anthropic_output_field_leak.py
+git diff --check
+```
+
+Result: focused ordered/output-field tests `10 passed`; broader Anthropic
+suite `336 passed, 1 warning`; provider/transport filtered suite `37 passed,
+55 deselected`; Feishu/max-token regression `119 passed`; ruff passed;
+py_compile passed; diff check passed.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work
