@@ -32,6 +32,7 @@ from agent.gemini_schema import sanitize_gemini_tool_parameters
 logger = logging.getLogger(__name__)
 
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_DEFAULT_MAX_OUTPUT_TOKENS = 65535
 
 
 def is_native_gemini_base_url(base_url: str) -> bool:
@@ -414,6 +415,8 @@ def build_gemini_request(
         generation_config["temperature"] = temperature
     if max_tokens is not None:
         generation_config["maxOutputTokens"] = max_tokens
+    else:
+        generation_config["maxOutputTokens"] = GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
     if top_p is not None:
         generation_config["topP"] = top_p
     if stop:

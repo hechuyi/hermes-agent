@@ -535,6 +535,20 @@ class ChatCompletionsTransport(ProviderTransport):
                     api_kwargs[k] = v
 
         if extra_body:
+            try:
+                from agent.gemini_native_adapter import is_native_gemini_base_url
+
+                native_gemini = is_native_gemini_base_url(params.get("base_url"))
+            except Exception:
+                native_gemini = False
+            if native_gemini:
+                extra_body = {
+                    key: value
+                    for key, value in extra_body.items()
+                    if key in {"thinking_config", "thinkingConfig"}
+                }
+
+        if extra_body:
             api_kwargs["extra_body"] = extra_body
 
         return api_kwargs

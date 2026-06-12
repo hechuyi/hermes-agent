@@ -5408,6 +5408,42 @@ uv run pytest -q tests/plugins/model_providers/test_kimi_profile.py tests/plugin
 Result: targeted plugin-profile run `50 passed, 1 warning`; broader
 Kimi/OpenCode surface run `85 passed, 150 deselected, 1 warning`.
 
+## 2026-06-12 — Gemini native parameter contract absorption
+
+Part of `ec46f5912e309330a68c49b273dc1346c1d018d0` was manually absorbed as a
+Gemini-native transport fix. Native Gemini request construction now translates
+`max_tokens=None` to `maxOutputTokens=65535`; Gemini's native API otherwise
+applies a low internal output default instead of treating an omitted cap as
+the full budget. Explicit `max_tokens` values continue to pass through.
+
+The chat-completions profile path now also strips OpenAI-style `extra_body`
+keys when the resolved `base_url` is a native Gemini endpoint
+(`generativelanguage.googleapis.com`, excluding `/openai`). This prevents
+profile additions such as Nous `tags` from reaching Google's native REST
+schema while preserving Gemini-native `thinking_config` fields and preserving
+all OpenAI-compatible `/openai` behavior.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/agent/test_gemini_native_adapter.py -k "max_tokens_none or explicit_max_tokens"
+uv run pytest -q tests/agent/transports/test_chat_completions.py -k "GeminiNativeExtraBodyStrip"
+```
+
+Result before code changes: adapter run `1 failed, 1 passed, 11 deselected`
+because `generationConfig` was absent for `max_tokens=None`; transport run
+`2 failed, 2 passed, 69 deselected` because native Gemini kwargs still carried
+Nous `tags`.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/agent/test_gemini_native_adapter.py
+uv run pytest -q tests/agent/transports/test_chat_completions.py
+```
+
+Result: adapter `13 passed`; chat-completions transport `73 passed`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work

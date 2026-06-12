@@ -326,3 +326,23 @@ def test_stream_event_translation_keeps_identical_calls_in_distinct_parts():
     assert tool_chunks[0].choices[0].delta.tool_calls[0].index == 0
     assert tool_chunks[1].choices[0].delta.tool_calls[0].index == 1
     assert tool_chunks[0].choices[0].delta.tool_calls[0].id != tool_chunks[1].choices[0].delta.tool_calls[0].id
+
+
+def test_max_tokens_none_defaults_to_gemini_output_ceiling():
+    from agent.gemini_native_adapter import build_gemini_request
+
+    req = build_gemini_request(
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=None,
+    )
+    assert req["generationConfig"]["maxOutputTokens"] == 65535
+
+
+def test_explicit_max_tokens_is_respected():
+    from agent.gemini_native_adapter import build_gemini_request
+
+    req = build_gemini_request(
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=4096,
+    )
+    assert req["generationConfig"]["maxOutputTokens"] == 4096
