@@ -7,6 +7,7 @@ from hermes_cli.models import (
     OPENROUTER_MODELS, fetch_openrouter_models, model_ids, detect_provider_for_model,
     is_nous_free_tier, partition_nous_models_by_tier,
     check_nous_free_tier, _FREE_TIER_CACHE_TTL,
+    get_curated_nous_model_ids,
     union_with_portal_free_recommendations,
     union_with_portal_paid_recommendations,
 )
@@ -59,6 +60,21 @@ class TestOpenRouterModels:
     def test_at_least_5_models(self):
         """Sanity check that the models list hasn't been accidentally truncated."""
         assert len(OPENROUTER_MODELS) >= 5
+
+    def test_stepfun_flash_snapshot_tracks_curated_openrouter_id(self):
+        ids = [mid for mid, _ in OPENROUTER_MODELS]
+
+        assert "stepfun/step-3.7-flash" in ids
+        assert "stepfun/step-3.5-flash" not in ids
+
+
+class TestNousCuratedModels:
+    def test_stepfun_flash_snapshot_tracks_curated_nous_id(self):
+        with patch("hermes_cli.model_catalog.get_curated_nous_models", return_value=None):
+            ids = get_curated_nous_model_ids()
+
+        assert "stepfun/step-3.7-flash" in ids
+        assert "stepfun/step-3.5-flash" not in ids
 
 
 class TestFetchOpenRouterModels:

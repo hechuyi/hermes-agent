@@ -1748,10 +1748,11 @@ Local result:
   `DEFAULT_CATALOG_FALLBACK_URLS`, `_fetch_manifest_with_fallback()`, and
   routing `get_catalog()` through that helper.
 - Absorbed the exact URL equality test semantics from `bc736ff543`.
-- Did not absorb the curated model-list swap from `f2d88c820`; this fork's
-  model catalog/provider choices are protected separately, and the local diff
-  intentionally leaves `hermes_cli/models.py` and
-  `website/static/api/model-catalog.json` untouched.
+- Initially left the curated model-list swap from `f2d88c820` out because the
+  fork's model catalog/provider choices were protected separately. The runtime
+  StepFun portion was later absorbed narrowly in `hermes_cli/models.py`; the
+  generated website manifest remains absent from this fork and was not
+  reintroduced.
 - Per-provider override URLs still use direct fetch semantics and do not
   implicitly fall through to the default public catalog fallback chain.
 
@@ -3552,11 +3553,12 @@ Remaining upstream groups reviewed and left out of blind absorption:
   `a22c2500`): deferred because upstream removes or weakens legacy session-key
   fallback, while this fork explicitly preserves Nous legacy auth, forced
   legacy mode, mint/cache/retry behavior, and proxy fallback.
-- Model catalog changes (`f2d88c82`, `bc736ff5`, `5e7c2ffa`): split. Raw
-  GitHub manifest fallback is already equivalent locally, but upstream model
-  list swaps remain deferred as unrelated catalog churn. The operator's
-  currently usable `5.5` channel is runtime availability evidence only, not a
-  Hermes catalog policy.
+- Model catalog changes (`f2d88c82`, `bc736ff5`, `5e7c2ffa`): split and now
+  absorbed for runtime fallback catalogs. Raw GitHub manifest fallback is
+  equivalent locally; OpenRouter/Nous fallback lists carry the upstream Gemini
+  and StepFun curated-id updates. The generated website manifest remains absent
+  from this fork. The operator's currently usable `5.5` channel is runtime
+  availability evidence only, not a Hermes catalog policy.
 - Progressive tool disclosure / tool-search (`369075dc`, `7427b9d5`,
   `17097761`, `18c9e891`, `a87f0a82`): deferred for design review. This group
   changes MCP/plugin tool discovery and dispatch scoping and touches the Hermes
@@ -6019,12 +6021,20 @@ uv run pytest -q tests/agent/test_context_compressor.py::TestUpdateFromResponse 
 Result: compression lock/concurrent-fork suite `13 passed, 1 warning`;
 rough-estimate deferral suite `7 passed, 1 warning`.
 
-## 2026-06-13 — Model catalog Gemini fallback update
+## 2026-06-13 — Model catalog runtime fallback updates
 
 `5e7c2ffa9ff5c8280a8fd8e3cbf5605be409fcf3`
 (`chore(models): gemini-3.5-flash replaces gemini-3-flash-preview in
 OpenRouter + Nous lists`) was manually absorbed for the runtime catalog in
 `hermes_cli/models.py`.
+
+The remaining runtime StepFun portion of
+`f2d88c820c841e9b2192e0158747ae9190745a23`
+(`fix(model-catalog): fall through to raw.github when Vercel 403s; swap
+step-3.5-flash for step-3.7-flash on OpenRouter+Nous`) was later absorbed in
+the same fork-limited scope: OpenRouter and Nous fallback snapshots now use
+`stepfun/step-3.7-flash`; the native StepFun provider list still keeps its own
+`step-3.5-*` entries.
 
 The upstream generated website catalog file is not present in this fork and was
 not reintroduced. The port is intentionally limited to the OpenRouter fallback
@@ -6038,7 +6048,15 @@ Verification:
 uv run pytest -q tests/hermes_cli/test_models.py tests/hermes_cli/test_models_dev_preferred_merge.py tests/hermes_cli/test_opencode_go_in_model_list.py tests/hermes_cli/test_copilot_in_model_list.py tests/agent/test_bedrock_integration.py
 ```
 
-Result: model catalog suite `147 passed, 1 warning`.
+Follow-up verification for the StepFun runtime fallback absorption:
+
+```bash
+uv run --extra dev pytest tests/hermes_cli/test_models.py tests/hermes_cli/test_model_catalog.py tests/hermes_cli/test_model_validation.py -q -rs
+```
+
+Result: `187 passed, 1 skipped`; the skipped test is the expected website
+manifest regeneration check because this fork does not include
+`website/static/api/model-catalog.json`.
 
 ## 2026-06-13 — Gateway manual-approval startup warning
 
