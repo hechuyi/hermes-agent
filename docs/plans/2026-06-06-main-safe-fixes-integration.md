@@ -5479,6 +5479,50 @@ uv run pytest -q tests/run_agent/test_413_compression.py
 Result: targeted disabled-overflow run `3 passed, 1 warning`; full file
 `23 passed, 1 warning`.
 
+## 2026-06-13 — Anthropic dispatch boundary guards
+
+The following low-coupling Anthropic boundary fixes were manually absorbed:
+
+- `399b8ee5f0136e4b4c3cc4affdbf3bbf90b461c1`
+- `86e10dd87817fb50f495fd27e85961e9026f850d`
+
+Native Anthropic Messages SDK dispatch now strips OpenAI Responses-only kwargs
+(`instructions`, `input`, `store`, `parallel_tool_calls`) immediately before
+both non-streaming `messages.create()` and streaming `messages.stream()` calls.
+This is a defensive boundary guard for api-mode flip races: a malformed payload
+no longer dies with a non-retryable SDK `TypeError`, and a warning with a
+`#31673` breadcrumb keeps the underlying race visible.
+
+The error classifier now also treats Anthropic 400 messages saying thinking
+blocks cannot be modified or must remain as they were as
+`thinking_signature`. This routes those deterministic frozen-thinking-block
+errors into the existing thinking-signature recovery path instead of generic
+format-error handling. The classifier remains narrow: messages that say
+`cannot be modified` without `thinking` are not classified as
+`thinking_signature`.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/agent/test_anthropic_kwargs_sanitize.py
+.venv/bin/python -m pytest tests/agent/test_error_classifier.py::TestClassifyApiError::test_anthropic_thinking_blocks_must_remain_unmodified -q
+```
+
+Result before code changes: sanitizer run `5 failed, 1 passed, 1 warning`
+because the helper did not exist and `_anthropic_messages_create()` forwarded
+Responses-only kwargs to the SDK; classifier targeted run failed because the
+new Anthropic thinking-block messages were classified as `format_error`.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/agent/test_anthropic_kwargs_sanitize.py
+uv run pytest -q tests/agent/test_error_classifier.py
+```
+
+Result: sanitizer run `6 passed, 1 warning`; full classifier run
+`161 passed`.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work

@@ -2282,3 +2282,26 @@ def build_anthropic_kwargs(
         kwargs["extra_headers"] = {"anthropic-beta": ",".join(betas)}
 
     return kwargs
+
+
+_RESPONSES_ONLY_KWARGS = frozenset(
+    {"instructions", "input", "store", "parallel_tool_calls"}
+)
+
+
+def sanitize_anthropic_kwargs(api_kwargs: Any, *, log_prefix: str = "") -> Any:
+    """Drop OpenAI Responses-only kwargs before Anthropic Messages SDK calls."""
+    if not isinstance(api_kwargs, dict):
+        return api_kwargs
+    leaked = _RESPONSES_ONLY_KWARGS.intersection(api_kwargs)
+    if not leaked:
+        return api_kwargs
+    for key in leaked:
+        api_kwargs.pop(key, None)
+    logger.warning(
+        "%sStripped Responses-only kwarg(s) %s from an Anthropic Messages "
+        "call (api_mode flip race; see #31673).",
+        log_prefix,
+        sorted(leaked),
+    )
+    return api_kwargs

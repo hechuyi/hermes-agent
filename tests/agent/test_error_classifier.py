@@ -661,6 +661,25 @@ class TestClassifyApiError:
         # Without "thinking" in the message, it shouldn't be thinking_signature
         assert result.reason != FailoverReason.thinking_signature
 
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "thinking blocks cannot be modified",
+            "thinking blocks must remain as they were",
+        ],
+    )
+    def test_anthropic_thinking_blocks_must_remain_unmodified(self, message):
+        e = MockAPIError(message, status_code=400)
+        result = classify_api_error(e, provider="anthropic")
+        assert result.reason == FailoverReason.thinking_signature
+        assert result.retryable is True
+        assert result.should_compress is False
+
+    def test_400_cannot_be_modified_without_thinking_not_classified(self):
+        e = MockAPIError("this field cannot be modified after creation", status_code=400)
+        result = classify_api_error(e, provider="anthropic", approx_tokens=0)
+        assert result.reason != FailoverReason.thinking_signature
+
     def test_invalid_encrypted_content_classified_as_retryable_replay_failure(self):
         body = {
             "error": {
