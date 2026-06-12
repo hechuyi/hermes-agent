@@ -334,6 +334,8 @@ def get_read_block_error(path: str) -> Optional[str]:
 # that should be guarded. Adding a new area here extends the guard with no
 # other code change.
 PROFILE_SCOPED_AREAS = ("skills", "plugins", "cron", "memories")
+SANDBOX_MIRROR_AREAS = (*PROFILE_SCOPED_AREAS, "SOUL.md", "USER.md", "MEMORY.md")
+CONTAINER_BACKENDS = {"docker", "singularity", "modal", "daytona"}
 
 
 def _resolve_active_profile_name() -> str:
@@ -450,4 +452,70 @@ def get_cross_profile_warning(path: str) -> Optional[str]:
         f"after explicit user direction, retry the call with "
         f"``cross_profile=True``. (Defense-in-depth — not a security "
         f"boundary; the terminal tool can still bypass.)"
+    )
+
+
+def _is_under(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def classify_sandbox_mirror_target(path: str) -> Optional[dict]:
+    """Classify writes into sandbox-local ``.hermes`` control-plane mirrors.
+
+    Container/cloud backends often run in a project sandbox whose filesystem is
+    not the host Hermes profile. Writing ``/workspace/.hermes/SOUL.md`` or
+    ``/workspace/.hermes/memories/MEMORY.md`` appears successful in the sandbox
+    but the host Hermes process never reads it. This classifier detects that
+    mirror shape while explicitly allowing the real host ``HERMES_HOME`` and
+    Hermes root paths.
+    """
+    try:
+        target = Path(os.path.expanduser(str(path))).resolve()
+        hermes_home = _hermes_home_path().resolve()
+        hermes_root = _hermes_root_path().resolve()
+    except (OSError, RuntimeError):
+        return None
+
+    if _is_under(target, hermes_home) or _is_under(target, hermes_root):
+        return None
+
+    parts = target.parts
+    for idx, part in enumerate(parts):
+        if part != ".hermes":
+            continue
+        rel_parts = parts[idx + 1:]
+        if not rel_parts:
+            continue
+        head = rel_parts[0]
+        if head in PROFILE_SCOPED_AREAS or head in {"SOUL.md", "USER.md", "MEMORY.md"}:
+            mirror_root = Path(*parts[:idx + 1])
+            return {
+                "target_path": str(target),
+                "mirror_root": str(mirror_root),
+                "relative_path": os.path.join(*rel_parts),
+                "area": head,
+            }
+    return None
+
+
+def get_container_mirror_warning(path: str, backend: str) -> Optional[str]:
+    """Return a warning for container backend writes to sandbox ``.hermes`` mirrors."""
+    backend_name = (backend or "").strip().lower()
+    if backend_name not in CONTAINER_BACKENDS:
+        return None
+    info = classify_sandbox_mirror_target(path)
+    if info is None:
+        return None
+    return (
+        f"sandbox-local .hermes mirror write blocked: {info['target_path']} "
+        f"is under {info['mirror_root']}, but the terminal backend is "
+        f"{backend_name!r}. Writes there usually affect only the sandbox "
+        "filesystem, not the host Hermes profile that loads SOUL.md, USER.md, "
+        "skills, plugins, cron jobs, or memories. Write to the real host "
+        "HERMES_HOME instead, or use the terminal backend only after explicitly "
+        "confirming this sandbox-local mirror is the intended target."
     )

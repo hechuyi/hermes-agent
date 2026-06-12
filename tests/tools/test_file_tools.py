@@ -171,6 +171,41 @@ class TestWriteFileHandler:
         assert "error" in result
         assert "string" in result["error"].lower() or "content" in result["error"].lower()
 
+    @patch("tools.file_tools._get_file_ops")
+    def test_docker_backend_blocks_sandbox_hermes_mirror_write(
+        self, mock_get, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        target = "/workspace/project/.hermes/SOUL.md"
+
+        from tools.file_tools import write_file_tool
+
+        result = json.loads(write_file_tool(str(target), "new soul"))
+
+        assert "error" in result
+        assert "sandbox-local .hermes mirror" in result["error"]
+        assert "docker" in result["error"]
+        mock_get.assert_not_called()
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_local_backend_allows_project_dot_hermes_write(
+        self, mock_get, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("TERMINAL_ENV", "local")
+        target = "/workspace/project/.hermes/SOUL.md"
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.to_dict.return_value = {"status": "ok", "path": str(target)}
+        mock_ops.write_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import write_file_tool
+
+        result = json.loads(write_file_tool(str(target), "new soul"))
+
+        assert result["status"] == "ok"
+        mock_ops.write_file.assert_called_once()
+
 
 class TestPatchHandler:
     @patch("tools.file_tools._get_file_ops")
@@ -243,6 +278,29 @@ class TestPatchHandler:
         result = json.loads(patch_tool(mode="invalid_mode"))
         assert "error" in result
         assert "Unknown mode" in result["error"]
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_docker_backend_blocks_sandbox_hermes_mirror_patch(
+        self, mock_get, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        target = "/workspace/project/.hermes/memories/MEMORY.md"
+
+        from tools.file_tools import patch_tool
+
+        result = json.loads(
+            patch_tool(
+                mode="replace",
+                path=str(target),
+                old_string="old",
+                new_string="new",
+            )
+        )
+
+        assert "error" in result
+        assert "sandbox-local .hermes mirror" in result["error"]
+        assert "docker" in result["error"]
+        mock_get.assert_not_called()
 
     @patch("tools.file_tools._get_file_ops")
     def test_patch_v4a_rejects_traversal_in_update_header(self, mock_get):

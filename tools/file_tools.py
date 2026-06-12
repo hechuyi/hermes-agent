@@ -369,6 +369,22 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
     return get_cross_profile_warning(resolved)
 
 
+def _check_container_mirror_path(filepath: str, task_id: str = "default") -> str | None:
+    """Return a warning when a container backend targets a sandbox .hermes mirror."""
+    try:
+        from agent.file_safety import get_container_mirror_warning
+    except Exception:
+        return None
+
+    try:
+        resolved = str(_resolve_path_for_task(filepath, task_id))
+    except (OSError, ValueError):
+        resolved = filepath
+
+    backend = os.getenv("TERMINAL_ENV", "local")
+    return get_container_mirror_warning(resolved, backend)
+
+
 def _is_expected_write_exception(exc: Exception) -> bool:
     """Return True for expected write denials that should not hit error logs."""
     if isinstance(exc, PermissionError):
@@ -1043,6 +1059,9 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
+    mirror_warning = _check_container_mirror_path(path, task_id)
+    if mirror_warning:
+        return tool_error(mirror_warning)
     if not cross_profile:
         cross_warning = _check_cross_profile_path(path, task_id)
         if cross_warning:
@@ -1140,6 +1159,9 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
         sensitive_err = _check_sensitive_path(_p, task_id)
         if sensitive_err:
             return tool_error(sensitive_err)
+        mirror_warning = _check_container_mirror_path(_p, task_id)
+        if mirror_warning:
+            return tool_error(mirror_warning)
         if not cross_profile:
             cross_warning = _check_cross_profile_path(_p, task_id)
             if cross_warning:

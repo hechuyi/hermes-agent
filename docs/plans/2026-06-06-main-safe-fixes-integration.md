@@ -5819,6 +5819,43 @@ Result: focused compressor MEDIA tests `2 passed`; broader compressor suite
 `123 passed, 1 warning`; gateway/media regression `219 passed, 2 skipped,
 2 warnings`; ruff passed; py_compile passed; diff check passed.
 
+## 2026-06-13 — Sandbox `.hermes` mirror write guard
+
+Official runtime/tools review identified the upstream `162c7856c` /
+`1495f0cc3` class of file-safety fixes: non-local terminal backends must not
+silently write Hermes control-plane files into sandbox-local `.hermes` mirrors
+that the host Hermes process will never read.
+
+The fork already had cross-profile guards for host Hermes profiles. This pass
+adds a separate classifier for sandbox mirror targets such as
+`/workspace/.hermes/SOUL.md` and `/workspace/.hermes/memories/MEMORY.md`.
+`write_file` and `patch` now block those paths when `TERMINAL_ENV` is one of
+the container/cloud backends (`docker`, `singularity`, `modal`, `daytona`),
+while leaving local backend project `.hermes` writes and real host
+`HERMES_HOME` writes under existing rules.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/agent/test_file_safety_sandbox_mirror.py tests/tools/test_file_tools.py -k "sandbox_hermes_mirror or sandbox_mirror or project_dot_hermes"
+```
+
+Result before code changes: `8 failed`; the classifier and warning API did not
+exist, and file tools did not block sandbox mirror writes before file_ops.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/agent/test_file_safety_sandbox_mirror.py tests/tools/test_file_tools.py -k "sandbox_hermes_mirror or sandbox_mirror or project_dot_hermes"
+uv run pytest -q tests/agent/test_file_safety.py tests/agent/test_file_safety_credentials.py tests/agent/test_file_safety_cross_profile.py tests/agent/test_file_safety_sandbox_mirror.py tests/tools/test_file_tools.py
+uv run ruff check agent/file_safety.py tools/file_tools.py tests/agent/test_file_safety_sandbox_mirror.py tests/tools/test_file_tools.py
+uv run python -m py_compile agent/file_safety.py tools/file_tools.py tests/agent/test_file_safety_sandbox_mirror.py tests/tools/test_file_tools.py
+git diff --check
+```
+
+Result: focused sandbox mirror tests `8 passed`; broader file-safety/file-tools
+suite `98 passed`; ruff passed; py_compile passed; diff check passed.
+
 ## 2026-06-07 — Remaining upstream candidates deferred or record-only
 
 The following upstream commits were reviewed after the Kanban absorption work
