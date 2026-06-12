@@ -11,6 +11,14 @@ def teardown_function():
     terminal_tool._reset_cached_sudo_passwords()
 
 
+def test_terminal_schema_advertises_persistent_env_state():
+    description = terminal_tool.TERMINAL_TOOL_DESCRIPTION
+
+    assert "exported environment variables persist between calls" in description
+    assert "activate a virtualenv" in description
+    assert "do not re-source the same environment before every command" in description
+
+
 def test_searching_for_sudo_does_not_trigger_rewrite(monkeypatch):
     monkeypatch.delenv("SUDO_PASSWORD", raising=False)
     monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
