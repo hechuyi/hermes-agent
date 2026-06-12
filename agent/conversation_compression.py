@@ -592,7 +592,7 @@ def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
         return False
 
     try:
-        from tools.vision_tools import _resize_image_for_vision
+        from tools.vision_tools import _image_exceeds_dimension, _resize_image_for_vision
     except Exception as exc:
         logger.warning("image-shrink recovery: vision_tools unavailable — %s", exc)
         return False
@@ -602,14 +602,14 @@ def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
     # much larger; shrinking to 4 MB here loses quality but only fires
     # after a confirmed provider rejection, so the alternative is failure.
     target_bytes = 4 * 1024 * 1024
+    max_dimension = 8000
     changed_count = 0
+    unshrinkable_count = 0
 
     def _shrink_data_url(url: str) -> Optional[str]:
         """Return a smaller data URL, or None if shrink can't help."""
+        nonlocal unshrinkable_count
         if not isinstance(url, str) or not url.startswith("data:"):
-            return None
-        if len(url) <= target_bytes:
-            # This specific image wasn't the oversized one.
             return None
         try:
             header, _, data = url.partition(",")
@@ -630,22 +630,31 @@ def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
             try:
                 tmp.write(raw)
                 tmp.close()
+                needs_shrink = len(url) > target_bytes or _image_exceeds_dimension(
+                    Path(tmp.name), max_dimension
+                )
+                if not needs_shrink:
+                    # This specific image wasn't the oversized one.
+                    return None
                 resized = _resize_image_for_vision(
                     Path(tmp.name),
                     mime_type=mime,
                     max_base64_bytes=target_bytes,
+                    max_dimension=max_dimension,
                 )
             finally:
                 try:
                     Path(tmp.name).unlink(missing_ok=True)
                 except Exception:
                     pass
-            if not resized or len(resized) >= len(url):
+            if not resized or len(resized) >= len(url) or len(resized) > target_bytes:
                 # Shrink didn't help (or made it bigger — corrupt input?).
+                unshrinkable_count += 1
                 return None
             return resized
         except Exception as exc:
             logger.warning("image-shrink recovery: re-encode failed — %s", exc)
+            unshrinkable_count += 1
             return None
 
     for msg in api_messages:
@@ -677,9 +686,15 @@ def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
 
     if changed_count:
         logger.info(
-            "image-shrink recovery: re-encoded %d image part(s) to fit under %.0f MB",
-            changed_count, target_bytes / (1024 * 1024),
+            "image-shrink recovery: re-encoded %d image part(s) to fit under %.0f MB / %d px",
+            changed_count, target_bytes / (1024 * 1024), max_dimension,
         )
+    if unshrinkable_count:
+        logger.warning(
+            "image-shrink recovery: %d oversized image part(s) still exceed limits after resize",
+            unshrinkable_count,
+        )
+        return False
     return changed_count > 0
 
 

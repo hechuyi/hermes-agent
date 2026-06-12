@@ -17,6 +17,8 @@ from unittest.mock import patch
 import pytest
 
 from tools.vision_tools import (
+    _EMBED_MAX_DIMENSION,
+    _EMBED_TARGET_BYTES,
     _build_native_vision_tool_result,
     _handle_vision_analyze,
     _supports_media_in_tool_results,
@@ -140,6 +142,27 @@ class TestVisionAnalyzeNative:
         )
         assert isinstance(result, dict)
         assert result.get("_multimodal") is True
+
+    def test_native_fast_path_resizes_before_embedding(self, tmp_path):
+        img = tmp_path / "t.png"
+        img.write_bytes(_TINY_PNG)
+        oversized = "data:image/png;base64," + "A" * (_EMBED_TARGET_BYTES + 100)
+        shrunk = "data:image/png;base64,SMALL"
+
+        with (
+            patch("tools.vision_tools._image_to_base64_data_url", return_value=oversized),
+            patch("tools.vision_tools._resize_image_for_vision", return_value=shrunk) as mock_resize,
+        ):
+            result = asyncio.get_event_loop().run_until_complete(
+                _vision_analyze_native(str(img), "?")
+            )
+
+        assert isinstance(result, dict)
+        image_part = next(p for p in result["content"] if p.get("type") == "image_url")
+        assert image_part["image_url"]["url"] == shrunk
+        mock_resize.assert_called_once()
+        assert mock_resize.call_args.kwargs["max_base64_bytes"] == _EMBED_TARGET_BYTES
+        assert mock_resize.call_args.kwargs["max_dimension"] == _EMBED_MAX_DIMENSION
 
 
 # ─── _handle_vision_analyze fast-path gating ─────────────────────────────────

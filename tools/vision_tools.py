@@ -308,6 +308,45 @@ _MAX_BASE64_BYTES = 20 * 1024 * 1024
 # rejects an image, we downscale to this target and retry once.
 _RESIZE_TARGET_BYTES = 5 * 1024 * 1024
 
+# Native tool-result image embeds need more headroom than ordinary auxiliary
+# vision calls because the image is persisted into the next provider request.
+_EMBED_TARGET_BYTES = 4 * 1024 * 1024
+_EMBED_MAX_DIMENSION = 7900
+
+
+def _load_pillow_image():
+    try:
+        from PIL import Image
+        return Image
+    except ImportError:
+        try:
+            from tools.lazy_deps import ensure as _lazy_ensure
+
+            _lazy_ensure("tool.vision", prompt=False)
+            from PIL import Image
+            return Image
+        except Exception:
+            return None
+
+
+def _image_exceeds_dimension(image_path: Path, max_dimension: int) -> bool:
+    """Return True when either image axis exceeds max_dimension."""
+    if not max_dimension:
+        return False
+    Image = _load_pillow_image()
+    if Image is None:
+        return False
+    img = None
+    try:
+        img = Image.open(image_path)
+        return max(getattr(img, "width", 0), getattr(img, "height", 0)) > max_dimension
+    except Exception:
+        return False
+    finally:
+        close = getattr(img, "close", None)
+        if callable(close):
+            close()
+
 
 def _is_image_size_error(error: Exception) -> bool:
     """Detect if an API error is related to image or payload size."""
@@ -320,7 +359,8 @@ def _is_image_size_error(error: Exception) -> bool:
 
 
 def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
-                              max_base64_bytes: int = _RESIZE_TARGET_BYTES) -> str:
+                              max_base64_bytes: int = _RESIZE_TARGET_BYTES,
+                              max_dimension: int | None = None) -> str:
     """Convert an image to a base64 data URL, auto-resizing if too large.
 
     Tries Pillow first to progressively downscale oversized images.  If Pillow
@@ -333,7 +373,10 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
     # Skip the expensive full-read + encode if Pillow can resize directly.
     file_size = image_path.stat().st_size
     estimated_b64 = (file_size * 4) // 3 + 100  # ~header overhead
-    if estimated_b64 <= max_base64_bytes:
+    dimension_too_large = bool(
+        max_dimension and _image_exceeds_dimension(image_path, max_dimension)
+    )
+    if estimated_b64 <= max_base64_bytes and not dimension_too_large:
         # Small enough — just encode directly.
         data_url = _image_to_base64_data_url(image_path, mime_type=mime_type)
         if len(data_url) <= max_base64_bytes:
@@ -342,14 +385,13 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
         data_url = None  # defer full encode; try Pillow resize first
 
     # Attempt auto-resize with Pillow (soft dependency)
-    try:
-        from PIL import Image
-        import io as _io
-    except ImportError:
+    Image = _load_pillow_image()
+    if Image is None:
         logger.info("Pillow not installed — cannot auto-resize oversized image")
         if data_url is None:
             data_url = _image_to_base64_data_url(image_path, mime_type=mime_type)
         return data_url  # caller will raise the size error
+    import io as _io
 
     logger.info("Image file is %.1f MB (estimated base64 %.1f MB, limit %.1f MB), auto-resizing...",
                 file_size / (1024 * 1024), estimated_b64 / (1024 * 1024),
@@ -370,6 +412,13 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
     # Convert RGBA to RGB for JPEG output
     if pil_format == "JPEG" and img.mode in {"RGBA", "P"}:
         img = img.convert("RGB")
+
+    if max_dimension and max(img.width, img.height) > max_dimension:
+        scale = max_dimension / max(img.width, img.height)
+        new_w = max(int(img.width * scale), 1)
+        new_h = max(int(img.height * scale), 1)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+        logger.info("Resized to dimension cap %dx%d", new_w, new_h)
 
     # Strategy: halve dimensions until base64 fits, up to 4 rounds.
     # For JPEG, also try reducing quality at each size step.
@@ -408,7 +457,8 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
             img.save(buf, **save_kwargs)
             encoded = base64.b64encode(buf.getvalue()).decode("ascii")
             candidate = f"data:{out_mime};base64,{encoded}"
-            if len(candidate) <= max_base64_bytes:
+            dimension_ok = not max_dimension or max(img.width, img.height) <= max_dimension
+            if len(candidate) <= max_base64_bytes and dimension_ok:
                 logger.info("Auto-resized image fits: %.1f MB (quality=%s, %dx%d)",
                             len(candidate) / (1024 * 1024), q,
                             img.width, img.height)
@@ -615,16 +665,23 @@ async def _vision_analyze_native(
             temp_image_path, mime_type=detected_mime_type,
         )
 
-        # Honour the same hard cap as the legacy path. Resize if needed.
-        if len(image_data_url) > _MAX_BASE64_BYTES:
+        # Native embeds are persisted into the next model request, so keep
+        # them below the provider-safe embed target and dimension cap.
+        if (
+            len(image_data_url) > _EMBED_TARGET_BYTES
+            or _image_exceeds_dimension(temp_image_path, _EMBED_MAX_DIMENSION)
+        ):
             image_data_url = _resize_image_for_vision(
-                temp_image_path, mime_type=detected_mime_type,
+                temp_image_path,
+                mime_type=detected_mime_type,
+                max_base64_bytes=_EMBED_TARGET_BYTES,
+                max_dimension=_EMBED_MAX_DIMENSION,
             )
-            if len(image_data_url) > _MAX_BASE64_BYTES:
+            if len(image_data_url) > _EMBED_TARGET_BYTES:
                 return tool_error(
                     f"Image too large for vision API: base64 payload is "
                     f"{len(image_data_url) / (1024 * 1024):.1f} MB "
-                    f"(limit {_MAX_BASE64_BYTES / (1024 * 1024):.0f} MB) "
+                    f"(embed limit {_EMBED_TARGET_BYTES / (1024 * 1024):.0f} MB) "
                     f"even after resizing. Install Pillow "
                     f"(`pip install Pillow`) for better auto-resize, "
                     f"or compress the image manually.",

@@ -5944,3 +5944,39 @@ Record-only:
 - `b6ed3913d241b456d16f6b2d5a5d75a60c80aa51` — skills.sh grouping metadata.
   The grouping parser is mostly neutral, but it is coupled to the trusted tap
   expansion above and has no current fork requirement by itself.
+
+## 2026-06-13 — Vision embed cap and dimension guard
+
+The upstream vision cap/dimension class was manually absorbed as a focused
+local port. Native vision tool-result embeds now use a stricter 4 MB target and
+7900 px dimension cap before attaching image data to the next model request.
+The reactive image-too-large retry path also recognizes Anthropic dimension
+wording, resizes data-URL image parts with an 8000 px cap, and refuses to retry
+if any oversized part still exceeds the byte target after resizing.
+
+Pillow remains optional: it is exposed as the `vision` extra and lazy-installable
+as `tool.vision`, matching the fork's policy that opt-in backend/tool
+dependencies stay out of `[all]`. This batch does not change Feishu gateway
+event ledgers, media extraction contracts, provider routing, model catalogs, or
+the current local `5.5` channel availability.
+
+Red evidence before implementation:
+
+```bash
+uv run pytest -q tests/run_agent/test_image_shrink_recovery.py::TestImageTooLargeClassification::test_anthropic_dimension_exceeds_message tests/run_agent/test_image_shrink_recovery.py::TestShrinkImagePartsHelper::test_mixed_unshrinkable_oversized_image_returns_false tests/tools/test_vision_native_fast_path.py::TestVisionAnalyzeNative::test_native_fast_path_resizes_before_embedding tests/tools/test_vision_tools.py::TestImageExceedsDimension
+```
+
+Result before code changes: `2 failed, 3 passed`. The classifier returned
+`format_error` for Anthropic dimension wording, and the shrink helper returned
+`True` even when a second oversized image remained above the retry target.
+
+Post-fix verification:
+
+```bash
+uv run pytest -q tests/run_agent/test_image_shrink_recovery.py::TestImageTooLargeClassification::test_anthropic_dimension_exceeds_message tests/run_agent/test_image_shrink_recovery.py::TestShrinkImagePartsHelper::test_mixed_unshrinkable_oversized_image_returns_false tests/tools/test_vision_native_fast_path.py::TestVisionAnalyzeNative::test_native_fast_path_resizes_before_embedding tests/tools/test_vision_tools.py::TestImageExceedsDimension
+uv run pytest -q tests/run_agent/test_image_shrink_recovery.py tests/tools/test_vision_tools.py tests/tools/test_vision_native_fast_path.py
+uv run ruff check agent/conversation_compression.py agent/error_classifier.py tools/vision_tools.py tests/run_agent/test_image_shrink_recovery.py tests/tools/test_vision_native_fast_path.py tests/tools/test_vision_tools.py tools/lazy_deps.py
+```
+
+Result: focused tests `5 passed`; broader vision/image-shrink suite
+`110 passed, 1 warning`; ruff passed.

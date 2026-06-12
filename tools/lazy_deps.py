@@ -168,6 +168,9 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # ─── Tools ─────────────────────────────────────────────────────────────
     # ACP adapter (VS Code / Zed / JetBrains integration)
     "tool.acp": ("agent-client-protocol==0.9.0",),
+    # Pillow is optional but enables image downscaling for native vision
+    # embeds and provider image-too-large recovery.
+    "tool.vision": ("Pillow==12.2.0",),
     # Dashboard (`hermes dashboard`)
     "tool.dashboard": (
         "fastapi==0.133.1",

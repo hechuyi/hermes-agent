@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import types
 from pathlib import Path
 from typing import Awaitable
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,6 +20,7 @@ from tools.vision_tools import (
     _is_image_size_error,
     _MAX_BASE64_BYTES,
     _RESIZE_TARGET_BYTES,
+    _image_exceeds_dimension,
     vision_analyze_tool,
     check_vision_requirements,
 )
@@ -900,6 +902,33 @@ class TestResizeImageForVision:
                 result = _resize_image_for_vision(path, max_base64_bytes=100)
                 # Should return the original (oversized) data url
                 assert len(result) > 100
+
+
+class TestImageExceedsDimension:
+    def test_returns_true_when_dimension_exceeds_limit(self, tmp_path):
+        path = tmp_path / "wide.png"
+        path.write_bytes(b"fake")
+
+        class FakeImage:
+            width = 1200
+            height = 9000
+
+            def close(self):
+                return None
+
+        fake_image_mod = types.ModuleType("PIL.Image")
+        fake_image_mod.open = lambda _path: FakeImage()
+        fake_pil = types.ModuleType("PIL")
+        fake_pil.Image = fake_image_mod
+
+        with patch.dict("sys.modules", {"PIL": fake_pil, "PIL.Image": fake_image_mod}):
+            assert _image_exceeds_dimension(path, 8000) is True
+
+    def test_returns_false_without_pillow(self, tmp_path):
+        path = tmp_path / "image.png"
+        path.write_bytes(b"fake")
+        with patch.dict("sys.modules", {"PIL": None, "PIL.Image": None}):
+            assert _image_exceeds_dimension(path, 8000) is False
 
 
 # ---------------------------------------------------------------------------

@@ -168,6 +168,9 @@ _PAYLOAD_TOO_LARGE_PATTERNS = [
 # "messages.N.content.K.image.source.base64: image exceeds 5 MB maximum").
 _IMAGE_TOO_LARGE_PATTERNS = [
     "image exceeds",        # Anthropic: "image exceeds 5 MB maximum"
+    "image dimensions exceed",  # Anthropic: "image dimensions exceed max allowed size"
+    "dimensions exceed max allowed size",
+    "max allowed size: 8000",
     "image too large",      # generic
     "image_too_large",      # error_code variant
     "image size exceeds",   # variant

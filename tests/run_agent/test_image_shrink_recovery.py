@@ -52,6 +52,16 @@ class TestImageTooLargeClassification:
         assert result.reason == FailoverReason.image_too_large
         assert result.retryable is True
 
+    def test_anthropic_dimension_exceeds_message(self):
+        """Anthropic dimension-cap wording must trigger image shrink recovery."""
+        err = _FakeApiError(
+            status_code=400,
+            message="image dimensions exceed max allowed size: 8000 pixels",
+        )
+        result = classify_api_error(err, provider="anthropic", model="claude-sonnet-4-6")
+        assert result.reason == FailoverReason.image_too_large
+        assert result.retryable is True
+
     def test_generic_image_too_large_no_status(self):
         """No status_code path: message text alone triggers classification."""
         err = Exception("image too large for this endpoint")
@@ -145,7 +155,8 @@ class TestShrinkImagePartsHelper:
         oversized_url = _big_png_data_url(5000)  # ~5 MB raw → ~6.7 MB b64
         shrunk = "data:image/jpeg;base64," + "A" * 1000  # small
 
-        def _fake_resize(path, mime_type=None, max_base64_bytes=None):
+        def _fake_resize(path, mime_type=None, max_base64_bytes=None, max_dimension=None):
+            assert max_dimension == 8000
             return shrunk
 
         monkeypatch.setattr(
@@ -275,3 +286,34 @@ class TestShrinkImagePartsHelper:
         assert agent._try_shrink_image_parts_in_messages(msgs) is False
         # Original URL still in place, not replaced by the bigger one.
         assert msgs[0]["content"][0]["image_url"]["url"] == oversized_url
+
+    def test_mixed_unshrinkable_oversized_image_returns_false(self, monkeypatch):
+        """Do not retry if any oversized image still survives after shrink attempts."""
+        agent = _make_agent()
+        big1 = _big_png_data_url(5000)
+        big2 = _big_png_data_url(6000)
+        small = "data:image/jpeg;base64," + "A" * 1000
+        still_oversized = "data:image/jpeg;base64," + "B" * (5 * 1024 * 1024)
+        calls = {"count": 0}
+
+        def _fake_resize(*_args, **_kwargs):
+            calls["count"] += 1
+            return small if calls["count"] == 1 else still_oversized
+
+        monkeypatch.setattr(
+            "tools.vision_tools._resize_image_for_vision",
+            _fake_resize,
+            raising=False,
+        )
+
+        msgs = [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": big1}},
+                {"type": "image_url", "image_url": {"url": big2}},
+            ],
+        }]
+
+        assert agent._try_shrink_image_parts_in_messages(msgs) is False
+        assert msgs[0]["content"][0]["image_url"]["url"] == small
+        assert msgs[0]["content"][1]["image_url"]["url"] == big2
