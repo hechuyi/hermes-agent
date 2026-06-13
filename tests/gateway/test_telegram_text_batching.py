@@ -31,6 +31,11 @@ def _make_adapter():
     adapter._text_batch_delay_seconds = 0.1  # fast for tests
     adapter._active_sessions = {}
     adapter._pending_messages = {}
+    adapter._session_tasks = {}
+    adapter._background_tasks = set()
+    adapter._text_debounce = {}
+    adapter._busy_text_mode = "queue"
+    adapter._busy_session_handler = None
     adapter._message_handler = AsyncMock()
     adapter.handle_message = AsyncMock()
     return adapter
@@ -128,16 +133,9 @@ class TestTextBatching:
     async def test_dm_topic_batching_recovers_thread_before_keying(self):
         """DM-topic text batches should be keyed by the recovered topic lane."""
         adapter = _make_adapter()
-
-        class _Runner:
-            def _recover_telegram_topic_thread_id(self, source):
-                return "222" if str(source.thread_id or "") == "1" else None
-
-            async def _handle_message(self, _event):
-                return None
-
-        runner = _Runner()
-        adapter._message_handler = runner._handle_message
+        adapter.set_topic_recovery_fn(
+            lambda source: "222" if str(source.thread_id or "") == "1" else None
+        )
         event = MessageEvent(
             text="hello from DM topic",
             message_type=MessageType.TEXT,
@@ -184,3 +182,63 @@ class TestTextBatching:
         adapter.handle_message.assert_called_once()
         dispatched = adapter.handle_message.call_args[0][0]
         assert dispatched.source.thread_id == "222"
+
+    @pytest.mark.asyncio
+    async def test_handle_message_recovers_topic_before_busy_queue_keying(self):
+        """Active-session guard and pending queue use the recovered topic lane."""
+        adapter = _make_adapter()
+        adapter.handle_message = type(adapter).handle_message.__get__(adapter, type(adapter))
+        adapter._busy_text_mode = "off"
+        adapter.set_topic_recovery_fn(
+            lambda source: "222" if str(source.thread_id or "") == "1" else None
+        )
+
+        recovered_key = build_session_key(
+            SimpleNamespace(
+                platform=Platform.TELEGRAM,
+                chat_id="12345",
+                chat_type="dm",
+                thread_id="222",
+            ),
+            group_sessions_per_user=True,
+            thread_sessions_per_user=False,
+            require_conversation_identity=True,
+        )
+        stale_key = build_session_key(
+            SimpleNamespace(
+                platform=Platform.TELEGRAM,
+                chat_id="12345",
+                chat_type="dm",
+                thread_id="1",
+            ),
+            group_sessions_per_user=True,
+            thread_sessions_per_user=False,
+            require_conversation_identity=True,
+        )
+        owner_task = asyncio.create_task(asyncio.sleep(60))
+        adapter._active_sessions[recovered_key] = asyncio.Event()
+        adapter._session_tasks[recovered_key] = owner_task
+
+        try:
+            event = MessageEvent(
+                text="queued follow-up",
+                message_type=MessageType.TEXT,
+                source=SessionSource(
+                    platform=Platform.TELEGRAM,
+                    chat_id="12345",
+                    chat_type="dm",
+                    user_id="user-1",
+                    thread_id="1",
+                ),
+            )
+
+            await adapter.handle_message(event)
+
+            assert event.source.thread_id == "222"
+            assert recovered_key in adapter._pending_messages
+            assert stale_key not in adapter._pending_messages
+            adapter._message_handler.assert_not_called()
+        finally:
+            owner_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await owner_task

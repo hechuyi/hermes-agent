@@ -6,6 +6,7 @@ and implement the required methods.
 """
 
 import asyncio
+import dataclasses
 import hashlib
 import inspect
 import ipaddress
@@ -1742,6 +1743,7 @@ class BasePlatformAdapter(ABC):
         self.platform = platform
         self._session_isolation_config = session_isolation_config or GatewayConfig()
         self._message_handler: Optional[MessageHandler] = None
+        self._topic_recovery_fn: Optional[Callable[[Any], Optional[str]]] = None
         self._running = False
         self._fatal_error_code: Optional[str] = None
         self._fatal_error_message: Optional[str] = None
@@ -2011,6 +2013,32 @@ class BasePlatformAdapter(ABC):
         an optional response string.
         """
         self._message_handler = handler
+
+    def set_topic_recovery_fn(
+        self,
+        fn: Optional[Callable[[Any], Optional[str]]],
+    ) -> None:
+        """Install a hook that can rewrite source.thread_id before session keying."""
+        self._topic_recovery_fn = fn
+
+    def _apply_topic_recovery(self, event: MessageEvent) -> None:
+        recover = getattr(self, "_topic_recovery_fn", None)
+        if recover is None:
+            return
+        source = getattr(event, "source", None)
+        if source is None:
+            return
+        try:
+            recovered = recover(source)
+        except Exception:
+            logger.debug("topic recovery hook failed", exc_info=True)
+            return
+        if recovered is None or str(recovered) == str(source.thread_id or ""):
+            return
+        try:
+            event.source = dataclasses.replace(source, thread_id=str(recovered))
+        except Exception:
+            logger.debug("topic recovery rewrite failed", exc_info=True)
 
     def set_busy_session_handler(self, handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]]) -> None:
         """Set an optional handler for messages arriving during active sessions."""
@@ -3604,6 +3632,8 @@ class BasePlatformAdapter(ABC):
             return
 
         coerce_plaintext_gateway_command(event)
+
+        self._apply_topic_recovery(event)
         
         session_key = self._session_guard_key(event.source)
 

@@ -797,11 +797,10 @@ slices now cover Windows MEDIA paths, extension allowlisting, current-turn
 tool-result scan, diagnosable MEDIA rejection, Yuanbao resource caching, nested
 platform config hooks, transient reconnect retry, self-targeted planned-stop
 markers, and the delivery-router silence-narration anti-loop filter. The still
-deferred gateway/media items are the topic/session identity changes in
-`100536134` / `db96fc60d`, which move topic recovery into session/compression
-identity paths. Those are not narrow cleanups; they need a separate review of
-gateway ledger attribution, compression-child session binding, busy-session
-guards, and pending-queue keys.
+deferred gateway/media items do not include the topic/session identity changes:
+`100536134` / `db96fc60d` were later manually absorbed as a narrow generic
+session-identity correction covering pre-key topic recovery, compression-child
+session binding, busy-session guards, and pending-queue keys.
 
 Adapter-owned access-policy commits remain a hard conflict with this fork's
 default-deny gateway boundary: adapters may add platform-local checks, but the
@@ -825,7 +824,6 @@ These must not be merged mechanically:
   Docker metadata was absorbed, these commits touch `gateway/run.py` and
   session-close/container-lifecycle behavior and need a separate Docker runtime
   contract review.
-- `100536134` / `db96fc60d`: topic recovery/session identity changes.
 - `655090b3d` / `6a2e3c2d2` / `fd09b2c55`: startup risk warnings and adapter
   access-policy changes, including default-deny semantics.
 - Media extraction and tool-result scan semantics were split after this
@@ -6188,16 +6186,13 @@ ordering and test-helper contracts instead of applying the upstream patch
 literally.
 
 `100536134cd9eb798f69fc9e928a604062990f8d` and
-`db96fc60d0d3dc3f9e95dc6541d8edcccb2f2171` remain deferred. They target
-Telegram topic binding recovery and compression-child alignment, not Feishu
-runtime behavior. They should be reviewed only if a generic gateway session
-identity contract needed by Feishu emerges. The generic contracts worth
-retaining for that future review are: external thread/topic normalization must
+`db96fc60d0d3dc3f9e95dc6541d8edcccb2f2171` were later manually absorbed as a
+narrow generic session-identity correction, not as a broader Telegram feature
+expansion. The retained contracts are: external thread/topic normalization must
 complete before text-batch keys, busy-session guards, pending queues, session
 store creation, and ledger attribution derive a session key; and external
 thread/topic bindings must canonicalize to the compression tip after session
-rotation. Current local equivalence covers only the earlier text-batch slice,
-not the Telegram guard/pending-queue or stale-binding self-heal pieces.
+rotation.
 
 Deferred dashboard/UI auth change:
 
@@ -6313,8 +6308,8 @@ The fresh candidate list was also rechecked against current code:
 
 The remaining not-yet-absorbed upstream groups are still protected decision
 groups: progressive tool-search/bridge-disclosure architecture, Nous JWT-only
-auth migration, Telegram topic/compression session identity, dashboard/UI auth
-policy, and adapter-owned gateway access-policy default-deny changes.
+auth migration, dashboard/UI auth policy, and adapter-owned gateway access-policy
+default-deny changes.
 
 ## 2026-06-13 — Docker lifecycle absorption with safe local defaults
 
@@ -6353,6 +6348,35 @@ explicit opt-in via `terminal.docker_persist_across_processes: true` or
 
 No `website/` Docker documentation was restored; this fork no longer carries
 that surface.
+
+## 2026-06-13 — Topic session identity absorption
+
+The Telegram topic/session identity pair was manually absorbed with fork-local
+scope control:
+
+- `100536134cd9eb798f69fc9e928a604062990f8d`
+- `db96fc60d0d3dc3f9e95dc6541d8edcccb2f2171`
+
+This is not a broader Telegram surface expansion. The local port keeps only the
+generic routing invariant: an external topic/thread id must be normalized before
+adapter text batching, active-session guards, pending-message queues, session
+store creation, and later ledger/session attribution derive a key. The port adds
+`BasePlatformAdapter.set_topic_recovery_fn()` and applies it before
+`handle_message()` session keying; `TelegramAdapter` batching uses the same hook
+instead of introspecting `_message_handler.__self__`.
+
+The compression-child alignment is also absorbed narrowly. When a topic binding
+points at a pre-compression parent, `_handle_message_with_agent()` now walks
+`SessionDB.get_compression_tip()`, switches to the canonical child, and refreshes
+the binding row. Topic bindings are also refreshed immediately after hygiene
+compression, agent-result compression rotation, manual `/compress`, and this
+fork's additional run-conversation session-split sync point.
+
+Regression tests added/updated:
+
+- `tests/gateway/test_telegram_text_batching.py::TestTextBatching::test_dm_topic_batching_recovers_thread_before_keying`
+- `tests/gateway/test_telegram_text_batching.py::TestTextBatching::test_handle_message_recovers_topic_before_busy_queue_keying`
+- `tests/gateway/test_telegram_topic_mode.py::test_topic_binding_follows_compression_tip_on_read`
 
 ## 2026-06-13 — Adapter access-policy boundary characterization
 

@@ -449,6 +449,76 @@ async def test_new_inside_telegram_topic_rewrites_binding_to_new_session(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_topic_binding_follows_compression_tip_on_read(tmp_path, monkeypatch):
+    """Stale topic bindings auto-heal to the compression child on next inbound."""
+    import gateway.run as gateway_run
+
+    session_db = SessionDB(db_path=tmp_path / "state.db")
+    session_db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    session_db.create_session(
+        session_id="parent-session",
+        source="telegram",
+        user_id="208214988",
+    )
+    session_db.end_session("parent-session", end_reason="compression")
+    session_db.create_session(
+        session_id="child-session",
+        source="telegram",
+        user_id="208214988",
+        parent_session_id="parent-session",
+    )
+
+    topic_source = _make_source(thread_id="17585")
+    topic_key = build_session_key(topic_source)
+    session_db.bind_telegram_topic(
+        chat_id="208214988",
+        thread_id="17585",
+        user_id="208214988",
+        session_key=topic_key,
+        session_id="parent-session",
+    )
+
+    runner = _make_runner(session_db=session_db)
+    switched_to = {}
+
+    def fake_switch(_key, new_session_id):
+        switched_to["id"] = new_session_id
+        return SessionEntry(
+            session_key=topic_key,
+            session_id=new_session_id,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+            platform=Platform.TELEGRAM,
+            chat_type="dm",
+            origin=topic_source,
+        )
+
+    runner.session_store.switch_session = MagicMock(side_effect=fake_switch)
+    runner._run_agent = AsyncMock(
+        return_value={
+            "success": True,
+            "final_response": "ok",
+            "session_id": "child-session",
+            "messages": [],
+        }
+    )
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+
+    await runner._handle_message(_make_event("follow up after compression", thread_id="17585"))
+
+    assert switched_to.get("id") == "child-session"
+    refreshed = session_db.get_telegram_topic_binding(
+        chat_id="208214988",
+        thread_id="17585",
+    )
+    assert refreshed is not None
+    assert refreshed["session_id"] == "child-session"
+
+
+@pytest.mark.asyncio
 async def test_topic_root_command_explicitly_migrates_and_enables_topic_mode(tmp_path, monkeypatch):
     import gateway.run as gateway_run
 
