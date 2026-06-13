@@ -721,31 +721,37 @@ in `_interrupted_threads` after concurrent cleanup. The local assertion is more
 tolerant of unrelated concurrent test state than the upstream whole-set-empty
 assertion while preserving the leak check.
 
-## Reverted attempted commit
+## Manual file-tools cwd contract port
 
 `96643b4a52b118477b07c838e30eb8ae7372062c`
 (`fix(file-tools): anchor relative-path resolution to absolute base`) was
-attempted and then reverted on this branch. Its new tests showed that the
-upstream behavior assumes relative file-tool paths are resolved through live
-tracking cwd before file-safety rejection. The current fork rejects bare
-relative write paths earlier as sensitive-system-path attempts. That is a
-semantic conflict in the file-safety boundary, not a simple merge conflict.
+manually absorbed in local commit `2bba1151c`
+(`fix(file-tools): canonicalize write targets before execution`). A previous
+mechanical attempt was reverted because upstream's implementation assumed that
+relative write targets could fall through the existing resolver and process-cwd
+fallback. That ordering conflicts with this fork's stricter file-safety
+boundary: write-like operations must either have a trustworthy workspace anchor
+or fail closed.
 
-This item should be treated as a manual design task: if the upstream behavior
-is desired, first define the ordering contract between live tracking cwd
-resolution and file-safety checks, then add regression tests for both
-workspace-relative writes and sensitive absolute/system paths.
+The local port keeps read/search path resolution compatible with the historical
+fallback, but gives `write_file` and `patch` their own execution contract:
+absolute paths are canonicalized directly; relative write targets require live
+terminal cwd or an absolute `TERMINAL_CWD`; missing, sentinel, or relative cwd
+anchors return a typed tool error before shell file operations are invoked.
+Patch replace, staleness checks, per-path locks, execution, and
+`resolved_path` / `files_modified` reporting all use the same resolved absolute
+target.
 
 ### 2026-06-08 file-tools cwd contract audit
 
-`96643b4a52b118477b07c838e30eb8ae7372062c` remains deferred after a second
-read-only review. The upstream direction is valuable: relative write and patch
-targets should be resolved once to a single absolute target and that same target
-should flow through safety checks, lock/staleness checks, execution, and result
-reporting. The unsafe part is importing upstream's ordering without first
-pinning this fork's stricter file-safety contract.
+`96643b4a52b118477b07c838e30eb8ae7372062c` is now handled by the local port
+above. The upstream direction was kept: relative write and patch targets are
+resolved once to a single absolute target and that same target flows through
+lock/staleness checks, execution, and result reporting. The fork-local
+difference is fail-closed handling when no trustworthy cwd exists; the port does
+not guess from the agent process cwd.
 
-The required local contract is:
+The implemented local contract is:
 
 - run cwd-independent lexical rejection first, including NUL-like invalid
   paths, V4A header traversal, and obvious device/system literal paths;
@@ -759,14 +765,21 @@ The required local contract is:
 - fail closed on unknown cwd state or failed resolution instead of falling back
   to executing the raw relative path.
 
-Minimum tests for a future manual port should cover: live-cwd relative writes
-landing in the workspace instead of a process-cwd decoy; patch replace using
-the same resolved absolute target as safety; relative names that resolve to
-Hermes control-plane files such as `auth.json`, `config.yaml`, or token stores
-being denied; `HERMES_WRITE_SAFE_ROOT` applying to the resolved absolute target;
-resolution failure not invoking shell file operations; and V4A multi-file patch
-headers being individually resolved and rejected as an atomic batch if any
-target fails safety.
+The port also closes the V4A execution mismatch that upstream's narrower
+change did not cover in this fork: `Update` / `Add` / `Delete` headers and
+`Move File` source plus destination are collected, traversal-checked, resolved
+once, and rewritten to canonical absolute headers before `patch_v4a` reparses
+the patch. This prevents shell-cwd-relative V4A execution from modifying a
+different file than the one reported by the tool result while preserving move
+result semantics as `source -> destination`.
+
+Regression coverage now includes: missing authoritative cwd fails closed for
+relative writes and replace patches; sentinel and relative `TERMINAL_CWD`
+values are not used as write anchors; absolute and live-cwd anchored paths still
+resolve; V4A update and move operations execute against canonical workspace
+targets instead of a shell-cwd decoy; patch hints continue to work with absolute
+targets; and staleness tests remain portable on macOS `tempfile` paths without
+weakening production sensitive-path guards.
 
 ### 2026-06-08 protected remainder rescan
 
