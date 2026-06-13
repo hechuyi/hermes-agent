@@ -70,6 +70,17 @@ def _make_fake_ops(read_content="hello\n", file_size=6):
     return fake
 
 
+def _allow_private_var_tempdirs(testcase):
+    """Let tempfile-backed tests run on macOS without weakening production guards."""
+    from tools import file_tools
+
+    previous = file_tools._SENSITIVE_PATH_PREFIXES
+    file_tools._SENSITIVE_PATH_PREFIXES = tuple(
+        prefix for prefix in previous if prefix != "/private/var/"
+    )
+    testcase.addCleanup(setattr, file_tools, "_SENSITIVE_PATH_PREFIXES", previous)
+
+
 # ---------------------------------------------------------------------------
 # Core staleness check
 # ---------------------------------------------------------------------------
@@ -79,6 +90,7 @@ class TestStalenessCheck(unittest.TestCase):
     def setUp(self):
         _read_tracker.clear()
         file_state.get_registry().clear()
+        _allow_private_var_tempdirs(self)
         self._tmpdir = tempfile.mkdtemp()
         self._tmpfile = os.path.join(self._tmpdir, "stale_test.txt")
         with open(self._tmpfile, "w") as f:
@@ -206,6 +218,7 @@ class TestPatchStaleness(unittest.TestCase):
     def setUp(self):
         _read_tracker.clear()
         file_state.get_registry().clear()
+        _allow_private_var_tempdirs(self)
         self._tmpdir = tempfile.mkdtemp()
         self._tmpfile = os.path.join(self._tmpdir, "patch_test.txt")
         with open(self._tmpfile, "w") as f:

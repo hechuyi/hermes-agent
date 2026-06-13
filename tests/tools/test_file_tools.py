@@ -43,6 +43,20 @@ def _clean_file_ops_cache():
         terminal_tool._last_activity.update(previous_activity)
 
 
+def _allow_private_var_tmp_path(monkeypatch):
+    """Let tmp_path-backed tests run on macOS without weakening production guards."""
+    import tools.file_tools as file_tools
+
+    monkeypatch.setattr(
+        file_tools,
+        "_SENSITIVE_PATH_PREFIXES",
+        tuple(
+            prefix for prefix in file_tools._SENSITIVE_PATH_PREFIXES
+            if prefix != "/private/var/"
+        ),
+    )
+
+
 class TestReadFileHandler:
     @patch("tools.file_tools._get_file_ops")
     def test_returns_file_content(self, mock_get):
@@ -404,7 +418,8 @@ class TestPatchHints:
     """Patch tool should hint when old_string is not found."""
 
     @patch("tools.file_tools._get_file_ops")
-    def test_no_match_includes_hint(self, mock_get):
+    def test_no_match_includes_hint(self, mock_get, tmp_path, monkeypatch):
+        _allow_private_var_tmp_path(monkeypatch)
         mock_ops = MagicMock()
         result_obj = MagicMock()
         result_obj.to_dict.return_value = {
@@ -414,14 +429,20 @@ class TestPatchHints:
         mock_get.return_value = mock_ops
 
         from tools.file_tools import patch_tool
-        raw = patch_tool(mode="replace", path="foo.py", old_string="x", new_string="y")
+        raw = patch_tool(
+            mode="replace",
+            path=str(tmp_path / "foo.py"),
+            old_string="x",
+            new_string="y",
+        )
         # patch_tool surfaces the hint as a structured "_hint" field on the
         # JSON error payload (not an inline "[Hint: ..." tail).
         assert "_hint" in raw
         assert "read_file" in raw
 
     @patch("tools.file_tools._get_file_ops")
-    def test_success_no_hint(self, mock_get):
+    def test_success_no_hint(self, mock_get, tmp_path, monkeypatch):
+        _allow_private_var_tmp_path(monkeypatch)
         mock_ops = MagicMock()
         result_obj = MagicMock()
         result_obj.to_dict.return_value = {"success": True, "diff": "--- a\n+++ b"}
@@ -429,8 +450,13 @@ class TestPatchHints:
         mock_get.return_value = mock_ops
 
         from tools.file_tools import patch_tool
-        raw = patch_tool(mode="replace", path="foo.py", old_string="x", new_string="y")
-        assert "_hint" not in raw
+        raw = patch_tool(
+            mode="replace",
+            path=str(tmp_path / "foo.py"),
+            old_string="x",
+            new_string="y",
+        )
+        assert "_hint" not in json.loads(raw)
 
 
 class TestSearchHints:

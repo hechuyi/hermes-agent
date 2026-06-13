@@ -16,11 +16,14 @@ Core invariant these tests pin:
 """
 
 import os
+import json
 from pathlib import Path
 
 import pytest
 
 import tools.file_tools as ft
+from tools.file_operations import LintResult, ReadResult, WriteResult
+from tools.patch_parser import apply_v4a_operations, parse_v4a_patch
 
 
 @pytest.fixture
@@ -69,26 +72,17 @@ def _isolated_cwd(tmp_path, monkeypatch):
         terminal_tool._task_env_overrides.update(previous_overrides)
 
 
-def test_relative_terminal_cwd_anchors_to_absolute_not_process_cwd(_isolated_cwd, monkeypatch):
-    """TERMINAL_CWD='.' must NOT silently mean 'the agent process cwd'.
-
-    A relative base is meaningless as a resolution anchor. The resolver must
-    make it absolute deterministically. We assert the resolved path is
-    absolute and stable regardless of where os.getcwd() points.
-    """
+def test_relative_write_without_authoritative_cwd_fails_closed(_isolated_cwd, monkeypatch):
+    """Relative writes need a live cwd or absolute TERMINAL_CWD anchor."""
     workspace, decoy = _isolated_cwd
-    # Poison config: literal relative '.'
     monkeypatch.setenv("TERMINAL_CWD", ".")
 
-    resolved = ft._resolve_path_for_task("target.py", task_id="default")
+    import json
+    out = json.loads(ft.write_file_tool("target.py", "WRONG\n", task_id="default"))
 
-    assert resolved.is_absolute(), f"resolution base leaked a relative path: {resolved}"
-    # The exact anchor for a bare '.' is the process cwd resolved to absolute —
-    # that is acceptable as long as it is ABSOLUTE and stable. The bug was that
-    # a relative base produced surprising results; the fix is that the base is
-    # always absolutised. (We do not require it to point at the workspace here —
-    # that's what live-cwd tracking is for; see the next test.)
-    assert str(resolved) == str((Path(os.getcwd()) / "target.py").resolve())
+    assert "error" in out
+    assert "Cannot resolve relative write path" in out["error"]
+    assert (decoy / "target.py").read_text() == "DECOY_ORIGINAL\n"
 
 
 def test_live_tracking_cwd_wins_over_relative_terminal_cwd(_isolated_cwd, monkeypatch):
@@ -128,15 +122,23 @@ def test_absolute_input_path_ignores_base(_isolated_cwd, monkeypatch):
     assert resolved == Path(abs_target).resolve()
 
 
-def test_resolution_base_always_absolute_no_terminal_cwd(_isolated_cwd, monkeypatch):
-    """With TERMINAL_CWD unset, the base falls back to an ABSOLUTE process cwd."""
+def test_replace_patch_without_authoritative_cwd_fails_closed(_isolated_cwd, monkeypatch):
+    """Relative replace patches also fail closed without a trustworthy anchor."""
     workspace, decoy = _isolated_cwd
     monkeypatch.delenv("TERMINAL_CWD", raising=False)
 
-    resolved = ft._resolve_path_for_task("target.py", task_id="default")
+    import json
+    out = json.loads(ft.patch_tool(
+        mode="replace",
+        path="target.py",
+        old_string="DECOY_ORIGINAL",
+        new_string="WRONG",
+        task_id="default",
+    ))
 
-    assert resolved.is_absolute()
-    assert str(resolved) == str((Path(os.getcwd()) / "target.py").resolve())
+    assert "error" in out
+    assert "Cannot resolve relative write path" in out["error"]
+    assert (decoy / "target.py").read_text() == "DECOY_ORIGINAL\n"
 
 
 # ── B-(ii): workspace-divergence warning ────────────────────────────────────
@@ -201,33 +203,36 @@ def test_no_warning_when_no_live_cwd(_isolated_cwd, monkeypatch):
 def test_sentinel_terminal_cwd_is_treated_as_unset(_isolated_cwd, monkeypatch, sentinel):
     """Sentinel TERMINAL_CWD values are NOT used as a directory anchor.
 
-    They fall through to the (absolute) process cwd, exactly as if unset —
-    never resolved as a literal relative directory.
+    They are not resolved as literal relative directories; write paths that need
+    an authoritative workspace anchor fail closed instead of using process cwd.
     """
     workspace, decoy = _isolated_cwd
     monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": None)
     monkeypatch.setenv("TERMINAL_CWD", sentinel)
 
     assert ft._configured_terminal_cwd() is None
-    resolved = ft._resolve_path_for_task("target.py", task_id="default")
-    assert resolved.is_absolute()
-    assert resolved == (decoy / "target.py").resolve()
+    out = json.loads(ft.write_file_tool("target.py", "WRONG\n", task_id="default"))
+    assert "error" in out
+    assert "Cannot resolve relative write path" in out["error"]
+    assert (decoy / "target.py").read_text() == "DECOY_ORIGINAL\n"
 
 
 def test_relative_nonsentinel_terminal_cwd_rejected(_isolated_cwd, monkeypatch):
     """A relative (but non-sentinel) TERMINAL_CWD is still rejected as an anchor.
 
     A relative anchor is ambiguous (relative to which cwd?), which is the exact
-    ambiguity that misroutes edits. It must fall through to the process cwd, not
-    be joined onto it as a literal subdir.
+    ambiguity that misroutes edits. It must not be joined onto process cwd or
+    used as an execution anchor for writes.
     """
     workspace, decoy = _isolated_cwd
     monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": None)
     monkeypatch.setenv("TERMINAL_CWD", "some/rel/path")
 
     assert ft._configured_terminal_cwd() is None
-    resolved = ft._resolve_path_for_task("target.py", task_id="default")
-    assert resolved == (decoy / "target.py").resolve()
+    out = json.loads(ft.write_file_tool("target.py", "WRONG\n", task_id="default"))
+    assert "error" in out
+    assert "Cannot resolve relative write path" in out["error"]
+    assert (decoy / "target.py").read_text() == "DECOY_ORIGINAL\n"
 
 
 def test_absolute_terminal_cwd_anchors_with_empty_registry(_isolated_cwd, monkeypatch):
@@ -320,6 +325,114 @@ def test_patch_reports_resolved_absolute_path(_isolated_cwd, monkeypatch):
     assert "WORKSPACE_PATCHED" in (workspace / "target.py").read_text()
     # And the decoy copy is untouched.
     assert (decoy / "target.py").read_text() == "DECOY_ORIGINAL\n"
+
+
+class _CwdResolvingV4AOps:
+    """Minimal shell-like file ops: relative paths resolve under ``cwd``."""
+
+    def __init__(self, cwd: Path):
+        self.cwd = cwd
+
+    def _target(self, path: str) -> Path:
+        p = Path(path).expanduser()
+        if p.is_absolute():
+            return p.resolve()
+        return (self.cwd / p).resolve()
+
+    def read_file_raw(self, path: str):
+        target = self._target(path)
+        if not target.exists():
+            return ReadResult(error=f"not found: {path}")
+        return ReadResult(content=target.read_text())
+
+    def write_file(self, path: str, content: str):
+        target = self._target(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        return WriteResult(bytes_written=len(content.encode("utf-8")))
+
+    def delete_file(self, path: str):
+        target = self._target(path)
+        if not target.exists():
+            return WriteResult(error=f"not found: {path}")
+        target.unlink()
+        return WriteResult()
+
+    def move_file(self, src: str, dst: str):
+        src_target = self._target(src)
+        dst_target = self._target(dst)
+        if not src_target.exists():
+            return WriteResult(error=f"not found: {src}")
+        dst_target.parent.mkdir(parents=True, exist_ok=True)
+        src_target.rename(dst_target)
+        return WriteResult()
+
+    def patch_v4a(self, patch_content: str):
+        operations, parse_error = parse_v4a_patch(patch_content)
+        if parse_error:
+            from tools.file_operations import PatchResult
+            return PatchResult(error=parse_error)
+        return apply_v4a_operations(operations, self)
+
+    def _check_lint(self, _path):
+        return LintResult(skipped=True)
+
+
+def test_v4a_update_uses_canonical_path_not_shell_cwd(_isolated_cwd, monkeypatch):
+    workspace, decoy = _isolated_cwd
+    (decoy / "target.py").write_text("WORKSPACE_ORIGINAL\n")
+    monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": None)
+    monkeypatch.setenv("TERMINAL_CWD", str(workspace))
+    monkeypatch.setattr(ft, "_get_file_ops", lambda _task_id="default": _CwdResolvingV4AOps(decoy))
+
+    import json
+    out = json.loads(ft.patch_tool(
+        mode="patch",
+        patch=(
+            "*** Begin Patch\n"
+            "*** Update File: target.py\n"
+            "@@\n"
+            "-WORKSPACE_ORIGINAL\n"
+            "+WORKSPACE_PATCHED\n"
+            "*** End Patch\n"
+        ),
+        task_id="default",
+    ))
+
+    expected = str((workspace / "target.py").resolve())
+    assert not out.get("error"), out
+    assert out["files_modified"] == [expected]
+    assert out["resolved_path"] == expected
+    assert (workspace / "target.py").read_text() == "WORKSPACE_PATCHED\n"
+    assert (decoy / "target.py").read_text() == "WORKSPACE_ORIGINAL\n"
+
+
+def test_v4a_move_uses_canonical_source_and_destination(_isolated_cwd, monkeypatch):
+    workspace, decoy = _isolated_cwd
+    (workspace / "move_src.py").write_text("MOVE_ME\n")
+    (decoy / "move_src.py").write_text("DECOY_MOVE_ME\n")
+    monkeypatch.setattr(ft, "_get_live_tracking_cwd", lambda task_id="default": None)
+    monkeypatch.setenv("TERMINAL_CWD", str(workspace))
+    monkeypatch.setattr(ft, "_get_file_ops", lambda _task_id="default": _CwdResolvingV4AOps(decoy))
+
+    import json
+    out = json.loads(ft.patch_tool(
+        mode="patch",
+        patch=(
+            "*** Begin Patch\n"
+            "*** Move File: move_src.py -> moved/move_dst.py\n"
+            "*** End Patch\n"
+        ),
+        task_id="default",
+    ))
+
+    expected_src = str((workspace / "move_src.py").resolve())
+    expected_dst = str((workspace / "moved" / "move_dst.py").resolve())
+    assert not out.get("error"), out
+    assert out["files_modified"] == [f"{expected_src} -> {expected_dst}"]
+    assert not (workspace / "move_src.py").exists()
+    assert (workspace / "moved" / "move_dst.py").read_text() == "MOVE_ME\n"
+    assert (decoy / "move_src.py").read_text() == "DECOY_MOVE_ME\n"
 
 
 def test_file_ops_creation_reads_raw_task_cwd_override(_isolated_cwd, monkeypatch):

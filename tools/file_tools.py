@@ -153,8 +153,9 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
     a worktree session warn about (and resolve into) the worktree from the very
     first ``write_file``/``patch``, before any ``cd`` has populated the live cwd.
 
-    Returns ``None`` only when there is genuinely no reliable anchor, in which
-    case callers fall back to the process cwd.
+    Returns ``None`` when there is no reliable anchor. Read/search callers may
+    still use their historical process-cwd fallback; write/patch callers must
+    fail closed instead of guessing.
     """
     live = _get_live_tracking_cwd(task_id)
     if live:
@@ -204,6 +205,27 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path:
     return (_resolve_base_dir(task_id) / p).resolve()
 
 
+def _resolve_write_path_for_task(filepath: str, task_id: str = "default") -> Path:
+    """Resolve a write target to a canonical absolute path, or fail closed."""
+    p = Path(filepath).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    root = _authoritative_workspace_root(task_id)
+    if not root:
+        raise ValueError(
+            f"Cannot resolve relative write path {filepath!r}: no live terminal "
+            "cwd or absolute TERMINAL_CWD is available. Pass an absolute path or "
+            "establish the session working directory before writing."
+        )
+    base = Path(root).expanduser()
+    if not base.is_absolute():
+        raise ValueError(
+            f"Cannot resolve relative write path {filepath!r}: workspace anchor "
+            f"{root!r} is not absolute."
+        )
+    return (base.resolve() / p).resolve()
+
+
 def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "default") -> str | None:
     """Warn when a relative path resolved OUTSIDE the task's workspace root.
 
@@ -239,6 +261,70 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
             )
     except Exception:
         return None
+
+
+def _collect_v4a_header_paths(patch_content: str) -> tuple[list[str], str | None]:
+    """Return every path-bearing V4A header, including move destinations."""
+    import re as _re
+    from tools.path_security import has_traversal_component
+
+    paths: list[str] = []
+    for line in patch_content.splitlines():
+        move_match = _re.match(r"^\*\*\*\s*Move\s+File:\s*(.+?)\s*->\s*(.+)$", line)
+        if move_match:
+            candidates = [move_match.group(1).strip(), move_match.group(2).strip()]
+        else:
+            op_match = _re.match(
+                r"^\*\*\*\s*(?:Update|Add|Delete)\s+File:\s*(.+)$",
+                line,
+            )
+            candidates = [op_match.group(1).strip()] if op_match else []
+        for candidate in candidates:
+            if has_traversal_component(candidate):
+                return [], (
+                    f"V4A patch header contains '..' traversal: {candidate!r}. "
+                    "Use the agent's cwd-relative path (no '..') or an absolute "
+                    "path in V4A file headers."
+                )
+            paths.append(candidate)
+    return paths, None
+
+
+def _rewrite_v4a_patch_paths(
+    patch_content: str,
+    path_to_resolved: dict[str, str],
+) -> str:
+    """Rewrite V4A file headers to canonical absolute paths before execution."""
+    import re as _re
+
+    rewritten: list[str] = []
+    for line in patch_content.splitlines():
+        move_match = _re.match(
+            r"^(\*\*\*\s*Move\s+File:\s*)(.+?)(\s*->\s*)(.+)$",
+            line,
+        )
+        if move_match:
+            src = move_match.group(2).strip()
+            dst = move_match.group(4).strip()
+            rewritten.append(
+                f"{move_match.group(1)}"
+                f"{path_to_resolved.get(src, src)}"
+                f"{move_match.group(3)}"
+                f"{path_to_resolved.get(dst, dst)}"
+            )
+            continue
+        op_match = _re.match(
+            r"^(\*\*\*\s*(?:Update|Add|Delete)\s+File:\s*)(.+)$",
+            line,
+        )
+        if op_match:
+            path = op_match.group(2).strip()
+            rewritten.append(f"{op_match.group(1)}{path_to_resolved.get(path, path)}")
+            continue
+        rewritten.append(line)
+    if patch_content.endswith("\n"):
+        return "\n".join(rewritten) + "\n"
+    return "\n".join(rewritten)
 
 
 def _is_blocked_device_path(path: str) -> bool:
@@ -1072,23 +1158,10 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
             "Re-read the file or reconstruct the intended file contents before writing."
         )
     try:
-        # Resolve once for the registry lock + stale check.  Failures here
-        # fall back to the legacy path — write proceeds, per-task staleness
-        # check below still runs.
         try:
-            _resolved = str(_resolve_path_for_task(path, task_id))
-        except Exception:
-            _resolved = None
-
-        if _resolved is None:
-            stale_warning = _check_file_staleness(path, task_id)
-            file_ops = _get_file_ops(task_id)
-            result = file_ops.write_file(path, content)
-            result_dict = result.to_dict()
-            if stale_warning:
-                result_dict["_warning"] = stale_warning
-            _update_read_timestamp(path, task_id)
-            return json.dumps(result_dict, ensure_ascii=False)
+            _resolved = str(_resolve_write_path_for_task(path, task_id))
+        except Exception as e:
+            return tool_error(str(e))
 
         # Serialize the read→modify→write region per-path so concurrent
         # subagents can't interleave on the same file.  Different paths
@@ -1136,25 +1209,11 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     if path:
         _paths_to_check.append(path)
     if mode == "patch" and patch:
-        import re as _re
-        from tools.path_security import has_traversal_component
-        for _m in _re.finditer(r'^\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)$', patch, _re.MULTILINE):
-            v4a_path = _m.group(1).strip()
-            # V4A path headers come from patch CONTENT, not the explicit
-            # ``path=`` arg — so they're more attacker-influenceable (skill
-            # content, web extract, prompt injection). Reject ``..`` traversal
-            # in V4A headers: a legitimate multi-file patch from a single cwd
-            # can always emit absolute paths or paths relative to the agent's
-            # cwd without ``..``. The explicit ``path=`` arg is unchanged
-            # because the agent uses relative ``..`` paths legitimately
-            # (e.g. ``patch path="../other_module/x.py"`` from a worktree).
-            if has_traversal_component(v4a_path):
-                return tool_error(
-                    f"V4A patch header contains '..' traversal: {v4a_path!r}. "
-                    "Use the agent's cwd-relative path (no '..') or an absolute "
-                    "path in '*** Update File:' / '*** Add File:' / '*** Delete File:' headers."
-                )
-            _paths_to_check.append(v4a_path)
+        v4a_paths, v4a_error = _collect_v4a_header_paths(patch)
+        if v4a_error:
+            return tool_error(v4a_error)
+        _paths_to_check.extend(v4a_paths)
+
     for _p in _paths_to_check:
         sensitive_err = _check_sensitive_path(_p, task_id)
         if sensitive_err:
@@ -1166,25 +1225,23 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             cross_warning = _check_cross_profile_path(_p, task_id)
             if cross_warning:
                 return tool_error(cross_warning)
+
     try:
-        # Resolve paths for locking.  Ordered + deduplicated so concurrent
-        # callers lock in the same order — prevents deadlock on overlapping
-        # multi-file V4A patches.
+        # Resolve paths for locking and execution. Ordered + deduplicated so
+        # concurrent callers lock in the same order — prevents deadlock on
+        # overlapping multi-file V4A patches.
         _resolved_paths: list[str] = []
         _seen: set[str] = set()
+        _path_to_resolved: dict[str, str] = {}
         for _p in _paths_to_check:
-            try:
-                _r = str(_resolve_path_for_task(_p, task_id))
-            except Exception:
-                _r = None
-            if _r and _r not in _seen:
+            _r = str(_resolve_write_path_for_task(_p, task_id))
+            _path_to_resolved[_p] = _r
+            if _r not in _seen:
                 _resolved_paths.append(_r)
                 _seen.add(_r)
         _resolved_paths.sort()
 
-        # Acquire per-path locks in sorted order via ExitStack.  On single
-        # path this degenerates to one lock; on empty list (unresolvable)
-        # it's a no-op and execution falls through unchanged.
+        # Acquire per-path locks in sorted order via ExitStack.
         from contextlib import ExitStack
         with ExitStack() as _locks:
             for _r in _resolved_paths:
@@ -1193,13 +1250,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             # Collect warnings — cross-agent registry first (names sibling),
             # then per-task tracker as a fallback.
             stale_warnings: list[str] = []
-            _path_to_resolved: dict[str, str] = {}
             for _p in _paths_to_check:
-                try:
-                    _r = str(_resolve_path_for_task(_p, task_id))
-                except Exception:
-                    _r = None
-                _path_to_resolved[_p] = _r
+                _r = _path_to_resolved.get(_p)
                 _cross = file_state.check_stale(task_id, _r) if _r else None
                 _sw = _cross or _check_file_staleness(_p, task_id)
                 if not _sw and _r:
@@ -1219,22 +1271,34 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             elif mode == "patch":
                 if not patch:
                     return tool_error("patch content required")
-                result = file_ops.patch_v4a(patch)
+                result = file_ops.patch_v4a(
+                    _rewrite_v4a_patch_paths(patch, _path_to_resolved)
+                )
             else:
                 return tool_error(f"Unknown mode: {mode}")
 
             result_dict = result.to_dict()
             if stale_warnings:
                 result_dict["_warning"] = stale_warnings[0] if len(stale_warnings) == 1 else " | ".join(stale_warnings)
-            _resolved_modified = [
-                _path_to_resolved.get(_p) or _p for _p in _paths_to_check
-            ]
             # Refresh stored timestamps for all successfully-patched paths so
             # consecutive edits by this task don't trigger false warnings.
             if not result_dict.get("error"):
-                result_dict["files_modified"] = _resolved_modified
-                if len(_resolved_modified) == 1:
-                    result_dict["resolved_path"] = _resolved_modified[0]
+                if mode == "replace":
+                    _resolved_modified = [
+                        _path_to_resolved.get(_p) or _p for _p in _paths_to_check
+                    ]
+                    result_dict["files_modified"] = _resolved_modified
+                    if len(_resolved_modified) == 1:
+                        result_dict["resolved_path"] = _resolved_modified[0]
+                else:
+                    _single = (
+                        result_dict.get("files_modified")
+                        or result_dict.get("files_created")
+                        or result_dict.get("files_deleted")
+                        or []
+                    )
+                    if isinstance(_single, list) and len(_single) == 1 and " -> " not in str(_single[0]):
+                        result_dict["resolved_path"] = _single[0]
                 for _p in _paths_to_check:
                     _update_read_timestamp(_p, task_id)
                     _r = _path_to_resolved.get(_p)
