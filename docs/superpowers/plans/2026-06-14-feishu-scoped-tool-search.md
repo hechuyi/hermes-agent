@@ -83,7 +83,7 @@ git commit -m "docs: plan feishu-scoped tool search"
 **Files:**
 - Create: `tests/tools/test_tool_search.py`
 
-- [ ] **Step 1: Write catalog and activation tests**
+- [x] **Step 1: Write catalog and activation tests**
 
 Cover:
 
@@ -92,7 +92,7 @@ Cover:
 - core tools remain visible and are refused by `tool_call`;
 - bridge schemas are not themselves deferrable.
 
-- [ ] **Step 2: Write scoped regression tests**
+- [x] **Step 2: Write scoped regression tests**
 
 Cover:
 
@@ -103,7 +103,7 @@ Cover:
 - bridge assembly does not update `_last_resolved_tool_names` with out-of-scope tools;
 - `scoped_deferrable_names()` returns only names from the supplied scoped definitions.
 
-- [ ] **Step 3: Write Feishu boundary tests**
+- [x] **Step 3: Write Feishu boundary tests**
 
 Cover:
 
@@ -112,7 +112,7 @@ Cover:
 - `feishu_doc` and `feishu_drive` tools are not deferrable bridge catalog entries, even when enabled directly.
 - `tool_describe` rejects hidden, adapter-only, denied, and legacy Feishu identifiers.
 
-- [ ] **Step 4: Verify RED**
+- [x] **Step 4: Verify RED**
 
 Run:
 
@@ -129,11 +129,11 @@ Expected: fail because `tools.tool_search` and bridge plumbing do not exist yet.
 - Modify: `model_tools.py`
 - Modify: `hermes_cli/config.py`
 
-- [ ] **Step 1: Implement pure helpers in `tools/tool_search.py`**
+- [x] **Step 1: Implement pure helpers in `tools/tool_search.py`**
 
 Include config parsing, `classify_tools`, token estimate, activation gate, catalog entry construction, BM25 search, bridge schema builders, `assemble_tool_definitions`, `resolve_underlying_call`, `scoped_deferrable_names`, and `handle_bridge_call`.
 
-- [ ] **Step 2: Wire `model_tools.get_tool_definitions`**
+- [x] **Step 2: Wire `model_tools.get_tool_definitions`**
 
 Add keyword args:
 
@@ -146,11 +146,11 @@ After dynamic schema rebuild and schema sanitization, call `tool_search.assemble
 
 Expose one helper that returns the same scope fingerprint used by the schema cache. Executor unwrap cache must use this helper rather than inventing a shorter cache key.
 
-- [ ] **Step 3: Wire bridge dispatch**
+- [x] **Step 3: Wire bridge dispatch**
 
 In `handle_function_call`, accept `enabled_toolsets`, `disabled_toolsets`, and an optional already-scoped tool definition list. For bridge names, fail closed unless either an explicit scoped definitions list is supplied or `enabled_toolsets` is non-`None`. Rebuild the catalog using scoped `get_tool_definitions(..., skip_tool_search_assembly=True)` and reject any target not in that scoped deferrable catalog.
 
-- [ ] **Step 4: Add default config**
+- [x] **Step 4: Add default config**
 
 Add:
 
@@ -163,7 +163,7 @@ tools:
     max_search_limit: 20
 ```
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run:
 
@@ -171,7 +171,7 @@ Run:
 uv run --extra dev pytest tests/tools/test_tool_search.py -q -rs
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tools/tool_search.py model_tools.py hermes_cli/config.py tests/tools/test_tool_search.py
@@ -185,7 +185,7 @@ git commit -m "feat(tools): add session-scoped tool search bridge"
 - Modify: `agent/agent_runtime_helpers.py`
 - Modify: `tests/run_agent/test_run_agent.py` or focused agent executor tests
 
-- [ ] **Step 1: Write RED tests for unwrap scoping**
+- [x] **Step 1: Write RED tests for unwrap scoping**
 
 Cover:
 
@@ -195,19 +195,19 @@ Cover:
 - `_invoke_tool` passes `enabled_toolsets` and `disabled_toolsets` into `handle_function_call`.
 - original assistant/tool result pairing still uses the bridge tool call id, while execution callbacks use the underlying tool name only after scope validation succeeds.
 
-- [ ] **Step 2: Implement `_tool_search_scoped_names(agent)`**
+- [x] **Step 2: Implement `_tool_search_scoped_names(agent)`**
 
 Cache by the shared `ToolSearchScopeKey`, not just registry generation plus `agent.enabled_toolsets` and `agent.disabled_toolsets`. Build names from scoped `model_tools.get_tool_definitions(..., skip_tool_search_assembly=True)`.
 
-- [ ] **Step 3: Unwrap before pre-tool hooks and guardrails**
+- [x] **Step 3: Unwrap before pre-tool hooks and guardrails**
 
 Use `tools.tool_search.resolve_underlying_call`. Preserve the original tool call id and transcript shape, but downstream execution, guardrails, callbacks, result storage, and activity feed should use the underlying tool name.
 
-- [ ] **Step 4: Pass toolset scope from agent runtime helper**
+- [x] **Step 4: Pass toolset scope from agent runtime helper**
 
 Add `enabled_toolsets=getattr(agent, "enabled_toolsets", None)` and `disabled_toolsets=getattr(agent, "disabled_toolsets", None)` to `handle_function_call`.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run:
 
@@ -215,7 +215,7 @@ Run:
 uv run --extra dev pytest tests/tools/test_tool_search.py tests/run_agent/test_run_agent.py tests/agent/test_tool_dispatch_helpers.py -q -rs
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add agent/tool_executor.py agent/agent_runtime_helpers.py tests/run_agent/test_run_agent.py tests/agent/test_tool_dispatch_helpers.py tests/tools/test_tool_search.py

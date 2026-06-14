@@ -261,10 +261,40 @@ def _clear_tool_defs_cache() -> None:
     _tool_defs_cache.clear()
 
 
+def _config_fingerprint() -> tuple | None:
+    try:
+        from hermes_cli.config import get_config_path
+
+        cfg_path = get_config_path()
+        cfg_stat = cfg_path.stat()
+        return (cfg_stat.st_mtime_ns, cfg_stat.st_size)
+    except (FileNotFoundError, OSError, ImportError):
+        return None
+
+
+def get_tool_search_scope_key(
+    enabled_toolsets: List[str] = None,
+    disabled_toolsets: List[str] = None,
+    context_length: Optional[int] = None,
+) -> tuple:
+    """Return the cache invalidation key for scoped Tool Search catalogs."""
+    return (
+        registry._generation,
+        frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
+        frozenset(disabled_toolsets) if disabled_toolsets else None,
+        _config_fingerprint(),
+        bool(os.environ.get("HERMES_KANBAN_TASK")),
+        _feishu_broker_cache_fingerprint(),
+        context_length,
+    )
+
+
 def get_tool_definitions(
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
+    context_length: Optional[int] = None,
+    skip_tool_search_assembly: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -288,20 +318,9 @@ def get_tool_definitions(
     # mode, discord action allowlist, etc.) without needing an explicit
     # invalidate hook on every config-writer.
     if quiet_mode:
-        try:
-            from hermes_cli.config import get_config_path
-            cfg_path = get_config_path()
-            cfg_stat = cfg_path.stat()
-            cfg_fp = (cfg_stat.st_mtime_ns, cfg_stat.st_size)
-        except (FileNotFoundError, OSError, ImportError):
-            cfg_fp = None
         cache_key = (
-            frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
-            frozenset(disabled_toolsets) if disabled_toolsets else None,
-            registry._generation,
-            cfg_fp,
-            bool(os.environ.get("HERMES_KANBAN_TASK")),
-            _feishu_broker_cache_fingerprint(),
+            get_tool_search_scope_key(enabled_toolsets, disabled_toolsets, context_length),
+            bool(skip_tool_search_assembly),
         )
         cached = _tool_defs_cache.get(cache_key)
         if cached is not None:
@@ -313,7 +332,13 @@ def get_tool_definitions(
             # schemas are treated as read-only by all known callers.
             return list(cached)
 
-    result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)
+    result = _compute_tool_definitions(
+        enabled_toolsets,
+        disabled_toolsets,
+        quiet_mode,
+        context_length=context_length,
+        skip_tool_search_assembly=skip_tool_search_assembly,
+    )
     if quiet_mode:
         # Cache the freshly-computed list, but hand callers a shallow copy so
         # downstream mutations (e.g. run_agent appending memory/LCM tool
@@ -331,6 +356,8 @@ def _compute_tool_definitions(
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
+    context_length: Optional[int] = None,
+    skip_tool_search_assembly: bool = False,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     # Determine which tool names the caller wants
@@ -461,16 +488,6 @@ def _compute_tool_definitions(
                     }
                     break
 
-    if not quiet_mode:
-        if filtered_tools:
-            tool_names = [t["function"]["name"] for t in filtered_tools]
-            print(f"🛠️  Final tool selection ({len(filtered_tools)} tools): {', '.join(tool_names)}")
-        else:
-            print("🛠️  No tools selected (all filtered out or unavailable)")
-
-    global _last_resolved_tool_names
-    _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
-
     # Sanitize schemas for broad backend compatibility. llama.cpp's
     # json-schema-to-grammar converter (used by its OAI server to build
     # GBNF tool-call parsers) rejects some shapes that cloud providers
@@ -482,6 +499,27 @@ def _compute_tool_definitions(
         filtered_tools = sanitize_tool_schemas(filtered_tools)
     except Exception as e:  # pragma: no cover — defensive
         logger.warning("Schema sanitization skipped: %s", e)
+
+    if not skip_tool_search_assembly and enabled_toolsets is not None:
+        try:
+            from tools import tool_search
+
+            filtered_tools = tool_search.assemble_tool_defs(
+                filtered_tools,
+                context_length=context_length,
+            ).tool_defs
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning("Tool Search assembly skipped: %s", e)
+
+    if not quiet_mode:
+        if filtered_tools:
+            tool_names = [t["function"]["name"] for t in filtered_tools]
+            print(f"🛠️  Final tool selection ({len(filtered_tools)} tools): {', '.join(tool_names)}")
+        else:
+            print("🛠️  No tools selected (all filtered out or unavailable)")
+
+    global _last_resolved_tool_names
+    _last_resolved_tool_names = [t["function"]["name"] for t in filtered_tools]
 
     return filtered_tools
 
@@ -784,6 +822,9 @@ def handle_function_call(
     user_task: Optional[str] = None,
     enabled_tools: Optional[List[str]] = None,
     skip_pre_tool_call_hook: bool = False,
+    enabled_toolsets: Optional[List[str]] = None,
+    disabled_toolsets: Optional[List[str]] = None,
+    scoped_tool_definitions: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -807,6 +848,63 @@ def handle_function_call(
     try:
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
+
+        try:
+            from tools import tool_search
+
+            is_bridge_call = function_name in tool_search.BRIDGE_TOOL_NAMES
+        except Exception:
+            tool_search = None
+            is_bridge_call = False
+
+        if is_bridge_call and tool_search is not None:
+            if scoped_tool_definitions is None and enabled_toolsets is None:
+                return json.dumps(
+                    {
+                        "error": (
+                            "Tool Search bridge requires explicit session scope; "
+                            "refusing to build a global tool catalog"
+                        )
+                    },
+                    ensure_ascii=False,
+                )
+            scoped_defs = scoped_tool_definitions
+            if scoped_defs is None:
+                scoped_defs = get_tool_definitions(
+                    enabled_toolsets=enabled_toolsets,
+                    disabled_toolsets=disabled_toolsets,
+                    quiet_mode=True,
+                    skip_tool_search_assembly=True,
+                )
+            if function_name == tool_search.TOOL_SEARCH_NAME:
+                return tool_search.dispatch_tool_search(
+                    function_args,
+                    current_tool_defs=scoped_defs,
+                )
+            if function_name == tool_search.TOOL_DESCRIBE_NAME:
+                return tool_search.dispatch_tool_describe(
+                    function_args,
+                    current_tool_defs=scoped_defs,
+                )
+            allowed_names = tool_search.scoped_deferrable_names(scoped_defs)
+            underlying_name, underlying_args, error = tool_search.resolve_underlying_call(
+                function_args,
+                allowed_names=allowed_names,
+            )
+            if error:
+                return json.dumps({"error": error}, ensure_ascii=False)
+            return handle_function_call(
+                underlying_name or "",
+                underlying_args,
+                task_id=task_id,
+                tool_call_id=tool_call_id,
+                session_id=session_id,
+                user_task=user_task,
+                enabled_tools=enabled_tools,
+                skip_pre_tool_call_hook=skip_pre_tool_call_hook,
+                enabled_toolsets=enabled_toolsets,
+                disabled_toolsets=disabled_toolsets,
+            )
 
         # Check plugin hooks for a block directive (unless caller already
         # checked — e.g. run_agent._invoke_tool passes skip=True to

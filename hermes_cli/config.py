@@ -666,6 +666,14 @@ DEFAULT_CONFIG = {
     "fallback_providers": [],
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
+    "tools": {
+        "tool_search": {
+            "enabled": "auto",
+            "threshold_pct": 10,
+            "search_default_limit": 5,
+            "max_search_limit": 20,
+        },
+    },
     "agent": {
         "max_turns": 90,
         # Inactivity timeout for gateway agent execution (seconds).

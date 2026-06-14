@@ -70,6 +70,65 @@ def _ra():
     return run_agent
 
 
+def _tool_search_scoped_names(agent) -> frozenset[str]:
+    """Return deferred tool names this agent may invoke through tool_call."""
+    try:
+        import model_tools
+        from tools import tool_search
+    except Exception:
+        return frozenset()
+
+    enabled = getattr(agent, "enabled_toolsets", None)
+    disabled = getattr(agent, "disabled_toolsets", None)
+    try:
+        scope_key = model_tools.get_tool_search_scope_key(
+            enabled,
+            disabled,
+            getattr(agent, "context_length", None),
+        )
+    except Exception:
+        scope_key = None
+    cached = getattr(agent, "_tool_search_scope_cache", None)
+    if cached is not None and cached[0] == scope_key:
+        return cached[1]
+    if enabled is None:
+        names = frozenset()
+    else:
+        try:
+            scoped_defs = model_tools.get_tool_definitions(
+                enabled_toolsets=enabled,
+                disabled_toolsets=disabled,
+                quiet_mode=True,
+                context_length=getattr(agent, "context_length", None),
+                skip_tool_search_assembly=True,
+            )
+            names = tool_search.scoped_deferrable_names(scoped_defs)
+        except Exception:
+            names = frozenset()
+    try:
+        agent._tool_search_scope_cache = (scope_key, names)
+    except Exception:
+        pass
+    return names
+
+
+def _unwrap_tool_search_call(agent, function_name: str, function_args: dict) -> tuple[str, dict, str | None]:
+    """Unwrap tool_call into the underlying scoped tool before policy hooks."""
+    try:
+        from tools import tool_search
+    except Exception:
+        return function_name, function_args, None
+    if function_name != tool_search.TOOL_CALL_NAME:
+        return function_name, function_args, None
+    underlying, underlying_args, error = tool_search.resolve_underlying_call(
+        function_args,
+        allowed_names=_tool_search_scoped_names(agent),
+    )
+    if error:
+        return function_name, function_args, error
+    return underlying or function_name, underlying_args, None
+
+
 def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
     """Execute multiple tool calls concurrently using a thread pool.
 
@@ -108,25 +167,34 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         if not isinstance(function_args, dict):
             function_args = {}
 
+        function_name, function_args, unwrap_error = _unwrap_tool_search_call(
+            agent,
+            function_name,
+            function_args,
+        )
+
         # Block evaluation must happen before checkpoint preflight.  A blocked
         # tool should not mutate checkpoint state or consume dedup slots.
         block_result = None
         blocked_by_guardrail = False
-        try:
-            from hermes_cli.plugins import get_pre_tool_call_block_message
-            block_message = get_pre_tool_call_block_message(
-                function_name, function_args, task_id=effective_task_id or "",
-            )
-        except Exception:
-            block_message = None
-
-        if block_message is not None:
-            block_result = json.dumps({"error": block_message}, ensure_ascii=False)
+        if unwrap_error is not None:
+            block_result = json.dumps({"error": unwrap_error}, ensure_ascii=False)
         else:
-            guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
-            if not guardrail_decision.allows_execution:
-                block_result = agent._guardrail_block_result(guardrail_decision)
-                blocked_by_guardrail = True
+            try:
+                from hermes_cli.plugins import get_pre_tool_call_block_message
+                block_message = get_pre_tool_call_block_message(
+                    function_name, function_args, task_id=effective_task_id or "",
+                )
+            except Exception:
+                block_message = None
+
+            if block_message is not None:
+                block_result = json.dumps({"error": block_message}, ensure_ascii=False)
+            else:
+                guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
+                if not guardrail_decision.allows_execution:
+                    block_result = agent._guardrail_block_result(guardrail_decision)
+                    blocked_by_guardrail = True
 
         if block_result is None:
             # Checkpoint for file-mutating tools
@@ -490,15 +558,22 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         if not isinstance(function_args, dict):
             function_args = {}
 
+        function_name, function_args, _unwrap_error = _unwrap_tool_search_call(
+            agent,
+            function_name,
+            function_args,
+        )
+
         # Check plugin hooks for a block directive before executing.
-        _block_msg: Optional[str] = None
-        try:
-            from hermes_cli.plugins import get_pre_tool_call_block_message
-            _block_msg = get_pre_tool_call_block_message(
-                function_name, function_args, task_id=effective_task_id or "",
-            )
-        except Exception:
-            pass
+        _block_msg: Optional[str] = _unwrap_error
+        if _block_msg is None:
+            try:
+                from hermes_cli.plugins import get_pre_tool_call_block_message
+                _block_msg = get_pre_tool_call_block_message(
+                    function_name, function_args, task_id=effective_task_id or "",
+                )
+            except Exception:
+                pass
 
         _guardrail_block_decision: ToolGuardrailDecision | None = None
         if _block_msg is None:
@@ -744,6 +819,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     session_id=agent.session_id or "",
                     enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
                     skip_pre_tool_call_hook=True,
+                    enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+                    disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 )
                 _spinner_result = function_result
             except Exception as tool_error:
@@ -764,6 +841,8 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     session_id=agent.session_id or "",
                     enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
                     skip_pre_tool_call_hook=True,
+                    enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+                    disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 )
             except Exception as tool_error:
                 function_result = f"Error executing tool '{function_name}': {tool_error}"

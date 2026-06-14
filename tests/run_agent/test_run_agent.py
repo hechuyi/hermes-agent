@@ -2417,6 +2417,8 @@ class TestConcurrentToolExecution:
 
     def test_invoke_tool_dispatches_to_handle_function_call(self, agent):
         """_invoke_tool should route regular tools through handle_function_call."""
+        agent.enabled_toolsets = ["web"]
+        agent.disabled_toolsets = ["terminal"]
         with patch("run_agent.handle_function_call", return_value="result") as mock_hfc:
             result = agent._invoke_tool("web_search", {"q": "test"}, "task-1")
             mock_hfc.assert_called_once_with(
@@ -2425,8 +2427,83 @@ class TestConcurrentToolExecution:
                 session_id=agent.session_id,
                 enabled_tools=list(agent.valid_tool_names),
                 skip_pre_tool_call_hook=True,
+                enabled_toolsets=["web"],
+                disabled_toolsets=["terminal"],
             )
             assert result == "result"
+
+    def test_sequential_tool_call_bridge_unwraps_before_callbacks(self, agent, monkeypatch):
+        """tool_call bridge should execute and report the underlying tool."""
+        monkeypatch.setattr(
+            "agent.tool_executor._tool_search_scoped_names",
+            lambda _agent: frozenset({"web_search"}),
+            raising=False,
+        )
+        tool_call = _mock_tool_call(
+            name="tool_call",
+            arguments='{"name":"web_search","arguments":{"query":"hello"}}',
+            call_id="c1",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        messages = []
+        starts = []
+        agent.tool_start_callback = (
+            lambda tool_call_id, function_name, function_args:
+            starts.append((tool_call_id, function_name, function_args))
+        )
+
+        with patch("run_agent.handle_function_call", return_value='{"success": true}') as mock_hfc:
+            agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
+
+        assert starts == [("c1", "web_search", {"query": "hello"})]
+        assert mock_hfc.call_args.args[:3] == ("web_search", {"query": "hello"}, "task-1")
+        assert messages[0]["tool_call_id"] == "c1"
+
+    def test_concurrent_tool_call_bridge_unwraps_before_callbacks(self, agent, monkeypatch):
+        monkeypatch.setattr(
+            "agent.tool_executor._tool_search_scoped_names",
+            lambda _agent: frozenset({"web_search"}),
+            raising=False,
+        )
+        tool_call = _mock_tool_call(
+            name="tool_call",
+            arguments='{"name":"web_search","arguments":{"query":"hello"}}',
+            call_id="c1",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        messages = []
+        starts = []
+        agent.tool_start_callback = (
+            lambda tool_call_id, function_name, function_args:
+            starts.append((tool_call_id, function_name, function_args))
+        )
+
+        with patch("run_agent.handle_function_call", return_value='{"success": true}') as mock_hfc:
+            agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+
+        assert starts == [("c1", "web_search", {"query": "hello"})]
+        assert mock_hfc.call_args.args[:3] == ("web_search", {"query": "hello"}, "task-1")
+        assert messages[0]["tool_call_id"] == "c1"
+
+    def test_tool_call_bridge_rejects_out_of_scope_unwrap(self, agent, monkeypatch):
+        monkeypatch.setattr(
+            "agent.tool_executor._tool_search_scoped_names",
+            lambda _agent: frozenset(),
+            raising=False,
+        )
+        tool_call = _mock_tool_call(
+            name="tool_call",
+            arguments='{"name":"web_search","arguments":{"query":"hello"}}',
+            call_id="c1",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tool_call])
+        messages = []
+
+        with patch("run_agent.handle_function_call", side_effect=AssertionError("should not run")) as mock_hfc:
+            agent._execute_tool_calls_sequential(mock_msg, messages, "task-1")
+
+        mock_hfc.assert_not_called()
+        assert "not available in this session" in messages[0]["content"]
 
     def test_sequential_tool_callbacks_fire_in_order(self, agent):
         tool_call = _mock_tool_call(name="web_search", arguments='{"query":"hello"}', call_id="c1")
