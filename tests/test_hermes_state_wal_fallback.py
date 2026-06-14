@@ -249,7 +249,7 @@ class TestGetLastInitError:
         """Happy-path SessionDB init does NOT clear a stale error from a prior thread.
 
         We deliberately don't clear on success so that in multi-threaded
-        callers (gateway / web_server per-request SessionDB()), a concurrent
+        callers (gateway per-request SessionDB()), a concurrent
         successful open racing past a different thread's failure won't
         erase the cause string the failing thread's /resume is about to
         format.  The caller or test fixture is responsible for explicitly

@@ -183,14 +183,9 @@ class TestCmdUpdateBranchFallback:
         mock_run.side_effect = _make_run_side_effect(
             branch="main", verify_ok=True, commit_count="1"
         )
-        # The web UI build runs through _run_with_idle_timeout now (issue
-        # #33788) so it no longer appears in subprocess.run's call list.
-        # Mock it so the test doesn't actually shell out to ``tsc``.
-        import subprocess as _subprocess
-        build_ok = _subprocess.CompletedProcess([], 0, stdout="", stderr="")
         with patch.object(hm, "_is_termux_env", return_value=False), patch.object(
-            hm, "_web_ui_build_needed", return_value=True
-        ), patch.object(hm, "_run_with_idle_timeout", return_value=build_ok) as mock_idle:
+            hm, "_run_with_idle_timeout"
+        ) as mock_idle:
             cmd_update(mock_args)
 
         npm_calls = [
@@ -216,8 +211,6 @@ class TestCmdUpdateBranchFallback:
             (update_flags, PROJECT_ROOT),
         ]
 
-        # The stale web build helper is still mocked in this test path but is
-        # no longer reached when the visual frontend is absent.
         mock_idle.assert_not_called()
 
         # Regression for #18840: repo-root npm install must stream output

@@ -4,15 +4,18 @@ from pathlib import Path
 import tomllib
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _load_optional_dependencies():
-    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    pyproject_path = REPO_ROOT / "pyproject.toml"
     with pyproject_path.open("rb") as handle:
         project = tomllib.load(handle)["project"]
     return project["optional-dependencies"]
 
 
 def _load_package_data():
-    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    pyproject_path = REPO_ROOT / "pyproject.toml"
     with pyproject_path.open("rb") as handle:
         tool = tomllib.load(handle)["tool"]
     return tool["setuptools"]["package-data"]
@@ -221,10 +224,11 @@ def test_feishu_extra_includes_qrcode_for_qr_login():
     assert any(dep.startswith("qrcode") for dep in feishu_extra)
 
 
-def test_dashboard_extra_not_in_default_install_profiles():
-    """The dashboard backend remains optional while visual surfaces are pruned."""
+def test_dashboard_extra_is_removed_from_feishu_runtime_fork():
+    """The Feishu runtime fork must not publish a dashboard backend extra."""
     optional_dependencies = _load_optional_dependencies()
 
+    assert "web" not in optional_dependencies
     assert not any(
         spec == "hermes-agent[web]"
         for spec in optional_dependencies["all"]
@@ -235,11 +239,26 @@ def test_dashboard_extra_not_in_default_install_profiles():
     )
 
 
-def test_dashboard_plugin_static_assets_are_not_packaged():
-    """Visual dashboard plugin bundles are not part of the Feishu runtime wheel."""
+def test_dashboard_plugin_manifests_are_not_packaged():
+    """Dashboard plugin discovery metadata is not part of the Feishu wheel."""
     package_data = _load_package_data()
     plugin_data = package_data["plugins"]
 
-    assert "*/dashboard/manifest.json" in plugin_data
+    assert "*/dashboard/manifest.json" not in plugin_data
     assert "*/dashboard/dist/*" not in plugin_data
     assert "*/dashboard/dist/**/*" not in plugin_data
+
+
+def test_dashboard_runtime_files_are_removed_from_feishu_runtime_fork():
+    """The Feishu fork must not ship the dashboard runtime or auth backend."""
+    forbidden = [
+        "hermes_cli/web_server.py",
+        "hermes_cli/pty_bridge.py",
+        "hermes_cli/dashboard_auth",
+        "plugins/dashboard_auth/nous",
+        "docker/s6-rc.d/dashboard",
+        "docker/s6-rc.d/user/contents.d/dashboard",
+    ]
+
+    for relpath in forbidden:
+        assert not (REPO_ROOT / relpath).exists(), relpath

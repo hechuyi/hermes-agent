@@ -556,41 +556,16 @@ class PluginContext:
     # -- dashboard auth provider registration --------------------------------
 
     def register_dashboard_auth_provider(self, provider) -> None:
-        """Register a dashboard authentication provider.
+        """Compatibility hook for dashboard-era plugins.
 
-        ``provider`` must be an instance of
-        :class:`hermes_cli.dashboard_auth.DashboardAuthProvider`. Used by
-        the dashboard OAuth auth gate, which engages when the dashboard
-        binds to a non-loopback host without ``--insecure``.
-
-        Misbehaving providers (wrong type, duplicate name) are logged at
-        WARNING and silently ignored — never raised — so a broken plugin
-        cannot crash the host. Same convention as
-        ``register_image_gen_provider``.
+        The Feishu runtime fork no longer ships the dashboard OAuth gate.
+        Keep the hook as a no-op so third-party plugins that still call it
+        remain loadable, but do not import removed dashboard_auth modules.
         """
-        from hermes_cli.dashboard_auth import (
-            DashboardAuthProvider, register_provider,
-        )
-
-        if not isinstance(provider, DashboardAuthProvider):
-            logger.warning(
-                "Plugin '%s' tried to register a dashboard-auth provider "
-                "that does not inherit from DashboardAuthProvider. Ignoring.",
-                self.manifest.name,
-            )
-            return
-        try:
-            register_provider(provider)
-        except (TypeError, ValueError) as e:
-            logger.warning(
-                "Plugin '%s' failed to register dashboard-auth provider "
-                "%r: %s",
-                self.manifest.name, getattr(provider, "name", "?"), e,
-            )
-            return
         logger.info(
-            "Plugin '%s' registered dashboard-auth provider: %s (%s)",
-            self.manifest.name, provider.name, provider.display_name,
+            "Plugin '%s' ignored dashboard-auth provider registration; "
+            "dashboard auth is unavailable in this Feishu runtime fork.",
+            self.manifest.name,
         )
 
     # -- video gen provider registration -------------------------------------

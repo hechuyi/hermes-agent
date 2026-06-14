@@ -487,8 +487,7 @@ def test_redirect_respects_no_supervise_env(
 ) -> None:
     """`HERMES_GATEWAY_NO_SUPERVISE=1` (env var) must skip the redirect.
 
-    Truthiness mirrors the dashboard service's own env var parsing —
-    1/true/yes are all accepted, case-insensitively.
+    The opt-out accepts the standard truthy forms case-insensitively.
     """
     from hermes_cli import gateway as gw
 

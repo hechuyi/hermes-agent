@@ -763,21 +763,13 @@ def test_board_auto_initializes_missing_db(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_ws_events_rejects_when_token_required(tmp_path, monkeypatch):
-    """When _SESSION_TOKEN is set (normal dashboard context), a missing or
-    wrong ?token= query param must be rejected with policy-violation."""
+def test_ws_events_requires_some_token(tmp_path, monkeypatch):
+    """The legacy event stream requires a token-shaped query parameter."""
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
-
-    # Stub web_server so _check_ws_token has a token to compare against.
-    import hermes_cli
-    import types
-    stub = types.SimpleNamespace(_SESSION_TOKEN="secret-xyz")
-    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", stub)
-    monkeypatch.setattr(hermes_cli, "web_server", stub, raising=False)
 
     app = FastAPI()
     app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
@@ -790,13 +782,8 @@ def test_ws_events_rejects_when_token_required(tmp_path, monkeypatch):
             pass
     assert exc.value.code == 1008
 
-    # Wrong token → policy violation close.
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with c.websocket_connect("/api/plugins/kanban/events?token=nope"):
-            pass
-    assert exc.value.code == 1008
-
-    # Correct token → accepted (connect then close cleanly from our side).
+    # Any provided token is accepted now that the dashboard session authority
+    # has been removed from this fork.
     with c.websocket_connect(
         "/api/plugins/kanban/events?token=secret-xyz"
     ) as ws:
@@ -831,13 +818,6 @@ def test_ws_events_board_query_param_default_overrides_current_board_pointer(tmp
         other_conn.close()
 
     kb.set_current_board("other")
-
-    import hermes_cli
-    import types
-
-    stub = types.SimpleNamespace(_SESSION_TOKEN="secret-xyz")
-    monkeypatch.setitem(sys.modules, "hermes_cli.web_server", stub)
-    monkeypatch.setattr(hermes_cli, "web_server", stub, raising=False)
 
     app = FastAPI()
     app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")

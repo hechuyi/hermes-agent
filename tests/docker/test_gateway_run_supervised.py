@@ -5,7 +5,7 @@ run`` was the standard pattern — the gateway ran as the container's
 main process, container exit code matched gateway exit code, no
 supervision. With s6 as PID 1, the same invocation now auto-redirects
 to the supervised path (`gateway start`) so users get auto-restart on
-crash and a supervised dashboard alongside (when ``HERMES_DASHBOARD=1``).
+crash.
 
 These tests verify the three load-bearing properties of that redirect:
 
@@ -302,33 +302,6 @@ def test_supervised_gateway_does_not_recurse(
     )
 
 
-def test_dashboard_supervised_when_env_set(
-    built_image: str, container_name: str,
-) -> None:
-    """When ``HERMES_DASHBOARD=1`` is set, ``docker run <image> gateway
-    run`` should result in BOTH the gateway and the dashboard being
-    supervised by s6 — the dashboard slot was always there but only
-    activates with the env var. This is the headline benefit of the
-    redirect: one container = supervised gateway + supervised
-    dashboard, with zero extra user effort.
-    """
-    subprocess.run(
-        ["docker", "run", "-d", "--name", container_name,
-         "-e", "HERMES_DASHBOARD=1",
-         built_image, "gateway", "run"],
-        check=True, capture_output=True, timeout=30,
-    )
-    time.sleep(5)
-
-    # Both slots should report want-up.
-    assert _svstat_wants_up(container_name, "gateway-default"), (
-        f"gateway-default slot not up: {_svstat(container_name)!r}"
-    )
-    assert _svstat_wants_up(container_name, "dashboard"), (
-        f"dashboard slot not up: {_svstat(container_name, 'dashboard')!r}"
-    )
-
-
 def test_supervised_gateway_stdout_reaches_docker_logs(
     built_image: str, container_name: str,
 ) -> None:
@@ -392,4 +365,3 @@ def test_supervised_gateway_stdout_reaches_docker_logs(
         "destination may have been dropped by the new s6-log script. "
         f"File contents:\n{file_contents}"
     )
-

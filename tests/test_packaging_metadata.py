@@ -43,9 +43,8 @@ def test_every_on_disk_subpackage_is_covered_by_packages_find():
     top-level package is listed twice — bare (``hermes_cli``) for the package
     itself and ``hermes_cli.*`` for its subpackages — EXCEPT when someone
     forgets the wildcard. v0.15.x listed ``hermes_cli`` without ``hermes_cli.*``,
-    so the wheel shipped ``hermes_cli/*.py`` but dropped the ``dashboard_auth``
-    and ``proxy`` subpackages. The dashboard then died on every install with
-    ``ModuleNotFoundError: No module named 'hermes_cli.dashboard_auth'``.
+    so the wheel shipped ``hermes_cli/*.py`` but dropped real subpackages such
+    as ``proxy``.
 
     This drives setuptools' own discovery against the live tree: every package
     that exists on disk and would be found by a permissive ``<name>.*`` scan
@@ -159,8 +158,8 @@ def test_bundled_plugin_manifests_ship_in_both_wheel_and_sdist():
 # 1.0.1. Anything below that lets a malformed Host header desync
 # ``request.url.path`` from the dispatched ASGI path, bypassing path-based
 # authz in middleware/endpoints that gate on ``request.url``. Starlette is a
-# transitive dep (fastapi in [web]; sse-starlette/mcp in [mcp]/[computer-use]/
-# [dev]) so we pin it directly in every extra that exposes a server surface and
+# transitive dep (sse-starlette/mcp in [mcp]/[computer-use]/[dev]) so we pin it
+# directly in every extra that exposes a server surface and
 # enforce the floor in both pyproject and the committed lockfile.
 _STARLETTE_CVE_FLOOR = (1, 0, 1)
 
@@ -182,8 +181,8 @@ def test_starlette_pinned_above_cve_2026_48710_floor_in_pyproject():
 
     Regression guard for #35067 / CVE-2026-48710. A future edit that drops the
     pin (re-exposing the unbounded transitive ``starlette>=0.27`` from mcp /
-    ``>=0.40.0`` from fastapi) or pins a pre-1.0.1 version fails here instead of
-    shipping a Host-header auth-bypass to dashboard / MCP-HTTP users.
+    pins a pre-1.0.1 version fails here instead of shipping a Host-header
+    auth-bypass to MCP-HTTP users.
     """
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     extras = data["project"]["optional-dependencies"]
@@ -197,8 +196,8 @@ def test_starlette_pinned_above_cve_2026_48710_floor_in_pyproject():
                 ver = spec.split("==", 1)[1].split(";", 1)[0].strip()
                 found[extra] = ver
 
-    # The four server-surface extras must each carry the direct pin.
-    for extra in ("web", "mcp", "computer-use", "dev"):
+    # Server-surface extras must each carry the direct pin.
+    for extra in ("mcp", "computer-use", "dev"):
         assert extra in found, (
             f"[{extra}] no longer pins starlette directly — CVE-2026-48710 "
             f"regression risk (mcp/fastapi pull it transitively with no upper bound)"

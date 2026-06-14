@@ -21,7 +21,6 @@
 #      wired in keeps that change small.
 #
 # For now this service is a no-op: it sleeps forever, doing nothing.
-# The dashboard runs as a real s6 service alongside it (see
-# ../dashboard/run) and per-profile gateways register dynamically via
-# /run/service/ at runtime (Phase 4).
+# Per-profile gateways register dynamically via /run/service/ at runtime
+# (Phase 4).
 exec sleep infinity
