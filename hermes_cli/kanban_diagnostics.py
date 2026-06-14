@@ -1230,10 +1230,15 @@ def list_task_diagnostics(
     conn,
     *,
     severity: Optional[str] = None,
+    task_ids: Optional[list[str]] = None,
     config: Optional[dict] = None,
 ) -> dict:
     """Return dashboard/API-shaped diagnostics rows for a kanban DB."""
-    diagnostics_by_task = compute_task_diagnostics_by_task(conn, config=config)
+    diagnostics_by_task = compute_task_diagnostics_by_task(
+        conn,
+        task_ids=task_ids,
+        config=config,
+    )
     if severity:
         diagnostics_by_task = {
             task_id: [

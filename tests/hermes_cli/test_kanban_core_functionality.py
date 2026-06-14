@@ -734,6 +734,19 @@ def test_read_worker_log_tail(kanban_home):
     assert kb.read_worker_log("t_missing") is None
 
 
+def test_cli_diagnostics_task_mode_omits_clean_task(kanban_home):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="clean task")
+    finally:
+        conn.close()
+
+    out = run_slash(f"diagnostics --task {task_id}")
+
+    assert "No active diagnostics on this board." in out
+    assert "0 active diagnostic(s) across 1 task(s)" not in out
+
+
 # ---------------------------------------------------------------------------
 # CLI bulk verbs
 # ---------------------------------------------------------------------------
