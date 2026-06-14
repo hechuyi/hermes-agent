@@ -90,39 +90,6 @@ def _set_process_title() -> None:
         pass
 
 
-# Mouse-tracking residue suppression — runs BEFORE every other import on the
-# TUI hot path so the terminal stops emitting SGR/X10 mouse reports while the
-# Python launcher is still doing imports (≈100–300ms in cooked + echo mode,
-# before the Node TUI takes stdin into raw mode). During that window any
-# incoming bytes are echoed straight back to the user's shell scrollback as
-# ``^[[<…M`` text. The TUI itself runs `resetTerminalModes()` again in
-# `entry.tsx`; this is just the earlier cousin. ``HERMES_TUI_NO_EARLY_DISABLE``
-# escapes the behaviour for diagnostics.
-def _suppress_mouse_residue_early() -> None:
-    if os.environ.get("HERMES_TUI_NO_EARLY_DISABLE") == "1":
-        return
-    if not (os.environ.get("HERMES_TUI") == "1" or "--tui" in sys.argv[1:]):
-        return
-    try:
-        # Skip when stdout is redirected (`hermes --tui … >log`, CI capture):
-        # the bytes can't reach the terminal anyway and would just pollute
-        # the log with raw CSI.
-        if not os.isatty(1):
-            return
-        # Disable every mouse-tracking variant we know about. Idempotent and
-        # safe to send even when no tracking is currently asserted.
-        os.write(
-            1,
-            b"\x1b[?1003l\x1b[?1002l\x1b[?1001l\x1b[?1000l\x1b[?9l"
-            b"\x1b[?1006l\x1b[?1005l\x1b[?1015l\x1b[?1016l\x1b[?2029l",
-        )
-    except OSError:
-        pass
-
-
-_suppress_mouse_residue_early()
-
-
 def _is_termux_startup_environment_fast() -> bool:
     """Tiny Termux check for pre-import startup shortcuts."""
     prefix = os.environ.get("PREFIX", "")
@@ -10362,47 +10329,6 @@ def _try_termux_fast_cli_launch() -> bool:
     return False
 
 
-def _try_termux_fast_tui_launch() -> bool:
-    """Launch obvious Termux TUI invocations before building every subparser.
-
-    `hermes --tui` is the hot path on phones. The full parser setup imports
-    command modules for model, fallback, migrate, kanban, bundles, plugins,
-    etc. even though the TUI immediately execs Node. On Termux only, parse the
-    lightweight top-level/chat parser and hand off to ``cmd_chat`` when the
-    invocation is unambiguously the built-in TUI/chat path.
-    """
-    if not _is_termux_startup_environment():
-        return False
-
-    if "-h" in sys.argv[1:] or "--help" in sys.argv[1:]:
-        return False
-
-    wants_tui = os.environ.get("HERMES_TUI") == "1" or "--tui" in sys.argv[1:]
-    if not wants_tui:
-        return False
-
-    first = _first_positional_argv()
-    if first not in {None, "chat"}:
-        return False
-
-    from hermes_cli._parser import build_top_level_parser
-
-    parser, _subparsers, chat_parser = build_top_level_parser()
-    chat_parser.set_defaults(func=cmd_chat)
-    args = parser.parse_args(_coalesce_session_name_args(sys.argv[1:]))
-
-    # Preserve top-level behaviours whose semantics are not "launch chat/TUI".
-    if getattr(args, "version", False) or getattr(args, "oneshot", None):
-        return False
-    if getattr(args, "command", None) not in {None, "chat"}:
-        return False
-    if not (getattr(args, "tui", False) or os.environ.get("HERMES_TUI") == "1"):
-        return False
-
-    cmd_chat(args)
-    return True
-
-
 def main():
     """Main entry point for hermes CLI."""
     _set_process_title()
@@ -10422,8 +10348,6 @@ def main():
     except Exception:
         pass
 
-    if _try_termux_fast_tui_launch():
-        return
     if _try_termux_fast_cli_launch():
         return
 

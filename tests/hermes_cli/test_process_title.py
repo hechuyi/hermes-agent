@@ -33,7 +33,7 @@ def test_main_invokes_process_title_before_fast_exit(monkeypatch):
     calls = []
     monkeypatch.setattr(main_mod, "_set_process_title", lambda: calls.append("title"))
     monkeypatch.setattr(main_mod, "_cleanup_quarantined_exes", lambda: calls.append("cleanup"))
-    monkeypatch.setattr(main_mod, "_try_termux_fast_tui_launch", lambda: True)
+    monkeypatch.setattr(main_mod, "_try_termux_fast_cli_launch", lambda: True)
 
     main_mod.main()
 

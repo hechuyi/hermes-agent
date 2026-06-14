@@ -284,6 +284,9 @@ def test_node_tui_launcher_is_removed_from_feishu_runtime_fork():
         "def _make_tui_argv(",
         "def _ensure_tui_node(",
         "def _tui_need_npm_install(",
+        "def _suppress_mouse_residue_early(",
+        "def _try_termux_fast_tui_launch(",
+        "HERMES_TUI_NO_EARLY_DISABLE",
         "ui-tui",
         "tui_dist",
     ]
