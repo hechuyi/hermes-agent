@@ -42,13 +42,13 @@ import os
 import sqlite3
 import time
 from dataclasses import asdict
-from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from hermes_cli import kanban_attachments
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
 
@@ -615,30 +615,6 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
 # Attachments — upload / list / download / delete (#35338)
 # ---------------------------------------------------------------------------
 
-# Cap a single upload so a runaway request can't fill the disk. 25 MB
-# comfortably covers PDFs, images, and source docs — the kanban use case.
-_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
-
-
-def _safe_attachment_name(raw: str) -> str:
-    """Reduce a client-supplied filename to a safe basename.
-
-    Strips any directory components (``os.path.basename`` on both
-    separators) so a malicious ``../../etc/passwd`` or ``C:\\x`` collapses
-    to its leaf. Rejects empty / dotfile-only names. The result is only
-    ever joined under the per-task attachments dir, never used verbatim
-    as a path from the client.
-    """
-    name = (raw or "").replace("\\", "/").split("/")[-1].strip()
-    # Drop control chars and leading dots so we never write a dotfile or
-    # a name with embedded NULs/newlines.
-    name = "".join(ch for ch in name if ch.isprintable() and ch not in '\x00').strip()
-    name = name.lstrip(".").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="invalid attachment filename")
-    return name[:200]
-
-
 @router.get("/tasks/{task_id}/attachments")
 def list_task_attachments(task_id: str, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
@@ -671,71 +647,25 @@ async def upload_task_attachment(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        if kanban_db.get_task(conn, task_id) is None:
-            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-
-        safe_name = _safe_attachment_name(file.filename or "")
-
-        # Stream to disk with a hard size cap so a huge upload can't fill
-        # the disk. Read in chunks; abort + clean up if the cap is hit.
-        dest_dir = kanban_db.task_attachments_dir(task_id, board=board)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
-        # Resolve name collisions: foo.pdf → foo (1).pdf, foo (2).pdf, …
-        # Treat symlinks as occupied even when broken: Path.exists() is
-        # false for a broken symlink, but opening it would follow the link.
-        stem, dot, ext = safe_name.partition(".")
-        candidate = safe_name
-        n = 1
-        while (dest_dir / candidate).exists() or (dest_dir / candidate).is_symlink():
-            candidate = f"{stem} ({n}){dot}{ext}"
-            n += 1
-        dest_path = dest_dir / candidate
-
-        total = 0
-        created_path = False
-        try:
-            with open(dest_path, "xb") as out:
-                created_path = True
-                while True:
-                    chunk = await file.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > _MAX_ATTACHMENT_BYTES:
-                        out.close()
-                        dest_path.unlink(missing_ok=True)
-                        raise HTTPException(
-                            status_code=413,
-                            detail=(
-                                f"attachment exceeds {_MAX_ATTACHMENT_BYTES // (1024 * 1024)} MB limit"
-                            ),
-                        )
-                    out.write(chunk)
-        except HTTPException:
-            raise
-        except OSError as exc:
-            if created_path:
-                dest_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=500, detail=f"failed to store attachment: {exc}")
-
-        try:
-            att_id = kanban_db.add_attachment(
-                conn,
-                task_id,
-                filename=candidate,
-                stored_path=str(dest_path.resolve()),
-                content_type=file.content_type,
-                size=total,
-                uploaded_by=(uploaded_by or "dashboard"),
-                board=board,
-            )
-        except ValueError:
-            dest_path.unlink(missing_ok=True)
-            raise
-        att = kanban_db.get_attachment(conn, att_id)
-        return {"attachment": _attachment_dict(att) if att else None}
-    except ValueError as e:
+        att = await kanban_attachments.store_attachment_upload(
+            conn,
+            task_id,
+            filename=file.filename or "",
+            reader=file,
+            content_type=file.content_type,
+            uploaded_by=uploaded_by,
+            board=board,
+        )
+        return {"attachment": _attachment_dict(att)}
+    except kanban_attachments.AttachmentNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except kanban_attachments.InvalidAttachmentName as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except kanban_attachments.AttachmentTooLarge as e:
+        raise HTTPException(status_code=413, detail=str(e))
+    except kanban_attachments.AttachmentUnavailable as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except kanban_attachments.AttachmentError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
         conn.close()
@@ -746,24 +676,19 @@ def download_attachment(attachment_id: int, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        att = kanban_db.get_attachment(conn, attachment_id)
-        if att is None:
-            raise HTTPException(status_code=404, detail="attachment not found")
-        # Confirm the blob still lives under this task's attachment dir
-        # before serving — defense in depth against a tampered DB row.
-        root = kanban_db.task_attachments_dir(att.task_id, board=board).resolve()
-        try:
-            stored = Path(att.stored_path).resolve()
-            stored.relative_to(root)
-        except (ValueError, OSError):
-            raise HTTPException(status_code=404, detail="attachment file unavailable")
-        if not stored.is_file():
-            raise HTTPException(status_code=404, detail="attachment file missing on disk")
-        return FileResponse(
-            path=str(stored),
-            filename=att.filename,
-            media_type=att.content_type or "application/octet-stream",
+        download = kanban_attachments.resolve_attachment_download(
+            conn, attachment_id, board=board,
         )
+        return FileResponse(
+            path=str(download.path),
+            filename=download.filename,
+            media_type=download.media_type,
+        )
+    except (
+        kanban_attachments.AttachmentNotFound,
+        kanban_attachments.AttachmentUnavailable,
+    ) as e:
+        raise HTTPException(status_code=404, detail=str(e))
     finally:
         conn.close()
 
