@@ -117,7 +117,7 @@ def build_top_level_parser():
         default=None,
         help=(
             "Model override for this invocation (e.g. anthropic/claude-sonnet-4.6). "
-            "Applies to -z/--oneshot and --tui. Also settable via HERMES_INFERENCE_MODEL env var."
+            "Applies to chat and -z/--oneshot. Also settable via HERMES_INFERENCE_MODEL env var."
         ),
     )
     _inherited_flag(
@@ -126,7 +126,7 @@ def build_top_level_parser():
         default=None,
         help=(
             "Provider override for this invocation (e.g. openrouter, anthropic). "
-            "Applies to -z/--oneshot and --tui. The persistent provider lives in config.yaml "
+            "Applies to chat and -z/--oneshot. The persistent provider lives in config.yaml "
             "under model.provider — use `hermes setup` or edit the file to change it."
         ),
     )
@@ -134,7 +134,7 @@ def build_top_level_parser():
         "-t",
         "--toolsets",
         default=None,
-        help="Comma-separated toolsets to enable for this invocation. Applies to -z/--oneshot and --tui.",
+        help="Comma-separated toolsets to enable for this invocation. Applies to chat and -z/--oneshot.",
     )
     parser.add_argument(
         "--resume",

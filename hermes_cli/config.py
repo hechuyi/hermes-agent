@@ -86,8 +86,8 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # * ``PYTHONPATH`` / ``PYTHONHOME`` / ``PYTHONSTARTUP`` /
 #   ``PYTHONUSERBASE`` — Python interpreter init. Hermes itself starts
 #   from one of these on every restart.
-# * ``NODE_OPTIONS`` / ``NODE_PATH`` — Node interpreter; affects npm,
-#   ``hermes update``, the TUI build.
+# * ``NODE_OPTIONS`` / ``NODE_PATH`` — Node interpreter; affects npm and
+#   ``hermes update``.
 # * ``PATH`` — too broad to allow. The dashboard never needs to rewrite
 #   the operator's PATH; if a tool can't be found, the fix is to add an
 #   absolute path in the integration config, not to mutate PATH globally.
@@ -1210,15 +1210,10 @@ DEFAULT_CONFIG = {
         # behavior of showing tool-call summaries inline.
         "resume_skip_tool_only": True,
         "busy_input_mode": "interrupt",  # interrupt | queue | steer
-        # When true, `hermes --tui` auto-resumes the most recent human-
-        # facing session on launch instead of forging a fresh one.
-        # Mirrors `hermes -c` muscle memory.  Default off so existing
-        # users aren't surprised.  HERMES_TUI_RESUME=<id> always wins.
+        # Legacy Node/Ink TUI compatibility key. The Feishu runtime fork keeps
+        # the setting loadable but no longer launches the Node/Ink TUI.
         "tui_auto_resume_recent": False,
-        # When true (default), `hermes --tui` drops a one-time hint
-        # ("subagents working · /agents to watch live") the first time a turn
-        # starts delegating, nudging the user toward the live spawn-tree
-        # dashboard. Set false to suppress the hint.
+        # Legacy Node/Ink TUI compatibility key; retained so old configs load.
         "tui_agents_nudge": True,
         "bell_on_complete": False,
         "show_reasoning": False,
