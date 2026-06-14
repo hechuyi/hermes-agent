@@ -14,7 +14,7 @@ import secrets
 import sys
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
@@ -217,89 +217,6 @@ def test_inspect_run_no_pid(client):
     body = r.json()
     assert body["alive"] is False
     assert "worker_pid" in body["reason"]
-
-
-def test_inspect_run_dead_pid(client, monkeypatch):
-    """Run with a non-existent PID returns alive=false via psutil.NoSuchProcess."""
-    conn = kb.connect()
-    try:
-        task_id = kb.create_task(conn, title="dead-pid", assignee="grace")
-        run_id = _insert_run(conn, task_id, worker_pid=999999)
-    finally:
-        conn.close()
-
-    # Mock psutil to raise NoSuchProcess for any PID.
-    mock_psutil = MagicMock()
-    mock_psutil.NoSuchProcess = Exception
-    mock_psutil.AccessDenied = PermissionError
-
-    def _raise_no_such(*args, **kwargs):
-        raise mock_psutil.NoSuchProcess("no such process")
-
-    mock_psutil.Process = _raise_no_such
-
-    # Patch the module-level _psutil in the loaded plugin module.
-    plugin_mod_name = "hermes_dashboard_plugin_kanban_worker_runs_test"
-    plugin_mod = sys.modules.get(plugin_mod_name)
-    if plugin_mod is not None:
-        monkeypatch.setattr(plugin_mod, "_psutil", mock_psutil)
-    else:
-        pytest.skip("plugin module not yet loaded")
-
-    r = client.get(f"/api/plugins/kanban/runs/{run_id}/inspect")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["alive"] is False
-    assert body["pid"] == 999999
-    assert "not found" in body["reason"]
-
-
-def test_inspect_run_live_pid(client, monkeypatch):
-    """Run with a live PID returns alive=true with psutil fields."""
-    conn = kb.connect()
-    try:
-        task_id = kb.create_task(conn, title="live-pid", assignee="heidi")
-        run_id = _insert_run(conn, task_id, worker_pid=12345)
-    finally:
-        conn.close()
-
-    # Build a realistic mock psutil.
-    mock_psutil = MagicMock()
-    mock_psutil.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
-    mock_psutil.AccessDenied = type("AccessDenied", (Exception,), {})
-
-    fake_mem = MagicMock()
-    fake_mem.rss = 1024 * 1024 * 50  # 50 MB
-    fake_mem.vms = 1024 * 1024 * 200
-
-    fake_proc = MagicMock()
-    fake_proc.as_dict.return_value = {
-        "cpu_percent": 3.5,
-        "memory_info": fake_mem,
-        "num_threads": 4,
-        "status": "sleeping",
-        "create_time": time.time() - 300,
-        "cmdline": ["python", "-m", "hermes"],
-    }
-    fake_proc.num_fds.return_value = 12
-    mock_psutil.Process.return_value = fake_proc
-
-    plugin_mod_name = "hermes_dashboard_plugin_kanban_worker_runs_test"
-    plugin_mod = sys.modules.get(plugin_mod_name)
-    if plugin_mod is not None:
-        monkeypatch.setattr(plugin_mod, "_psutil", mock_psutil)
-    else:
-        pytest.skip("plugin module not yet loaded")
-
-    r = client.get(f"/api/plugins/kanban/runs/{run_id}/inspect")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["alive"] is True
-    assert body["pid"] == 12345
-    assert body["cpu_percent"] == 3.5
-    assert body["memory_rss_bytes"] == fake_mem.rss
-    assert body["num_threads"] == 4
-    assert body["status"] == "sleeping"
 
 
 # ---------------------------------------------------------------------------

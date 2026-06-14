@@ -51,6 +51,7 @@ from pydantic import BaseModel, Field
 from hermes_cli import kanban_attachments
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
+from hermes_cli import kanban_workers
 
 log = logging.getLogger(__name__)
 
@@ -189,24 +190,7 @@ def _attachment_dict(a: kanban_db.Attachment) -> dict[str, Any]:
 
 def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
     """Serialise a Run for the drawer's Run history section."""
-    return {
-        "id": r.id,
-        "task_id": r.task_id,
-        "profile": r.profile,
-        "step_key": r.step_key,
-        "status": r.status,
-        "claim_lock": r.claim_lock,
-        "claim_expires": r.claim_expires,
-        "worker_pid": r.worker_pid,
-        "max_runtime_seconds": r.max_runtime_seconds,
-        "last_heartbeat_at": r.last_heartbeat_at,
-        "started_at": r.started_at,
-        "ended_at": r.ended_at,
-        "outcome": r.outcome,
-        "summary": r.summary,
-        "metadata": r.metadata,
-        "error": r.error,
-    }
+    return kanban_workers.run_to_payload(r)
 
 
 # Hallucination-warning event kinds — see complete_task() in kanban_db.py.
@@ -1137,12 +1121,6 @@ def list_diagnostics(
 # Worker visibility — cross-task active-worker list and per-run inspection
 # ---------------------------------------------------------------------------
 
-try:
-    import psutil as _psutil
-except ImportError:
-    _psutil = None  # type: ignore[assignment]
-
-
 @router.get("/workers/active")
 def list_active_workers(
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -1159,47 +1137,7 @@ def list_active_workers(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        rows = conn.execute(
-            """
-            SELECT
-                r.id          AS run_id,
-                r.task_id,
-                t.title       AS task_title,
-                t.status      AS task_status,
-                t.assignee    AS task_assignee,
-                r.profile,
-                r.worker_pid,
-                r.started_at,
-                r.claim_lock,
-                r.claim_expires,
-                r.last_heartbeat_at,
-                r.max_runtime_seconds
-            FROM task_runs r
-            JOIN tasks t ON t.id = r.task_id
-            WHERE r.ended_at IS NULL
-              AND r.worker_pid IS NOT NULL
-              AND t.status = 'running'
-            ORDER BY r.started_at ASC
-            """,
-        ).fetchall()
-        workers = [
-            {
-                "run_id": row["run_id"],
-                "task_id": row["task_id"],
-                "task_title": row["task_title"],
-                "task_status": row["task_status"],
-                "task_assignee": row["task_assignee"],
-                "profile": row["profile"],
-                "worker_pid": row["worker_pid"],
-                "started_at": row["started_at"],
-                "claim_lock": row["claim_lock"],
-                "claim_expires": row["claim_expires"],
-                "last_heartbeat_at": row["last_heartbeat_at"],
-                "max_runtime_seconds": row["max_runtime_seconds"],
-            }
-            for row in rows
-        ]
-        return {"workers": workers, "count": len(workers), "checked_at": int(time.time())}
+        return kanban_workers.list_active_workers(conn)
     finally:
         conn.close()
 
@@ -1218,10 +1156,9 @@ def get_run_endpoint(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        r = kanban_db.get_run(conn, run_id)
-        if r is None:
-            raise HTTPException(status_code=404, detail=f"run {run_id} not found")
-        return {"run": _run_dict(r)}
+        return kanban_workers.get_run_payload(conn, run_id)
+    except kanban_workers.RunNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
     finally:
         conn.close()
 
@@ -1247,51 +1184,11 @@ def inspect_run_endpoint(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        r = kanban_db.get_run(conn, run_id)
-        if r is None:
-            raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+        return kanban_workers.inspect_run(conn, run_id)
+    except kanban_workers.RunNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
     finally:
         conn.close()
-
-    if r.ended_at is not None:
-        return {"run_id": run_id, "alive": False, "reason": "run already ended"}
-    if r.worker_pid is None:
-        return {"run_id": run_id, "alive": False, "reason": "no worker_pid recorded"}
-
-    pid = r.worker_pid
-
-    if _psutil is None:
-        return {"run_id": run_id, "alive": False, "pid": pid, "reason": "psutil not available"}
-
-    try:
-        proc = _psutil.Process(pid)
-        info = proc.as_dict(attrs=[
-            "cpu_percent", "memory_info", "num_threads",
-            "status", "create_time", "cmdline",
-        ])
-        # num_fds is POSIX-only; skip gracefully on Windows.
-        try:
-            num_fds = proc.num_fds()
-        except AttributeError:
-            num_fds = None
-        mem = info.get("memory_info")
-        return {
-            "run_id": run_id,
-            "alive": True,
-            "pid": pid,
-            "cpu_percent": info.get("cpu_percent"),
-            "memory_rss_bytes": mem.rss if mem else None,
-            "memory_vms_bytes": mem.vms if mem else None,
-            "num_threads": info.get("num_threads"),
-            "num_fds": num_fds,
-            "status": info.get("status"),
-            "create_time": info.get("create_time"),
-            "cmdline": info.get("cmdline"),
-        }
-    except _psutil.NoSuchProcess:
-        return {"run_id": run_id, "alive": False, "pid": pid, "reason": "process not found"}
-    except _psutil.AccessDenied:
-        return {"run_id": run_id, "alive": True, "pid": pid, "error": "access denied"}
 
 
 class TerminateRunBody(BaseModel):
@@ -1324,24 +1221,14 @@ def terminate_run_endpoint(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        r = kanban_db.get_run(conn, run_id)
-        if r is None:
-            raise HTTPException(status_code=404, detail=f"run {run_id} not found")
-        if r.ended_at is not None:
-            raise HTTPException(
-                status_code=409,
-                detail=f"run {run_id} already ended",
-            )
-        ok = kanban_db.reclaim_task(conn, r.task_id, reason=payload.reason)
-        if not ok:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"cannot terminate run {run_id}: task {r.task_id} is no "
-                    "longer in a reclaimable state"
-                ),
-            )
-        return {"ok": True, "run_id": run_id, "task_id": r.task_id}
+        return kanban_workers.terminate_run(conn, run_id, reason=payload.reason)
+    except kanban_workers.RunNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except (
+        kanban_workers.RunAlreadyEnded,
+        kanban_workers.RunNotReclaimable,
+    ) as e:
+        raise HTTPException(status_code=409, detail=str(e))
     finally:
         conn.close()
 
