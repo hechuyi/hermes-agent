@@ -270,6 +270,20 @@ def test_get_platform_tools_configurable_only_no_expansion():
     assert "web" not in enabled
 
 
+def test_get_platform_tools_default_does_not_enable_computer_use():
+    enabled = _get_platform_tools({}, "cli", include_default_mcp_servers=False)
+
+    assert "computer_use" not in enabled
+
+
+def test_get_platform_tools_explicit_computer_use_opt_in_survives():
+    config = {"platform_toolsets": {"cli": ["terminal", "computer_use"]}}
+
+    enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
+
+    assert "computer_use" in enabled
+
+
 def test_get_platform_tools_mixed_does_not_resurrect_default_off():
     """Expansion must subtract _DEFAULT_OFF_TOOLSETS from the implicit
     pull-in. Without this, ``hermes-cli`` expansion would re-enable

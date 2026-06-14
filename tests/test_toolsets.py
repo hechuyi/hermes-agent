@@ -254,3 +254,14 @@ class TestDefaultPlatformWebSearchCoverage:
 
     def test_hermes_api_server_toolset_includes_web_search(self):
         assert "web_search" in resolve_toolset("hermes-api-server")
+
+
+class TestComputerUseToolsetExposure:
+    def test_hermes_feishu_does_not_enable_computer_use_by_default(self):
+        assert "computer_use" not in resolve_toolset("hermes-feishu")
+
+    def test_hermes_cli_does_not_enable_computer_use_by_default(self):
+        assert "computer_use" not in resolve_toolset("hermes-cli")
+
+    def test_computer_use_remains_explicit_opt_in_toolset(self):
+        assert resolve_toolset("computer_use") == ["computer_use"]
