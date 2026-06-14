@@ -87,7 +87,10 @@ website/static/api/skills-meta.json
 models-dev-upstream/
 hermes_cli/tui_dist/*
 hermes_cli/scripts/
-docs/superpowers/*
+# Internal development notes and execution plans. Keep these local; the GitHub
+# repository is for public-facing source, docs, and artifacts only.
+docs/plans/
+docs/superpowers/
 # Working directory for the Hermes Agent's session state (~/.hermes/ at runtime;
 # also created in-repo when an agent operates in this checkout). Plans, audit
 # logs, and per-session caches are never artifacts of the codebase.

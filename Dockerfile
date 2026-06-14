@@ -248,8 +248,8 @@ VOLUME [ "/opt/data" ]
 # argv as the container's "main program" with stdin/stdout/stderr
 # inherited (this is what makes interactive --tui work). When the
 # main program exits, /init begins stage 3 shutdown and the container
-# exits with the program's exit code. Replaces tini — see Phase 2 of
-# docs/plans/2026-05-07-s6-overlay-dynamic-subagent-gateways.md.
+# exits with the program's exit code. This replaces tini so supervised
+# gateway services and the interactive main process share one shutdown path.
 #
 # We use the ENTRYPOINT+CMD split rather than CMD alone so the
 # wrapper is prepended to user-supplied args automatically:
