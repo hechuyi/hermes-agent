@@ -266,3 +266,26 @@ def test_dashboard_runtime_files_are_removed_from_feishu_runtime_fork():
 
     for relpath in forbidden:
         assert not (REPO_ROOT / relpath).exists(), relpath
+
+
+def test_node_tui_launcher_is_removed_from_feishu_runtime_fork():
+    """The Feishu fork must not retain the Node/Ink TUI launch surface."""
+    forbidden_paths = [
+        "ui-tui",
+        "tui_gateway",
+        "hermes_cli/tui_dist",
+    ]
+    for relpath in forbidden_paths:
+        assert not (REPO_ROOT / relpath).exists(), relpath
+
+    main_source = (REPO_ROOT / "hermes_cli" / "main.py").read_text(encoding="utf-8")
+    forbidden_snippets = [
+        "def _launch_tui(",
+        "def _make_tui_argv(",
+        "def _ensure_tui_node(",
+        "def _tui_need_npm_install(",
+        "ui-tui",
+        "tui_dist",
+    ]
+    for snippet in forbidden_snippets:
+        assert snippet not in main_source, snippet

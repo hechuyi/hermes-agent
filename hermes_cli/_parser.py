@@ -208,20 +208,18 @@ def build_top_level_parser():
         default=False,
         help="Skip auto-injection of AGENTS.md, SOUL.md, .cursorrules, memory, and preloaded skills",
     )
-    _inherited_flag(
-        parser,
+    parser.add_argument(
         "--tui",
         action="store_true",
         default=False,
-        help="Launch the modern TUI instead of the classic REPL",
+        help=argparse.SUPPRESS,
     )
-    _inherited_flag(
-        parser,
+    parser.add_argument(
         "--dev",
         dest="tui_dev",
         action="store_true",
         default=False,
-        help="With --tui: run TypeScript sources via tsx (skip dist build)",
+        help=argparse.SUPPRESS,
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
@@ -359,20 +357,18 @@ def build_top_level_parser():
         default=None,
         help="Session source tag for filtering (default: cli). Use 'tool' for third-party integrations that should not appear in user session lists.",
     )
-    _inherited_flag(
-        chat_parser,
+    chat_parser.add_argument(
         "--tui",
         action="store_true",
         default=False,
-        help="Launch the modern TUI instead of the classic REPL",
+        help=argparse.SUPPRESS,
     )
-    _inherited_flag(
-        chat_parser,
+    chat_parser.add_argument(
         "--dev",
         dest="tui_dev",
         action="store_true",
         default=False,
-        help="With --tui: run TypeScript sources via tsx (skip dist build)",
+        help=argparse.SUPPRESS,
     )
 
     return parser, subparsers, chat_parser
