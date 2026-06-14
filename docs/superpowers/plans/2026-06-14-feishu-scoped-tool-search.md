@@ -227,7 +227,7 @@ git commit -m "fix(tool-search): enforce session scope during bridge unwrap"
 **Files:**
 - Modify: `docs/plans/2026-06-06-main-safe-fixes-integration.md`
 
-- [ ] **Step 1: Update upstream disposition**
+- [x] **Step 1: Update upstream disposition**
 
 Record:
 
@@ -236,7 +236,7 @@ Record:
 - `18c9e8910` absorbed if `_invoke_tool` dispatch assertion is updated;
 - `17097761207` and `a87f0a82a` remain deferred as live harness scripts.
 
-- [ ] **Step 2: Run final verification**
+- [x] **Step 2: Run final verification**
 
 Run:
 
@@ -248,7 +248,7 @@ python -m py_compile tools/tool_search.py model_tools.py agent/tool_executor.py 
 git diff --check
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/plans/2026-06-06-main-safe-fixes-integration.md

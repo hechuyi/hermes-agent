@@ -144,10 +144,9 @@ environment scrubbing from broad `HERMES_` passthrough to an explicit
 operational allowlist, and logs dropped non-secret `HERMES_*` vars for
 diagnosability.
 
-`7427b9d58` remains deferred: it is a tool-search session toolset scoping fix,
-but this fork does not currently contain the `tools/tool_search.py` /
-progressive-disclosure base that commit depends on. It should be reviewed only
-with the tool-search base, not as part of the code-exec approval batch.
+`7427b9d58` was intentionally left out of this code-exec approval batch because
+it depended on the progressive tool-search base. It was later absorbed together
+with that base as the fork-local Feishu-scoped tool-search port recorded below.
 
 ### Update and uninstall path batch
 
@@ -789,21 +788,16 @@ this document. The remaining work is therefore not an unclassified merge queue;
 it is a set of intentionally protected contract decisions plus patch-id noise
 from manual local ports.
 
-The progressive tool-disclosure group remains deferred. This fork already
-scopes ordinary tool definitions through the session's enabled/disabled
-toolsets, and subagents inherit a narrowed toolset view, but it does not yet
-have upstream's `tool_search` bridge module, bridge dispatch path, live harness,
-or transcript-redaction harness. Absorbing the follow-up scoping fix without the
-feature base would be empty, while absorbing the feature base without a fork
-design review would expand MCP/plugin discovery and dispatch visibility. A
-future port must first define the bridge catalog as session-scoped, pass
-toolset scope through dispatch, fail closed on out-of-scope bridged calls, and
-cover restricted gateway, subagent, plugin, MCP allowlist/no-MCP, approval, and
-hook visibility tests. The fork-local Feishu risk is explicit: Package B
-model-visible tools must either remain directly visible in Feishu gateway
-sessions or be bridged only under a session-scoped `hermes-feishu` catalog that
-cannot expose tools outside the session's enabled toolsets. Core `web_search`
-and `web_extract` must also remain non-deferred.
+The progressive tool-disclosure runtime group was later manually absorbed in
+local commit `69f39ff73` as a Feishu-scoped bridge rather than a mechanical
+upstream port. The fork-local contract is stricter than upstream's initial
+shape: bridge dispatch fails closed without explicit session scope; catalog,
+describe, call, and executor unwrap are all limited to the session's scoped
+tool definitions; Feishu-family toolsets (`hermes-feishu`, `feishu_doc`,
+`feishu_drive`, and future Feishu-prefixed toolsets) are never deferred; Package
+B model-visible Feishu tools remain direct; adapter-only, denied, and legacy
+Feishu tools cannot become searchable or describeable through the bridge. The
+upstream live A/B harness remains deferred as test tooling, not runtime.
 
 The remaining gateway/media items were split after this checkpoint. Absorbed
 slices now cover Windows MEDIA paths, extension allowlisting, current-turn
@@ -852,8 +846,6 @@ These must not be merged mechanically:
 
 ### Tooling and runtime commits requiring separate batches
 
-- `7427b9d58`: tool-search session toolset scoping. Defer until the
-  progressive tool-search base exists in this fork.
 - `41ff6e593`, `7e958dafc`, `4e4984a`, `95cf8f984`, `a22c25000`: Nous
   JWT-only behavior. Defer until there is an explicit decision to remove this
   fork's retained legacy Nous session-key inference paths. Characterization
@@ -895,10 +887,11 @@ and no broad `origin/main` merge. Recommended order:
    Windows path, extension allowlist, and current-turn tool-result scan pieces
    need a separate gateway ledger attribution review.
 
-The Docker reuse/orphan-reaper group, tool-search base/scoping group,
-Nous JWT-only decision group, session/state group, and MEDIA extraction group
-should remain separate batches because each changes a runtime contract rather
-than just a local implementation detail.
+The Docker reuse/orphan-reaper group, Nous JWT-only decision group,
+session/state group, and MEDIA extraction group should remain separate batches
+because each changes a runtime contract rather than just a local implementation
+detail. Tool-search runtime was later handled as its own Feishu-scoped batch;
+its live harness remains optional tooling.
 
 ## Verification
 
@@ -2824,9 +2817,10 @@ Result:
   `6928692cec3260b21e5574099c41034827c1c59e`.
 - This does not mean all deferred behavior should be merged. Protected runtime
   contract groups remain deferred by design: dashboard public-bind/OAuth
-  policy, Nous JWT-only auth, progressive tool-search/tool disclosure, adapter
-  access-policy weakening, Docker lifecycle semantics, model catalog churn,
-  trusted external skill taps, and broad dead-code/import pruning.
+  policy, Nous JWT-only auth, adapter access-policy weakening, Docker lifecycle
+  semantics, model catalog churn, trusted external skill taps, and broad
+  dead-code/import pruning. Tool-search runtime was later absorbed separately;
+  its live harness remains optional tooling.
 
 ## 2026-06-08 — Post-interrupt empty-model recovery absorption
 
@@ -3574,14 +3568,12 @@ Remaining upstream groups reviewed and left out of blind absorption:
   and StepFun curated-id updates. The generated website manifest remains absent
   from this fork. The operator's currently usable `5.5` channel is runtime
   availability evidence only, not a Hermes catalog policy.
-- Progressive tool disclosure / tool-search (`369075dc`, `7427b9d5`,
-  `17097761`, `18c9e891`, `a87f0a82`): deferred for design review. This group
-  changes MCP/plugin tool discovery and dispatch scoping and touches the Hermes
-  tools/live-gateway/access-control surface; upstream also needed a follow-up
-  leak fix. The useful contract is not the upstream patch shape, but a future
-  Feishu-aware bridge design: `hermes-feishu` model-visible tools need an
-  explicit direct-visibility or bridge-visibility rule before this can be
-  safely ported.
+- Progressive tool disclosure / tool-search runtime (`369075dc`, `7427b9d5`,
+  `18c9e891`): absorbed in local commit `69f39ff73` as a Feishu-scoped bridge.
+  The local port keeps upstream's progressive MCP/plugin disclosure idea but
+  applies the follow-up scoping fix as a baseline requirement, not a later
+  patch. `17097761` and `a87f0a82` remain deferred because they are live A/B
+  harness and transcript-redaction harness changes, not runtime behavior.
 - Adapter-owned gateway access policy (`fd09b2c55`, `6a2e3c2d`): deferred as a
   default-deny conflict. Upstream trusts adapters that claim to enforce their
   own policy; this fork keeps gateway-level `_is_user_authorized` as the final
@@ -6149,23 +6141,33 @@ and default `cleanup_vm()` behavior. They were not folded into this first
 gateway reconciliation batch; see the later Docker lifecycle absorption note
 below for the final local disposition.
 
-Deferred tool-search/progressive-disclosure base:
+Tool-search/progressive-disclosure runtime:
 
 - `369075dc95bb998fdf493ef0f97dfa2d19c43d82`
 - `7427b9d5812f3bd4deb47340ab64ef86e605c27e`
-- `17097761207d65a385362696ff1698075e0b0c7a`
 - `18c9e8910685fefee2fb5f67e7fdd1cb37b67750`
+
+These runtime changes were manually absorbed in local commit `69f39ff73`. The
+local port deliberately starts from the scoped contract fixed by `7427b9d58`:
+bridge assembly only activates for explicitly scoped sessions, bridge dispatch
+refuses unscoped/global catalog construction, `tool_call` unwrap is checked
+against the same scoped deferrable set before hooks/guardrails, and
+`agent_runtime_helpers.invoke_tool()` forwards the agent's enabled/disabled
+toolsets into `handle_function_call`.
+
+Feishu-specific adaptation is part of the runtime contract: Feishu-family
+toolsets are not deferrable, Package B tools stay direct, and legacy
+`feishu_doc` / `feishu_drive` tools are not exposed through `tool_search` or
+`tool_describe`.
+
+Deferred tool-search live harness:
+
+- `17097761207d65a385362696ff1698075e0b0c7a`
 - `a87f0a82a52178b05ff7405e9af7137e20a70bbf`
 
-This is a broad MCP/plugin tool-disclosure architecture change with live
-harness changes. It should not be folded into the Feishu gateway reconciliation
-without a dedicated tool-registry/tool-search design review. A re-review found
-no useful low-risk subset: the scoping fix depends on the feature base, the
-live harness depends on the feature behavior, and `.gitignore`-only fallout has
-no standalone value. Future tests must prove Feishu Package B model-visible
-tools, `enabled_toolsets=["hermes-feishu"]`, core web tools, subagent narrowed
-toolsets, restricted gateway sessions, and sandbox/code-exec tool assembly all
-preserve the fork's access boundary.
+These remain deferred as optional live A/B tooling. If they are ever absorbed,
+the redaction commit must travel with the harness; checked transcripts and
+console output must not expose provider keys or bearer tokens.
 
 Deferred Nous JWT-only authentication series:
 
@@ -6281,10 +6283,10 @@ uv run pytest -q tests/gateway/test_platform_reconnect.py
 Result: `30 passed`.
 
 The remaining deferred categories after this checkpoint are still policy or
-architecture decisions, not forgotten low-risk fixes: progressive tool
-disclosure/tool-search, Nous JWT-only auth migration, non-Feishu platform
-batching/topic recovery, dashboard/UI auth, and adapter-owned access-policy
-default-deny changes.
+architecture decisions, not forgotten low-risk fixes: Nous JWT-only auth
+migration, non-Feishu platform batching/topic recovery, dashboard/UI auth, and
+adapter-owned access-policy default-deny changes. Tool-search live harness
+scripts remain deferred as optional validation tooling, not runtime.
 
 ## 2026-06-13 — Subagent rescan disposition cleanup
 
@@ -6320,9 +6322,9 @@ The fresh candidate list was also rechecked against current code:
   preflight compaction after real provider prompt usage has fit.
 
 The remaining not-yet-absorbed upstream groups are still protected decision
-groups: progressive tool-search/bridge-disclosure architecture, Nous JWT-only
-auth migration, dashboard/UI auth policy, and adapter-owned gateway access-policy
-default-deny changes.
+groups: Nous JWT-only auth migration, dashboard/UI auth policy, and
+adapter-owned gateway access-policy default-deny changes. Tool-search live
+harness scripts remain separate optional tooling.
 
 ## 2026-06-13 — Docker lifecycle absorption with safe local defaults
 
