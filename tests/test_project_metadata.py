@@ -258,8 +258,10 @@ def test_dashboard_runtime_files_are_removed_from_feishu_runtime_fork():
         "plugins/dashboard_auth/nous",
         "plugins/example-dashboard",
         "plugins/hermes-achievements",
+        "plugins/kanban/dashboard/manifest.json",
         "docker/s6-rc.d/dashboard",
         "docker/s6-rc.d/user/contents.d/dashboard",
+        "tests/hermes_cli/test_dashboard_profiles_nav_label.py",
     ]
 
     for relpath in forbidden:
