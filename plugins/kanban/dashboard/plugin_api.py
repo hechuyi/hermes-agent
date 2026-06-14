@@ -193,124 +193,6 @@ def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
     return kanban_workers.run_to_payload(r)
 
 
-# Hallucination-warning event kinds — see complete_task() in kanban_db.py.
-# completion_blocked_hallucination: kernel rejected created_cards with
-#   phantom ids; task stays in prior state.
-# suspected_hallucinated_references: prose scan found t_<hex> in summary
-#   that doesn't resolve; completion succeeded, advisory only.
-_WARNING_EVENT_KINDS = (
-    "completion_blocked_hallucination",
-    "suspected_hallucinated_references",
-)
-
-
-def _compute_task_diagnostics(
-    conn: sqlite3.Connection,
-    task_ids: Optional[list[str]] = None,
-) -> dict[str, list[dict]]:
-    """Run the diagnostic rule engine against every task (or a subset)
-    and return ``{task_id: [diagnostic_dict, ...]}``.
-
-    Tasks with no active diagnostics are omitted from the result.
-    Uses ``hermes_cli.kanban_diagnostics`` — see that module for the
-    rule definitions.
-    """
-    from hermes_cli import kanban_diagnostics as kd
-    from hermes_cli.config import load_config
-
-    diag_config = kd.config_from_runtime_config(load_config())
-
-    # Build the candidate task list. We need each task's row + its
-    # events + its runs. Doing N separate queries works but scales
-    # poorly; do three aggregate queries instead.
-    if task_ids is not None:
-        if not task_ids:
-            return {}
-        placeholders = ",".join(["?"] * len(task_ids))
-        rows = conn.execute(
-            f"SELECT * FROM tasks WHERE id IN ({placeholders})",
-            tuple(task_ids),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM tasks WHERE status != 'archived'",
-        ).fetchall()
-
-    if not rows:
-        return {}
-
-    # Index events + runs by task id. For very large boards this will
-    # slurp a lot — acceptable on the dashboard's typical working set
-    # (hundreds of tasks), but we can add pagination / filtering later
-    # if profiling shows it's a hotspot.
-    row_ids = [r["id"] for r in rows]
-    placeholders = ",".join(["?"] * len(row_ids))
-    events_by_task: dict[str, list] = {tid: [] for tid in row_ids}
-    for ev_row in conn.execute(
-        f"SELECT * FROM task_events WHERE task_id IN ({placeholders}) ORDER BY id",
-        tuple(row_ids),
-    ).fetchall():
-        events_by_task.setdefault(ev_row["task_id"], []).append(ev_row)
-    runs_by_task: dict[str, list] = {tid: [] for tid in row_ids}
-    for run_row in conn.execute(
-        f"SELECT * FROM task_runs WHERE task_id IN ({placeholders}) ORDER BY id",
-        tuple(row_ids),
-    ).fetchall():
-        runs_by_task.setdefault(run_row["task_id"], []).append(run_row)
-
-    out: dict[str, list[dict]] = {}
-    for r in rows:
-        tid = r["id"]
-        diags = kd.compute_task_diagnostics(
-            r,
-            events_by_task.get(tid, []),
-            runs_by_task.get(tid, []),
-            config=diag_config,
-        )
-        if diags:
-            out[tid] = [d.to_dict() for d in diags]
-    return out
-
-
-def _warnings_summary_from_diagnostics(
-    diagnostics: list[dict],
-) -> Optional[dict]:
-    """Compact summary for cards: {count, highest_severity, kinds,
-    latest_at}. Replaces the old hallucination-only ``warnings`` object
-    — same shape additions plus ``highest_severity`` so the UI can color
-    badges per diagnostic severity.
-
-    Returns None when ``diagnostics`` is empty.
-    """
-    if not diagnostics:
-        return None
-    from hermes_cli.kanban_diagnostics import SEVERITY_ORDER
-
-    kinds: dict[str, int] = {}
-    latest = 0
-    highest_idx = -1
-    highest_sev: Optional[str] = None
-    count = 0
-    for d in diagnostics:
-        kinds[d["kind"]] = kinds.get(d["kind"], 0) + d.get("count", 1)
-        count += d.get("count", 1)
-        la = d.get("last_seen_at") or 0
-        if la > latest:
-            latest = la
-        sev = d.get("severity")
-        if sev in SEVERITY_ORDER:
-            idx = SEVERITY_ORDER.index(sev)
-            if idx > highest_idx:
-                highest_idx = idx
-                highest_sev = sev
-    return {
-        "count": count,
-        "kinds": kinds,
-        "latest_at": latest,
-        "highest_severity": highest_sev,
-    }
-
-
 def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
     """Return {'parents': [...], 'children': [...]} for a task."""
     parents = [
@@ -402,7 +284,7 @@ def get_board(
         # We get the full structured list per task AND a compact
         # summary for the card badge (so cards don't carry the detail
         # text; the drawer fetches that via /tasks/:id or /diagnostics).
-        diagnostics_per_task = _compute_task_diagnostics(conn, task_ids=None)
+        diagnostics_per_task = kd.compute_task_diagnostics_by_task(conn, task_ids=None)
 
         latest_event_id = conn.execute(
             "SELECT COALESCE(MAX(id), 0) AS m FROM task_events"
@@ -433,7 +315,7 @@ def get_board(
                 # without a second round-trip. The board-level badge only
                 # needs the summary.
                 d["diagnostics"] = diags
-                d["warnings"] = _warnings_summary_from_diagnostics(diags)
+                d["warnings"] = kd.warnings_summary_from_diagnostics(diags)
             col = t.status if t.status in columns else "todo"
             columns[col].append(d)
 
@@ -507,11 +389,11 @@ def get_task(
         task_d = _task_dict(task, latest_summary=full_summary)
         # Attach diagnostics so the drawer's Diagnostics section can
         # render recovery actions without a second round-trip.
-        diags = _compute_task_diagnostics(conn, task_ids=[task_id])
+        diags = kd.compute_task_diagnostics_by_task(conn, task_ids=[task_id])
         diag_list = diags.get(task_id) or []
         if diag_list:
             task_d["diagnostics"] = diag_list
-            task_d["warnings"] = _warnings_summary_from_diagnostics(diag_list)
+            task_d["warnings"] = kd.warnings_summary_from_diagnostics(diag_list)
         return {
             "task": task_d,
             "comments": [_comment_dict(c) for c in kanban_db.list_comments(conn, task_id)],
@@ -1060,58 +942,7 @@ def list_diagnostics(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        diags_by_task = _compute_task_diagnostics(conn, task_ids=None)
-        if not diags_by_task:
-            return {"diagnostics": [], "count": 0}
-
-        # Narrow by severity if asked.
-        if severity:
-            filtered: dict[str, list[dict]] = {}
-            for tid, dl in diags_by_task.items():
-                keep = [d for d in dl if kd.severity_at_or_above(d.get("severity"), severity)]
-                if keep:
-                    filtered[tid] = keep
-            diags_by_task = filtered
-            if not diags_by_task:
-                return {"diagnostics": [], "count": 0}
-
-        # Pull the task rows we need in one query so we can include
-        # titles/statuses without a per-task lookup.
-        ids = list(diags_by_task.keys())
-        placeholders = ",".join(["?"] * len(ids))
-        rows = {
-            r["id"]: r
-            for r in conn.execute(
-                f"SELECT id, title, status, assignee FROM tasks WHERE id IN ({placeholders})",
-                tuple(ids),
-            ).fetchall()
-        }
-
-        out = []
-        for tid, dl in diags_by_task.items():
-            r = rows.get(tid)
-            out.append({
-                "task_id": tid,
-                "task_title": r["title"] if r else None,
-                "task_status": r["status"] if r else None,
-                "task_assignee": r["assignee"] if r else None,
-                "diagnostics": dl,
-            })
-        # Sort: highest severity first, then most recent.
-        from hermes_cli.kanban_diagnostics import SEVERITY_ORDER
-        sev_idx = {s: i for i, s in enumerate(SEVERITY_ORDER)}
-        def _sort_key(row):
-            top = row["diagnostics"][0]
-            return (
-                -sev_idx.get(top.get("severity"), -1),
-                -(top.get("last_seen_at") or 0),
-            )
-        out.sort(key=_sort_key)
-
-        return {
-            "diagnostics": out,
-            "count": sum(len(d["diagnostics"]) for d in out),
-        }
+        return kd.list_task_diagnostics(conn, severity=severity)
     finally:
         conn.close()
 

@@ -748,3 +748,74 @@ def test_severity_at_or_above_uses_threshold_semantics():
     assert kd.severity_at_or_above("error", "critical") is False
     assert kd.severity_at_or_above("mystery", "warning") is False
     assert kd.severity_at_or_above("warning", None) is True
+
+
+def test_compute_task_diagnostics_by_task_reads_db_rows(kanban_home):
+    conn = kb.connect()
+    try:
+        clean = kb.create_task(conn, title="clean", assignee="a")
+        failing = kb.create_task(conn, title="failing", assignee="b")
+        conn.execute(
+            "UPDATE tasks SET consecutive_failures = 2, last_failure_error = ? WHERE id = ?",
+            ("spawn failed", failing),
+        )
+        conn.commit()
+
+        diagnostics = kd.compute_task_diagnostics_by_task(conn)
+        assert clean not in diagnostics
+        assert diagnostics[failing][0]["kind"] == "repeated_failures"
+
+        subset = kd.compute_task_diagnostics_by_task(conn, task_ids=[clean])
+        assert subset == {}
+    finally:
+        conn.close()
+
+
+def test_warnings_summary_from_diagnostics_compacts_counts_and_severity():
+    summary = kd.warnings_summary_from_diagnostics([
+        {
+            "kind": "prose_phantom_refs",
+            "severity": "warning",
+            "count": 2,
+            "last_seen_at": 10,
+        },
+        {
+            "kind": "repeated_failures",
+            "severity": "error",
+            "last_seen_at": 30,
+        },
+    ])
+
+    assert summary == {
+        "count": 3,
+        "kinds": {"prose_phantom_refs": 2, "repeated_failures": 1},
+        "latest_at": 30,
+        "highest_severity": "error",
+    }
+    assert kd.warnings_summary_from_diagnostics([]) is None
+
+
+def test_list_task_diagnostics_filters_and_sorts_rows(kanban_home):
+    conn = kb.connect()
+    try:
+        warning = kb.create_task(conn, title="warning task", assignee="a")
+        kb.complete_task(conn, warning, summary="mentions t_deadbeef1234")
+
+        error = kb.create_task(conn, title="error task", assignee="b")
+        conn.execute(
+            "UPDATE tasks SET consecutive_failures = 2, last_failure_error = ? WHERE id = ?",
+            ("spawn failed", error),
+        )
+        conn.commit()
+
+        payload = kd.list_task_diagnostics(conn, severity="error")
+        assert payload["count"] == 1
+        assert payload["diagnostics"][0]["task_id"] == error
+        assert payload["diagnostics"][0]["task_title"] == "error task"
+        assert payload["diagnostics"][0]["diagnostics"][0]["kind"] == "repeated_failures"
+
+        payload = kd.list_task_diagnostics(conn, severity="warning")
+        assert payload["count"] == 2
+        assert [row["task_id"] for row in payload["diagnostics"]] == [error, warning]
+    finally:
+        conn.close()

@@ -1124,6 +1124,167 @@ def compute_task_diagnostics(
     return out
 
 
+def _runtime_diagnostics_config(config: Optional[dict]) -> dict:
+    if config is not None:
+        return config
+    from hermes_cli.config import load_config
+
+    return config_from_runtime_config(load_config())
+
+
+def compute_task_diagnostics_by_task(
+    conn,
+    task_ids: Optional[list[str]] = None,
+    *,
+    config: Optional[dict] = None,
+) -> dict[str, list[dict]]:
+    """Compute active diagnostics for task rows in ``conn``.
+
+    Returns ``{task_id: [diagnostic_dict, ...]}`` and omits tasks without
+    active diagnostics. ``task_ids=None`` means all non-archived tasks.
+    """
+    diag_config = _runtime_diagnostics_config(config)
+
+    if task_ids is not None:
+        if not task_ids:
+            return {}
+        placeholders = ",".join(["?"] * len(task_ids))
+        rows = conn.execute(
+            f"SELECT * FROM tasks WHERE id IN ({placeholders})",
+            tuple(task_ids),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM tasks WHERE status != 'archived'",
+        ).fetchall()
+
+    if not rows:
+        return {}
+
+    row_ids = [r["id"] for r in rows]
+    placeholders = ",".join(["?"] * len(row_ids))
+
+    events_by_task: dict[str, list] = {tid: [] for tid in row_ids}
+    for ev_row in conn.execute(
+        f"SELECT * FROM task_events WHERE task_id IN ({placeholders}) ORDER BY id",
+        tuple(row_ids),
+    ).fetchall():
+        events_by_task.setdefault(ev_row["task_id"], []).append(ev_row)
+
+    runs_by_task: dict[str, list] = {tid: [] for tid in row_ids}
+    for run_row in conn.execute(
+        f"SELECT * FROM task_runs WHERE task_id IN ({placeholders}) ORDER BY id",
+        tuple(row_ids),
+    ).fetchall():
+        runs_by_task.setdefault(run_row["task_id"], []).append(run_row)
+
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        tid = row["id"]
+        diagnostics = compute_task_diagnostics(
+            row,
+            events_by_task.get(tid, []),
+            runs_by_task.get(tid, []),
+            config=diag_config,
+        )
+        if diagnostics:
+            out[tid] = [d.to_dict() for d in diagnostics]
+    return out
+
+
+def warnings_summary_from_diagnostics(
+    diagnostics: list[dict],
+) -> Optional[dict]:
+    """Compact card-badge summary for a task's active diagnostics."""
+    if not diagnostics:
+        return None
+
+    kinds: dict[str, int] = {}
+    latest = 0
+    highest_idx = -1
+    highest_sev: Optional[str] = None
+    count = 0
+    for diagnostic in diagnostics:
+        kind = diagnostic.get("kind")
+        item_count = diagnostic.get("count", 1)
+        kinds[kind] = kinds.get(kind, 0) + item_count
+        count += item_count
+        last_seen = diagnostic.get("last_seen_at") or 0
+        if last_seen > latest:
+            latest = last_seen
+        severity = diagnostic.get("severity")
+        if severity in SEVERITY_ORDER:
+            severity_idx = SEVERITY_ORDER.index(severity)
+            if severity_idx > highest_idx:
+                highest_idx = severity_idx
+                highest_sev = severity
+    return {
+        "count": count,
+        "kinds": kinds,
+        "latest_at": latest,
+        "highest_severity": highest_sev,
+    }
+
+
+def list_task_diagnostics(
+    conn,
+    *,
+    severity: Optional[str] = None,
+    config: Optional[dict] = None,
+) -> dict:
+    """Return dashboard/API-shaped diagnostics rows for a kanban DB."""
+    diagnostics_by_task = compute_task_diagnostics_by_task(conn, config=config)
+    if severity:
+        diagnostics_by_task = {
+            task_id: [
+                diagnostic
+                for diagnostic in diagnostics
+                if severity_at_or_above(diagnostic.get("severity"), severity)
+            ]
+            for task_id, diagnostics in diagnostics_by_task.items()
+        }
+        diagnostics_by_task = {
+            task_id: diagnostics
+            for task_id, diagnostics in diagnostics_by_task.items()
+            if diagnostics
+        }
+
+    if not diagnostics_by_task:
+        return {"diagnostics": [], "count": 0}
+
+    placeholders = ",".join(["?"] * len(diagnostics_by_task))
+    rows = {
+        row["id"]: row
+        for row in conn.execute(
+            f"SELECT id, title, status, assignee FROM tasks WHERE id IN ({placeholders})",
+            tuple(diagnostics_by_task.keys()),
+        ).fetchall()
+    }
+
+    out = []
+    for task_id, diagnostics in diagnostics_by_task.items():
+        row = rows.get(task_id)
+        out.append({
+            "task_id": task_id,
+            "task_title": row["title"] if row else None,
+            "task_status": row["status"] if row else None,
+            "task_assignee": row["assignee"] if row else None,
+            "diagnostics": diagnostics,
+        })
+
+    severity_idx = {s: i for i, s in enumerate(SEVERITY_ORDER)}
+    out.sort(
+        key=lambda row: (
+            -severity_idx.get(row["diagnostics"][0].get("severity"), -1),
+            -(row["diagnostics"][0].get("last_seen_at") or 0),
+        )
+    )
+    return {
+        "diagnostics": out,
+        "count": sum(len(row["diagnostics"]) for row in out),
+    }
+
+
 def severity_of_highest(diagnostics: Iterable[Diagnostic]) -> Optional[str]:
     """Highest severity present in the list, or None if empty. Useful
     for card badges that need a single color."""
