@@ -257,6 +257,7 @@ def test_dashboard_runtime_files_are_removed_from_feishu_runtime_fork():
         "hermes_cli/dashboard_auth",
         "plugins/dashboard_auth/nous",
         "plugins/example-dashboard",
+        "plugins/hermes-achievements",
         "docker/s6-rc.d/dashboard",
         "docker/s6-rc.d/user/contents.d/dashboard",
     ]
