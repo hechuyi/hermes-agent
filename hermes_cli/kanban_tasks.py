@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from hermes_cli import kanban_db
+from hermes_cli import kanban_board_view
 
 
 class TaskUpdateError(Exception):
@@ -16,6 +17,9 @@ class TaskUpdateError(Exception):
         super().__init__(detail)
         self.status_code = status_code
         self.detail = detail
+
+
+DispatcherProbe = Callable[[], tuple[bool, str]]
 
 
 def _raise_blocking_parents(conn, task_id: str) -> None:
@@ -191,3 +195,57 @@ def add_task_link(conn, parent_id: str, child_id: str) -> None:
 def delete_task_link(conn, parent_id: str, child_id: str) -> bool:
     """Remove a task link if present."""
     return bool(kanban_db.unlink_tasks(conn, parent_id, child_id))
+
+
+def _default_dispatcher_probe() -> tuple[bool, str]:
+    from hermes_cli.kanban import _check_dispatcher_presence
+
+    return _check_dispatcher_presence()
+
+
+def create_task_payload(
+    conn,
+    *,
+    title: str,
+    body: Optional[str] = None,
+    assignee: Optional[str] = None,
+    tenant: Optional[str] = None,
+    priority: int = 0,
+    workspace_kind: str = "scratch",
+    workspace_path: Optional[str] = None,
+    parents: Optional[list[str]] = None,
+    triage: bool = False,
+    idempotency_key: Optional[str] = None,
+    max_runtime_seconds: Optional[int] = None,
+    skills: Optional[list[str]] = None,
+    dispatcher_probe: DispatcherProbe = _default_dispatcher_probe,
+) -> dict:
+    """Create a task and return the dashboard/API response payload."""
+    task_id = kanban_db.create_task(
+        conn,
+        title=title,
+        body=body,
+        assignee=assignee,
+        created_by="dashboard",
+        workspace_kind=workspace_kind,
+        workspace_path=workspace_path,
+        tenant=tenant,
+        priority=priority,
+        parents=parents or [],
+        triage=triage,
+        idempotency_key=idempotency_key,
+        max_runtime_seconds=max_runtime_seconds,
+        skills=skills,
+    )
+    task = kanban_db.get_task(conn, task_id)
+    payload: dict = {
+        "task": kanban_board_view.task_payload(task) if task else None,
+    }
+    if task and task.status == "ready" and task.assignee:
+        try:
+            running, message = dispatcher_probe()
+            if not running and message:
+                payload["warning"] = message
+        except Exception:
+            pass
+    return payload

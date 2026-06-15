@@ -133,3 +133,36 @@ def test_link_task_helpers_create_and_remove_links(kanban_home):
         assert parent not in kanban_tasks.task_links(conn, child)["parents"]
     finally:
         conn.close()
+
+
+def test_create_task_payload_includes_dispatcher_warning_for_ready_assigned(kanban_home):
+    conn = kb.connect()
+    try:
+        payload = kanban_tasks.create_task_payload(
+            conn,
+            title="warn",
+            assignee="worker",
+            dispatcher_probe=lambda: (False, "gateway is down"),
+        )
+
+        assert payload["task"]["title"] == "warn"
+        assert payload["warning"] == "gateway is down"
+    finally:
+        conn.close()
+
+
+def test_create_task_payload_skips_warning_for_triage(kanban_home):
+    conn = kb.connect()
+    try:
+        payload = kanban_tasks.create_task_payload(
+            conn,
+            title="triage",
+            assignee="worker",
+            triage=True,
+            dispatcher_probe=lambda: (False, "gateway is down"),
+        )
+
+        assert "warning" not in payload
+        assert payload["task"]["status"] == "triage"
+    finally:
+        conn.close()
