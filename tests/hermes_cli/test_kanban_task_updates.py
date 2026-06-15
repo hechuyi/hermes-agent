@@ -85,3 +85,51 @@ def test_update_task_rejects_empty_title(kanban_home):
         assert exc.value.detail == "title cannot be empty"
     finally:
         conn.close()
+
+
+def test_delete_task_removes_existing_task(kanban_home):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="gone")
+
+        assert kanban_tasks.delete_task(conn, task_id) is True
+        assert kb.get_task(conn, task_id) is None
+    finally:
+        conn.close()
+
+
+def test_add_task_comment_validates_body_and_task(kanban_home):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="commented")
+
+        with pytest.raises(kanban_tasks.TaskUpdateError) as exc:
+            kanban_tasks.add_task_comment(conn, task_id, body="   ")
+        assert exc.value.status_code == 400
+
+        with pytest.raises(kanban_tasks.TaskUpdateError) as exc:
+            kanban_tasks.add_task_comment(conn, "missing", body="hello")
+        assert exc.value.status_code == 404
+
+        kanban_tasks.add_task_comment(conn, task_id, body="hello", author=None)
+        comments = kb.list_comments(conn, task_id)
+        assert comments[0].body == "hello"
+        assert comments[0].author == "dashboard"
+    finally:
+        conn.close()
+
+
+def test_link_task_helpers_create_and_remove_links(kanban_home):
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child")
+
+        kanban_tasks.add_task_link(conn, parent, child)
+        assert parent in kanban_tasks.task_links(conn, child)["parents"]
+        assert child in kanban_tasks.task_links(conn, parent)["children"]
+
+        assert kanban_tasks.delete_task_link(conn, parent, child) is True
+        assert parent not in kanban_tasks.task_links(conn, child)["parents"]
+    finally:
+        conn.close()

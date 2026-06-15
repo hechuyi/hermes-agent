@@ -197,21 +197,7 @@ def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
 
 def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
     """Return {'parents': [...], 'children': [...]} for a task."""
-    parents = [
-        r["parent_id"]
-        for r in conn.execute(
-            "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
-            (task_id,),
-        )
-    ]
-    children = [
-        r["child_id"]
-        for r in conn.execute(
-            "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
-            (task_id,),
-        )
-    ]
-    return {"parents": parents, "children": children}
+    return kanban_tasks.task_links(conn, task_id)
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +613,7 @@ def delete_task(task_id: str, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        ok = kanban_db.delete_task(conn, task_id, board=board)
+        ok = kanban_tasks.delete_task(conn, task_id, board=board)
         if not ok:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
         return {"deleted": True, "task_id": task_id}
@@ -646,17 +632,18 @@ class CommentBody(BaseModel):
 
 @router.post("/tasks/{task_id}/comments")
 def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query(None)):
-    if not payload.body.strip():
-        raise HTTPException(status_code=400, detail="body is required")
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        if kanban_db.get_task(conn, task_id) is None:
-            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-        kanban_db.add_comment(
-            conn, task_id, author=payload.author or "dashboard", body=payload.body,
+        kanban_tasks.add_task_comment(
+            conn,
+            task_id,
+            author=payload.author,
+            body=payload.body,
         )
         return {"ok": True}
+    except kanban_tasks.TaskUpdateError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
     finally:
         conn.close()
 
@@ -675,7 +662,7 @@ def add_link(payload: LinkBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        kanban_db.link_tasks(conn, payload.parent_id, payload.child_id)
+        kanban_tasks.add_task_link(conn, payload.parent_id, payload.child_id)
         return {"ok": True}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -692,7 +679,7 @@ def delete_link(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        ok = kanban_db.unlink_tasks(conn, parent_id, child_id)
+        ok = kanban_tasks.delete_task_link(conn, parent_id, child_id)
         return {"ok": bool(ok)}
     finally:
         conn.close()

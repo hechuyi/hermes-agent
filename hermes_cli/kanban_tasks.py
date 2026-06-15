@@ -137,3 +137,57 @@ def update_task(
             )
 
     return kanban_db.get_task(conn, task_id)
+
+
+def delete_task(conn, task_id: str, *, board: Optional[str] = None) -> bool:
+    """Delete a task and its dependent rows."""
+    return bool(kanban_db.delete_task(conn, task_id, board=board))
+
+
+def add_task_comment(
+    conn,
+    task_id: str,
+    *,
+    body: str,
+    author: Optional[str] = "dashboard",
+) -> None:
+    """Add a task comment after validating task existence and body."""
+    if not body.strip():
+        raise TaskUpdateError(400, "body is required")
+    if kanban_db.get_task(conn, task_id) is None:
+        raise TaskUpdateError(404, f"task {task_id} not found")
+    kanban_db.add_comment(
+        conn,
+        task_id,
+        author=author or "dashboard",
+        body=body,
+    )
+
+
+def task_links(conn, task_id: str) -> dict[str, list[str]]:
+    """Return parent and child task ids for a task."""
+    parents = [
+        row["parent_id"]
+        for row in conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
+            (task_id,),
+        )
+    ]
+    children = [
+        row["child_id"]
+        for row in conn.execute(
+            "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
+            (task_id,),
+        )
+    ]
+    return {"parents": parents, "children": children}
+
+
+def add_task_link(conn, parent_id: str, child_id: str) -> None:
+    """Link two tasks, preserving ``kanban_db.link_tasks`` validation."""
+    kanban_db.link_tasks(conn, parent_id, child_id)
+
+
+def delete_task_link(conn, parent_id: str, child_id: str) -> bool:
+    """Remove a task link if present."""
+    return bool(kanban_db.unlink_tasks(conn, parent_id, child_id))
