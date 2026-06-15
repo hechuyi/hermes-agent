@@ -18,8 +18,11 @@ def _load_ensure_ssl():
     import os, ssl
 
     def _ensure_ssl_certs():
-        if "SSL_CERT_FILE" in os.environ:
-            return
+        configured_cert = os.environ.get("SSL_CERT_FILE")
+        if configured_cert:
+            if os.path.exists(configured_cert):
+                return
+            os.environ.pop("SSL_CERT_FILE", None)
         paths = ssl.get_default_verify_paths()
         for candidate in (paths.cafile, paths.openssl_cafile):
             if candidate and os.path.exists(candidate):
@@ -45,11 +48,27 @@ def _load_ensure_ssl():
 
 
 class TestEnsureSslCerts:
-    def test_respects_existing_env_var(self):
+    def test_respects_existing_env_var(self, tmp_path):
         fn = _load_ensure_ssl()
-        with patch.dict(os.environ, {"SSL_CERT_FILE": "/custom/ca.pem"}):
+        cert = tmp_path / "custom-ca.pem"
+        cert.write_text("FAKE CERT")
+        with patch.dict(os.environ, {"SSL_CERT_FILE": str(cert)}):
             fn()
-            assert os.environ["SSL_CERT_FILE"] == "/custom/ca.pem"
+            assert os.environ["SSL_CERT_FILE"] == str(cert)
+
+    def test_ignores_stale_existing_env_var(self, tmp_path):
+        fn = _load_ensure_ssl()
+        cert = tmp_path / "ca.crt"
+        cert.write_text("FAKE CERT")
+
+        mock_paths = MagicMock()
+        mock_paths.cafile = str(cert)
+        mock_paths.openssl_cafile = None
+
+        with patch.dict(os.environ, {"SSL_CERT_FILE": str(tmp_path / "missing.pem")}, clear=True), \
+             patch("ssl.get_default_verify_paths", return_value=mock_paths):
+            fn()
+            assert os.environ["SSL_CERT_FILE"] == str(cert)
 
     def test_sets_from_ssl_default_paths(self, tmp_path):
         fn = _load_ensure_ssl()
