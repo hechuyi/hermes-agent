@@ -41,6 +41,23 @@ class TestShouldCompress:
         assert compressor.should_compress(prompt_tokens=90000) is True
         assert compressor.should_compress(prompt_tokens=50000) is False
 
+    def test_no_compress_window_counts_as_ineffective(self, compressor):
+        messages = [{"role": "system", "content": "system"}]
+        for i in range(10):
+            messages.append({"role": "user", "content": f"question {i}"})
+            messages.append({"role": "assistant", "content": f"answer {i}"})
+
+        with patch.object(
+            compressor,
+            "_find_tail_cut_by_tokens",
+            side_effect=lambda _messages, head_end: head_end,
+        ):
+            result = compressor.compress(messages, current_tokens=90_000)
+
+        assert result == messages
+        assert compressor._ineffective_compression_count == 1
+        assert compressor._last_compression_savings_pct == 0.0
+
 
 
 class TestUpdateFromResponse:

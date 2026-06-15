@@ -36,6 +36,19 @@ def _messages_with_handoff(summary_body: str):
     ]
 
 
+def _messages_without_handoff():
+    return [
+        {"role": "system", "content": "system prompt"},
+        {"role": "user", "content": "fresh session user turn 1"},
+        {"role": "assistant", "content": "fresh session assistant turn 1"},
+        {"role": "user", "content": "fresh session user turn 2"},
+        {"role": "assistant", "content": "fresh session assistant turn 2"},
+        {"role": "user", "content": "fresh session user turn 3"},
+        {"role": "assistant", "content": "fresh session assistant turn 3"},
+        {"role": "user", "content": "fresh session final request"},
+    ]
+
+
 def test_existing_previous_summary_is_not_serialized_again_as_new_turn():
     """Same-process iterative compression should not feed the old handoff twice."""
     compressor = _compressor()
@@ -85,3 +98,16 @@ def test_handoff_in_protected_head_populates_previous_summary_before_update():
     assert compressor._previous_summary == old_summary
     assert seen_turns
     assert all(old_summary not in str(msg.get("content", "")) for msg in seen_turns)
+
+
+def test_stale_previous_summary_is_cleared_when_current_session_has_no_handoff():
+    """A stale iterative summary from another session must not enter the prompt."""
+    compressor = _compressor()
+    compressor._previous_summary = "STALE-SUMMARY-FROM-OLD-SESSION"
+
+    def fake_generate_summary(_turns_to_summarize, focus_topic=None):
+        assert compressor._previous_summary is None
+        return "fresh summary"
+
+    with patch.object(compressor, "_generate_summary", side_effect=fake_generate_summary):
+        compressor.compress(_messages_without_handoff())

@@ -1919,6 +1919,16 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
 
         if compress_start >= compress_end:
+            self._ineffective_compression_count += 1
+            self._last_compression_savings_pct = 0.0
+            if not self.quiet_mode:
+                logger.warning(
+                    "Compression skipped: compress_start (%d) >= compress_end (%d); "
+                    "nothing to compress. ineffective_compression_count=%d",
+                    compress_start,
+                    compress_end,
+                    self._ineffective_compression_count,
+                )
             return messages
 
         turns_to_summarize = messages[compress_start:compress_end]
@@ -1939,6 +1949,8 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             if summary_body and not self._previous_summary:
                 self._previous_summary = summary_body
             turns_to_summarize = messages[max(compress_start, summary_idx + 1):compress_end]
+        elif self._previous_summary:
+            self._previous_summary = None
 
         if not self.quiet_mode:
             logger.info(
