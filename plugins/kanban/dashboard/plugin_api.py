@@ -53,6 +53,7 @@ from hermes_cli import kanban_board_view
 from hermes_cli import kanban_bulk
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
+from hermes_cli import kanban_dispatch
 from hermes_cli import kanban_tasks
 from hermes_cli import kanban_workers
 
@@ -1066,44 +1067,14 @@ def dispatch(
     board: Optional[str] = Query(None),
 ):
     board = _resolve_board(board)
-    try:
-        from hermes_cli.config import load_config
-
-        cfg = load_config() or {}
-        kanban_cfg = (cfg.get("kanban") or {}) if isinstance(cfg, dict) else {}
-    except Exception:
-        kanban_cfg = {}
-
-    def _coerce_positive_int(value):
-        if value is None:
-            return None
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return None
-        return parsed if parsed >= 1 else None
-
-    default_assignee = (kanban_cfg.get("default_assignee") or "").strip() or None
-    max_in_progress = _coerce_positive_int(kanban_cfg.get("max_in_progress"))
-    max_in_progress_per_profile = _coerce_positive_int(
-        kanban_cfg.get("max_in_progress_per_profile")
-    )
     conn = _conn(board=board)
     try:
-        result = kanban_db.dispatch_once(
+        return kanban_dispatch.dispatch_payload(
             conn,
             dry_run=dry_run,
             max_spawn=max_n,
-            max_in_progress=max_in_progress,
             board=board,
-            default_assignee=default_assignee,
-            max_in_progress_per_profile=max_in_progress_per_profile,
         )
-        # DispatchResult is a dataclass.
-        try:
-            return asdict(result)
-        except TypeError:
-            return {"result": str(result)}
     finally:
         conn.close()
 
