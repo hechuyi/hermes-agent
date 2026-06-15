@@ -4635,6 +4635,49 @@ class TestFeishuProcessInboundMessage(unittest.TestCase):
     def _source_from_kwargs(**kwargs):
         return SimpleNamespace(**kwargs)
 
+    def test_unknown_event_chat_type_is_not_downgraded_to_dm_or_group(self):
+        from gateway.platforms.feishu import FeishuAdapter
+
+        self.assertIsNone(
+            FeishuAdapter._resolve_source_chat_type(
+                chat_info={"type": "", "reliable": False},
+                event_chat_type="future_chat_kind",
+                prefer_event_chat_type=True,
+            )
+        )
+
+    def test_unknown_inbound_chat_type_is_dropped_before_dispatch(self):
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = self._build_adapter()
+        adapter.build_source = Mock(side_effect=self._source_from_kwargs)
+        adapter._resolve_source_chat_type = FeishuAdapter._resolve_source_chat_type
+        adapter.get_chat_info = AsyncMock(return_value={"name": "Mystery", "type": "", "reliable": False})
+        message = SimpleNamespace(
+            content=json.dumps({"text": "hello"}),
+            message_type="text",
+            message_id="om_unknown_chat_type",
+            mentions=[],
+            chat_id="oc_chat",
+            parent_id=None,
+            upper_message_id=None,
+            root_id=None,
+            thread_id=None,
+        )
+
+        asyncio.run(
+            adapter._process_inbound_message(
+                data=message,
+                message=message,
+                sender_id=None,
+                chat_type="future_chat_kind",
+                message_id="om_unknown_chat_type",
+            )
+        )
+
+        adapter.build_source.assert_not_called()
+        adapter._dispatch_inbound_event.assert_not_awaited()
+
     def test_root_id_not_thread_id(self):
         adapter = self._build_adapter()
         adapter.build_source = Mock(side_effect=self._source_from_kwargs)

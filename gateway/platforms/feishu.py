@@ -4951,14 +4951,22 @@ class FeishuAdapter(BasePlatformAdapter):
 
         sender_profile = await self._resolve_sender_profile(user_id_obj)
         chat_info = await self.get_chat_info(chat_id)
+        source_chat_type = self._resolve_source_chat_type(
+            chat_info=chat_info,
+            event_chat_type=chat_type_raw,
+            prefer_event_chat_type=True,
+        )
+        if source_chat_type is None:
+            logger.warning(
+                "[Feishu] Dropping reaction with unknown target chat type: event_id=%s chat_type=%s",
+                reaction_event_id,
+                chat_type_raw or "<unknown>",
+            )
+            return
         source = self.build_source(
             chat_id=chat_id,
             chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
-            chat_type=self._resolve_source_chat_type(
-                chat_info=chat_info,
-                event_chat_type=chat_type_raw,
-                prefer_event_chat_type=True,
-            ),
+            chat_type=source_chat_type,
             user_id=sender_profile["user_id"],
             user_name=sender_profile["user_name"],
             thread_id=thread_id,
@@ -5940,14 +5948,22 @@ class FeishuAdapter(BasePlatformAdapter):
 
         chat_info = await self.get_chat_info(chat_id)
         sender_profile = await self._resolve_sender_profile(sender_id, is_bot=is_bot)
+        source_chat_type = self._resolve_source_chat_type(
+            chat_info=chat_info,
+            event_chat_type=chat_type,
+            prefer_event_chat_type=True,
+        )
+        if source_chat_type is None:
+            logger.warning(
+                "[Feishu] Dropping inbound message with unknown chat type: id=%s chat_type=%s",
+                message_id,
+                chat_type or "<unknown>",
+            )
+            return
         source = self.build_source(
             chat_id=chat_id,
             chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
-            chat_type=self._resolve_source_chat_type(
-                chat_info=chat_info,
-                event_chat_type=chat_type,
-                prefer_event_chat_type=True,
-            ),
+            chat_type=source_chat_type,
             user_id=sender_profile["user_id"],
             user_name=sender_profile["user_name"],
             thread_id=thread_id,
@@ -6723,7 +6739,7 @@ class FeishuAdapter(BasePlatformAdapter):
             return "forum"
         if normalized == "group":
             return "group"
-        return "dm"
+        return ""
 
     @staticmethod
     def _resolve_source_chat_type(
@@ -6731,11 +6747,13 @@ class FeishuAdapter(BasePlatformAdapter):
         chat_info: Dict[str, Any],
         event_chat_type: str,
         prefer_event_chat_type: bool = False,
-    ) -> str:
+    ) -> Optional[str]:
         if prefer_event_chat_type:
             mapped_event_type = FeishuAdapter._map_chat_type(event_chat_type)
             if mapped_event_type in {"dm", "group", "forum"}:
                 return mapped_event_type
+            if str(event_chat_type or "").strip():
+                return None
         resolved = str(chat_info.get("type") or "").strip().lower()
         if resolved in {"group", "forum"}:
             return resolved
@@ -6743,6 +6761,8 @@ class FeishuAdapter(BasePlatformAdapter):
             return "dm"
         if event_chat_type == "p2p":
             return "dm"
+        if str(event_chat_type or "").strip():
+            return None
         return "group"
 
     async def _resolve_sender_profile(
