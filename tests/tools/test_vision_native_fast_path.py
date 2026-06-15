@@ -21,6 +21,7 @@ from tools.vision_tools import (
     _EMBED_TARGET_BYTES,
     _build_native_vision_tool_result,
     _handle_vision_analyze,
+    _should_use_native_vision_fast_path,
     _supports_media_in_tool_results,
     _vision_analyze_native,
 )
@@ -170,6 +171,24 @@ class TestVisionAnalyzeNative:
 
 class TestHandleVisionAnalyzeFastPath:
     """Verify the dispatcher chooses fast-path vs aux-LLM correctly."""
+
+    def test_shared_fast_path_gate_respects_supports_vision_override(self):
+        """Browser and vision tools should share one native-routing predicate."""
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"model": {"supports_vision": True}},
+        ):
+            assert _should_use_native_vision_fast_path("brand-new-provider", "llava-v1.6")
+
+    def test_shared_fast_path_gate_respects_text_mode_override(self):
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "agent": {"image_input_mode": "text"},
+                "model": {"supports_vision": True},
+            },
+        ):
+            assert not _should_use_native_vision_fast_path("brand-new-provider", "llava-v1.6")
 
     def test_native_mode_with_supported_transport_uses_fast_path(self, tmp_path):
         """Explicit native mode + known transport returns multimodal."""

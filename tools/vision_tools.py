@@ -547,6 +547,30 @@ def _supports_media_in_tool_results(provider: str, model: str) -> bool:
     return False
 
 
+def _should_use_native_vision_fast_path(provider: str, model: str) -> bool:
+    """Return whether vision tools should return native multimodal content.
+
+    The native fast path is allowed only when routing is explicitly/native
+    auto-selected and either the provider transport can carry images inside
+    tool results or the active model config explicitly declares
+    ``supports_vision``.
+    """
+    try:
+        from agent.image_routing import decide_image_input_mode, _lookup_supports_vision
+        from hermes_cli.config import load_config
+
+        cfg = load_config()
+        mode = decide_image_input_mode(provider, model, cfg)
+        supports_vision = _lookup_supports_vision(provider, model, cfg) is True
+        return mode == "native" and (
+            _supports_media_in_tool_results(provider, model)
+            or supports_vision
+        )
+    except Exception as exc:
+        logger.debug("Native vision fast-path gate failed: %s", exc)
+        return False
+
+
 def _build_native_vision_tool_result(
     image_url: str,
     question: str,
@@ -1116,18 +1140,10 @@ def _handle_vision_analyze(args: Dict[str, Any], **kw: Any) -> Awaitable[str]:
     # next turn — no aux call, no information loss, no extra latency.
     try:
         from agent.auxiliary_client import _read_main_provider, _read_main_model
-        from agent.image_routing import decide_image_input_mode, _lookup_supports_vision
-        from hermes_cli.config import load_config
 
         _provider = _read_main_provider()
         _model = _read_main_model()
-        _cfg = load_config()
-        _mode = decide_image_input_mode(_provider, _model, _cfg)
-        _supports_vision = _lookup_supports_vision(_provider, _model, _cfg) is True
-        if _mode == "native" and (
-            _supports_media_in_tool_results(_provider, _model)
-            or _supports_vision
-        ):
+        if _should_use_native_vision_fast_path(_provider, _model):
             logger.info(
                 "vision_analyze: native fast path (provider=%s, model=%s)",
                 _provider, _model,

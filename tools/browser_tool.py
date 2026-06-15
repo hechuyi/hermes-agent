@@ -63,7 +63,7 @@ import tempfile
 import threading
 import time
 import requests
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
 from agent.auxiliary_client import call_llm
 from hermes_constants import get_hermes_home
@@ -3066,7 +3066,7 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
-def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> str:
+def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> Union[str, Dict[str, Any]]:
     """
     Take a screenshot of the current page for visual inspection.
 
@@ -3220,22 +3220,14 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         # next turn — no aux call, no information loss, no extra latency.
         try:
             from agent.auxiliary_client import _read_main_model, _read_main_provider
-            from agent.image_routing import decide_image_input_mode, _lookup_supports_vision
-            from hermes_cli.config import load_config
             from tools.vision_tools import (
                 _build_native_vision_tool_result,
-                _supports_media_in_tool_results,
+                _should_use_native_vision_fast_path,
             )
 
             _provider = _read_main_provider()
             _model = _read_main_model()
-            _cfg = load_config()
-            _mode = decide_image_input_mode(_provider, _model, _cfg)
-            _supports_vision = _lookup_supports_vision(_provider, _model, _cfg) is True
-            if _mode == "native" and (
-                _supports_media_in_tool_results(_provider, _model)
-                or _supports_vision
-            ):
+            if _should_use_native_vision_fast_path(_provider, _model):
                 native_result = _build_native_vision_tool_result(
                     image_url=str(screenshot_path),
                     question=question,
