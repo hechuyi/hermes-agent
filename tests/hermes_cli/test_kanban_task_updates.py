@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_tasks
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    return home
+
+
+def test_update_task_completes_with_summary_and_metadata(kanban_home):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="ship")
+
+        updated = kanban_tasks.update_task(
+            conn,
+            task_id,
+            status="done",
+            result="DECIDED",
+            summary="DECIDED",
+            metadata={"source": "core"},
+        )
+
+        run = kb.latest_run(conn, task_id)
+        assert updated.status == "done"
+        assert updated.result == "DECIDED"
+        assert run.summary == "DECIDED"
+        assert run.metadata == {"source": "core"}
+    finally:
+        conn.close()
+
+
+def test_update_task_ready_reports_blocking_parents(kanban_home):
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="parent")
+        child = kb.create_task(conn, title="child", parents=[parent])
+
+        with pytest.raises(kanban_tasks.TaskUpdateError) as exc:
+            kanban_tasks.update_task(conn, child, status="ready")
+
+        assert exc.value.status_code == 409
+        assert "Cannot move to 'ready'" in exc.value.detail
+        assert parent in exc.value.detail
+        assert "'parent'" in exc.value.detail
+    finally:
+        conn.close()
+
+
+def test_update_task_rejects_running_status(kanban_home):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="x")
+
+        with pytest.raises(kanban_tasks.TaskUpdateError) as exc:
+            kanban_tasks.update_task(conn, task_id, status="running")
+
+        assert exc.value.status_code == 400
+        assert "running" in exc.value.detail
+        assert kb.get_task(conn, task_id).status != "running"
+    finally:
+        conn.close()
+
+
+def test_update_task_rejects_empty_title(kanban_home):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="x")
+
+        with pytest.raises(kanban_tasks.TaskUpdateError) as exc:
+            kanban_tasks.update_task(conn, task_id, title="   ")
+
+        assert exc.value.status_code == 400
+        assert exc.value.detail == "title cannot be empty"
+    finally:
+        conn.close()
