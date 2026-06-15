@@ -4968,11 +4968,50 @@ class FeishuAdapter(BasePlatformAdapter):
             text=synthetic_text,
             message_type=MessageType.TEXT,
             source=source,
-            raw_message=data,
+            raw_message=SimpleNamespace(
+                header=getattr(data, "header", None),
+                event=SimpleNamespace(
+                    message=SimpleNamespace(
+                        chat_id=chat_id,
+                        chat_type=chat_type_raw,
+                        message_id=reaction_event_id,
+                        mentions=[],
+                        thread_id=thread_id,
+                        parent_id=reply_to_message_id,
+                        upper_message_id=None,
+                        root_id=reply_to_message_id,
+                    ),
+                    reaction=event,
+                ),
+            ),
             message_id=reaction_event_id,
             reply_to_message_id=reply_to_message_id,
             timestamp=datetime.now(),
         )
+        transport_kind = self._transport_kind_for_event(synthetic_event)
+        current_contract = self._build_current_conversation_contract(
+            synthetic_event,
+            reply_anchor_ref=self._reply_anchor_ref(synthetic_event),
+            expected_contract=None,
+        )
+        setattr(
+            synthetic_event,
+            "feishu_current_conversation_contract",
+            current_contract,
+        )
+        setattr(
+            synthetic_event,
+            "feishu_current_transport_kind",
+            transport_kind,
+        )
+        setattr(synthetic_event, "feishu_current_mention_required", False)
+        if not self._admit_current_conversation_for_event(
+            synthetic_event,
+            current_conversation_contract=current_contract,
+            transport_kind=transport_kind,
+            mention_required=False,
+        ):
+            return
         logger.info("[Feishu] Routing reaction %s:%s on bot message %s as synthetic event", action, emoji_type, message_id)
         await self._handle_message_with_guards(synthetic_event)
 

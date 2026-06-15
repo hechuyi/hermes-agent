@@ -415,6 +415,59 @@ async def test_reaction_synthetic_inbound_id_uses_feishu_event_id_not_target_mes
 
 
 @pytest.mark.asyncio
+async def test_reaction_synthetic_event_carries_current_conversation_admission(tmp_path):
+    adapter = _reaction_adapter(tmp_path)
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="ev_reaction_current"),
+        event=SimpleNamespace(
+            message_id="om_bot_target",
+            user_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+        ),
+    )
+
+    with _broker_context():
+        await adapter._handle_reaction_event("im.message.reaction.created_v1", data)
+
+    synthetic_event = adapter._handle_message_with_guards.await_args.args[0]
+    contract = getattr(synthetic_event, "feishu_current_conversation_contract", None)
+    admission = getattr(synthetic_event, "feishu_current_conversation_admission", None)
+    assert contract is not None
+    assert isinstance(admission, dict)
+    assert admission["contract_hash"] == contract.contract_hash
+    assert admission["canonical_event_ref"].startswith("sha256:")
+    assert admission["transport_kind"] == "group"
+    assert "ev_reaction_current" not in str(admission)
+    assert "oc_chat" not in str(admission)
+    assert "ou_user" not in str(admission)
+
+
+@pytest.mark.asyncio
+async def test_reaction_synthetic_current_admission_denial_blocks_dispatch(tmp_path):
+    adapter = _reaction_adapter(tmp_path)
+    adapter._admit_current_conversation_event = Mock(
+        return_value=SimpleNamespace(
+            ok=False,
+            failure_class="feishu_current_route_mismatch",
+            evidence={"transport_kind": "group"},
+        )
+    )
+    data = SimpleNamespace(
+        header=SimpleNamespace(event_id="ev_reaction_denied"),
+        event=SimpleNamespace(
+            message_id="om_bot_target",
+            user_id=SimpleNamespace(open_id="ou_user", user_id=None, union_id=None),
+            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+        ),
+    )
+
+    with _broker_context():
+        await adapter._handle_reaction_event("im.message.reaction.created_v1", data)
+
+    adapter._handle_message_with_guards.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reaction_requires_broker_before_fetch_or_synthetic_submission(tmp_path):
     adapter = _reaction_adapter(tmp_path)
     events = []
