@@ -246,3 +246,91 @@ def task_log_payload(
         "content": content or "",
         "truncated": bool(tail and size > tail),
     }
+
+
+def board_counts(slug: str) -> dict[str, int]:
+    """Return ``{status: count}`` for a board, tolerating empty DBs."""
+    try:
+        path = kanban_db.kanban_db_path(board=slug)
+        if not path.exists():
+            return {}
+        conn = kanban_db.connect(board=slug)
+        try:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
+            ).fetchall()
+            return {row["status"]: int(row["n"]) for row in rows}
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+
+
+def boards_payload(*, include_archived: bool = False) -> dict:
+    """Return every board with task counts and current-board marker."""
+    boards = kanban_db.list_boards(include_archived=include_archived)
+    current = kanban_db.get_current_board()
+    for board in boards:
+        board["is_current"] = board["slug"] == current
+        board["counts"] = board_counts(board["slug"])
+        board["total"] = sum(board["counts"].values())
+    return {"boards": boards, "current": current}
+
+
+def create_board_payload(
+    slug: str,
+    *,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    icon: Optional[str] = None,
+    color: Optional[str] = None,
+    switch: bool = False,
+) -> dict:
+    """Create a board and optionally switch the active board."""
+    meta = kanban_db.create_board(
+        slug,
+        name=name,
+        description=description,
+        icon=icon,
+        color=color,
+    )
+    if switch:
+        kanban_db.set_current_board(meta["slug"])
+    return {"board": meta, "current": kanban_db.get_current_board()}
+
+
+def update_board_payload(
+    slug: str,
+    *,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    icon: Optional[str] = None,
+    color: Optional[str] = None,
+) -> dict:
+    """Update display metadata for an existing board."""
+    normed = kanban_db._normalize_board_slug(slug)
+    if not normed or not kanban_db.board_exists(normed):
+        raise LookupError(f"board {slug!r} does not exist")
+    meta = kanban_db.write_board_metadata(
+        normed,
+        name=name,
+        description=description,
+        icon=icon,
+        color=color,
+    )
+    return {"board": meta}
+
+
+def delete_board_payload(slug: str, *, delete: bool = False) -> dict:
+    """Archive or hard-delete a board."""
+    result = kanban_db.remove_board(slug, archive=not delete)
+    return {"result": result, "current": kanban_db.get_current_board()}
+
+
+def switch_board_payload(slug: str) -> dict:
+    """Persist a board as active."""
+    normed = kanban_db._normalize_board_slug(slug)
+    if not normed or not kanban_db.board_exists(normed):
+        raise LookupError(f"board {slug!r} does not exist")
+    kanban_db.set_current_board(normed)
+    return {"current": normed}

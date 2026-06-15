@@ -111,3 +111,40 @@ def test_stats_and_assignees_payloads(kanban_home):
         assert kb.get_task(conn, task_id).assignee == "worker"
     finally:
         conn.close()
+
+
+def test_board_registry_payload_includes_counts(kanban_home):
+    kb.create_board("proj")
+    conn = kb.connect(board="proj")
+    try:
+        kb.create_task(conn, title="work")
+    finally:
+        conn.close()
+
+    payload = kanban_board_view.boards_payload()
+    by_slug = {board["slug"]: board for board in payload["boards"]}
+    assert by_slug["proj"]["counts"] == {"ready": 1}
+    assert by_slug["proj"]["total"] == 1
+    assert payload["current"]
+
+
+def test_board_crud_helpers_create_rename_switch_and_delete(kanban_home):
+    created = kanban_board_view.create_board_payload(
+        "ops",
+        name="Ops",
+        switch=True,
+    )
+    assert created["board"]["slug"] == "ops"
+    assert created["current"] == "ops"
+
+    renamed = kanban_board_view.update_board_payload("ops", description="work")
+    assert renamed["board"]["description"] == "work"
+
+    switched = kanban_board_view.switch_board_payload("default")
+    assert switched == {"current": "default"}
+
+    deleted = kanban_board_view.delete_board_payload("ops", delete=True)
+    assert deleted["current"] == "default"
+
+    with pytest.raises(LookupError):
+        kanban_board_view.update_board_payload("missing", name="Missing")

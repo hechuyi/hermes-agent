@@ -1128,42 +1128,34 @@ class RenameBoardBody(BaseModel):
     color: Optional[str] = None
 
 
-def _board_counts(slug: str) -> dict[str, int]:
-    """Return ``{status: count}`` for a board. Safe on an empty DB."""
-    try:
-        path = kanban_db.kanban_db_path(board=slug)
-        if not path.exists():
-            return {}
-        conn = kanban_db.connect(board=slug)
-        try:
-            rows = conn.execute(
-                "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
-            ).fetchall()
-            return {r["status"]: int(r["n"]) for r in rows}
-        finally:
-            conn.close()
-    except Exception:
-        return {}
-
-
 @router.get("/boards")
 def list_boards(include_archived: bool = Query(False)):
     """Return every board on disk with task counts and the active slug."""
-    boards = kanban_db.list_boards(include_archived=include_archived)
-    current = kanban_db.get_current_board()
-    for b in boards:
-        b["is_current"] = (b["slug"] == current)
-        b["counts"] = _board_counts(b["slug"])
-        b["total"] = sum(b["counts"].values())
-    return {"boards": boards, "current": current}
+    return kanban_board_view.boards_payload(include_archived=include_archived)
 
 
 @router.post("/boards")
 def create_board_endpoint(payload: CreateBoardBody):
     """Create a new board. Idempotent — ``slug`` collision returns existing."""
     try:
-        meta = kanban_db.create_board(
+        return kanban_board_view.create_board_payload(
             payload.slug,
+            name=payload.name,
+            description=payload.description,
+            icon=payload.icon,
+            color=payload.color,
+            switch=payload.switch,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.patch("/boards/{slug}")
+def rename_board(slug: str, payload: RenameBoardBody):
+    """Update a board's display metadata (slug is immutable — create a new one to rename the directory)."""
+    try:
+        return kanban_board_view.update_board_payload(
+            slug,
             name=payload.name,
             description=payload.description,
             icon=payload.icon,
@@ -1171,41 +1163,17 @@ def create_board_endpoint(payload: CreateBoardBody):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    if payload.switch:
-        try:
-            kanban_db.set_current_board(meta["slug"])
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-    return {"board": meta, "current": kanban_db.get_current_board()}
-
-
-@router.patch("/boards/{slug}")
-def rename_board(slug: str, payload: RenameBoardBody):
-    """Update a board's display metadata (slug is immutable — create a new one to rename the directory)."""
-    try:
-        normed = kanban_db._normalize_board_slug(slug)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    if not normed or not kanban_db.board_exists(normed):
+    except LookupError:
         raise HTTPException(status_code=404, detail=f"board {slug!r} does not exist")
-    meta = kanban_db.write_board_metadata(
-        normed,
-        name=payload.name,
-        description=payload.description,
-        icon=payload.icon,
-        color=payload.color,
-    )
-    return {"board": meta}
 
 
 @router.delete("/boards/{slug}")
 def delete_board(slug: str, delete: bool = Query(False, description="Hard-delete instead of archive")):
     """Archive (default) or hard-delete a board."""
     try:
-        res = kanban_db.remove_board(slug, archive=not delete)
+        return kanban_board_view.delete_board_payload(slug, delete=delete)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"result": res, "current": kanban_db.get_current_board()}
 
 
 @router.post("/boards/{slug}/switch")
@@ -1217,13 +1185,11 @@ def switch_board(slug: str):
     commands and the CLI share the same current-board pointer.
     """
     try:
-        normed = kanban_db._normalize_board_slug(slug)
+        return kanban_board_view.switch_board_payload(slug)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    if not normed or not kanban_db.board_exists(normed):
+    except LookupError:
         raise HTTPException(status_code=404, detail=f"board {slug!r} does not exist")
-    kanban_db.set_current_board(normed)
-    return {"current": normed}
 
 
 # ---------------------------------------------------------------------------
