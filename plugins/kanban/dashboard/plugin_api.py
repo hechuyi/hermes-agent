@@ -49,6 +49,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_attachments
+from hermes_cli import kanban_board_view
 from hermes_cli import kanban_bulk
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
@@ -125,79 +126,18 @@ def _conn(board: Optional[str] = None):
 # if it is omitted here, the board-level fallback below mis-buckets scheduled
 # tasks into ``todo`` and makes the dashboard look like the Scheduled column
 # disappeared.
-BOARD_COLUMNS: list[str] = [
-    "triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done",
-]
-
-
-_CARD_SUMMARY_PREVIEW_CHARS = 200
-
-
 def _task_dict(
     task: kanban_db.Task,
     *,
     latest_summary: Optional[str] = None,
 ) -> dict[str, Any]:
-    d = asdict(task)
-    # Add derived age metrics so the UI can colour stale cards without
-    # computing deltas client-side.
-    try:
-        d["age"] = kanban_db.task_age(task)
-    except Exception:
-        d["age"] = {"created_age_seconds": None, "started_age_seconds": None, "time_to_complete_seconds": None}
-    # Surface the latest non-null run summary so dashboards don't show
-    # blank cards/drawers for tasks where the worker handed off via
-    # ``task_runs.summary`` (the kanban-worker pattern) instead of
-    # ``tasks.result``. ``None`` when no run has produced a summary yet.
-    d["latest_summary"] = latest_summary
-    # Keep body short on list endpoints; full body comes from /tasks/:id.
-    return d
-
-
-def _event_dict(event: kanban_db.Event) -> dict[str, Any]:
-    return {
-        "id": event.id,
-        "task_id": event.task_id,
-        "kind": event.kind,
-        "payload": event.payload,
-        "created_at": event.created_at,
-        "run_id": event.run_id,
-    }
-
-
-def _comment_dict(c: kanban_db.Comment) -> dict[str, Any]:
-    return {
-        "id": c.id,
-        "task_id": c.task_id,
-        "author": c.author,
-        "body": c.body,
-        "created_at": c.created_at,
-    }
+    return kanban_board_view.task_payload(task, latest_summary=latest_summary)
 
 
 def _attachment_dict(a: kanban_db.Attachment) -> dict[str, Any]:
     """Serialise an Attachment for the drawer. ``stored_path`` is the
     absolute on-disk path workers read; the UI uses ``id`` for download."""
-    return {
-        "id": a.id,
-        "task_id": a.task_id,
-        "filename": a.filename,
-        "content_type": a.content_type,
-        "size": a.size,
-        "uploaded_by": a.uploaded_by,
-        "stored_path": a.stored_path,
-        "created_at": a.created_at,
-    }
-
-
-def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
-    """Serialise a Run for the drawer's Run history section."""
-    return kanban_workers.run_to_payload(r)
-
-
-def _links_for(conn: sqlite3.Connection, task_id: str) -> dict[str, list[str]]:
-    """Return {'parents': [...], 'children': [...]} for a task."""
-    return kanban_tasks.task_links(conn, task_id)
+    return kanban_board_view.attachment_payload(a)
 
 
 # ---------------------------------------------------------------------------
@@ -228,113 +168,13 @@ def get_board(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        tasks = kanban_db.list_tasks(
+        return kanban_board_view.board_payload(
             conn,
             tenant=tenant,
             include_archived=include_archived,
             workflow_template_id=workflow_template_id,
             current_step_key=current_step_key,
         )
-        # Pre-fetch link counts per task (cheap: one query).
-        link_counts: dict[str, dict[str, int]] = {}
-        for row in conn.execute(
-            "SELECT parent_id, child_id FROM task_links"
-        ).fetchall():
-            link_counts.setdefault(row["parent_id"], {"parents": 0, "children": 0})[
-                "children"
-            ] += 1
-            link_counts.setdefault(row["child_id"], {"parents": 0, "children": 0})[
-                "parents"
-            ] += 1
-
-        # Comment + event counts (both cheap aggregates).
-        comment_counts: dict[str, int] = {
-            r["task_id"]: r["n"]
-            for r in conn.execute(
-                "SELECT task_id, COUNT(*) AS n FROM task_comments GROUP BY task_id"
-            )
-        }
-
-        # Progress rollup: for each parent, how many children are done / total.
-        # One pass over task_links joined with child status — cheaper than
-        # N per-task queries and the plugin uses it to render "N/M".
-        progress: dict[str, dict[str, int]] = {}
-        for row in conn.execute(
-            "SELECT l.parent_id AS pid, t.status AS cstatus "
-            "FROM task_links l JOIN tasks t ON t.id = l.child_id"
-        ).fetchall():
-            p = progress.setdefault(row["pid"], {"done": 0, "total": 0})
-            p["total"] += 1
-            if row["cstatus"] == "done":
-                p["done"] += 1
-
-        # Diagnostics rollup for this board — see kanban_diagnostics.
-        # We get the full structured list per task AND a compact
-        # summary for the card badge (so cards don't carry the detail
-        # text; the drawer fetches that via /tasks/:id or /diagnostics).
-        diagnostics_per_task = kd.compute_task_diagnostics_by_task(conn, task_ids=None)
-
-        latest_event_id = conn.execute(
-            "SELECT COALESCE(MAX(id), 0) AS m FROM task_events"
-        ).fetchone()["m"]
-
-        columns: dict[str, list[dict]] = {c: [] for c in BOARD_COLUMNS}
-        if include_archived:
-            columns["archived"] = []
-
-        # Batch-fetch the latest non-null run summary per task in one
-        # window-function query (avoids N+1 ``latest_summary`` calls
-        # for boards with hundreds of tasks). Truncated to a card-size
-        # preview here — the full text is available via /tasks/:id.
-        summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
-
-        for t in tasks:
-            full = summary_map.get(t.id)
-            preview = (
-                full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None
-            )
-            d = _task_dict(t, latest_summary=preview)
-            d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
-            d["comment_count"] = comment_counts.get(t.id, 0)
-            d["progress"] = progress.get(t.id)  # None when the task has no children
-            diags = diagnostics_per_task.get(t.id)
-            if diags:
-                # Full list goes into the payload so the drawer can render
-                # without a second round-trip. The board-level badge only
-                # needs the summary.
-                d["diagnostics"] = diags
-                d["warnings"] = kd.warnings_summary_from_diagnostics(diags)
-            col = t.status if t.status in columns else "todo"
-            columns[col].append(d)
-
-        # Stable per-column ordering already applied by list_tasks
-        # (priority DESC, created_at ASC), keep as-is.
-
-        # List of known tenants for the UI filter dropdown.
-        tenants = [
-            r["tenant"]
-            for r in conn.execute(
-                "SELECT DISTINCT tenant FROM tasks WHERE tenant IS NOT NULL ORDER BY tenant"
-            )
-        ]
-        # List of distinct assignees for the lane-by-profile sub-grouping.
-        assignees = [
-            r["assignee"]
-            for r in conn.execute(
-                "SELECT DISTINCT assignee FROM tasks WHERE assignee IS NOT NULL "
-                "AND status != 'archived' ORDER BY assignee"
-            )
-        ]
-
-        return {
-            "columns": [
-                {"name": name, "tasks": columns[name]} for name in columns.keys()
-            ],
-            "tenants": tenants,
-            "assignees": assignees,
-            "latest_event_id": int(latest_event_id),
-            "now": int(time.time()),
-        }
     finally:
         conn.close()
 
@@ -357,47 +197,16 @@ def get_task(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        if (run_state_type is None) ^ (run_state_name is None):
-            raise HTTPException(
-                status_code=400,
-                detail="run_state_type and run_state_name must be passed together or omitted",
-            )
-        if run_state_type is not None and run_state_type not in ("status", "outcome"):
-            raise HTTPException(
-                status_code=400,
-                detail="run_state_type must be 'status' or 'outcome'",
-            )
-        task = kanban_db.get_task(conn, task_id)
-        if task is None:
-            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-        # Drawer/detail view returns the FULL summary (no truncation) so
-        # operators can read the complete worker handoff without making
-        # a second round-trip. Cards on /board carry a 200-char preview.
-        full_summary = kanban_db.latest_summary(conn, task_id)
-        task_d = _task_dict(task, latest_summary=full_summary)
-        # Attach diagnostics so the drawer's Diagnostics section can
-        # render recovery actions without a second round-trip.
-        diags = kd.compute_task_diagnostics_by_task(conn, task_ids=[task_id])
-        diag_list = diags.get(task_id) or []
-        if diag_list:
-            task_d["diagnostics"] = diag_list
-            task_d["warnings"] = kd.warnings_summary_from_diagnostics(diag_list)
-        return {
-            "task": task_d,
-            "comments": [_comment_dict(c) for c in kanban_db.list_comments(conn, task_id)],
-            "events": [_event_dict(e) for e in kanban_db.list_events(conn, task_id)],
-            "attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)],
-            "links": _links_for(conn, task_id),
-            "runs": [
-                _run_dict(r)
-                for r in kanban_db.list_runs(
-                    conn,
-                    task_id,
-                    state_type=run_state_type,
-                    state_name=run_state_name,
-                )
-            ],
-        }
+        return kanban_board_view.task_detail_payload(
+            conn,
+            task_id,
+            run_state_type=run_state_type,
+            run_state_name=run_state_name,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     finally:
         conn.close()
 
