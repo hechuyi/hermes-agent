@@ -1008,7 +1008,7 @@ def get_stats(board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        return kanban_db.board_stats(conn)
+        return kanban_board_view.stats_payload(conn)
     finally:
         conn.close()
 
@@ -1025,7 +1025,7 @@ def get_assignees(board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        return {"assignees": kanban_db.known_assignees(conn)}
+        return kanban_board_view.assignees_payload(conn)
     finally:
         conn.close()
 
@@ -1049,25 +1049,10 @@ def get_task_log(
     generations, so disk usage per task is bounded at ~4 MiB.
     """
     board = _resolve_board(board)
-    conn = _conn(board=board)
     try:
-        task = kanban_db.get_task(conn, task_id)
-    finally:
-        conn.close()
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-    content = kanban_db.read_worker_log(task_id, tail_bytes=tail, board=board)
-    log_path = kanban_db.worker_log_path(task_id, board=board)
-    size = log_path.stat().st_size if log_path.exists() else 0
-    return {
-        "task_id": task_id,
-        "path": str(log_path),
-        "exists": content is not None,
-        "size_bytes": size,
-        "content": content or "",
-        # Truncated when the on-disk file was larger than the tail cap.
-        "truncated": bool(tail and size > tail),
-    }
+        return kanban_board_view.task_log_payload(task_id, tail=tail, board=board)
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 # ---------------------------------------------------------------------------

@@ -212,3 +212,37 @@ def task_detail_payload(
             )
         ],
     }
+
+
+def stats_payload(conn) -> dict:
+    """Return board status/assignee stats."""
+    return kanban_db.board_stats(conn)
+
+
+def assignees_payload(conn) -> dict:
+    """Return known assignees wrapped for the dashboard API."""
+    return {"assignees": kanban_db.known_assignees(conn)}
+
+
+def task_log_payload(
+    task_id: str,
+    *,
+    tail: Optional[int] = None,
+    board: Optional[str] = None,
+) -> dict:
+    """Return worker log metadata and content for a task."""
+    with kanban_db.connect_closing(board=board) as conn:
+        if kanban_db.get_task(conn, task_id) is None:
+            raise LookupError(f"task {task_id} not found")
+
+    content = kanban_db.read_worker_log(task_id, tail_bytes=tail, board=board)
+    log_path = kanban_db.worker_log_path(task_id, board=board)
+    size = log_path.stat().st_size if log_path.exists() else 0
+    return {
+        "task_id": task_id,
+        "path": str(log_path),
+        "exists": content is not None,
+        "size_bytes": size,
+        "content": content or "",
+        "truncated": bool(tail and size > tail),
+    }

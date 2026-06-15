@@ -74,3 +74,40 @@ def test_task_detail_payload_rejects_invalid_run_filter(kanban_home):
             )
     finally:
         conn.close()
+
+
+def test_task_log_payload_reports_tail_and_missing_task(kanban_home):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="logged")
+    finally:
+        conn.close()
+
+    log_path = kb.worker_log_path(task_id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("line 1\nline 2\n")
+
+    payload = kanban_board_view.task_log_payload(task_id, tail=8)
+    assert payload["task_id"] == task_id
+    assert payload["exists"] is True
+    assert payload["content"] == "line 2\n"
+    assert payload["truncated"] is True
+
+    with pytest.raises(LookupError):
+        kanban_board_view.task_log_payload("missing")
+
+
+def test_stats_and_assignees_payloads(kanban_home):
+    conn = kb.connect()
+    try:
+        task_id = kb.create_task(conn, title="ready", assignee="worker")
+
+        stats = kanban_board_view.stats_payload(conn)
+        assignees = kanban_board_view.assignees_payload(conn)
+
+        assert stats["by_status"]["ready"] == 1
+        by_name = {item["name"]: item for item in assignees["assignees"]}
+        assert by_name["worker"]["counts"] == {"ready": 1}
+        assert kb.get_task(conn, task_id).assignee == "worker"
+    finally:
+        conn.close()
