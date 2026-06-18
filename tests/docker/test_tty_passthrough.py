@@ -1,4 +1,4 @@
-"""Harness: interactive TUI TTY passthrough.
+"""Harness: interactive Docker TTY passthrough.
 
 Uses ``script -qc`` on the host to allocate a PTY for the docker client,
 which then allocates a container-side PTY via ``-t``. The probe inside
@@ -41,7 +41,7 @@ def test_tty_passthrough_to_container(built_image: str) -> None:
     assert int(numeric_lines[0]) > 0
 
 
-def test_tui_flag_recognized(built_image: str) -> None:
+def test_help_runs_with_allocated_tty(built_image: str) -> None:
     """``docker run -it <image> --help`` should run without crashing."""
     cmd = f"docker run --rm -t {built_image} --help"
     r = subprocess.run(

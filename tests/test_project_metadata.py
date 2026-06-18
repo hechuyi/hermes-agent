@@ -356,6 +356,7 @@ def test_node_tui_launcher_is_removed_from_feishu_runtime_fork():
         assert not (REPO_ROOT / relpath).exists(), relpath
 
     main_source = (REPO_ROOT / "hermes_cli" / "main.py").read_text(encoding="utf-8")
+    parser_source = (REPO_ROOT / "hermes_cli" / "_parser.py").read_text(encoding="utf-8")
     forbidden_snippets = [
         "def _launch_tui(",
         "def _make_tui_argv(",
@@ -364,8 +365,13 @@ def test_node_tui_launcher_is_removed_from_feishu_runtime_fork():
         "def _suppress_mouse_residue_early(",
         "def _try_termux_fast_tui_launch(",
         "HERMES_TUI_NO_EARLY_DISABLE",
+        "HERMES_TUI",
         "ui-tui",
         "tui_dist",
+        '"--tui"',
+        "tui_dev",
+        "TUI is not available in this Feishu runtime fork",
     ]
     for snippet in forbidden_snippets:
         assert snippet not in main_source, snippet
+        assert snippet not in parser_source, snippet

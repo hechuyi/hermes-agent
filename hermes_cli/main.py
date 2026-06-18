@@ -1097,15 +1097,6 @@ def _pin_kanban_board_env() -> None:
 
 def cmd_chat(args):
     """Run interactive chat CLI."""
-    use_tui = getattr(args, "tui", False) or os.environ.get("HERMES_TUI") == "1"
-    if use_tui:
-        print(
-            "TUI is not available in this Feishu runtime fork. "
-            "Use the Feishu gateway or the classic CLI chat surface instead.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
     # Resolve --continue into --resume with the latest session or by name
     continue_val = getattr(args, "continue_last", None)
     if continue_val and not getattr(args, "resume", None):
@@ -1120,15 +1111,11 @@ def cmd_chat(args):
                 sys.exit(1)
         else:
             # -c with no argument — continue the most recent session
-            source = "tui" if use_tui else "cli"
-            last_id = _resolve_last_session(source=source)
-            if not last_id and source == "tui":
-                last_id = _resolve_last_session(source="cli")
+            last_id = _resolve_last_session(source="cli")
             if last_id:
                 args.resume = last_id
             else:
-                kind = "TUI" if use_tui else "CLI"
-                print(f"No previous {kind} session found to continue.")
+                print("No previous CLI session found to continue.")
                 sys.exit(1)
 
     # Resolve --resume by title if it's not a direct session ID
@@ -1235,25 +1222,6 @@ def cmd_chat(args):
         os.environ["HERMES_SESSION_SOURCE"] = args.source
 
     _pin_kanban_board_env()
-
-    if use_tui:
-        _launch_tui(
-            getattr(args, "resume", None),
-            tui_dev=getattr(args, "tui_dev", False),
-            model=getattr(args, "model", None),
-            provider=getattr(args, "provider", None),
-            toolsets=getattr(args, "toolsets", None),
-            skills=getattr(args, "skills", None),
-            verbose=getattr(args, "verbose", None),
-            quiet=getattr(args, "quiet", False),
-            query=getattr(args, "query", None),
-            image=getattr(args, "image", None),
-            worktree=getattr(args, "worktree", False),
-            checkpoints=getattr(args, "checkpoints", False),
-            pass_session_id=getattr(args, "pass_session_id", False),
-            max_turns=getattr(args, "max_turns", None),
-            accept_hooks=getattr(args, "accept_hooks", False),
-        )
 
     # Import and run the CLI
     from cli import main as cli_main
@@ -10189,10 +10157,6 @@ _AGENT_SUBCOMMANDS = {
 }
 
 
-def _is_tui_chat_launch(args) -> bool:
-    return bool(getattr(args, "tui", False) or os.environ.get("HERMES_TUI") == "1")
-
-
 def _command_has_dedicated_mcp_startup(args) -> bool:
     if args.command == "acp":
         return True
@@ -10204,8 +10168,6 @@ def _command_has_dedicated_mcp_startup(args) -> bool:
 
 
 def _should_background_mcp_startup(args) -> bool:
-    if _is_tui_chat_launch(args):
-        return False
     return args.command in {None, "chat", "rl"}
 
 
@@ -10229,9 +10191,7 @@ def _prepare_agent_startup(args) -> None:
             exc_info=True,
         )
     _run_inline_mcp_discovery = True
-    if _is_tui_chat_launch(args):
-        _run_inline_mcp_discovery = False
-    elif _command_has_dedicated_mcp_startup(args):
+    if _command_has_dedicated_mcp_startup(args):
         _run_inline_mcp_discovery = False
     elif _should_background_mcp_startup(args):
         try:
@@ -10294,9 +10254,6 @@ def _try_termux_fast_cli_launch() -> bool:
     argv = sys.argv[1:]
     if "-h" in argv or "--help" in argv:
         return False
-    if os.environ.get("HERMES_TUI") == "1" or "--tui" in argv:
-        return False
-
     if _is_termux_fast_version_argv(argv):
         _print_version_info(check_updates=False)
         return True
