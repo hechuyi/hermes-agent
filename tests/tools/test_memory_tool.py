@@ -4,6 +4,7 @@ import json
 import pytest
 from pathlib import Path
 
+import tools.memory_tool as memory_tool_module
 from tools.memory_tool import (
     MemoryStore,
     memory_tool,
@@ -13,6 +14,35 @@ from tools.memory_tool import (
 )
 
 _DUMMY_SECRET_VALUE = "x" * 20
+
+
+# =========================================================================
+# Path resolution
+# =========================================================================
+
+class TestMemoryDirResolution:
+    def test_get_memory_dir_uses_current_hermes_home_function(self, tmp_path, monkeypatch):
+        old_home = tmp_path / "old"
+        new_home = tmp_path / "new"
+        old_home.mkdir()
+        new_home.mkdir()
+
+        # Simulate tools.memory_tool being first imported while
+        # hermes_constants.get_hermes_home was patched to old_home.  The
+        # memory module must not keep using that stale function object after
+        # hermes_constants has been restored or re-patched.
+        monkeypatch.setattr(
+            memory_tool_module,
+            "get_hermes_home",
+            lambda: old_home,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "hermes_constants.get_hermes_home",
+            lambda: new_home,
+        )
+
+        assert memory_tool_module.get_memory_dir() == new_home / "memories"
 
 
 # =========================================================================

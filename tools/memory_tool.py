@@ -31,7 +31,6 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from hermes_constants import get_hermes_home
 from typing import Dict, Any, List, Optional
 
 from utils import atomic_replace
@@ -55,7 +54,9 @@ logger = logging.getLogger(__name__)
 # happened after the first import.
 def get_memory_dir() -> Path:
     """Return the profile-scoped memories directory."""
-    return get_hermes_home() / "memories"
+    import hermes_constants
+
+    return hermes_constants.get_hermes_home() / "memories"
 
 ENTRY_DELIMITER = "\n§\n"
 
@@ -718,7 +719,6 @@ registry.register(
     check_fn=check_memory_requirements,
     emoji="🧠",
 )
-
 
 
 
