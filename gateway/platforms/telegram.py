@@ -2805,22 +2805,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 return slug
 
         try:
-            # Build provider buttons — 2 per row
-            buttons: list = []
-            for p in providers:
-                count = p.get("total_models", len(p.get("models", [])))
-                label = f"{p['name']} ({count})"
-                if p.get("is_current"):
-                    label = f"✓ {label}"
-                # Compact callback data: mp:<slug>  (max 64 bytes)
-                buttons.append(
-                    InlineKeyboardButton(label, callback_data=f"mp:{p['slug']}")
-                )
-
-            rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
-            rows.append([InlineKeyboardButton("✗ Cancel", callback_data="mx")])
-            keyboard = InlineKeyboardMarkup(rows)
-
+            keyboard = self._build_provider_keyboard(providers)
             provider_label = get_label(current_provider)
             text = self.format_message(
                 (
@@ -2865,6 +2850,54 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(e))
 
     _MODEL_PAGE_SIZE = 8
+
+    def _build_provider_keyboard(self, providers: list):
+        """Build provider picker keyboard, folding display-only groups."""
+        try:
+            from hermes_cli.models import group_providers
+        except Exception:
+            group_providers = None
+
+        by_slug = {p.get("slug"): p for p in providers}
+
+        def provider_button(provider):
+            count = provider.get("total_models", len(provider.get("models", [])))
+            label = f"{provider['name']} ({count})"
+            if provider.get("is_current"):
+                label = f"✓ {label}"
+            return InlineKeyboardButton(label, callback_data=f"mp:{provider['slug']}")
+
+        buttons: list = []
+        if group_providers is None:
+            buttons = [provider_button(p) for p in providers]
+        else:
+            for row in group_providers([p.get("slug") for p in providers]):
+                if row["kind"] == "single":
+                    provider = by_slug.get(row["slug"])
+                    if provider is not None:
+                        buttons.append(provider_button(provider))
+                    continue
+
+                members = [by_slug[m] for m in row["members"] if m in by_slug]
+                if not members:
+                    continue
+                count = sum(
+                    member.get("total_models", len(member.get("models", [])))
+                    for member in members
+                )
+                label = f"{row['label']} ▸ ({count})"
+                if any(member.get("is_current") for member in members):
+                    label = f"✓ {label}"
+                buttons.append(
+                    InlineKeyboardButton(
+                        label,
+                        callback_data=f"mpg:{row['group_id']}",
+                    )
+                )
+
+        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+        rows.append([InlineKeyboardButton("✗ Cancel", callback_data="mx")])
+        return InlineKeyboardMarkup(rows)
 
     def _build_model_keyboard(self, models: list, page: int) -> tuple:
         """Build paginated model buttons. Returns (keyboard, page_info_text)."""
@@ -2959,6 +2992,51 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             await query.answer()
 
+        elif data.startswith("mpg:"):
+            group_id = data[4:]
+            try:
+                from hermes_cli.models import PROVIDER_GROUPS
+
+                group_label, member_slugs = PROVIDER_GROUPS.get(group_id, ("", []))
+            except Exception:
+                group_label, member_slugs = "", []
+
+            by_slug = {p["slug"]: p for p in state["providers"]}
+            members = [by_slug[slug] for slug in member_slugs if slug in by_slug]
+            if not members:
+                await query.answer(text="Group not found.")
+                return
+
+            buttons = []
+            for provider in members:
+                count = provider.get("total_models", len(provider.get("models", [])))
+                label = f"{provider['name']} ({count})"
+                if provider.get("is_current"):
+                    label = f"✓ {label}"
+                buttons.append(
+                    InlineKeyboardButton(label, callback_data=f"mp:{provider['slug']}")
+                )
+
+            rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+            rows.append([
+                InlineKeyboardButton("◀ Back", callback_data="mb"),
+                InlineKeyboardButton("✗ Cancel", callback_data="mx"),
+            ])
+            keyboard = InlineKeyboardMarkup(rows)
+
+            await query.edit_message_text(
+                text=self.format_message(
+                    (
+                        f"⚙ *Model Configuration*\n\n"
+                        f"Provider family: *{group_label or group_id}*\n\n"
+                        f"Select a provider:"
+                    )
+                ),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=keyboard,
+            )
+            await query.answer()
+
         elif data.startswith("mg:"):
             # --- Page navigation ---
             try:
@@ -3046,19 +3124,7 @@ class TelegramAdapter(BasePlatformAdapter):
 
         elif data == "mb":
             # --- Back to provider list ---
-            buttons = []
-            for p in state["providers"]:
-                count = p.get("total_models", len(p.get("models", [])))
-                label = f"{p['name']} ({count})"
-                if p.get("is_current"):
-                    label = f"✓ {label}"
-                buttons.append(
-                    InlineKeyboardButton(label, callback_data=f"mp:{p['slug']}")
-                )
-
-            rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
-            rows.append([InlineKeyboardButton("✗ Cancel", callback_data="mx")])
-            keyboard = InlineKeyboardMarkup(rows)
+            keyboard = self._build_provider_keyboard(state["providers"])
 
             try:
                 provider_label = get_label(state["current_provider"])
@@ -3108,7 +3174,7 @@ class TelegramAdapter(BasePlatformAdapter):
         query_user_name = getattr(query.from_user, "first_name", None)
 
         # --- Model picker callbacks ---
-        if data.startswith(("mp:", "mm:", "mb", "mx", "mg:")):
+        if data.startswith(("mp:", "mpg:", "mm:", "mb", "mx", "mg:")):
             chat_id = str(query.message.chat_id) if query.message else None
             if chat_id:
                 await self._handle_model_picker_callback(query, data, chat_id)

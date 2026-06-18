@@ -147,6 +147,64 @@ class TestTelegramModelPicker:
         assert "12345" not in adapter._model_picker_state
 
     @pytest.mark.asyncio
+    async def test_provider_group_folds_and_drills_down(self, monkeypatch):
+        import gateway.platforms.telegram as tg
+
+        built: list[str | None] = []
+
+        class RecordingButton:
+            def __init__(self, text, callback_data=None, **_kwargs):
+                self.text = text
+                self.callback_data = callback_data
+                built.append(callback_data)
+
+        class RecordingMarkup:
+            def __init__(self, rows):
+                self.inline_keyboard = rows
+
+        monkeypatch.setattr(tg, "InlineKeyboardButton", RecordingButton)
+        monkeypatch.setattr(tg, "InlineKeyboardMarkup", RecordingMarkup)
+
+        adapter = _make_adapter()
+        adapter._bot.send_message = AsyncMock(
+            return_value=SimpleNamespace(message_id=101)
+        )
+        providers = [
+            {"slug": "minimax", "name": "MiniMax", "total_models": 2},
+            {"slug": "minimax-cn", "name": "MiniMax China", "total_models": 3},
+            {"slug": "xai", "name": "xAI", "total_models": 1},
+        ]
+
+        result = await adapter.send_model_picker(
+            chat_id="12345",
+            providers=providers,
+            current_model="m",
+            current_provider="minimax",
+            session_key="s",
+            on_model_selected=AsyncMock(),
+            metadata=None,
+        )
+
+        assert result.success is True
+        assert "mpg:minimax" in built
+        assert "mp:xai" in built
+        assert "mp:minimax" not in built
+        assert "mp:minimax-cn" not in built
+
+        built.clear()
+        query = AsyncMock()
+        query.message = MagicMock()
+        query.message.chat_id = 12345
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+
+        await adapter._handle_model_picker_callback(query, "mpg:minimax", "12345")
+
+        assert "mp:minimax" in built
+        assert "mp:minimax-cn" in built
+        assert "mb" in built
+
+    @pytest.mark.asyncio
     async def test_retries_without_thread_when_thread_not_found(self):
         adapter = _make_adapter()
         providers = [{"slug": "openai", "name": "OpenAI", "total_models": 2, "is_current": True}]

@@ -971,6 +971,77 @@ _PROVIDER_LABELS = {p.slug: p.label for p in CANONICAL_PROVIDERS}
 _PROVIDER_LABELS["custom"] = "Custom endpoint"  # special case: not a named provider
 
 
+# Provider groups are display-only folds for interactive pickers. They do not
+# change canonical provider slugs, typed /model paths, --provider, auth, or
+# catalog lookup semantics.
+PROVIDER_GROUPS: dict[str, tuple[str, list[str]]] = {
+    "kimi": ("Kimi / Moonshot", ["kimi-coding", "kimi-coding-cn"]),
+    "minimax": ("MiniMax", ["minimax", "minimax-oauth", "minimax-cn"]),
+    "xai": ("xAI Grok", ["xai", "xai-oauth"]),
+    "google": ("Google Gemini", ["gemini", "google-gemini-cli"]),
+    "openai": ("OpenAI", ["openai-codex", "openai-api"]),
+    "opencode": ("OpenCode", ["opencode-zen", "opencode-go"]),
+    "copilot": ("GitHub Copilot", ["copilot", "copilot-acp"]),
+}
+
+_SLUG_TO_GROUP: dict[str, str] = {
+    slug: group_id
+    for group_id, (_label, members) in PROVIDER_GROUPS.items()
+    for slug in members
+}
+
+
+def provider_group_for_slug(slug: str) -> str:
+    """Return the provider-group id for ``slug``, or ``""`` if ungrouped."""
+    return _SLUG_TO_GROUP.get(str(slug or "").strip().lower(), "")
+
+
+def group_providers(slugs) -> list[dict]:
+    """Fold provider slugs into display rows for interactive pickers.
+
+    Groups with two or more present members become one row at the first
+    member's input position. Groups with a single present member degrade to a
+    normal provider row, so users never drill into a one-item submenu.
+    """
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for slug in slugs:
+        value = str(slug or "").strip().lower()
+        if value and value not in seen:
+            normalized.append(value)
+            seen.add(value)
+
+    present = set(normalized)
+    group_members: dict[str, list[str]] = {}
+    for group_id, (_label, members) in PROVIDER_GROUPS.items():
+        available = [member for member in members if member in present]
+        if available:
+            group_members[group_id] = available
+
+    rows: list[dict] = []
+    emitted_groups: set[str] = set()
+    for slug in normalized:
+        group_id = _SLUG_TO_GROUP.get(slug, "")
+        if not group_id:
+            rows.append({"kind": "single", "slug": slug})
+            continue
+        if group_id in emitted_groups:
+            continue
+        emitted_groups.add(group_id)
+        members = group_members.get(group_id, [slug])
+        if len(members) <= 1:
+            rows.append({"kind": "single", "slug": members[0]})
+        else:
+            label, _declared_members = PROVIDER_GROUPS[group_id]
+            rows.append({
+                "kind": "group",
+                "group_id": group_id,
+                "label": label,
+                "members": list(members),
+            })
+    return rows
+
+
 _PROVIDER_ALIASES = {
     "glm": "zai",
     "z-ai": "zai",
