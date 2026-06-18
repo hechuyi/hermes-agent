@@ -174,24 +174,12 @@ class Platform(Enum):
 
     @classmethod
     def _scan_bundled_plugin_platforms(cls) -> set:
-        """Return names of bundled platform plugins under ``plugins/platforms/``."""
-        names: set = set()
-        try:
-            platforms_dir = Path(__file__).parent.parent / "plugins" / "platforms"
-            if platforms_dir.is_dir():
-                for child in platforms_dir.iterdir():
-                    if (
-                        child.is_dir()
-                        and (child / "__init__.py").exists()
-                        and (
-                            (child / "plugin.yaml").exists()
-                            or (child / "plugin.yml").exists()
-                        )
-                    ):
-                        names.add(child.name.lower())
-        except Exception:
-            pass
-        return names
+        """Return bundled platform plugin names.
+
+        This Feishu runtime fork does not ship bundled platform plugins;
+        dynamic platforms are accepted only after runtime registration.
+        """
+        return set()
 
 
 # Snapshot of built-in platform values before any dynamic _missing_ lookups.
@@ -1207,9 +1195,6 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(allowed, list):
                         allowed = ",".join(str(v) for v in allowed)
                     os.environ["DINGTALK_ALLOWED_USERS"] = str(allowed)
-
-            # Mattermost config bridge moved into plugins/platforms/mattermost/
-            # adapter.py::_apply_yaml_config — see #25443 (apply_yaml_config_fn).
 
             # Matrix settings → env vars (env vars take precedence)
             matrix_cfg = yaml_cfg.get("matrix", {})

@@ -286,6 +286,65 @@ def test_dashboard_cli_entrypoint_is_removed_from_feishu_runtime_fork():
         assert snippet not in main_source, snippet
 
 
+def test_non_feishu_platform_plugins_are_removed_from_runtime_fork():
+    """The Feishu runtime fork must not ship extra messaging platform plugins."""
+    assert not (REPO_ROOT / "plugins" / "platforms").exists()
+
+
+def test_removed_platform_plugin_surfaces_leave_no_runtime_references():
+    """Deleted bundled platform plugins must not leave importable runtime hooks."""
+    ignored_roots = {
+        ".git",
+        ".mypy_cache",
+        ".plans",
+        ".pytest-cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "docs/plans",
+        "docs/superpowers/plans",
+        "hermes_agent.egg-info",
+    }
+    ignored_suffixes = {
+        ".pyc",
+        ".pyo",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".pdf",
+        ".sqlite",
+        ".db",
+    }
+    forbidden_snippets = [
+        "plugins/platforms",
+        "plugins.platforms",
+        "plugins/teams_pipeline",
+        "plugins.teams_pipeline",
+        "teams_pipeline",
+    ]
+    offenders: list[str] = []
+    for path in REPO_ROOT.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel == "tests/test_project_metadata.py":
+            continue
+        if any(rel == root or rel.startswith(f"{root}/") for root in ignored_roots):
+            continue
+        if path.suffix.lower() in ignored_suffixes:
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        for snippet in forbidden_snippets:
+            if snippet in source:
+                offenders.append(f"{rel}: {snippet}")
+
+    assert not offenders
+
+
 def test_node_tui_launcher_is_removed_from_feishu_runtime_fork():
     """The Feishu fork must not retain the Node/Ink TUI launch surface."""
     forbidden_paths = [

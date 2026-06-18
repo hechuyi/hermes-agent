@@ -93,8 +93,7 @@ class TestSessionSourceRoundtrip:
     def test_unknown_platform_rejected_for_bad_names(self):
         """Arbitrary platform names are rejected (no accidental enum pollution).
 
-        Only bundled platform plugins (discovered under ``plugins/platforms/``)
-        and runtime-registered plugins get dynamic enum members.
+        Only runtime-registered platform plugins get dynamic enum members.
         """
         with pytest.raises(ValueError):
             SessionSource.from_dict({"platform": "nonexistent", "chat_id": "1"})
@@ -1389,7 +1388,10 @@ class TestRewriteTranscriptPreservesReasoning:
             {"role": "assistant", "content": "after assistant"},
         ]
 
-        store.rewrite_transcript(session_id, replacement)
+        with pytest.raises(SessionPersistenceError) as exc_info:
+            store.rewrite_transcript(session_id, replacement)
+
+        assert exc_info.value.failure_class == "session_db_rewrite_failed"
 
         # The rewrite must roll back atomically — original messages preserved.
         after = db.get_messages_as_conversation(session_id)

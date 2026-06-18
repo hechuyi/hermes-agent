@@ -651,33 +651,6 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if platform == Platform.WEIXIN:
         return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
 
-    # --- Discord: chunked delivery via the registry's standalone_sender_fn.
-    # The plugin's ``_standalone_send`` (registered in
-    # plugins/platforms/discord/adapter.py) handles forum channels, threads,
-    # and multipart media uploads.  ``_send_via_adapter`` tries the live
-    # in-process adapter first via ``adapter.send()``, but Discord's elif
-    # historically went straight to the HTTP path; we preserve that by
-    # explicitly invoking the registry hook here so behavior is unchanged.
-    if platform == Platform.DISCORD:
-        from gateway.platform_registry import platform_registry
-        entry = platform_registry.get("discord")
-        if entry is None or entry.standalone_sender_fn is None:
-            return {"error": "Discord plugin not registered or missing standalone_sender_fn"}
-        last_result = None
-        for i, chunk in enumerate(chunks):
-            is_last = (i == len(chunks) - 1)
-            result = await entry.standalone_sender_fn(
-                pconfig,
-                chat_id,
-                chunk,
-                thread_id=thread_id,
-                media_files=media_files if is_last else [],
-            )
-            if isinstance(result, dict) and result.get("error"):
-                return result
-            last_result = result
-        return last_result
-
     # --- Matrix: use the native adapter helper when media is present ---
     if platform == Platform.MATRIX and media_files:
         last_result = None
@@ -747,7 +720,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu; "
+                f"send_message MEDIA delivery is currently only supported for telegram, matrix, weixin, signal, yuanbao and feishu; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -755,7 +728,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao and feishu"
+            "native send_message media delivery is currently only supported for telegram, matrix, weixin, signal, yuanbao and feishu"
         )
 
     last_result = None

@@ -1,7 +1,6 @@
 # Model Provider Plugins
 
-Each subdirectory is a self-contained provider profile plugin. The
-directory layout mirrors `plugins/platforms/`:
+Each subdirectory is a self-contained provider profile plugin:
 
 ```
 plugins/model-providers/

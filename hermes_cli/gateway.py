@@ -3551,9 +3551,6 @@ _PLATFORMS = [
              "help": "For DMs, this is your user ID. You can set it later by typing /set-home in chat."},
         ],
     },
-    # Discord moved to plugins/platforms/discord/ — its setup metadata is
-    # discovered dynamically via _all_platforms() from the platform registry
-    # entry registered by plugins/platforms/discord/adapter.py::register().
     {
         "key": "slack",
         "label": "Slack",
@@ -4947,14 +4944,8 @@ def _builtin_setup_fn(key: str):
     from hermes_cli import setup as _s
     return {
         "telegram": _s._setup_telegram,
-        # discord moved into the plugin: setup_fn is registered by
-        # plugins/platforms/discord/adapter.py::register() and dispatched
-        # via the plugin path in _configure_platform().
         "slack": _s._setup_slack,
         "matrix": _s._setup_matrix,
-        # mattermost moved into the plugin: setup_fn is registered by
-        # plugins/platforms/mattermost/adapter.py::register() and dispatched
-        # via the plugin path in _configure_platform().
         "bluebubbles": _s._setup_bluebubbles,
         "webhooks": _s._setup_webhooks,
         "signal": _setup_signal,

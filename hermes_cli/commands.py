@@ -450,9 +450,9 @@ def _iter_plugin_command_entries() -> list[tuple[str, str, str]]:
     Plugin commands are registered via
     :func:`hermes_cli.plugins.PluginContext.register_command`. They behave
     like ``CommandDef`` entries for gateway surfacing: they appear in the
-    Telegram command menu, in Slack's ``/hermes`` subcommand mapping, and
-    (via :func:`plugins.platforms.discord.adapter._register_slash_commands`) in
-    Discord's native slash command picker.
+    Telegram command menu, in Slack's ``/hermes`` subcommand mapping, and in
+    any runtime-registered platform that maps Hermes command metadata to a
+    native command surface.
 
     Lookup is lazy so importing this module never forces plugin discovery
     (which can trigger filesystem scans and environment-dependent
