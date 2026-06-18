@@ -766,9 +766,6 @@ kanban task.
   stale claims, promotes ready tasks, atomically claims, and spawns
   assigned profiles. Runs **inside the gateway** by default via
   `kanban.dispatch_in_gateway: true`.
-- **Plugin assets:** `plugins/kanban/dashboard/` (web UI) +
-  `plugins/kanban/systemd/` (`hermes-kanban-dispatcher.service` for
-  standalone dispatcher deployment).
 
 Isolation model:
 - **Board** is the hard boundary — workers are spawned with
@@ -781,7 +778,9 @@ Isolation model:
   same task (default: 2), the dispatcher auto-blocks it to prevent spin
   loops.
 
-Full user-facing docs: `website/docs/user-guide/features/kanban.md`.
+This fork intentionally does not ship the upstream dashboard plugin assets or
+standalone systemd dispatcher unit; the gateway-hosted dispatcher is the
+runtime path.
 
 ---
 

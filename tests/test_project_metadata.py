@@ -259,13 +259,31 @@ def test_dashboard_runtime_files_are_removed_from_feishu_runtime_fork():
         "plugins/example-dashboard",
         "plugins/hermes-achievements",
         "plugins/kanban/dashboard/manifest.json",
+        "plugins/kanban/dashboard/plugin_api.py",
+        "plugins/kanban/systemd/hermes-kanban-dispatcher.service",
         "docker/s6-rc.d/dashboard",
         "docker/s6-rc.d/user/contents.d/dashboard",
+        "docs/hermes-kanban-v1-spec.pdf",
+        "infographic/kanban-db-corruption-defense/infographic.png",
         "tests/hermes_cli/test_dashboard_profiles_nav_label.py",
     ]
 
     for relpath in forbidden:
         assert not (REPO_ROOT / relpath).exists(), relpath
+
+
+def test_dashboard_cli_entrypoint_is_removed_from_feishu_runtime_fork():
+    """The Feishu fork must not retain even a disabled dashboard command."""
+    main_source = (REPO_ROOT / "hermes_cli" / "main.py").read_text(encoding="utf-8")
+    forbidden_snippets = [
+        "def cmd_dashboard(",
+        'add_parser(\n        "dashboard"',
+        '"dashboard", "debug"',
+        '"profile",\n        "dashboard"',
+        "Dashboard is disabled in this Feishu runtime fork",
+    ]
+    for snippet in forbidden_snippets:
+        assert snippet not in main_source, snippet
 
 
 def test_node_tui_launcher_is_removed_from_feishu_runtime_fork():

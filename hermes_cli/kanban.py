@@ -1,8 +1,7 @@
 """CLI for the Hermes Kanban board — ``hermes kanban …`` subcommand.
 
-Exposes the full Kanban command surface documented in the design spec
-(``docs/hermes-kanban-v1-spec.pdf``).  All DB work is delegated to
-``kanban_db``.  This module adds:
+Exposes the Kanban command surface used by the headless Feishu runtime fork.
+All DB work is delegated to ``kanban_db``.  This module adds:
 
   * Argparse subcommand construction (``build_parser``).
   * Argument dispatch (``kanban_command``).
@@ -199,9 +198,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         description=(
             "Durable SQLite-backed task board shared across Hermes profiles. "
             "Tasks are claimed atomically, can depend on other tasks, and "
-            "are executed by a named profile in an isolated workspace. "
-            "See https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban "
-            "or docs/hermes-kanban-v1-spec.pdf for the full design."
+            "are executed by a named profile in an isolated workspace."
         ),
     )
     # --- global --board flag ---

@@ -55,8 +55,7 @@ Docker layouts.
 Schema is intentionally small: tasks, task_links, task_comments,
 task_events.  The ``workspace_kind`` field decouples coordination from git
 worktrees so that research / ops / digital-twin workloads work alongside
-coding workloads.  See ``docs/hermes-kanban-v1-spec.pdf`` for the full
-design specification.
+coding workloads.
 
 Concurrency strategy: WAL mode + ``BEGIN IMMEDIATE`` for write
 transactions + compare-and-swap (CAS) updates on ``tasks.status`` and

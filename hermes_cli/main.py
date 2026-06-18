@@ -9342,7 +9342,6 @@ def _coalesce_session_name_args(argv: list) -> list:
         "update",
         "uninstall",
         "profile",
-        "dashboard",
         "honcho",
         "claw",
         "plugins",
@@ -10015,16 +10014,6 @@ def _render_distribution_plan(plan) -> None:
         )
 
 
-def cmd_dashboard(args):
-    """Report that the dashboard runtime is not shipped in this fork."""
-    print(
-        "dashboard is not available in this Feishu runtime fork; "
-        "use the Feishu gateway/runtime entry points instead.",
-        file=sys.stderr,
-    )
-    sys.exit(2)
-
-
 def cmd_completion(args, parser=None):
     """Print shell completion script."""
     from hermes_cli.completion import generate_bash, generate_zsh, generate_fish
@@ -10095,7 +10084,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
     {
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
-        "config", "cron", "curator", "dashboard", "debug", "doctor",
+        "config", "cron", "curator", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
         "model", "pairing", "plugins", "portal", "postinstall", "profile", "proxy",
@@ -13295,50 +13284,6 @@ Examples:
         help="Shell type (default: bash)",
     )
     completion_parser.set_defaults(func=lambda args: cmd_completion(args, parser))
-
-    # =========================================================================
-    # dashboard command
-    # =========================================================================
-    dashboard_parser = subparsers.add_parser(
-        "dashboard",
-        help="Dashboard is disabled in this Feishu runtime fork",
-        description="Dashboard is disabled in this Feishu runtime fork.",
-    )
-    dashboard_parser.add_argument(
-        "--port", type=int, default=9119, help=argparse.SUPPRESS
-    )
-    dashboard_parser.add_argument(
-        "--host", default="127.0.0.1", help=argparse.SUPPRESS
-    )
-    dashboard_parser.add_argument(
-        "--no-open", action="store_true", help=argparse.SUPPRESS
-    )
-    dashboard_parser.add_argument(
-        "--insecure",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    dashboard_parser.add_argument(
-        "--tui",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    dashboard_parser.add_argument(
-        "--skip-build",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    dashboard_parser.add_argument(
-        "--stop",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    dashboard_parser.add_argument(
-        "--status",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
-    dashboard_parser.set_defaults(func=cmd_dashboard)
 
     # =========================================================================
     # logs command

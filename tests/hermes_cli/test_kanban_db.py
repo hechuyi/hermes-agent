@@ -2879,13 +2879,8 @@ def test_task_age_well_formed_task():
     assert 25 <= age["time_to_complete_seconds"] <= 35
 
 
-def test_task_dict_survives_corrupt_created_at(tmp_path, monkeypatch):
-    """Defense in depth: even if task_age ever raised, plugin_api must not 500.
-
-    The PR also added a try/except around the task_age call in
-    `plugins/kanban/dashboard/plugin_api.py::_task_dict`. Verify a single
-    corrupt row doesn't turn the whole board response into an error.
-    """
+def test_task_age_survives_corrupt_created_at(tmp_path, monkeypatch):
+    """A corrupt ``created_at`` cell must not break board/task payload helpers."""
     # Set up an isolated kanban home so we can write a corrupt created_at.
     home = tmp_path / ".hermes"
     home.mkdir()
