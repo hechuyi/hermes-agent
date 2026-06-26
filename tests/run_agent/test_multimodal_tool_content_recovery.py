@@ -29,6 +29,8 @@ import pytest
 
 from agent.error_classifier import FailoverReason, classify_api_error
 
+MULTIMODAL_TOOL_NAME = "multimodal_tool"
+
 
 class _FakeApiError(Exception):
     """Stand-in for an openai.BadRequestError with status_code + body."""
@@ -187,7 +189,7 @@ class TestToolResultContentShortCircuit:
         agent._no_list_tool_content_models = set()  # explicit empty
         monkeypatch.setattr(agent, "_model_supports_vision", lambda: True)
         out = agent._tool_result_content_for_active_model(
-            "computer_use", self._multimodal_result()
+            MULTIMODAL_TOOL_NAME, self._multimodal_result()
         )
         # Native multimodal path: returns the content parts list.
         assert isinstance(out, list)
@@ -198,7 +200,7 @@ class TestToolResultContentShortCircuit:
         agent._no_list_tool_content_models = {("xiaomi", "mimo-v2.5")}
         monkeypatch.setattr(agent, "_model_supports_vision", lambda: True)
         out = agent._tool_result_content_for_active_model(
-            "computer_use", self._multimodal_result()
+            MULTIMODAL_TOOL_NAME, self._multimodal_result()
         )
         # Short-circuit: a plain string summary, no image_url present.
         assert isinstance(out, str)
@@ -213,7 +215,7 @@ class TestToolResultContentShortCircuit:
         agent._no_list_tool_content_models = {("xiaomi", "mimo-v2.5")}
         monkeypatch.setattr(agent, "_model_supports_vision", lambda: True)
         out = agent._tool_result_content_for_active_model(
-            "computer_use", self._multimodal_result()
+            MULTIMODAL_TOOL_NAME, self._multimodal_result()
         )
         assert isinstance(out, list)
 
@@ -225,7 +227,7 @@ class TestToolResultContentShortCircuit:
         # Deliberately do not assign _no_list_tool_content_models.
         monkeypatch.setattr(agent, "_model_supports_vision", lambda: True)
         out = agent._tool_result_content_for_active_model(
-            "computer_use", self._multimodal_result()
+            MULTIMODAL_TOOL_NAME, self._multimodal_result()
         )
         assert isinstance(out, list)
 

@@ -14,7 +14,6 @@ from hermes_cli.tools_config import (
     _get_platform_tools,
     _platform_toolset_summary,
     _reconfigure_tool,
-    _run_post_setup,
     _save_platform_tools,
     _toolset_has_keys,
     _toolset_needs_configuration_prompt,
@@ -34,10 +33,10 @@ def test_agent_disabled_toolsets_suppresses_across_platforms():
     }
 
     cli_enabled = _get_platform_tools(config, "cli")
-    discord_enabled = _get_platform_tools(config, "discord")
+    feishu_enabled = _get_platform_tools(config, "feishu")
 
     assert "memory" not in cli_enabled
-    assert "memory" not in discord_enabled
+    assert "memory" not in feishu_enabled
 
 
 def test_agent_disabled_toolsets_with_explicit_platform_config():
@@ -121,22 +120,22 @@ def test_get_platform_tools_context_engine_respects_explicit_empty_selection():
     assert "context_engine" not in enabled
 
 
-def test_get_platform_tools_default_telegram_includes_messaging():
-    enabled = _get_platform_tools({}, "telegram")
+def test_get_platform_tools_default_feishu_includes_messaging():
+    enabled = _get_platform_tools({}, "feishu")
 
     assert "messaging" in enabled
 
 
-def test_get_platform_tools_default_whatsapp_includes_web():
-    enabled = _get_platform_tools({}, "whatsapp")
+def test_get_platform_tools_default_api_server_includes_web():
+    enabled = _get_platform_tools({}, "api_server")
 
     assert "web" in enabled
 
 
-def test_get_platform_tools_homeassistant_platform_keeps_homeassistant_toolset():
-    enabled = _get_platform_tools({}, "homeassistant")
+def test_get_platform_tools_removed_platform_has_no_implicit_toolsets():
+    enabled = _get_platform_tools({}, "homeassistant", include_default_mcp_servers=False)
 
-    assert "homeassistant" in enabled
+    assert enabled == set()
 
 
 def test_get_platform_tools_homeassistant_toolset_enabled_for_cron_when_hass_token_set(monkeypatch):
@@ -183,7 +182,7 @@ def test_get_platform_tools_x_search_auto_enabled_when_xai_oauth_present(monkeyp
         "hermes_cli.tools_config._xai_credentials_present", lambda: True
     )
 
-    for plat in ("cli", "cron", "telegram"):
+    for plat in ("cli", "cron", "feishu"):
         enabled = _get_platform_tools({}, plat)
         assert "x_search" in enabled, f"x_search missing for {plat}"
 
@@ -276,12 +275,13 @@ def test_get_platform_tools_default_does_not_enable_computer_use():
     assert "computer_use" not in enabled
 
 
-def test_get_platform_tools_explicit_computer_use_opt_in_survives():
+def test_get_platform_tools_ignores_stale_computer_use_opt_in():
     config = {"platform_toolsets": {"cli": ["terminal", "computer_use"]}}
 
     enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
 
-    assert "computer_use" in enabled
+    assert "terminal" in enabled
+    assert "computer_use" not in enabled
 
 
 def test_get_platform_tools_mixed_does_not_resurrect_default_off():
@@ -452,14 +452,19 @@ def test_toolset_has_keys_for_vision_accepts_codex_auth(tmp_path, monkeypatch):
 
 
 def test_save_platform_tools_preserves_mcp_server_names():
-    """Ensure MCP server names are preserved when saving platform tools.
+    """Ensure configured MCP server names are preserved when saving tools.
 
     Regression test for https://github.com/NousResearch/hermes-agent/issues/1247
     """
     config = {
         "platform_toolsets": {
             "cli": ["web", "terminal", "time", "github", "custom-mcp-server"]
-        }
+        },
+        "mcp_servers": {
+            "time": {"command": "time-mcp"},
+            "github": {"command": "github-mcp"},
+            "custom-mcp-server": {"command": "custom-mcp"},
+        },
     }
 
     new_selection = {"web", "browser"}
@@ -482,9 +487,9 @@ def test_save_platform_tools_handles_empty_existing_config():
     config = {}
 
     with patch("hermes_cli.tools_config.save_config"):
-        _save_platform_tools(config, "telegram", {"web", "terminal"})
+        _save_platform_tools(config, "feishu", {"web", "terminal"})
 
-    saved_toolsets = config["platform_toolsets"]["telegram"]
+    saved_toolsets = config["platform_toolsets"]["feishu"]
     assert "web" in saved_toolsets
     assert "terminal" in saved_toolsets
 
@@ -555,12 +560,13 @@ def test_save_platform_tools_does_not_preserve_platform_default_toolsets():
     assert "moa" not in saved
 
 
-def test_save_platform_tools_does_not_preserve_hermes_telegram():
-    """Same bug for Telegram — hermes-telegram must not be preserved."""
+def test_save_platform_tools_does_not_preserve_removed_platform_defaults():
+    """Removed platform defaults must not survive as opaque custom toolsets."""
     config = {
         "platform_toolsets": {
-            "telegram": [
-                "browser", "file", "hermes-telegram", "terminal", "web",
+            "feishu": [
+                "browser", "file", "hermes-discord", "hermes-telegram",
+                "terminal", "web",
             ]
         }
     }
@@ -568,9 +574,10 @@ def test_save_platform_tools_does_not_preserve_hermes_telegram():
     new_selection = {"browser", "file", "terminal", "web"}
 
     with patch("hermes_cli.tools_config.save_config"):
-        _save_platform_tools(config, "telegram", new_selection)
+        _save_platform_tools(config, "feishu", new_selection)
 
-    saved = config["platform_toolsets"]["telegram"]
+    saved = config["platform_toolsets"]["feishu"]
+    assert "hermes-discord" not in saved
     assert "hermes-telegram" not in saved
     assert "web" in saved
 
@@ -583,7 +590,11 @@ def test_save_platform_tools_still_preserves_mcp_with_platform_default_present()
             "cli": [
                 "web", "terminal", "hermes-cli", "my-mcp-server", "github-tools",
             ]
-        }
+        },
+        "mcp_servers": {
+            "my-mcp-server": {"command": "my-mcp"},
+            "github-tools": {"command": "github-mcp"},
+        },
     }
 
     new_selection = {"web", "browser"}
@@ -999,86 +1010,21 @@ def test_numeric_mcp_server_name_does_not_crash_sorted():
 def test_toolset_has_keys_treats_no_key_providers_as_configured():
     config = {}
 
-    assert _toolset_has_keys("computer_use", config) is True
+    assert _toolset_has_keys("tts", config) is True
 
 
-def test_computer_use_needs_configuration_when_cua_driver_post_setup_pending():
-    """No-key providers can still need setup when their post_setup is unsatisfied.
+def test_computer_use_is_not_in_hermes_tools_configurable_toolsets():
+    configurable = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
 
-    Returning users enabling Computer Use through `hermes tools` must reach the
-    cua-driver post-setup installer even though the provider has no API keys.
-    """
-    with patch("shutil.which", return_value=None):
-        assert _toolset_needs_configuration_prompt("computer_use", {}) is True
+    assert "computer_use" not in configurable
 
 
-def test_computer_use_skips_configuration_when_cua_driver_already_installed():
-    """Installed post_setup dependencies should keep returning-user toggles no-op."""
-    def fake_which(name: str):
-        return "/usr/local/bin/cua-driver" if name == "cua-driver" else None
-
-    with patch("shutil.which", side_effect=fake_which):
-        assert _toolset_needs_configuration_prompt("computer_use", {}) is False
+def test_computer_use_has_no_tools_configuration_category():
+    assert "computer_use" not in TOOL_CATEGORIES
 
 
-def test_computer_use_respects_custom_cua_driver_command():
-    """The setup gate should match runtime's HERMES_CUA_DRIVER_CMD override."""
-    def fake_which(name: str):
-        return "/opt/bin/custom-cua" if name == "custom-cua" else None
-
-    with patch.dict("os.environ", {"HERMES_CUA_DRIVER_CMD": "custom-cua"}), \
-         patch("shutil.which", side_effect=fake_which):
-        assert _toolset_needs_configuration_prompt("computer_use", {}) is False
-
-
-def test_computer_use_blank_custom_driver_command_falls_back_to_default():
-    """Blank overrides should not make the setup gate look for an empty command."""
-    def fake_which(name: str):
-        return "/usr/local/bin/cua-driver" if name == "cua-driver" else None
-
-    with patch.dict("os.environ", {"HERMES_CUA_DRIVER_CMD": "   "}), \
-         patch("shutil.which", side_effect=fake_which):
-        assert _toolset_needs_configuration_prompt("computer_use", {}) is False
-
-
-def test_computer_use_post_setup_respects_custom_driver_command_when_installed():
-    """post_setup already-installed checks should version-probe the override."""
-    def fake_which(name: str):
-        return "/opt/bin/custom-cua" if name == "custom-cua" else None
-
-    with patch.dict("os.environ", {"HERMES_CUA_DRIVER_CMD": "custom-cua"}), \
-         patch("platform.system", return_value="Darwin"), \
-         patch("shutil.which", side_effect=fake_which), \
-         patch("subprocess.run") as run:
-        run.return_value.stdout = "custom 1.2.3\n"
-
-        _run_post_setup("cua_driver")
-
-    run.assert_called_once()
-    assert run.call_args.args[0] == ["custom-cua", "--version"]
-
-
-def test_computer_use_post_setup_missing_override_does_not_accept_default_binary():
-    """A default cua-driver binary must not satisfy a missing runtime override."""
-    seen = []
-
-    def fake_which(name: str):
-        seen.append(name)
-        if name == "cua-driver":
-            return "/usr/local/bin/cua-driver"
-        if name == "curl":
-            return None
-        return None
-
-    with patch.dict("os.environ", {"HERMES_CUA_DRIVER_CMD": "custom-cua"}), \
-         patch("platform.system", return_value="Darwin"), \
-         patch("shutil.which", side_effect=fake_which), \
-         patch("subprocess.run") as run:
-        _run_post_setup("cua_driver")
-
-    run.assert_not_called()
-    assert "custom-cua" in seen
-    assert "curl" in seen
+def test_computer_use_does_not_open_configuration_prompt():
+    assert _toolset_needs_configuration_prompt("computer_use", {}) is False
 
 
 class TestImagegenBackendRegistry:
@@ -1166,14 +1112,18 @@ class TestImagegenModelPicker:
         assert config["image_gen"]["model"] == "fal-ai/flux-2/klein/9b"
 
 
-def test_save_platform_tools_normalizes_numeric_entries():
-    """YAML may parse bare numeric toolset names as int. They should be
-    normalized to str so they survive the save round-trip.
+def test_save_platform_tools_normalizes_numeric_mcp_entries():
+    """YAML may parse bare numeric MCP server names as int. Configured MCP
+    names should be normalized to str so they survive the save round-trip.
     """
     config = {
         "platform_toolsets": {
             "cli": ["web", "terminal", 12306, "custom-mcp"]
-        }
+        },
+        "mcp_servers": {
+            "12306": {"command": "railway-mcp"},
+            "custom-mcp": {"command": "custom-mcp"},
+        },
     }
 
     with patch("hermes_cli.tools_config.save_config"):
@@ -1203,13 +1153,19 @@ def test_save_platform_tools_clears_no_mcp_sentinel():
 
 
 def test_save_platform_tools_preserves_mcp_server_names():
-    """Non-sentinel passthrough entries (MCP server names) must still survive
-    the save — we only clear `no_mcp`, not every non-configurable entry.
+    """Configured MCP server names must still survive the save.
+
+    Unknown strings are intentionally not passthrough entries; stale channel
+    toolsets otherwise leak back into the Feishu runtime fork.
     """
     config = {
         "platform_toolsets": {
             "cli": ["web", "terminal", "custom-mcp", "another-mcp"]
-        }
+        },
+        "mcp_servers": {
+            "custom-mcp": {"command": "custom-mcp"},
+            "another-mcp": {"command": "another-mcp"},
+        },
     }
 
     with patch("hermes_cli.tools_config.save_config"):
@@ -1262,58 +1218,34 @@ def test_get_platform_tools_second_pass_skips_fully_claimed_toolsets():
     assert "search" not in enabled
 
 
-def test_get_platform_tools_discord_both_off_by_default():
-    """Both `discord` and `discord_admin` are opt-in via `hermes tools`,
-    even on the Discord platform itself.  Users shouldn't auto-inherit 19
-    extra tools just because DISCORD_BOT_TOKEN is set."""
-    enabled = _get_platform_tools({}, "discord")
-    assert "discord" not in enabled
-    assert "discord_admin" not in enabled
-
-
-def test_discord_toolsets_in_configurable_toolsets():
+def test_discord_toolsets_not_in_configurable_toolsets():
     keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
-    assert "discord" in keys
-    assert "discord_admin" in keys
+    assert "discord" not in keys
+    assert "discord_admin" not in keys
+    assert "yuanbao" not in keys
 
 
-def test_discord_toolsets_in_default_off():
-    assert "discord" in _DEFAULT_OFF_TOOLSETS
-    assert "discord_admin" in _DEFAULT_OFF_TOOLSETS
+def test_discord_toolsets_not_in_default_off():
+    assert "discord" not in _DEFAULT_OFF_TOOLSETS
+    assert "discord_admin" not in _DEFAULT_OFF_TOOLSETS
+    assert "yuanbao" not in _DEFAULT_OFF_TOOLSETS
 
 
-def test_discord_toolsets_not_available_on_other_platforms():
-    """Platform-scoping: discord / discord_admin should not appear on CLI,
-    Telegram, etc. — not even as an opt-in."""
-    from hermes_cli.tools_config import _toolset_allowed_for_platform
-    for plat in ["cli", "telegram", "slack", "whatsapp", "signal"]:
-        assert not _toolset_allowed_for_platform("discord", plat), (
-            f"`discord` toolset leaked onto {plat}"
-        )
-        assert not _toolset_allowed_for_platform("discord_admin", plat), (
-            f"`discord_admin` toolset leaked onto {plat}"
-        )
-    assert _toolset_allowed_for_platform("discord", "discord")
-    assert _toolset_allowed_for_platform("discord_admin", "discord")
-
-
-def test_discord_toolsets_user_enabled_are_honored():
-    """When the user opts in via `hermes tools`, the toolset appears."""
-    config = {"platform_toolsets": {"discord": ["web", "terminal", "discord"]}}
-    enabled = _get_platform_tools(config, "discord")
-    assert "discord" in enabled
-    assert "discord_admin" not in enabled
+def test_removed_channel_platforms_have_no_implicit_toolsets():
+    for plat in ("telegram", "discord", "whatsapp", "slack", "signal", "yuanbao"):
+        enabled = _get_platform_tools({}, plat, include_default_mcp_servers=False)
+        assert enabled == set(), f"{plat} should not resolve implicit toolsets"
 
 
 def test_save_platform_tools_strips_restricted_toolsets():
-    """Hand-edited or all-platforms checklist with `discord` selected for
-    Telegram must be stripped at save time."""
+    """Hand-edited channel toolsets must be stripped at save time."""
     from hermes_cli.tools_config import _save_platform_tools
     config = {}
-    _save_platform_tools(config, "telegram", {"web", "terminal", "discord", "discord_admin"})
-    saved = config["platform_toolsets"]["telegram"]
+    _save_platform_tools(config, "feishu", {"web", "terminal", "discord", "discord_admin", "yuanbao"})
+    saved = config["platform_toolsets"]["feishu"]
     assert "discord" not in saved
     assert "discord_admin" not in saved
+    assert "yuanbao" not in saved
     assert "web" in saved
     assert "terminal" in saved
 
@@ -1325,7 +1257,7 @@ def test_get_platform_tools_feishu_includes_doc_and_drive():
 
 
 def test_get_platform_tools_feishu_tools_not_on_other_platforms():
-    for plat in ["cli", "telegram", "discord"]:
+    for plat in ["cli", "api_server", "cron"]:
         enabled = _get_platform_tools({}, plat)
         assert "feishu_doc" not in enabled, f"feishu_doc leaked onto {plat}"
         assert "feishu_drive" not in enabled, f"feishu_drive leaked onto {plat}"

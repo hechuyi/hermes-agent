@@ -1,6 +1,7 @@
 """Regression tests for packaging metadata in pyproject.toml."""
 
 from pathlib import Path
+import re
 import tomllib
 
 
@@ -291,6 +292,64 @@ def test_non_feishu_platform_plugins_are_removed_from_runtime_fork():
     assert not (REPO_ROOT / "plugins" / "platforms").exists()
 
 
+def test_gateway_adapter_factory_is_feishu_api_only():
+    """The Feishu fork must not construct non-Feishu messaging adapters."""
+    source = (REPO_ROOT / "gateway" / "run.py").read_text(encoding="utf-8")
+    start = source.index("    def _create_adapter(")
+    end = source.index("    def _is_user_authorized(", start)
+    factory_source = source[start:end]
+
+    assert "gateway.platform_registry" not in factory_source
+    assert "platform_registry" not in factory_source
+
+    platform_refs = set(re.findall(r"\bPlatform\.([A-Z_]+)\b", factory_source))
+    assert platform_refs == {"FEISHU", "API_SERVER"}
+
+    adapter_imports = set(re.findall(r"gateway\.platforms\.([a-z_]+)", factory_source))
+    assert adapter_imports == {"feishu", "api_server"}
+
+
+def test_cli_platform_registry_is_static_for_feishu_fork():
+    """Platform menus must not re-import channel plugins in this fork."""
+    from hermes_cli.platforms import PLATFORMS
+    from runtime_profile import CLI_TOOL_PLATFORMS
+
+    assert list(PLATFORMS) == list(CLI_TOOL_PLATFORMS)
+    assert {
+        key: info.default_toolset
+        for key, info in PLATFORMS.items()
+    } == {
+        key: info.default_toolset
+        for key, info in CLI_TOOL_PLATFORMS.items()
+    }
+
+    source = (REPO_ROOT / "hermes_cli" / "platforms.py").read_text(encoding="utf-8")
+
+    assert "gateway.platform_registry" not in source
+    assert "plugin_entries" not in source
+    assert '"discord"' not in source
+    assert '"telegram"' not in source
+    assert '"yuanbao"' not in source
+
+
+def test_gateway_runtime_allowed_platforms_follow_profile():
+    """Gateway config pruning must use the same positive runtime profile."""
+    from gateway.config import _ALLOWED_RUNTIME_PLATFORMS, Platform
+    from runtime_profile import GATEWAY_RUNTIME_PLATFORM_VALUES
+
+    assert _ALLOWED_RUNTIME_PLATFORMS == {
+        Platform(value) for value in GATEWAY_RUNTIME_PLATFORM_VALUES
+    }
+
+
+def test_toolsets_do_not_autogenerate_plugin_platform_aliases():
+    """Toolset resolution must not synthesize hermes-<platform> aliases."""
+    source = (REPO_ROOT / "toolsets.py").read_text(encoding="utf-8")
+
+    assert "gateway.platform_registry" not in source
+    assert "platform_registry.is_registered" not in source
+
+
 def test_removed_platform_plugin_surfaces_leave_no_runtime_references():
     """Deleted bundled platform plugins must not leave importable runtime hooks."""
     ignored_roots = {
@@ -375,3 +434,37 @@ def test_node_tui_launcher_is_removed_from_feishu_runtime_fork():
     for snippet in forbidden_snippets:
         assert snippet not in main_source, snippet
         assert snippet not in parser_source, snippet
+
+
+def test_computer_use_desktop_surface_is_removed_from_feishu_runtime_fork():
+    """The Feishu fork must not retain the desktop/computer-use surface."""
+    forbidden_paths = [
+        "tools/computer_use",
+        "tools/computer_use_tool.py",
+        "skills/apple/macos-computer-use",
+        "tests/tools/test_computer_use.py",
+        "tests/tools/test_computer_use_capture_routing.py",
+        "tests/tools/test_computer_use_vision_routing.py",
+        "tests/hermes_cli/test_install_cua_driver.py",
+    ]
+    for relpath in forbidden_paths:
+        assert not (REPO_ROOT / relpath).exists(), relpath
+
+    main_source = (REPO_ROOT / "hermes_cli" / "main.py").read_text(encoding="utf-8")
+    tools_config_source = (REPO_ROOT / "hermes_cli" / "tools_config.py").read_text(encoding="utf-8")
+    prompt_builder_source = (REPO_ROOT / "agent" / "prompt_builder.py").read_text(encoding="utf-8")
+    system_prompt_source = (REPO_ROOT / "agent" / "system_prompt.py").read_text(encoding="utf-8")
+
+    forbidden_snippets = [
+        '"computer-use"',
+        "computer_use",
+        "cua-driver",
+        "cua_driver",
+        "Computer Use",
+        "COMPUTER_USE_GUIDANCE",
+    ]
+    for snippet in forbidden_snippets:
+        assert snippet not in main_source, snippet
+        assert snippet not in tools_config_source, snippet
+        assert snippet not in prompt_builder_source, snippet
+        assert snippet not in system_prompt_source, snippet

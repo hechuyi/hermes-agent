@@ -69,7 +69,7 @@ class TestStripImagesPreservesAlternation:
                 "tool_calls": [{
                     "id": "call_abc",
                     "type": "function",
-                    "function": {"name": "computer_use", "arguments": "{}"},
+                    "function": {"name": "multimodal_tool", "arguments": "{}"},
                 }],
             },
             {

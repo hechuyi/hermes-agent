@@ -213,22 +213,38 @@ class TestToolsetConsistency:
                 assert inc in TOOLSETS, f"{name} includes unknown toolset '{inc}'"
 
     def test_hermes_platforms_share_core_tools(self):
-        """All hermes-* platform toolsets share the same core tools.
-
-        Platform-specific additions (e.g. ``discord`` / ``discord_admin``
-        on hermes-discord, gated on DISCORD_BOT_TOKEN) are allowed on top —
-        the invariant is that the core set is identical across platforms.
-        """
-        platforms = ["hermes-cli", "hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant"]
+        """The retained headless runtime aliases share the same core tools."""
+        platforms = ["hermes-cli", "hermes-feishu", "hermes-cron"]
         tool_sets = [set(TOOLSETS[p]["tools"]) for p in platforms]
-        # All platforms must contain the shared core; platform-specific
-        # extras are OK (subset check, not equality).
         core = set.intersection(*tool_sets)
         for name, ts in zip(platforms, tool_sets):
             assert core.issubset(ts), f"{name} is missing core tools: {core - ts}"
-        # Sanity: the shared core must be non-trivial (i.e. we didn't
-        # silently let a platform diverge so far that nothing is shared).
         assert len(core) > 20, f"Suspiciously small shared core: {len(core)} tools"
+
+    def test_runtime_platform_aliases_are_profile_owned(self):
+        from hermes_cli.platforms import PLATFORMS
+
+        default_toolsets = {info.default_toolset for info in PLATFORMS.values()}
+        assert default_toolsets == {
+            "hermes-cli",
+            "hermes-feishu",
+            "hermes-api-server",
+            "hermes-cron",
+        }
+        for alias in default_toolsets:
+            assert get_toolset(alias) is not None, alias
+            assert resolve_toolset(alias), alias
+
+        for stale_alias in ("hermes-discord", "hermes-yuanbao"):
+            assert get_toolset(stale_alias) is None, stale_alias
+            assert resolve_toolset(stale_alias) == [], stale_alias
+
+    def test_removed_channel_specific_toolsets_are_absent(self):
+        for toolset in ("discord", "discord_admin", "yuanbao"):
+            assert get_toolset(toolset) is None
+            assert resolve_toolset(toolset) == []
+            assert validate_toolset(toolset) is False
+            assert toolset not in get_toolset_names()
 
 
 class TestPluginToolsets:
@@ -249,19 +265,22 @@ class TestPluginToolsets:
 
 
 class TestDefaultPlatformWebSearchCoverage:
-    def test_hermes_whatsapp_toolset_includes_web_search(self):
-        assert "web_search" in resolve_toolset("hermes-whatsapp")
+    def test_hermes_feishu_toolset_includes_web_search(self):
+        assert "web_search" in resolve_toolset("hermes-feishu")
 
     def test_hermes_api_server_toolset_includes_web_search(self):
         assert "web_search" in resolve_toolset("hermes-api-server")
 
 
-class TestComputerUseToolsetExposure:
+class TestHeadlessFeishuToolsetExposure:
     def test_hermes_feishu_does_not_enable_computer_use_by_default(self):
         assert "computer_use" not in resolve_toolset("hermes-feishu")
 
     def test_hermes_cli_does_not_enable_computer_use_by_default(self):
         assert "computer_use" not in resolve_toolset("hermes-cli")
 
-    def test_computer_use_remains_explicit_opt_in_toolset(self):
-        assert resolve_toolset("computer_use") == ["computer_use"]
+    def test_computer_use_is_not_a_builtin_toolset(self):
+        assert get_toolset("computer_use") is None
+        assert resolve_toolset("computer_use") == []
+        assert validate_toolset("computer_use") is False
+        assert "computer_use" not in get_toolset_names()

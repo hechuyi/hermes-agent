@@ -158,9 +158,9 @@ def test_bundled_plugin_manifests_ship_in_both_wheel_and_sdist():
 # 1.0.1. Anything below that lets a malformed Host header desync
 # ``request.url.path`` from the dispatched ASGI path, bypassing path-based
 # authz in middleware/endpoints that gate on ``request.url``. Starlette is a
-# transitive dep (sse-starlette/mcp in [mcp]/[computer-use]/[dev]) so we pin it
-# directly in every extra that exposes a server surface and
-# enforce the floor in both pyproject and the committed lockfile.
+# transitive dep (sse-starlette/mcp in [mcp]/[dev]) so we pin it directly in
+# every extra that exposes a server surface and enforce the floor in both
+# pyproject and the committed lockfile.
 _STARLETTE_CVE_FLOOR = (1, 0, 1)
 
 
@@ -196,8 +196,10 @@ def test_starlette_pinned_above_cve_2026_48710_floor_in_pyproject():
                 ver = spec.split("==", 1)[1].split(";", 1)[0].strip()
                 found[extra] = ver
 
+    assert "computer-use" not in extras
+
     # Server-surface extras must each carry the direct pin.
-    for extra in ("mcp", "computer-use", "dev"):
+    for extra in ("mcp", "dev"):
         assert extra in found, (
             f"[{extra}] no longer pins starlette directly — CVE-2026-48710 "
             f"regression risk (mcp/fastapi pull it transitively with no upper bound)"

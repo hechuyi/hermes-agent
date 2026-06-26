@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Any, Callable
 from enum import Enum
 
 from hermes_cli.config import get_hermes_home
+from runtime_profile import GATEWAY_RUNTIME_PLATFORM_VALUES, is_gateway_runtime_platform
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -434,6 +435,20 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
         and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
     ),
 }
+
+
+_ALLOWED_RUNTIME_PLATFORMS = frozenset(
+    Platform(value) for value in GATEWAY_RUNTIME_PLATFORM_VALUES
+)
+
+
+def _prune_unsupported_runtime_platforms(config: "GatewayConfig") -> None:
+    """Drop non-Feishu messaging platform configs from this runtime fork."""
+    config.platforms = {
+        platform: platform_config
+        for platform, platform_config in config.platforms.items()
+        if is_gateway_runtime_platform(platform)
+    }
 
 
 @dataclass
@@ -1235,6 +1250,11 @@ def load_gateway_config() -> GatewayConfig:
 
     # Override with environment variables
     _apply_env_overrides(config)
+
+    # This fork only exposes Feishu/Lark as a messaging runtime. Keep the API
+    # server surface for direct tool-calling clients, but ignore stale configs
+    # and env vars for removed messaging channels.
+    _prune_unsupported_runtime_platforms(config)
     
     # --- Validate loaded values ---
     _validate_gateway_config(config)
