@@ -854,6 +854,14 @@ def load_gateway_config() -> GatewayConfig:
             if "always_log_local" in yaml_cfg:
                 gw_data["always_log_local"] = yaml_cfg["always_log_local"]
 
+            if (
+                isinstance(gateway_cfg, dict)
+                and "filter_silence_narration" in gateway_cfg
+            ):
+                gw_data["filter_silence_narration"] = gateway_cfg[
+                    "filter_silence_narration"
+                ]
+
             if "filter_silence_narration" in yaml_cfg:
                 gw_data["filter_silence_narration"] = yaml_cfg[
                     "filter_silence_narration"
