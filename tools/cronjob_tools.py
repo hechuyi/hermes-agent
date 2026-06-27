@@ -323,11 +323,12 @@ def _normalize_deliver_param(value: Any) -> Optional[str]:
     """Normalize a user-supplied ``deliver`` value to the canonical string form.
 
     The cron schema documents ``deliver`` as a string (``"local"``, ``"origin"``,
-    ``"telegram"``, ``"telegram:chat_id[:thread_id]"``, or comma-separated combos).
+    ``"all"``, ``"feishu"``, ``"feishu:chat_id[:thread_id]"``, or
+    comma-separated combos).
     Some callers — MCP clients passing arrays, scripts building the payload as a
-    list — supply ``["telegram"]``.  ``create_job``/``update_job`` store it as-is,
+    list — supply ``["feishu"]``.  ``create_job``/``update_job`` store it as-is,
     and the scheduler's ``str(deliver).split(",")`` then serializes the list to
-    the literal ``"['telegram']"`` which is not a known platform.  Flatten lists
+    an array-shaped literal which is not a known platform.  Flatten lists
     / tuples at the API boundary so storage is always a string.  Returns ``None``
     for ``None``/empty so callers can treat it as "not supplied".
     """
@@ -338,6 +339,34 @@ def _normalize_deliver_param(value: Any) -> Optional[str]:
         return ",".join(parts) if parts else None
     text = str(value).strip()
     return text or None
+
+
+_CRON_DELIVER_TOKENS = frozenset({"origin", "local", "all", "feishu"})
+_FEISHU_DELIVER_TARGET_RE = re.compile(
+    r"^feishu:((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::([-A-Za-z0-9_]+))?$",
+    re.IGNORECASE,
+)
+
+
+def _validate_deliver_param(value: Optional[str]) -> Optional[str]:
+    """Validate cron delivery target grammar at the create/update boundary."""
+    if value is None:
+        return None
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    if not parts:
+        return None
+    for part in parts:
+        lower = part.lower()
+        if lower in _CRON_DELIVER_TOKENS:
+            continue
+        if _FEISHU_DELIVER_TARGET_RE.fullmatch(part):
+            continue
+        return (
+            "Unsupported cron delivery target "
+            f"{part!r}. Allowed values are 'origin', 'local', 'all', 'feishu', "
+            "or 'feishu:<id>' / 'feishu:<id>:<thread>'."
+        )
+    return None
 
 
 def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
@@ -489,12 +518,17 @@ def cronjob(
                             success=False,
                         )
 
+            normalized_deliver = _normalize_deliver_param(deliver)
+            deliver_error = _validate_deliver_param(normalized_deliver)
+            if deliver_error:
+                return tool_error(deliver_error, success=False)
+
             job = create_job(
                 prompt=prompt or "",
                 schedule=schedule,
                 name=name,
                 repeat=repeat,
-                deliver=_normalize_deliver_param(deliver),
+                deliver=normalized_deliver,
                 origin=_origin_from_env(),
                 skills=canonical_skills,
                 model=_normalize_optional_job_value(model),
@@ -597,7 +631,11 @@ def cronjob(
             if name is not None:
                 updates["name"] = name
             if deliver is not None:
-                updates["deliver"] = _normalize_deliver_param(deliver)
+                normalized_deliver = _normalize_deliver_param(deliver)
+                deliver_error = _validate_deliver_param(normalized_deliver)
+                if deliver_error:
+                    return tool_error(deliver_error, success=False)
+                updates["deliver"] = normalized_deliver
             if skills is not None or skill is not None:
                 canonical_skills = _canonical_skills(skill, skills)
                 updates["skills"] = canonical_skills
@@ -730,7 +768,7 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
             },
             "deliver": {
                 "type": "string",
-                "description": "Omit this parameter to auto-deliver back to the current chat and topic (recommended). Auto-detection preserves thread/topic context. Only set explicitly when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), 'all' (fan out to every connected home channel), or platform:chat_id:thread_id for a specific destination. Combine with comma: 'origin,all' delivers to the origin plus every other connected channel. Examples: 'telegram:-1001234567890:17585', 'discord:#engineering', 'sms:+15551234567', 'all'. WARNING: 'platform:chat_id' without :thread_id loses topic targeting. 'all' resolves at fire time, so a job created before a channel was wired up will pick it up automatically once connected."
+                "description": "Omit this parameter to auto-deliver back to the current Feishu chat/thread when available (recommended). Auto-detection preserves thread context. Only set explicitly when the user asks to deliver somewhere OTHER than the current conversation. Values: 'origin' (same as omitting), 'local' (no delivery, save only), 'all' (the configured Feishu home channel), 'feishu' (configured Feishu home channel), or 'feishu:<id>' / 'feishu:<id>:<thread>' for a specific Feishu destination. Combine with comma: 'origin,all' delivers to the origin plus the Feishu home channel. Examples: 'feishu:oc_123456', 'feishu:oc_123456:om_abcdef', 'all'. Old non-Feishu platform targets are rejected."
             },
             "skills": {
                 "type": "array",

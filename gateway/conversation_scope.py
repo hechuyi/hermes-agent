@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from gateway.config import Platform
-from gateway.whatsapp_identity import canonical_whatsapp_identifier
 
 
 @dataclass(frozen=True)
@@ -33,10 +32,7 @@ def _participant_id(source: Any) -> Optional[str]:
     participant = getattr(source, "user_id_alt", None) or getattr(source, "user_id", None)
     if participant is None:
         return None
-    participant = str(participant)
-    if getattr(source, "platform", None) == Platform.WHATSAPP:
-        participant = canonical_whatsapp_identifier(participant) or participant
-    return participant
+    return str(participant)
 
 
 def feishu_platform_account_id(
@@ -144,8 +140,6 @@ def route_partition_key(
 
     if chat_type == "dm":
         dm_chat_id = chat_id
-        if getattr(source, "platform", None) == Platform.WHATSAPP:
-            dm_chat_id = canonical_whatsapp_identifier(chat_id)
         if dm_chat_id:
             if thread_id:
                 return f"agent:main:{platform}:dm:{dm_chat_id}:{thread_id}"

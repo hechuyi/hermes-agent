@@ -1,9 +1,10 @@
 """
-Hermes MCP Server — expose messaging conversations as MCP tools.
+Hermes MCP Server — expose Feishu/headless Hermes conversations as MCP tools.
 
 Starts a stdio MCP server that lets any MCP client (Claude Code, Cursor, Codex,
-etc.) list conversations, read message history, send messages, poll for live
-events, and manage approval requests across all connected platforms.
+etc.) list Hermes conversations, read message history, send Feishu/Lark chat
+messages, poll for live events, and manage approval requests for the headless
+runtime.
 
 Matches OpenClaw's 9-tool MCP channel bridge surface:
   conversations_list, conversation_get, messages_read, attachments_fetch,
@@ -113,6 +114,34 @@ def _load_channel_directory() -> dict:
     except Exception as e:
         logger.debug("Failed to load channel_directory.json: %s", e)
         return {}
+
+
+def _chat_delivery_platform_values() -> set[str]:
+    """Return platform names that this runtime can send chat messages to."""
+    try:
+        from runtime_profile import CHAT_DELIVERY_PLATFORM_VALUES
+
+        return {str(value).lower() for value in CHAT_DELIVERY_PLATFORM_VALUES}
+    except Exception:
+        return {"feishu"}
+
+
+def _is_sendable_channel_platform(platform_name: object) -> bool:
+    """Return whether channel targets for this platform are sendable."""
+    return str(platform_name or "").lower() in _chat_delivery_platform_values()
+
+
+def _matches_sendable_channel_filter(
+    platform_name: object,
+    requested_platform: Optional[str],
+) -> bool:
+    """Return whether a platform passes the sendable and user-requested filters."""
+    normalized = str(platform_name or "").lower()
+    if not _is_sendable_channel_platform(normalized):
+        return False
+    if requested_platform and normalized != requested_platform.lower():
+        return False
+    return True
 
 
 def _coerce_int(
@@ -458,9 +487,9 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
     mcp = FastMCP(
         "hermes",
         instructions=(
-            "Hermes Agent messaging bridge. Use these tools to interact with "
-            "conversations across Telegram, Discord, Slack, WhatsApp, Signal, "
-            "Matrix, and other connected platforms."
+            "Hermes Agent headless bridge for Feishu/Lark conversations plus "
+            "local and API server session history. Use channels_list and "
+            "messages_send only for Feishu/Lark chat delivery targets."
         ),
     )
 
@@ -474,13 +503,13 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
         limit: int = 50,
         search: Optional[str] = None,
     ) -> str:
-        """List active messaging conversations across connected platforms.
+        """List Hermes conversations for Feishu, API server, and local sessions.
 
         Returns conversations with their session keys (needed for messages_read),
-        platform, chat type, display name, and last activity time.
+        source platform, chat type, display name, and last activity time.
 
         Args:
-            platform: Filter by platform name (telegram, discord, slack, etc.)
+            platform: Optional source filter such as feishu, api_server, or local
             limit: Maximum number of conversations to return (default 50)
             search: Optional text to filter conversations by name
         """
@@ -735,19 +764,20 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
         target: str,
         message: str,
     ) -> str:
-        """Send a message to a platform conversation.
+        """Send a message to a Feishu/Lark chat conversation.
 
-        The target format is "platform:chat_id" — same format used by the
-        channels_list tool. You can also use human-friendly channel names
-        that will be resolved automatically.
+        The sendable target format is "feishu:chat_id" or
+        "feishu:chat_id:message_id" for a reply/thread. Use channels_list to
+        discover Feishu targets. Human-friendly Feishu channel names may be
+        resolved by the underlying send tool when the channel directory has
+        a matching entry.
 
         Examples:
-            target="telegram:6308981865"
-            target="discord:#general"
-            target="slack:#engineering"
+            target="feishu:oc_abc123"
+            target="feishu:oc_abc123:om_def456"
 
         Args:
-            target: Platform target in "platform:identifier" format
+            target: Feishu target in "feishu:identifier" format
             message: The message text to send
         """
         if not target or not message:
@@ -768,13 +798,13 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
 
     @mcp.tool()
     def channels_list(platform: Optional[str] = None) -> str:
-        """List available messaging channels and targets across platforms.
+        """List Feishu/Lark messaging channels that can receive messages.
 
         Returns channels that you can send messages to. The target strings
         returned here can be used directly with the messages_send tool.
 
         Args:
-            platform: Filter by platform name (telegram, discord, slack, etc.)
+            platform: Optional sendable platform filter; currently feishu
         """
         directory = _load_channel_directory()
         if not directory:
@@ -787,7 +817,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
                 chat_id = origin.get("chat_id", "")
                 if not p or not chat_id:
                     continue
-                if platform and p.lower() != platform.lower():
+                if not _matches_sendable_channel_filter(p, platform):
                     continue
                 target_str = f"{p}:{chat_id}"
                 if target_str in seen:
@@ -803,7 +833,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
 
         channels = []
         for plat, entries_list in directory.get("platforms", {}).items():
-            if platform and plat.lower() != platform.lower():
+            if not _matches_sendable_channel_filter(plat, platform):
                 continue
             if isinstance(entries_list, list):
                 for ch in entries_list:

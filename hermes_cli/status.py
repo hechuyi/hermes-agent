@@ -419,45 +419,31 @@ def show_status(args):
     print(f"  Sudo:         {check_mark(bool(sudo_password))} {'enabled' if sudo_password else 'disabled'}")
 
     # =========================================================================
-    # Messaging Platforms
+    # Feishu/headless runtime surfaces
     # =========================================================================
     print()
-    print(color("◆ Messaging Platforms", Colors.CYAN, Colors.BOLD))
+    print(color("◆ Feishu Runtime", Colors.CYAN, Colors.BOLD))
 
-    platforms = {
-        "Telegram": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL"),
-        "Discord": ("DISCORD_BOT_TOKEN", "DISCORD_HOME_CHANNEL"),
-        "WhatsApp": ("WHATSAPP_ENABLED", None),
-        "Signal": ("SIGNAL_HTTP_URL", "SIGNAL_HOME_CHANNEL"),
-        "Slack": ("SLACK_BOT_TOKEN", None),
-        "Email": ("EMAIL_ADDRESS", "EMAIL_HOME_ADDRESS"),
-        "SMS": ("TWILIO_ACCOUNT_SID", "SMS_HOME_CHANNEL"),
-        "DingTalk": ("DINGTALK_CLIENT_ID", None),
-        "Feishu": ("FEISHU_APP_ID", "FEISHU_HOME_CHANNEL"),
-        "WeCom": ("WECOM_BOT_ID", "WECOM_HOME_CHANNEL"),
-        "WeCom Callback": ("WECOM_CALLBACK_CORP_ID", None),
-        "Weixin": ("WEIXIN_ACCOUNT_ID", "WEIXIN_HOME_CHANNEL"),
-        "BlueBubbles": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_HOME_CHANNEL"),
-        "QQBot": ("QQ_APP_ID", "QQ_HOME_CHANNEL"),
-        "Yuanbao": ("YUANBAO_APP_ID", "YUANBAO_HOME_CHANNEL"),
-    }
+    feishu_app = os.getenv("FEISHU_APP_ID", "")
+    feishu_home = os.getenv("FEISHU_HOME_CHANNEL", "")
+    feishu_status = "configured" if feishu_app else "not configured"
+    if feishu_home:
+        feishu_status += f" (home: {feishu_home})"
+    print(f"  {'Feishu':<12}  {check_mark(bool(feishu_app))} {feishu_status}")
 
-    for name, (token_var, home_var) in platforms.items():
-        token = os.getenv(token_var, "")
-        has_token = bool(token)
-        
-        home_channel = ""
-        if home_var:
-            home_channel = os.getenv(home_var, "")
-        # Back-compat: QQBot home channel was renamed from QQ_HOME_CHANNEL to QQBOT_HOME_CHANNEL
-        if not home_channel and home_var == "QQBOT_HOME_CHANNEL":
-            home_channel = os.getenv("QQ_HOME_CHANNEL", "")
-        
-        status = "configured" if has_token else "not configured"
-        if home_channel:
-            status += f" (home: {home_channel})"
-        
-        print(f"  {name:<12}  {check_mark(has_token)} {status}")
+    api_enabled = os.getenv("API_SERVER_ENABLED", "").strip().lower() in {"true", "1", "yes"}
+    api_key = os.getenv("API_SERVER_KEY", "")
+    api_status = "enabled" if api_enabled else "disabled"
+    if api_key:
+        api_status += ", key configured"
+    print(f"  {'API Server':<12}  {check_mark(api_enabled or bool(api_key))} {api_status}")
+
+    webhook_enabled = os.getenv("WEBHOOK_ENABLED", "").strip().lower() in {"true", "1", "yes"}
+    webhook_secret = os.getenv("WEBHOOK_SECRET", "")
+    webhook_status = "enabled" if webhook_enabled else "disabled"
+    if webhook_secret:
+        webhook_status += ", secret configured"
+    print(f"  {'Webhook':<12}  {check_mark(webhook_enabled or bool(webhook_secret))} {webhook_status}")
 
     # Plugin-registered platforms
     try:

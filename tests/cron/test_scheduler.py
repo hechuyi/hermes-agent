@@ -16,30 +16,30 @@ class TestResolveOrigin:
     def test_full_origin(self):
         job = {
             "origin": {
-                "platform": "telegram",
-                "chat_id": "123456",
+                "platform": "feishu",
+                "chat_id": "oc_123456",
                 "chat_name": "Test Chat",
-                "thread_id": "42",
+                "thread_id": "om_42",
             }
         }
         result = _resolve_origin(job)
         assert isinstance(result, dict)
         assert result == job["origin"]
-        assert result["platform"] == "telegram"
-        assert result["chat_id"] == "123456"
+        assert result["platform"] == "feishu"
+        assert result["chat_id"] == "oc_123456"
         assert result["chat_name"] == "Test Chat"
-        assert result["thread_id"] == "42"
+        assert result["thread_id"] == "om_42"
 
     def test_no_origin(self):
         assert _resolve_origin({}) is None
         assert _resolve_origin({"origin": None}) is None
 
     def test_missing_platform(self):
-        job = {"origin": {"chat_id": "123"}}
+        job = {"origin": {"chat_id": "oc_123"}}
         assert _resolve_origin(job) is None
 
     def test_missing_chat_id(self):
-        job = {"origin": {"platform": "telegram"}}
+        job = {"origin": {"platform": "feishu"}}
         assert _resolve_origin(job) is None
 
     def test_empty_origin(self):
@@ -51,7 +51,7 @@ class TestResolveOrigin:
         [
             "combined-digest-replaces-x-and-y-20260503",
             123,
-            ["telegram", "12345"],
+            ["feishu", "oc_12345"],
             ("platform", "chat_id"),
             42.0,
         ],
@@ -75,321 +75,219 @@ class TestResolveDeliveryTarget:
         job = {
             "deliver": "origin",
             "origin": {
-                "platform": "telegram",
-                "chat_id": "-1001",
-                "thread_id": "17585",
+                "platform": "feishu",
+                "chat_id": "oc_1001",
+                "thread_id": "om_17585",
             },
         }
 
         assert _resolve_delivery_target(job) == {
-            "platform": "telegram",
-            "chat_id": "-1001",
-            "thread_id": "17585",
+            "platform": "feishu",
+            "chat_id": "oc_1001",
+            "thread_id": "om_17585",
         }
 
-    @pytest.mark.parametrize(
-        ("platform", "env_var", "chat_id"),
-        [
-            ("matrix", "MATRIX_HOME_ROOM", "!bot-room:example.org"),
-            ("signal", "SIGNAL_HOME_CHANNEL", "+15551234567"),
-            ("mattermost", "MATTERMOST_HOME_CHANNEL", "team-town-square"),
-            ("sms", "SMS_HOME_CHANNEL", "+15557654321"),
-            ("email", "EMAIL_HOME_ADDRESS", "home@example.com"),
-            ("dingtalk", "DINGTALK_HOME_CHANNEL", "cidNNN"),
-            ("feishu", "FEISHU_HOME_CHANNEL", "oc_home"),
-            ("wecom", "WECOM_HOME_CHANNEL", "wecom-home"),
-            ("weixin", "WEIXIN_HOME_CHANNEL", "wxid_home"),
-            ("qqbot", "QQ_HOME_CHANNEL", "group-openid-home"),
-        ],
-    )
-    def test_origin_delivery_without_origin_falls_back_to_supported_home_channels(
-        self, monkeypatch, platform, env_var, chat_id
+    def test_origin_delivery_without_origin_falls_back_to_feishu_home_channel(
+        self, monkeypatch
     ):
-        for fallback_env in (
-            "MATRIX_HOME_ROOM",
-            "MATRIX_HOME_CHANNEL",
-            "TELEGRAM_HOME_CHANNEL",
-            "DISCORD_HOME_CHANNEL",
-            "SLACK_HOME_CHANNEL",
-            "SIGNAL_HOME_CHANNEL",
-            "MATTERMOST_HOME_CHANNEL",
-            "SMS_HOME_CHANNEL",
-            "EMAIL_HOME_ADDRESS",
-            "DINGTALK_HOME_CHANNEL",
-            "BLUEBUBBLES_HOME_CHANNEL",
-            "FEISHU_HOME_CHANNEL",
-            "WECOM_HOME_CHANNEL",
-            "WEIXIN_HOME_CHANNEL",
-            "QQ_HOME_CHANNEL",
-        ):
+        for fallback_env in ("FEISHU_HOME_CHANNEL", "SLACK_HOME_CHANNEL", "SMS_HOME_CHANNEL"):
             monkeypatch.delenv(fallback_env, raising=False)
-        monkeypatch.setenv(env_var, chat_id)
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL", "oc_home")
 
         assert _resolve_delivery_target({"deliver": "origin"}) == {
-            "platform": platform,
-            "chat_id": chat_id,
+            "platform": "feishu",
+            "chat_id": "oc_home",
             "thread_id": None,
         }
 
-    def test_bare_matrix_delivery_uses_matrix_home_room(self, monkeypatch):
-        monkeypatch.delenv("MATRIX_HOME_CHANNEL", raising=False)
-        monkeypatch.setenv("MATRIX_HOME_ROOM", "!room123:example.org")
+    def test_bare_legacy_platform_delivery_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL", "oc_home")
 
-        assert _resolve_delivery_target({"deliver": "matrix"}) == {
-            "platform": "matrix",
-            "chat_id": "!room123:example.org",
-            "thread_id": None,
+        assert _resolve_delivery_target({"deliver": "telegram"}) is None
+
+    def test_bare_feishu_delivery_preserves_home_thread_id(self, monkeypatch):
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL", "oc_home")
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL_THREAD_ID", "om_thread")
+
+        assert _resolve_delivery_target({"deliver": "feishu"}) == {
+            "platform": "feishu",
+            "chat_id": "oc_home",
+            "thread_id": "om_thread",
         }
 
-    def test_bare_platform_delivery_preserves_home_thread_id(self, monkeypatch):
-        monkeypatch.setenv("DISCORD_HOME_CHANNEL", "parent-42")
-        monkeypatch.setenv("DISCORD_HOME_CHANNEL_THREAD_ID", "topic-7")
-
-        assert _resolve_delivery_target({"deliver": "discord"}) == {
-            "platform": "discord",
-            "chat_id": "parent-42",
-            "thread_id": "topic-7",
-        }
-
-    def test_telegram_cron_thread_id_overrides_home_thread_id(self, monkeypatch):
-        """TELEGRAM_CRON_THREAD_ID wins over TELEGRAM_HOME_CHANNEL_THREAD_ID for cron (#24409)."""
+    def test_legacy_telegram_thread_env_does_not_enable_delivery(self, monkeypatch):
+        """Legacy Telegram cron env vars no longer create delivery targets."""
         monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-1001234567890")
         monkeypatch.setenv("TELEGRAM_HOME_CHANNEL_THREAD_ID", "5")
         monkeypatch.setenv("TELEGRAM_CRON_THREAD_ID", "42")
 
-        assert _resolve_delivery_target({"deliver": "telegram"}) == {
-            "platform": "telegram",
-            "chat_id": "-1001234567890",
-            "thread_id": "42",
-        }
+        assert _resolve_delivery_target({"deliver": "telegram"}) is None
 
-    def test_telegram_cron_thread_id_sets_thread_when_home_thread_unset(self, monkeypatch):
-        """TELEGRAM_CRON_THREAD_ID supplies a thread when no home thread is configured."""
+    def test_legacy_telegram_thread_env_does_not_affect_feishu(self, monkeypatch):
+        """Feishu home thread resolution ignores legacy Telegram thread env vars."""
         monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-1001234567890")
-        monkeypatch.delenv("TELEGRAM_HOME_CHANNEL_THREAD_ID", raising=False)
         monkeypatch.setenv("TELEGRAM_CRON_THREAD_ID", "42")
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL", "oc_home")
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL_THREAD_ID", "om_home")
 
-        assert _resolve_delivery_target({"deliver": "telegram"}) == {
-            "platform": "telegram",
-            "chat_id": "-1001234567890",
-            "thread_id": "42",
+        assert _resolve_delivery_target({"deliver": "feishu"}) == {
+            "platform": "feishu",
+            "chat_id": "oc_home",
+            "thread_id": "om_home",
         }
 
-    def test_telegram_cron_thread_id_does_not_leak_to_other_platforms(self, monkeypatch):
-        """TELEGRAM_CRON_THREAD_ID is Telegram-only; other platforms keep their own thread resolution."""
+    def test_legacy_discord_home_thread_env_does_not_enable_delivery(self, monkeypatch):
+        """Legacy Discord home env vars no longer create delivery targets."""
         monkeypatch.setenv("DISCORD_HOME_CHANNEL", "parent-42")
         monkeypatch.setenv("DISCORD_HOME_CHANNEL_THREAD_ID", "topic-7")
-        monkeypatch.setenv("TELEGRAM_CRON_THREAD_ID", "42")
 
-        assert _resolve_delivery_target({"deliver": "discord"}) == {
-            "platform": "discord",
-            "chat_id": "parent-42",
-            "thread_id": "topic-7",
-        }
+        assert _resolve_delivery_target({"deliver": "discord"}) is None
 
-    def test_explicit_telegram_topic_target_overrides_cron_thread_id(self, monkeypatch):
-        """Explicit ``telegram:chat:thread`` targets bypass TELEGRAM_CRON_THREAD_ID."""
-        monkeypatch.setenv("TELEGRAM_CRON_THREAD_ID", "999")
-
-        job = {"deliver": "telegram:-1003724596514:17"}
-        assert _resolve_delivery_target(job) == {
-            "platform": "telegram",
-            "chat_id": "-1003724596514",
-            "thread_id": "17",
-        }
-
-    def test_explicit_telegram_topic_target_with_thread_id(self):
-        """deliver: 'telegram:chat_id:thread_id' parses correctly."""
+    def test_explicit_feishu_topic_target_with_thread_id(self):
+        """deliver: 'feishu:chat_id:thread_id' parses correctly."""
         job = {
-            "deliver": "telegram:-1003724596514:17",
+            "deliver": "feishu:oc_123:om_456",
         }
         assert _resolve_delivery_target(job) == {
-            "platform": "telegram",
-            "chat_id": "-1003724596514",
-            "thread_id": "17",
+            "platform": "feishu",
+            "chat_id": "oc_123",
+            "thread_id": "om_456",
         }
 
-    def test_explicit_telegram_topic_thread_survives_bare_directory_match(self):
+    def test_explicit_feishu_topic_thread_survives_bare_directory_match(self):
         """Exact channel-directory matches must not erase an explicit topic id."""
         job = {
-            "deliver": "telegram:-1003724596514:17",
+            "deliver": "feishu:oc_123:om_456",
         }
         with patch(
             "gateway.channel_directory.resolve_channel_name",
-            return_value="-1003724596514",
+            return_value="oc_123",
         ):
             result = _resolve_delivery_target(job)
         assert result == {
-            "platform": "telegram",
-            "chat_id": "-1003724596514",
-            "thread_id": "17",
+            "platform": "feishu",
+            "chat_id": "oc_123",
+            "thread_id": "om_456",
         }
 
-    def test_explicit_telegram_chat_id_without_thread_id(self):
-        """deliver: 'telegram:chat_id' sets thread_id to None."""
+    def test_explicit_feishu_chat_id_without_thread_id(self):
+        """deliver: 'feishu:chat_id' sets thread_id to None."""
         job = {
-            "deliver": "telegram:-1003724596514",
+            "deliver": "feishu:oc_123",
         }
         assert _resolve_delivery_target(job) == {
-            "platform": "telegram",
-            "chat_id": "-1003724596514",
-            "thread_id": None,
-        }
-
-    def test_human_friendly_label_resolved_via_channel_directory(self):
-        """deliver: 'whatsapp:Alice (dm)' resolves to the real JID."""
-        job = {"deliver": "whatsapp:Alice (dm)"}
-        with patch(
-            "gateway.channel_directory.resolve_channel_name",
-            return_value="12345678901234@lid",
-        ) as resolve_mock:
-            result = _resolve_delivery_target(job)
-        resolve_mock.assert_called_once_with("whatsapp", "Alice (dm)")
-        assert result == {
-            "platform": "whatsapp",
-            "chat_id": "12345678901234@lid",
+            "platform": "feishu",
+            "chat_id": "oc_123",
             "thread_id": None,
         }
 
     def test_human_friendly_label_without_suffix_resolved(self):
-        """deliver: 'telegram:My Group' resolves without display suffix."""
-        job = {"deliver": "telegram:My Group"}
+        """deliver: 'feishu:My Group' resolves without display suffix."""
+        job = {"deliver": "feishu:My Group"}
         with patch(
             "gateway.channel_directory.resolve_channel_name",
-            return_value="-1009999",
+            return_value="oc_9999",
         ):
             result = _resolve_delivery_target(job)
         assert result == {
-            "platform": "telegram",
-            "chat_id": "-1009999",
+            "platform": "feishu",
+            "chat_id": "oc_9999",
             "thread_id": None,
         }
 
     def test_human_friendly_topic_label_preserves_thread_id(self):
-        """Resolved Telegram topic labels should split chat_id and thread_id."""
-        job = {"deliver": "telegram:Coaching Chat / topic 17585 (group)"}
+        """Resolved Feishu labels should split chat_id and thread_id."""
+        job = {"deliver": "feishu:Coaching Chat / topic om_17585"}
         with patch(
             "gateway.channel_directory.resolve_channel_name",
-            return_value="-1009999:17585",
+            return_value="oc_9999:om_17585",
         ):
             result = _resolve_delivery_target(job)
         assert result == {
-            "platform": "telegram",
-            "chat_id": "-1009999",
-            "thread_id": "17585",
+            "platform": "feishu",
+            "chat_id": "oc_9999",
+            "thread_id": "om_17585",
         }
 
-    def test_raw_id_not_mangled_when_directory_returns_none(self):
-        """deliver: 'whatsapp:12345@lid' passes through when directory has no match."""
+    def test_legacy_explicit_target_is_rejected_before_directory_resolution(self):
+        """deliver: 'whatsapp:12345@lid' is not a cron delivery grammar target."""
         job = {"deliver": "whatsapp:12345@lid"}
         with patch(
             "gateway.channel_directory.resolve_channel_name",
             return_value=None,
-        ):
+        ) as resolve_mock:
             result = _resolve_delivery_target(job)
-        assert result == {
-            "platform": "whatsapp",
-            "chat_id": "12345@lid",
-            "thread_id": None,
-        }
+        assert result is None
+        resolve_mock.assert_not_called()
 
     def test_bare_platform_uses_matching_origin_chat(self):
         job = {
-            "deliver": "telegram",
+            "deliver": "feishu",
             "origin": {
-                "platform": "telegram",
-                "chat_id": "-1001",
-                "thread_id": "17585",
+                "platform": "feishu",
+                "chat_id": "oc_1001",
+                "thread_id": "om_17585",
             },
         }
 
         assert _resolve_delivery_target(job) == {
-            "platform": "telegram",
-            "chat_id": "-1001",
-            "thread_id": "17585",
+            "platform": "feishu",
+            "chat_id": "oc_1001",
+            "thread_id": "om_17585",
         }
 
     def test_bare_platform_falls_back_to_home_channel(self, monkeypatch):
-        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-2002")
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL", "oc_2002")
         job = {
-            "deliver": "telegram",
+            "deliver": "feishu",
             "origin": {
-                "platform": "discord",
-                "chat_id": "abc",
+                "platform": "api_server",
+                "chat_id": "request_abc",
             },
         }
 
         assert _resolve_delivery_target(job) == {
-            "platform": "telegram",
-            "chat_id": "-2002",
+            "platform": "feishu",
+            "chat_id": "oc_2002",
             "thread_id": None,
         }
 
-    def test_explicit_discord_topic_target_with_thread_id(self):
-        """deliver: 'discord:chat_id:thread_id' parses correctly."""
+    def test_explicit_legacy_topic_target_is_rejected(self):
         job = {
             "deliver": "discord:-1001234567890:17585",
         }
-        assert _resolve_delivery_target(job) == {
-            "platform": "discord",
-            "chat_id": "-1001234567890",
-            "thread_id": "17585",
-        }
-
-    def test_explicit_discord_chat_id_without_thread_id(self):
-        """deliver: 'discord:chat_id' sets thread_id to None."""
-        job = {
-            "deliver": "discord:9876543210",
-        }
-        assert _resolve_delivery_target(job) == {
-            "platform": "discord",
-            "chat_id": "9876543210",
-            "thread_id": None,
-        }
-
-    def test_explicit_discord_channel_without_thread(self):
-        """deliver: 'discord:1001234567890' resolves via explicit platform:chat_id path."""
-        job = {
-            "deliver": "discord:1001234567890",
-        }
-        result = _resolve_delivery_target(job)
-        assert result == {
-            "platform": "discord",
-            "chat_id": "1001234567890",
-            "thread_id": None,
-        }
+        assert _resolve_delivery_target(job) is None
 
     def test_list_form_deliver_is_normalized(self, monkeypatch):
-        """deliver=['telegram'] (Python list) should resolve like 'telegram' string.
+        """deliver=['feishu'] (Python list) should resolve like 'feishu' string.
 
         Regression test for #17139: MCP clients / scripts that pass the deliver
-        field as an array-shaped value used to fail with "no delivery target
-        resolved for deliver=['telegram']" because ``str(['telegram'])`` was
+            field as an array-shaped value used to fail with "no delivery target
+            resolved for deliver=['feishu']" because ``str(['feishu'])`` was
         passed through to ``split(',')`` verbatim.
         """
-        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-4004")
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL", "oc_4004")
         job = {
-            "deliver": ["telegram"],
+            "deliver": ["feishu"],
             "origin": None,
         }
 
         assert _resolve_delivery_target(job) == {
-            "platform": "telegram",
-            "chat_id": "-4004",
+            "platform": "feishu",
+            "chat_id": "oc_4004",
             "thread_id": None,
         }
 
     def test_list_form_multiple_platforms_normalized(self, monkeypatch):
-        """deliver=['telegram', 'discord'] resolves to multiple targets."""
+        """deliver=['origin', 'feishu'] resolves to Feishu targets and dedups."""
         from cron.scheduler import _resolve_delivery_targets
 
-        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-111")
-        monkeypatch.setenv("DISCORD_HOME_CHANNEL", "-222")
-        job = {"deliver": ["telegram", "discord"], "origin": None}
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL", "oc_111")
+        job = {"deliver": ["origin", "feishu"], "origin": None}
 
         targets = _resolve_delivery_targets(job)
         platforms = sorted(t["platform"] for t in targets)
-        assert platforms == ["discord", "telegram"]
+        assert platforms == ["feishu"]
 
     def test_empty_list_form_deliver_resolves_to_local(self):
         """deliver=[] is treated as local (no delivery)."""
@@ -401,41 +299,35 @@ class TestResolveDeliveryTarget:
 class TestRoutingIntents:
     """``all`` routing intent expands at fire time."""
 
-    def test_all_expands_to_every_connected_home_channel(self, monkeypatch):
-        """deliver='all' fans out to every platform with a configured home channel."""
+    def test_all_expands_to_feishu_home_channel_only(self, monkeypatch):
+        """deliver='all' fans out only to the Feishu home channel."""
         from cron.scheduler import _resolve_delivery_targets
 
         monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-111")
         monkeypatch.setenv("DISCORD_HOME_CHANNEL", "-222")
         monkeypatch.setenv("SLACK_HOME_CHANNEL", "C333")
-        # Sanity: platforms without the env var must NOT appear in the expansion.
-        monkeypatch.delenv("SIGNAL_HOME_CHANNEL", raising=False)
-        monkeypatch.delenv("MATRIX_HOME_ROOM", raising=False)
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL", "oc_333")
 
         targets = _resolve_delivery_targets({"deliver": "all", "origin": None})
         platforms = sorted(t["platform"] for t in targets)
 
-        assert "telegram" in platforms
-        assert "discord" in platforms
-        assert "slack" in platforms
-        assert "signal" not in platforms
-        assert "matrix" not in platforms
+        assert platforms == ["feishu"]
+        assert targets[0]["chat_id"] == "oc_333"
 
     def test_all_combines_with_explicit_target_and_dedups(self, monkeypatch):
-        """'telegram:-999,all' yields every home channel + the explicit target without dupes."""
+        """'feishu:oc_999,all' yields explicit Feishu + Feishu home without dupes."""
         from cron.scheduler import _resolve_delivery_targets
 
-        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-111")
-        monkeypatch.setenv("DISCORD_HOME_CHANNEL", "-222")
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL", "oc_111")
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-222")
 
-        # Explicit telegram target precedes 'all'. Expansion adds discord;
+        # Explicit Feishu target precedes 'all'. Expansion adds Feishu home;
         # the dedup pass collapses any (platform, chat_id, thread_id) repeats.
-        job = {"deliver": "telegram:-999,all", "origin": None}
+        job = {"deliver": "feishu:oc_999,all", "origin": None}
         targets = _resolve_delivery_targets(job)
 
         platforms = sorted(t["platform"].lower() for t in targets)
-        assert "telegram" in platforms
-        assert "discord" in platforms
+        assert platforms == ["feishu", "feishu"]
         # Every target is unique on (platform, chat_id, thread_id).
         keys = [(t["platform"].lower(), str(t["chat_id"]), t.get("thread_id")) for t in targets]
         assert len(keys) == len(set(keys))
@@ -445,46 +337,35 @@ class TestRoutingIntents:
         from cron.scheduler import _resolve_delivery_targets
 
         for var in ("TELEGRAM_HOME_CHANNEL", "DISCORD_HOME_CHANNEL", "SLACK_HOME_CHANNEL",
-                    "SIGNAL_HOME_CHANNEL", "MATRIX_HOME_ROOM", "MATTERMOST_HOME_CHANNEL",
-                    "SMS_HOME_CHANNEL", "EMAIL_HOME_ADDRESS", "DINGTALK_HOME_CHANNEL",
-                    "FEISHU_HOME_CHANNEL", "WECOM_HOME_CHANNEL", "WEIXIN_HOME_CHANNEL",
-                    "BLUEBUBBLES_HOME_CHANNEL", "QQBOT_HOME_CHANNEL", "QQ_HOME_CHANNEL"):
+                    "SMS_HOME_CHANNEL", "FEISHU_HOME_CHANNEL"):
             monkeypatch.delenv(var, raising=False)
 
         assert _resolve_delivery_targets({"deliver": "all", "origin": None}) == []
 
     def test_origin_comma_all_preserves_origin_first(self, monkeypatch):
-        """'origin,all' delivers to the origin platform plus every other home channel."""
+        """'origin,all' delivers to origin plus Feishu home and dedups."""
         from cron.scheduler import _resolve_delivery_targets
 
-        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-111")
-        monkeypatch.setenv("DISCORD_HOME_CHANNEL", "-222")
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL", "oc_111")
 
         job = {
             "deliver": "origin,all",
-            "origin": {"platform": "discord", "chat_id": "888"},
+            "origin": {"platform": "feishu", "chat_id": "oc_888"},
         }
         targets = _resolve_delivery_targets(job)
-        platforms = sorted(t["platform"].lower() for t in targets)
-        assert "telegram" in platforms
-        assert "discord" in platforms
-
-        # The origin's explicit chat_id (888) wins the dedup race over the
-        # discord home channel (-222) because origin is resolved first.
-        discord = next(t for t in targets if t["platform"].lower() == "discord")
-        assert discord["chat_id"] == "888"
+        assert [t["platform"].lower() for t in targets] == ["feishu"]
+        assert [t["chat_id"] for t in targets] == ["oc_888"]
 
     def test_all_token_case_insensitive(self, monkeypatch):
         """'ALL' / 'All' / 'all' are all recognized."""
         from cron.scheduler import _resolve_delivery_targets
 
-        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-111")
-        monkeypatch.setenv("DISCORD_HOME_CHANNEL", "-222")
+        monkeypatch.setenv("FEISHU_HOME_CHANNEL", "oc_111")
 
         for token in ("ALL", "All", "all"):
             targets = _resolve_delivery_targets({"deliver": token, "origin": None})
             platforms = sorted(t["platform"].lower() for t in targets)
-            assert platforms == ["discord", "telegram"], f"token={token!r} -> {platforms}"
+            assert platforms == ["feishu"], f"token={token!r} -> {platforms}"
 
 
 class TestDeliverResultWrapping:
@@ -508,7 +389,7 @@ class TestDeliverResultWrapping:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
@@ -516,7 +397,7 @@ class TestDeliverResultWrapping:
                 "id": "test-job",
                 "name": "daily-report",
                 "deliver": "origin",
-                "origin": {"platform": "telegram", "chat_id": "123"},
+                "origin": {"platform": "feishu", "chat_id": "oc_123"},
             }
             _deliver_result(job, "Here is today's summary.")
 
@@ -535,14 +416,14 @@ class TestDeliverResultWrapping:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
             job = {
                 "id": "abc-123",
                 "deliver": "origin",
-                "origin": {"platform": "telegram", "chat_id": "123"},
+                "origin": {"platform": "feishu", "chat_id": "oc_123"},
             }
             _deliver_result(job, "Output.")
 
@@ -556,7 +437,7 @@ class TestDeliverResultWrapping:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
@@ -565,7 +446,7 @@ class TestDeliverResultWrapping:
                 "id": "test-job",
                 "name": "daily-report",
                 "deliver": "origin",
-                "origin": {"platform": "telegram", "chat_id": "123"},
+                "origin": {"platform": "feishu", "chat_id": "oc_123"},
             }
             _deliver_result(job, "Clean output only.")
 
@@ -583,7 +464,7 @@ class TestDeliverResultWrapping:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
@@ -591,7 +472,7 @@ class TestDeliverResultWrapping:
             job = {
                 "id": "voice-job",
                 "deliver": "origin",
-                "origin": {"platform": "telegram", "chat_id": "123"},
+                "origin": {"platform": "feishu", "chat_id": "oc_123"},
             }
             _deliver_result(job, f"Title\nMEDIA:{media_path}")
 
@@ -618,7 +499,7 @@ class TestDeliverResultWrapping:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.DISCORD: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         loop = MagicMock()
         loop.is_running.return_value = True
@@ -633,7 +514,7 @@ class TestDeliverResultWrapping:
         job = {
             "id": "tts-job",
             "deliver": "origin",
-            "origin": {"platform": "discord", "chat_id": "9876"},
+            "origin": {"platform": "feishu", "chat_id": "oc_9876"},
         }
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
@@ -642,7 +523,7 @@ class TestDeliverResultWrapping:
             _deliver_result(
                 job,
                 f"Here is TTS\nMEDIA:{media_path}",
-                adapters={Platform.DISCORD: adapter},
+                adapters={Platform.FEISHU: adapter},
                 loop=loop,
             )
 
@@ -670,7 +551,7 @@ class TestDeliverResultWrapping:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.DISCORD: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         loop = MagicMock()
         loop.is_running.return_value = True
@@ -684,7 +565,7 @@ class TestDeliverResultWrapping:
         job = {
             "id": "img-job",
             "deliver": "origin",
-            "origin": {"platform": "discord", "chat_id": "1234"},
+            "origin": {"platform": "feishu", "chat_id": "oc_1234"},
         }
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
@@ -693,7 +574,7 @@ class TestDeliverResultWrapping:
             _deliver_result(
                 job,
                 f"Chart attached\nMEDIA:{media_path}",
-                adapters={Platform.DISCORD: adapter},
+                adapters={Platform.FEISHU: adapter},
                 loop=loop,
             )
 
@@ -713,7 +594,7 @@ class TestDeliverResultWrapping:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         loop = MagicMock()
         loop.is_running.return_value = True
@@ -727,7 +608,7 @@ class TestDeliverResultWrapping:
         job = {
             "id": "voice-only",
             "deliver": "origin",
-            "origin": {"platform": "telegram", "chat_id": "999"},
+            "origin": {"platform": "feishu", "chat_id": "oc_999"},
         }
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
@@ -736,7 +617,7 @@ class TestDeliverResultWrapping:
             _deliver_result(
                 job,
                 f"[[audio_as_voice]]\nMEDIA:{media_path}",
-                adapters={Platform.TELEGRAM: adapter},
+                adapters={Platform.FEISHU: adapter},
                 loop=loop,
             )
 
@@ -757,7 +638,7 @@ class TestDeliverResultWrapping:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         loop = MagicMock()
         loop.is_running.return_value = True
@@ -771,7 +652,7 @@ class TestDeliverResultWrapping:
         job = {
             "id": "img-job",
             "deliver": "origin",
-            "origin": {"platform": "telegram", "chat_id": "555"},
+            "origin": {"platform": "feishu", "chat_id": "oc_555"},
         }
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
@@ -780,7 +661,7 @@ class TestDeliverResultWrapping:
             _deliver_result(
                 job,
                 "Report\nMEDIA:/tmp/chart.png",
-                adapters={Platform.TELEGRAM: adapter},
+                adapters={Platform.FEISHU: adapter},
                 loop=loop,
             )
 
@@ -795,7 +676,7 @@ class TestDeliverResultWrapping:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
              patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
@@ -803,7 +684,7 @@ class TestDeliverResultWrapping:
             job = {
                 "id": "test-job",
                 "deliver": "origin",
-                "origin": {"platform": "telegram", "chat_id": "123"},
+                "origin": {"platform": "feishu", "chat_id": "oc_123"},
             }
             _deliver_result(job, "Hello!")
 
@@ -816,16 +697,16 @@ class TestDeliverResultWrapping:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         job = {
             "id": "test-job",
             "name": "topic-job",
             "deliver": "origin",
             "origin": {
-                "platform": "telegram",
-                "chat_id": "-1001",
-                "thread_id": "17585",
+                "platform": "feishu",
+                "chat_id": "oc_1001",
+                "thread_id": "om_17585",
             },
         }
 
@@ -834,7 +715,7 @@ class TestDeliverResultWrapping:
             _deliver_result(job, "hello")
 
         send_mock.assert_called_once()
-        assert send_mock.call_args.kwargs["thread_id"] == "17585"
+        assert send_mock.call_args.kwargs["thread_id"] == "om_17585"
 
 
 class TestDeliverResultErrorReturns:
@@ -846,13 +727,13 @@ class TestDeliverResultErrorReturns:
         pconfig = MagicMock()
         pconfig.enabled = False
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         with patch("gateway.config.load_gateway_config", return_value=mock_cfg):
             job = {
                 "id": "disabled",
                 "deliver": "origin",
-                "origin": {"platform": "telegram", "chat_id": "123"},
+                "origin": {"platform": "feishu", "chat_id": "oc_123"},
             }
             result = _deliver_result(job, "Output.")
         assert result is not None
@@ -860,8 +741,8 @@ class TestDeliverResultErrorReturns:
 
     def test_returns_error_for_unresolved_target(self, monkeypatch):
         """Non-local delivery with no resolvable target should return an error."""
-        monkeypatch.delenv("TELEGRAM_HOME_CHANNEL", raising=False)
-        job = {"id": "no-target", "deliver": "telegram"}
+        monkeypatch.delenv("FEISHU_HOME_CHANNEL", raising=False)
+        job = {"id": "no-target", "deliver": "feishu"}
         result = _deliver_result(job, "Output.")
         assert result is not None
         assert "no delivery target" in result
@@ -1311,13 +1192,13 @@ class TestRunJobSessionPersistence:
             "id": "test-job",
             "name": "test",
             "prompt": "hello",
-            "deliver": "telegram",
+            "deliver": "feishu",
         }
         fake_db = MagicMock()
         seen = {}
 
-        (tmp_path / ".env").write_text("TELEGRAM_HOME_CHANNEL=-2002\n")
-        monkeypatch.delenv("TELEGRAM_HOME_CHANNEL", raising=False)
+        (tmp_path / ".env").write_text("FEISHU_HOME_CHANNEL=oc_2002\n")
+        monkeypatch.delenv("FEISHU_HOME_CHANNEL", raising=False)
         monkeypatch.delenv("HERMES_CRON_AUTO_DELIVER_PLATFORM", raising=False)
         monkeypatch.delenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", raising=False)
         monkeypatch.delenv("HERMES_CRON_AUTO_DELIVER_THREAD_ID", raising=False)
@@ -1352,8 +1233,8 @@ class TestRunJobSessionPersistence:
         assert final_response == "ok"
         assert "ok" in output
         assert seen == {
-            "platform": "telegram",
-            "chat_id": "-2002",
+            "platform": "feishu",
+            "chat_id": "oc_2002",
             "thread_id": None,
         }
         assert os.getenv("HERMES_CRON_AUTO_DELIVER_PLATFORM") is None
@@ -1367,13 +1248,13 @@ class TestRunJobSessionPersistence:
                 "id": "threaded-job",
                 "name": "threaded",
                 "prompt": "hello",
-                "deliver": "telegram:-1001:42",
+                "deliver": "feishu:oc_1001:om_42",
             },
             {
                 "id": "threadless-job",
                 "name": "threadless",
                 "prompt": "hello again",
-                "deliver": "telegram:-2002",
+                "deliver": "feishu:oc_2002",
             },
         ]
         fake_db = MagicMock()
@@ -1420,13 +1301,13 @@ class TestRunJobSessionPersistence:
 
         assert seen == [
             {
-                "platform": "telegram",
-                "chat_id": "-1001",
-                "thread_id": "42",
+                "platform": "feishu",
+                "chat_id": "oc_1001",
+                "thread_id": "om_42",
             },
             {
-                "platform": "telegram",
-                "chat_id": "-2002",
+                "platform": "feishu",
+                "chat_id": "oc_2002",
                 "thread_id": None,
             },
         ]
@@ -1816,7 +1697,7 @@ class TestSilentDelivery:
             "id": "monitor-job",
             "name": "monitor",
             "deliver": "origin",
-            "origin": {"platform": "telegram", "chat_id": "123"},
+            "origin": {"platform": "feishu", "chat_id": "oc_123"},
         }
 
     def test_silent_response_suppresses_delivery(self, caplog):
@@ -2357,9 +2238,9 @@ class TestParallelTick:
 
         jobs = [
             {"id": "tg-job", "name": "tg", "deliver": "local",
-             "origin": {"platform": "telegram", "chat_id": "111"}},
+             "origin": {"platform": "feishu", "chat_id": "oc_111"}},
             {"id": "dc-job", "name": "dc", "deliver": "local",
-             "origin": {"platform": "discord", "chat_id": "222"}},
+             "origin": {"platform": "feishu", "chat_id": "oc_222"}},
         ]
 
         with patch("cron.scheduler.get_due_jobs", return_value=jobs), \
@@ -2371,8 +2252,8 @@ class TestParallelTick:
             from cron.scheduler import tick
             tick(verbose=False)
 
-        assert seen["tg-job"] == {"platform": "telegram", "chat_id": "111"}
-        assert seen["dc-job"] == {"platform": "discord", "chat_id": "222"}
+        assert seen["tg-job"] == {"platform": "feishu", "chat_id": "oc_111"}
+        assert seen["dc-job"] == {"platform": "feishu", "chat_id": "oc_222"}
 
     def test_max_parallel_env_var(self, monkeypatch):
         """HERMES_CRON_MAX_PARALLEL=1 should restore serial behaviour."""
@@ -2427,7 +2308,7 @@ class TestDeliverResultTimeoutCancelsFuture:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         loop = MagicMock()
         loop.is_running.return_value = True
@@ -2453,7 +2334,7 @@ class TestDeliverResultTimeoutCancelsFuture:
         job = {
             "id": "timeout-job",
             "deliver": "origin",
-            "origin": {"platform": "telegram", "chat_id": "123"},
+            "origin": {"platform": "feishu", "chat_id": "oc_123"},
         }
 
         standalone_send = AsyncMock(return_value={"success": True})
@@ -2465,7 +2346,7 @@ class TestDeliverResultTimeoutCancelsFuture:
             result = _deliver_result(
                 job,
                 "Hello world",
-                adapters={Platform.TELEGRAM: adapter},
+                adapters={Platform.FEISHU: adapter},
                 loop=loop,
             )
 
@@ -2487,7 +2368,7 @@ class TestDeliverResultTimeoutCancelsFuture:
             success=True,
             message_id="42",
             raw_response={
-                "requested_thread_id": 7072,
+                "requested_thread_id": "om_7072",
                 "thread_fallback": True,
             },
         )
@@ -2497,14 +2378,14 @@ class TestDeliverResultTimeoutCancelsFuture:
         pconfig = MagicMock()
         pconfig.enabled = True
         mock_cfg = MagicMock()
-        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+        mock_cfg.platforms = {Platform.FEISHU: pconfig}
 
         loop = MagicMock()
         loop.is_running.return_value = True
 
         job = {
             "id": "thread-fallback-job",
-            "deliver": "telegram:226252250:7072",
+            "deliver": "feishu:oc_226252250:om_7072",
         }
 
         completed_future = Future()
@@ -2520,18 +2401,18 @@ class TestDeliverResultTimeoutCancelsFuture:
             result = _deliver_result(
                 job,
                 "Hello world",
-                adapters={Platform.TELEGRAM: adapter},
+                adapters={Platform.FEISHU: adapter},
                 loop=loop,
             )
 
         assert result == (
-            "configured thread_id 7072 for telegram:226252250 was not found; "
+            "configured thread_id om_7072 for feishu:oc_226252250 was not found; "
             "delivered without thread_id"
         )
         adapter.send.assert_called_once_with(
-            "226252250",
+            "oc_226252250",
             "Hello world",
-            metadata={"thread_id": "7072"},
+            metadata={"thread_id": "om_7072"},
         )
 
 

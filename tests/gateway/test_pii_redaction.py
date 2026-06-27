@@ -46,8 +46,8 @@ class TestHashHelpers:
 def _make_context(
     user_id="user-123",
     user_name=None,
-    chat_id="telegram:99999",
-    platform=Platform.TELEGRAM,
+    chat_id="feishu:99999",
+    platform=Platform.FEISHU,
     home_channels=None,
 ):
     source = SessionSource(
@@ -85,23 +85,23 @@ class TestBuildSessionContextPromptRedaction:
 
     def test_home_channel_id_hashed(self):
         hc = {
-            Platform.TELEGRAM: HomeChannel(
-                platform=Platform.TELEGRAM,
-                chat_id="telegram:99999",
+            Platform.FEISHU: HomeChannel(
+                platform=Platform.FEISHU,
+                chat_id="feishu:99999",
                 name="Home Chat",
             )
         }
         ctx = _make_context(home_channels=hc)
         prompt = build_session_context_prompt(ctx, redact_pii=True)
         assert "99999" not in prompt
-        assert "telegram:" in prompt  # prefix preserved
+        assert "feishu:" in prompt  # prefix preserved
         assert "Home Chat" in prompt  # name not redacted
 
     def test_home_channel_id_preserved_without_redaction(self):
         hc = {
-            Platform.TELEGRAM: HomeChannel(
-                platform=Platform.TELEGRAM,
-                chat_id="telegram:99999",
+            Platform.FEISHU: HomeChannel(
+                platform=Platform.FEISHU,
+                chat_id="feishu:99999",
                 name="Home Chat",
             )
         }
@@ -122,26 +122,7 @@ class TestBuildSessionContextPromptRedaction:
         p2 = build_session_context_prompt(ctx2, redact_pii=True)
         assert p1 != p2
 
-    def test_discord_ids_not_redacted_even_with_flag(self):
-        """Discord needs real IDs for <@user_id> mentions."""
-        ctx = _make_context(user_id="123456789", platform=Platform.DISCORD)
+    def test_non_feishu_ids_not_redacted_even_with_flag(self):
+        ctx = _make_context(user_id="123456789", platform=Platform.LOCAL)
         prompt = build_session_context_prompt(ctx, redact_pii=True)
         assert "123456789" in prompt
-
-    def test_whatsapp_ids_redacted(self):
-        ctx = _make_context(user_id="+15551234567", platform=Platform.WHATSAPP)
-        prompt = build_session_context_prompt(ctx, redact_pii=True)
-        assert "+15551234567" not in prompt
-        assert "user_" in prompt
-
-    def test_signal_ids_redacted(self):
-        ctx = _make_context(user_id="+15551234567", platform=Platform.SIGNAL)
-        prompt = build_session_context_prompt(ctx, redact_pii=True)
-        assert "+15551234567" not in prompt
-        assert "user_" in prompt
-
-    def test_slack_ids_not_redacted(self):
-        """Slack may need IDs for mentions too."""
-        ctx = _make_context(user_id="U12345ABC", platform=Platform.SLACK)
-        prompt = build_session_context_prompt(ctx, redact_pii=True)
-        assert "U12345ABC" in prompt

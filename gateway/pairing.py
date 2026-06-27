@@ -28,10 +28,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from gateway.whatsapp_identity import (
-    expand_whatsapp_aliases,
-    normalize_whatsapp_identifier,
-)
 from hermes_constants import get_hermes_dir
 from utils import atomic_replace
 
@@ -116,10 +112,7 @@ class PairingStore:
 
     def _normalize_user_id(self, platform: str, user_id: str) -> str:
         """Normalize platform-specific user IDs before persisting them."""
-        raw_user_id = str(user_id or "").strip()
-        if platform == "whatsapp":
-            return normalize_whatsapp_identifier(raw_user_id) or raw_user_id
-        return raw_user_id
+        return str(user_id or "").strip()
 
     def _user_id_aliases(self, platform: str, user_id: str) -> set[str]:
         """Return all known equivalent user IDs for auth/rate-limit checks."""
@@ -128,8 +121,6 @@ class PairingStore:
             return set()
 
         aliases = {raw_user_id, self._normalize_user_id(platform, raw_user_id)}
-        if platform == "whatsapp":
-            aliases.update(expand_whatsapp_aliases(raw_user_id))
         aliases.discard("")
         return aliases
 

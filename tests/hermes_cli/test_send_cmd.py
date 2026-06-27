@@ -66,12 +66,12 @@ def fake_tool(monkeypatch):
 
 
 def test_positional_message_success(fake_tool, capsys):
-    args = _parse(["--to", "telegram", "hello world"])
+    args = _parse(["--to", "feishu", "hello world"])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 0
     assert fake_tool.calls == [
-        {"action": "send", "target": "telegram", "message": "hello world"}
+        {"action": "send", "target": "feishu", "message": "hello world"}
     ]
     out = capsys.readouterr()
     assert "sent" in out.out or out.out == ""  # "sent" is the default success banner
@@ -82,18 +82,18 @@ def test_stdin_message(fake_tool, monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO("piped body\n"))
     # Force isatty to return False so the CLI reads from stdin.
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
-    args = _parse(["--to", "discord:#ops"])
+    args = _parse(["--to", "feishu:oc_ops"])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 0
     assert fake_tool.calls[0]["message"] == "piped body\n"
-    assert fake_tool.calls[0]["target"] == "discord:#ops"
+    assert fake_tool.calls[0]["target"] == "feishu:oc_ops"
 
 
 def test_file_message(fake_tool, tmp_path):
     body = tmp_path / "msg.txt"
     body.write_text("from a file\n")
-    args = _parse(["--to", "slack:#eng", "--file", str(body)])
+    args = _parse(["--to", "feishu:oc_eng", "--file", str(body)])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 0
@@ -102,7 +102,7 @@ def test_file_message(fake_tool, tmp_path):
 
 def test_file_dash_means_stdin(fake_tool, monkeypatch):
     monkeypatch.setattr("sys.stdin", io.StringIO("dash body"))
-    args = _parse(["--to", "telegram", "--file", "-"])
+    args = _parse(["--to", "feishu", "--file", "-"])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 0
@@ -110,7 +110,7 @@ def test_file_dash_means_stdin(fake_tool, monkeypatch):
 
 
 def test_subject_prepends_header(fake_tool):
-    args = _parse(["--to", "telegram", "--subject", "[CI]", "body text"])
+    args = _parse(["--to", "feishu", "--subject", "[CI]", "body text"])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 0
@@ -118,7 +118,7 @@ def test_subject_prepends_header(fake_tool):
 
 
 def test_json_mode_emits_payload(fake_tool, capsys):
-    args = _parse(["--to", "telegram", "--json", "hi"])
+    args = _parse(["--to", "feishu", "--json", "hi"])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 0
@@ -129,7 +129,7 @@ def test_json_mode_emits_payload(fake_tool, capsys):
 
 
 def test_quiet_suppresses_stdout(fake_tool, capsys):
-    args = _parse(["--to", "telegram", "--quiet", "shh"])
+    args = _parse(["--to", "feishu", "--quiet", "shh"])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 0
@@ -155,7 +155,7 @@ def test_missing_target(fake_tool, capsys, monkeypatch):
 
 def test_missing_message(fake_tool, capsys, monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    args = _parse(["--to", "telegram"])
+    args = _parse(["--to", "feishu"])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 2
@@ -165,7 +165,7 @@ def test_missing_message(fake_tool, capsys, monkeypatch):
 
 def test_file_not_found_is_usage_error(fake_tool, capsys, monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
-    args = _parse(["--to", "telegram", "--file", "/nonexistent/does-not-exist.txt"])
+    args = _parse(["--to", "feishu", "--file", "/nonexistent/does-not-exist.txt"])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 2
@@ -178,7 +178,7 @@ def test_file_decode_error_is_usage_error(fake_tool, capsys, monkeypatch, tmp_pa
     bad = tmp_path / "bad-bytes.bin"
     bad.write_bytes(b"\xff\xfe\x00")
 
-    args = _parse(["--to", "telegram", "--file", str(bad)])
+    args = _parse(["--to", "feishu", "--file", str(bad)])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 2
@@ -198,7 +198,7 @@ def test_tool_error_returns_failure_exit(monkeypatch, capsys):
     fake_mod.send_message_tool = _bad_tool
     monkeypatch.setitem(_sys.modules, "tools.send_message_tool", fake_mod)
 
-    args = _parse(["--to", "telegram", "nope"])
+    args = _parse(["--to", "feishu", "nope"])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 1
@@ -216,7 +216,7 @@ def test_skipped_result_is_success(monkeypatch):
     )
     monkeypatch.setitem(_sys.modules, "tools.send_message_tool", fake_mod)
 
-    args = _parse(["--to", "telegram", "dup"])
+    args = _parse(["--to", "feishu", "dup"])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 0
@@ -232,9 +232,9 @@ def test_list_human_output(monkeypatch, capsys):
     import types as _types
 
     fake_dir = _types.ModuleType("gateway.channel_directory")
-    fake_dir.format_directory_for_display = lambda: "Available messaging targets:\n\nTelegram:\n  telegram:-100123\n"
+    fake_dir.format_directory_for_display = lambda: "Available messaging targets:\n\nFeishu:\n  feishu:Ops\n"
     fake_dir.load_directory = lambda: {
-        "platforms": {"telegram": [{"id": "-100123", "name": "Test Group"}]}
+        "platforms": {"feishu": [{"id": "oc_ops", "name": "Ops"}]}
     }
     monkeypatch.setitem(_sys.modules, "gateway.channel_directory", fake_dir)
 
@@ -243,7 +243,7 @@ def test_list_human_output(monkeypatch, capsys):
         send_cmd.cmd_send(args)
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "Telegram" in out
+    assert "Feishu" in out
 
 
 def test_list_json(monkeypatch, capsys):
@@ -253,7 +253,10 @@ def test_list_json(monkeypatch, capsys):
     fake_dir = _types.ModuleType("gateway.channel_directory")
     fake_dir.format_directory_for_display = lambda: "(ignored in json mode)"
     fake_dir.load_directory = lambda: {
-        "platforms": {"telegram": [{"id": "-100123", "name": "Test Group"}]}
+        "platforms": {
+            "feishu": [{"id": "oc_ops", "name": "Ops"}],
+            "telegram": [{"id": "-100123", "name": "Legacy TG"}],
+        }
     }
     monkeypatch.setitem(_sys.modules, "gateway.channel_directory", fake_dir)
 
@@ -263,7 +266,7 @@ def test_list_json(monkeypatch, capsys):
     assert exc.value.code == 0
     out = capsys.readouterr().out
     payload = json.loads(out)
-    assert payload["platforms"]["telegram"][0]["name"] == "Test Group"
+    assert payload["platforms"] == {"feishu": [{"id": "oc_ops", "name": "Ops"}]}
 
 
 def test_list_filter_platform(monkeypatch, capsys):
@@ -274,21 +277,21 @@ def test_list_filter_platform(monkeypatch, capsys):
     fake_dir.format_directory_for_display = lambda: "(should not be called when filter set)"
     fake_dir.load_directory = lambda: {
         "platforms": {
+            "feishu": [{"id": "oc_ops", "name": "Ops"}],
             "telegram": [{"id": "-100123", "name": "TG Chat"}],
-            "discord": [{"id": "555", "name": "bot-home"}],
         }
     }
     monkeypatch.setitem(_sys.modules, "gateway.channel_directory", fake_dir)
 
     # When --list is set, argparse puts the optional bareword in the
     # `message` positional slot (where the send-mode body would go).
-    args = _parse(["--list", "telegram"])
+    args = _parse(["--list", "feishu"])
     with pytest.raises(SystemExit) as exc:
         send_cmd.cmd_send(args)
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "telegram" in out.lower()
-    assert "discord" not in out.lower()
+    assert "feishu" in out.lower()
+    assert "telegram" not in out.lower()
 
 
 def test_list_unknown_platform_fails(monkeypatch, capsys):
@@ -297,7 +300,7 @@ def test_list_unknown_platform_fails(monkeypatch, capsys):
 
     fake_dir = _types.ModuleType("gateway.channel_directory")
     fake_dir.format_directory_for_display = lambda: ""
-    fake_dir.load_directory = lambda: {"platforms": {"telegram": []}}
+    fake_dir.load_directory = lambda: {"platforms": {"feishu": []}}
     monkeypatch.setitem(_sys.modules, "gateway.channel_directory", fake_dir)
 
     args = _parse(["--list", "pigeon-post"])
@@ -321,9 +324,9 @@ def test_register_send_subparser_is_reusable():
     subparsers = parser.add_subparsers(dest="command")
     send_parser = send_cmd.register_send_subparser(subparsers)
     assert send_parser is not None
-    args = parser.parse_args(["send", "--to", "telegram", "hi"])
+    args = parser.parse_args(["send", "--to", "feishu", "hi"])
     assert args.func is send_cmd.cmd_send
-    assert args.to == "telegram"
+    assert args.to == "feishu"
     assert args.message == "hi"
 
 
@@ -337,7 +340,7 @@ def test_load_hermes_env_bridges_config_yaml_scalars(tmp_path, monkeypatch):
 
     This mirrors the gateway/run.py bootstrap behavior: without this, running
     ``hermes send`` from a fresh shell cannot resolve the home channel
-    because ``TELEGRAM_HOME_CHANNEL`` (saved by ``hermes config set``) lives
+    because ``FEISHU_HOME_CHANNEL`` (saved by ``hermes config set``) lives
     in config.yaml, not in .env — and the gateway's config loader reads via
     ``os.getenv(...)``.
     """
@@ -347,11 +350,11 @@ def test_load_hermes_env_bridges_config_yaml_scalars(tmp_path, monkeypatch):
     hermes_home.mkdir()
     (hermes_home / ".env").write_text("SOME_TOKEN=abc123\n")
     (hermes_home / "config.yaml").write_text(
-        "TELEGRAM_HOME_CHANNEL: '5550001111'\nnested:\n  ignored: true\n"
+        "FEISHU_HOME_CHANNEL: 'oc_home'\nnested:\n  ignored: true\n"
     )
 
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-    monkeypatch.delenv("TELEGRAM_HOME_CHANNEL", raising=False)
+    monkeypatch.delenv("FEISHU_HOME_CHANNEL", raising=False)
     monkeypatch.delenv("SOME_TOKEN", raising=False)
 
     # Force get_hermes_home() to re-resolve under the patched env.
@@ -363,7 +366,7 @@ def test_load_hermes_env_bridges_config_yaml_scalars(tmp_path, monkeypatch):
     send_cmd._load_hermes_env()
 
     assert os.environ.get("SOME_TOKEN") == "abc123"
-    assert os.environ.get("TELEGRAM_HOME_CHANNEL") == "5550001111"
+    assert os.environ.get("FEISHU_HOME_CHANNEL") == "oc_home"
 
 
 def test_load_hermes_env_does_not_override_existing(tmp_path, monkeypatch):
@@ -372,10 +375,10 @@ def test_load_hermes_env_does_not_override_existing(tmp_path, monkeypatch):
 
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
-    (hermes_home / "config.yaml").write_text("TELEGRAM_HOME_CHANNEL: yaml_value\n")
+    (hermes_home / "config.yaml").write_text("FEISHU_HOME_CHANNEL: yaml_value\n")
 
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-    monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "env_value")
+    monkeypatch.setenv("FEISHU_HOME_CHANNEL", "env_value")
 
     from importlib import reload
     import hermes_cli.config as _hc_config
@@ -383,7 +386,7 @@ def test_load_hermes_env_does_not_override_existing(tmp_path, monkeypatch):
 
     send_cmd._load_hermes_env()
 
-    assert os.environ.get("TELEGRAM_HOME_CHANNEL") == "env_value"
+    assert os.environ.get("FEISHU_HOME_CHANNEL") == "env_value"
 
 
 def test_load_hermes_env_handles_missing_files(tmp_path, monkeypatch):

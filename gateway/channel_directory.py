@@ -1,5 +1,5 @@
 """
-Channel directory -- cached map of reachable channels/contacts per platform.
+Channel directory -- cached map of reachable Feishu chats/contacts.
 
 Built on gateway startup, refreshed periodically (every 5 min), and saved to
 ~/.hermes/channel_directory.json.  The send_message tool reads this file for
@@ -26,9 +26,7 @@ def _normalize_channel_query(value: str) -> str:
 def _channel_target_name(platform_name: str, channel: Dict[str, Any]) -> str:
     """Return the human-facing target label shown to users for a channel entry."""
     name = channel["name"]
-    if platform_name == "discord" and channel.get("guild"):
-        return f"#{name}"
-    if platform_name != "discord" and channel.get("type"):
+    if platform_name == "feishu" and channel.get("type"):
         return f"{name} ({channel['type']})"
     return name
 
@@ -59,42 +57,13 @@ def _session_entry_name(origin: Dict[str, Any]) -> str:
 
 async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
     """
-    Build a channel directory from connected platform adapters and session data.
+    Build a Feishu channel directory from session data.
 
     Returns the directory dict and writes it to DIRECTORY_PATH.
     """
-    from gateway.config import Platform
-
-    platforms: Dict[str, List[Dict[str, str]]] = {}
-
-    for platform, adapter in adapters.items():
-        try:
-            if platform == Platform.DISCORD:
-                platforms["discord"] = _build_discord(adapter)
-            elif platform == Platform.SLACK:
-                platforms["slack"] = await _build_slack(adapter)
-        except Exception as e:
-            logger.warning("Channel directory: failed to build %s: %s", platform.value, e)
-
-    # Platforms that don't support direct channel enumeration get session-based
-    # discovery automatically.  Skip infrastructure entries that aren't messaging
-    # platforms — everything else falls through to _build_from_sessions().
-    _SKIP_SESSION_DISCOVERY = frozenset({"local", "api_server", "webhook"})
-    for plat in Platform:
-        plat_name = plat.value
-        if plat_name in _SKIP_SESSION_DISCOVERY or plat_name in platforms:
-            continue
-        platforms[plat_name] = _build_from_sessions(plat_name)
-
-    # Include plugin-registered platforms (dynamic enum members aren't in
-    # Platform.__members__, so the loop above misses them).
-    try:
-        from gateway.platform_registry import platform_registry
-        for entry in platform_registry.plugin_entries():
-            if entry.name not in _SKIP_SESSION_DISCOVERY and entry.name not in platforms:
-                platforms[entry.name] = _build_from_sessions(entry.name)
-    except Exception:
-        pass
+    platforms: Dict[str, List[Dict[str, str]]] = {
+        "feishu": _build_from_sessions("feishu"),
+    }
 
     directory = {
         "updated_at": datetime.now().isoformat(),
@@ -107,105 +76,6 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
         logger.warning("Channel directory: failed to write: %s", e)
 
     return directory
-
-
-def _build_discord(adapter) -> List[Dict[str, str]]:
-    """Enumerate all text channels and forum channels the Discord bot can see."""
-    channels = []
-    client = getattr(adapter, "_client", None)
-    if not client:
-        return channels
-
-    try:
-        import discord as _discord  # noqa: F401 — SDK presence check
-    except ImportError:
-        return channels
-
-    for guild in client.guilds:
-        for ch in guild.text_channels:
-            channels.append({
-                "id": str(ch.id),
-                "name": ch.name,
-                "guild": guild.name,
-                "type": "channel",
-            })
-        # Forum channels (type 15) — creating a message auto-spawns a thread post.
-        forums = getattr(guild, "forum_channels", None) or []
-        for ch in forums:
-            channels.append({
-                "id": str(ch.id),
-                "name": ch.name,
-                "guild": guild.name,
-                "type": "forum",
-            })
-        # Also include DM-capable users we've interacted with is not
-        # feasible via guild enumeration; those come from sessions.
-
-    # Merge any DMs from session history
-    channels.extend(_build_from_sessions("discord"))
-    return channels
-
-
-async def _build_slack(adapter) -> List[Dict[str, Any]]:
-    """List Slack channels the bot has joined across all workspaces.
-
-    Uses ``users.conversations`` against each workspace's web client. Pulls
-    public + private channels the bot is a member of, then merges in DMs
-    discovered from session history (IMs aren't useful to enumerate
-    proactively).
-    """
-    team_clients = getattr(adapter, "_team_clients", None) or {}
-    if not team_clients:
-        return _build_from_sessions("slack")
-
-    channels: List[Dict[str, Any]] = []
-    seen_ids: set = set()
-
-    for team_id, client in team_clients.items():
-        try:
-            cursor: Optional[str] = None
-            for _page in range(20):  # safety cap on pagination
-                response = await client.users_conversations(
-                    types="public_channel,private_channel",
-                    exclude_archived=True,
-                    limit=200,
-                    cursor=cursor,
-                )
-                if not response.get("ok"):
-                    logger.warning(
-                        "Channel directory: users.conversations not ok for team %s: %s",
-                        team_id,
-                        response.get("error", "unknown"),
-                    )
-                    break
-                for ch in response.get("channels", []):
-                    cid = ch.get("id")
-                    name = ch.get("name")
-                    if not cid or not name or cid in seen_ids:
-                        continue
-                    seen_ids.add(cid)
-                    channels.append({
-                        "id": cid,
-                        "name": name,
-                        "type": "private" if ch.get("is_private") else "channel",
-                    })
-                cursor = (response.get("response_metadata") or {}).get("next_cursor")
-                if not cursor:
-                    break
-        except Exception as e:
-            logger.warning(
-                "Channel directory: failed to list Slack channels for team %s: %s",
-                team_id, e,
-            )
-            continue
-
-    # Merge in DM/group entries discovered from session history.
-    for entry in _build_from_sessions("slack"):
-        if entry.get("id") not in seen_ids:
-            channels.append(entry)
-            seen_ids.add(entry.get("id"))
-
-    return channels
 
 
 def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
@@ -280,7 +150,7 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
         return None
 
     # 0. Exact ID match — case-sensitive, no normalization. Lets callers pass
-    # raw platform IDs (e.g. Slack "C0B0QV5434G") even when the format guard
+    # raw platform IDs when the format guard
     # in _parse_target_ref hasn't recognized them as explicit.
     raw = name.strip()
     for ch in channels:
@@ -296,15 +166,7 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
         if _normalize_channel_query(_channel_target_name(platform_name, ch)) == query:
             return ch["id"]
 
-    # 2. Guild-qualified match for legacy directory entries
-    if "/" in query:
-        guild_part, ch_part = query.rsplit("/", 1)
-        for ch in channels:
-            guild = ch.get("guild", "").strip().lower()
-            if guild == guild_part and _normalize_channel_query(ch["name"]) == ch_part:
-                return ch["id"]
-
-    # 3. Partial prefix match (only if unambiguous)
+    # 2. Partial prefix match (only if unambiguous)
     matches = [ch for ch in channels if _normalize_channel_query(ch["name"]).startswith(query)]
     if len(matches) == 1:
         return matches[0]["id"]

@@ -364,12 +364,12 @@ class TestUnifiedCronjobTool:
         assert updated["job"]["skill"] is None
 
     def test_create_normalizes_list_form_deliver(self):
-        """deliver=['telegram'] (list) is stored as the string 'telegram'.
+        """deliver=['feishu'] (list) is stored as the string 'feishu'.
 
         Regression for #17139: MCP clients / scripts sometimes pass ``deliver``
-        as an array.  Prior to the fix, ``['telegram']`` was written verbatim
+        as an array.  Prior to the fix, ``['feishu']`` was written verbatim
         to ``jobs.json`` and the scheduler then tried to resolve the literal
-        string ``"['telegram']"`` as a platform, failing with
+        string ``"['feishu']"`` as a platform, failing with
         "no delivery target resolved".
         """
         from cron.jobs import get_job
@@ -379,15 +379,15 @@ class TestUnifiedCronjobTool:
                 action="create",
                 prompt="Daily briefing",
                 schedule="every 1h",
-                deliver=["telegram"],
+                deliver=["feishu"],
             )
         )
         assert created["success"] is True
         stored = get_job(created["job_id"])
-        assert stored["deliver"] == "telegram"
+        assert stored["deliver"] == "feishu"
 
     def test_create_normalizes_multi_element_list_deliver(self):
-        """deliver=['telegram', 'discord'] is stored as 'telegram,discord'."""
+        """deliver=['origin', 'feishu'] is stored as 'origin,feishu'."""
         from cron.jobs import get_job
 
         created = json.loads(
@@ -395,15 +395,15 @@ class TestUnifiedCronjobTool:
                 action="create",
                 prompt="Daily briefing",
                 schedule="every 1h",
-                deliver=["telegram", "discord"],
+                deliver=["origin", "feishu"],
             )
         )
         assert created["success"] is True
         stored = get_job(created["job_id"])
-        assert stored["deliver"] == "telegram,discord"
+        assert stored["deliver"] == "origin,feishu"
 
     def test_update_normalizes_list_form_deliver(self):
-        """update with deliver=['telegram'] stores the canonical string."""
+        """update with deliver=['feishu'] stores the canonical string."""
         from cron.jobs import get_job
 
         created = json.loads(
@@ -413,9 +413,37 @@ class TestUnifiedCronjobTool:
             cronjob(
                 action="update",
                 job_id=created["job_id"],
-                deliver=["telegram"],
+                deliver=["feishu"],
             )
         )
         assert updated["success"] is True
         stored = get_job(created["job_id"])
-        assert stored["deliver"] == "telegram"
+        assert stored["deliver"] == "feishu"
+
+    @pytest.mark.parametrize("legacy_target", ["telegram", "discord:#engineering", "sms:+15551234567"])
+    def test_create_rejects_legacy_delivery_targets(self, legacy_target):
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Daily briefing",
+                schedule="every 1h",
+                deliver=legacy_target,
+            )
+        )
+
+        assert created["success"] is False
+        assert "Unsupported cron delivery target" in created["error"]
+
+    def test_update_rejects_legacy_delivery_targets(self):
+        created = json.loads(cronjob(action="create", prompt="x", schedule="every 1h"))
+
+        updated = json.loads(
+            cronjob(
+                action="update",
+                job_id=created["job_id"],
+                deliver=["feishu", "slack"],
+            )
+        )
+
+        assert updated["success"] is False
+        assert "Unsupported cron delivery target" in updated["error"]

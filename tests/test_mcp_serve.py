@@ -231,6 +231,7 @@ class _FakeToolManager:
 
 class _FakeFastMCP:
     def __init__(self, *args, **kwargs):
+        self.instructions = kwargs.get("instructions", "")
         self._tool_manager = _FakeToolManager()
 
     def tool(self):
@@ -799,33 +800,66 @@ class TestE2EMessagesSend:
 
     def test_send_delegates_to_tool(self, mcp_server_e2e, _event_loop, monkeypatch):
         server, _ = mcp_server_e2e
-        mock = MagicMock(return_value=json.dumps({"success": True, "platform": "telegram"}))
+        mock = MagicMock(return_value=json.dumps({"success": True, "platform": "feishu"}))
         monkeypatch.setattr("tools.send_message_tool.send_message_tool", mock)
 
         result = _run_tool(server, "messages_send",
-                          {"target": "telegram:123456", "message": "Hello!"})
+                          {"target": "feishu:oc_chat", "message": "Hello!"})
         assert result["success"] is True
         mock.assert_called_once()
         call_args = mock.call_args[0][0]
         assert call_args["action"] == "send"
-        assert call_args["target"] == "telegram:123456"
+        assert call_args["target"] == "feishu:oc_chat"
 
 
 class TestE2EChannelsList:
-    def test_channels_from_sessions(self, mcp_server_e2e, _event_loop):
+    def test_channels_from_sessions_filters_legacy_non_feishu_targets(self, mcp_server_e2e, _event_loop):
         server, _ = mcp_server_e2e
         result = _run_tool(server, "channels_list")
-        assert result["count"] == 3
-        targets = {c["target"] for c in result["channels"]}
-        assert "telegram:123456" in targets
-        assert "discord:789" in targets
-        assert "slack:C1234" in targets
+        assert result["count"] == 0
+        assert result["channels"] == []
 
-    def test_channels_platform_filter(self, mcp_server_e2e, _event_loop):
+    def test_channels_platform_filter_does_not_expose_non_delivery_platform(self, mcp_server_e2e, _event_loop):
         server, _ = mcp_server_e2e
         result = _run_tool(server, "channels_list", {"platform": "slack"})
+        assert result["count"] == 0
+        assert result["channels"] == []
+
+    def test_channels_from_sessions_returns_only_feishu_delivery_targets(
+        self,
+        fake_mcp_server,
+        _event_loop,
+        monkeypatch,
+        sample_sessions,
+    ):
+        """Historical sessions are a fallback source, not proof of sendability."""
+        import mcp_serve
+
+        mixed_sessions = {
+            **sample_sessions,
+            "agent:main:feishu:group:oc_chat": {
+                "session_key": "agent:main:feishu:group:oc_chat",
+                "session_id": "20260329_150000_jkl012",
+                "platform": "feishu",
+                "chat_type": "group",
+                "display_name": "Feishu Team",
+                "updated_at": "2026-03-29T15:00:00",
+                "origin": {
+                    "platform": "feishu",
+                    "chat_id": "oc_chat",
+                    "chat_name": "Feishu Team",
+                    "chat_type": "group",
+                },
+            },
+        }
+        monkeypatch.setattr(mcp_serve, "_load_sessions_index", lambda: mixed_sessions)
+
+        server, _ = fake_mcp_server
+        result = _run_tool(server, "channels_list")
+
         assert result["count"] == 1
-        assert result["channels"][0]["target"] == "slack:C1234"
+        assert result["channels"][0]["target"] == "feishu:oc_chat"
+        assert {c["platform"] for c in result["channels"]} == {"feishu"}
 
     def test_channels_with_directory(self, mcp_server_e2e, _event_loop, monkeypatch):
         """Populated channel_directory.json should be unwrapped via the 'platforms' key.
@@ -838,6 +872,9 @@ class TestE2EChannelsList:
         monkeypatch.setattr(mcp_serve, "_load_channel_directory", lambda: {
             "updated_at": "2026-05-07T12:00:00",
             "platforms": {
+                "feishu": [
+                    {"id": "oc_chat", "name": "Feishu Team", "type": "group"},
+                ],
                 "telegram": [
                     {"id": "123456", "name": "Alice", "type": "dm"},
                     {"id": "-100999", "name": "Dev Group", "type": "group"},
@@ -849,9 +886,9 @@ class TestE2EChannelsList:
         })
         server, _ = mcp_server_e2e
         result = _run_tool(server, "channels_list")
-        assert result["count"] == 3
+        assert result["count"] == 1
         targets = {c["target"] for c in result["channels"]}
-        assert targets == {"telegram:123456", "telegram:-100999", "discord:789"}
+        assert targets == {"feishu:oc_chat"}
 
     def test_channels_with_directory_platform_filter(self, mcp_server_e2e, _event_loop, monkeypatch):
         """Platform filter should work against the wrapped 'platforms' payload."""
@@ -859,14 +896,57 @@ class TestE2EChannelsList:
         monkeypatch.setattr(mcp_serve, "_load_channel_directory", lambda: {
             "updated_at": "2026-05-07T12:00:00",
             "platforms": {
-                "telegram": [{"id": "123456", "name": "Alice", "type": "dm"}],
+                "feishu": [{"id": "oc_chat", "name": "Feishu Team", "type": "group"}],
+                "discord": [{"id": "789", "name": "general", "type": "text"}],
+            },
+        })
+        server, _ = mcp_server_e2e
+        result = _run_tool(server, "channels_list", {"platform": "feishu"})
+        assert result["count"] == 1
+        assert result["channels"][0]["target"] == "feishu:oc_chat"
+
+    def test_channels_with_directory_non_delivery_platform_filter_returns_empty(
+        self,
+        mcp_server_e2e,
+        _event_loop,
+        monkeypatch,
+    ):
+        import mcp_serve
+        monkeypatch.setattr(mcp_serve, "_load_channel_directory", lambda: {
+            "updated_at": "2026-05-07T12:00:00",
+            "platforms": {
+                "feishu": [{"id": "oc_chat", "name": "Feishu Team", "type": "group"}],
                 "discord": [{"id": "789", "name": "general", "type": "text"}],
             },
         })
         server, _ = mcp_server_e2e
         result = _run_tool(server, "channels_list", {"platform": "discord"})
-        assert result["count"] == 1
-        assert result["channels"][0]["target"] == "discord:789"
+        assert result["count"] == 0
+        assert result["channels"] == []
+
+
+class TestMCPClientFacingContract:
+    def test_message_channel_descriptions_are_feishu_headless(self, fake_mcp_server):
+        server, _ = fake_mcp_server
+        selected_tools = {
+            "conversations_list",
+            "messages_send",
+            "channels_list",
+        }
+        contract_text = "\n".join(
+            [server.instructions]
+            + [
+                tool.description
+                for tool in server._tool_manager.list_tools()
+                if tool.name in selected_tools
+            ]
+        ).lower()
+
+        for forbidden in ("telegram", "discord", "slack", "whatsapp", "signal", "matrix"):
+            assert forbidden not in contract_text
+        assert "feishu" in contract_text
+        assert "api server" in contract_text
+        assert "local" in contract_text
 
 
 class TestE2EPermissions:

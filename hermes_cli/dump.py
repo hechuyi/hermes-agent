@@ -2,7 +2,7 @@
 Dump command for hermes CLI.
 
 Outputs a compact, plain-text summary of the user's Hermes setup
-that can be copy-pasted into Discord/GitHub/Telegram for support context.
+that can be copy-pasted into GitHub or internal support context.
 No ANSI colors, no checkmarks — just data.
 """
 
@@ -121,26 +121,21 @@ def _cron_summary(hermes_home: Path) -> str:
 
 
 def _configured_platforms() -> list[str]:
-    """Return list of configured messaging platform names."""
-    checks = {
-        "telegram": "TELEGRAM_BOT_TOKEN",
-        "discord": "DISCORD_BOT_TOKEN",
-        "slack": "SLACK_BOT_TOKEN",
-        "whatsapp": "WHATSAPP_ENABLED",
-        "signal": "SIGNAL_HTTP_URL",
-        "email": "EMAIL_ADDRESS",
-        "sms": "TWILIO_ACCOUNT_SID",
-        "matrix": "MATRIX_HOMESERVER",
-        "mattermost": "MATTERMOST_URL",
-        "homeassistant": "HASS_TOKEN",
-        "dingtalk": "DINGTALK_CLIENT_ID",
-        "feishu": "FEISHU_APP_ID",
-        "wecom": "WECOM_BOT_ID",
-        "wecom_callback": "WECOM_CALLBACK_CORP_ID",
-        "weixin": "WEIXIN_ACCOUNT_ID",
-        "qqbot": "QQ_APP_ID",
-    }
-    return [name for name, env in checks.items() if os.getenv(env)]
+    """Return configured Feishu/headless runtime surfaces."""
+    configured = []
+    if os.getenv("FEISHU_APP_ID"):
+        configured.append("feishu")
+    if os.getenv("API_SERVER_KEY"):
+        configured.append("api_server")
+    if os.getenv("API_SERVER_ENABLED", "").strip().lower() in {"true", "1", "yes"}:
+        if "api_server" not in configured:
+            configured.append("api_server")
+    if os.getenv("WEBHOOK_SECRET"):
+        configured.append("webhook")
+    if os.getenv("WEBHOOK_ENABLED", "").strip().lower() in {"true", "1", "yes"}:
+        if "webhook" not in configured:
+            configured.append("webhook")
+    return configured
 
 
 def _memory_provider(config: dict) -> str:

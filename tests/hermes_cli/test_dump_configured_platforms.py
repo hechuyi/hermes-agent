@@ -1,18 +1,26 @@
-def test_configured_platforms_detects_matrix_runtime_homeserver_env(monkeypatch):
-    """Matrix dump detection follows the runtime env contract."""
+def test_configured_platforms_reports_feishu_headless_surfaces(monkeypatch):
+    """The dump command reports only the Feishu/headless runtime surface."""
     from hermes_cli import dump
 
-    monkeypatch.delenv("MATRIX_HOMESERVER_URL", raising=False)
-    monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
+    monkeypatch.setenv("FEISHU_APP_ID", "cli_xxx")
+    monkeypatch.setenv("API_SERVER_ENABLED", "true")
+    monkeypatch.setenv("WEBHOOK_SECRET", "secret")
 
-    assert "matrix" in dump._configured_platforms()
+    assert dump._configured_platforms() == ["feishu", "api_server", "webhook"]
 
 
-def test_configured_platforms_does_not_use_legacy_matrix_homeserver_url(monkeypatch):
-    """The dump command should not report Matrix from a non-runtime env name."""
+def test_configured_platforms_ignores_legacy_messaging_env(monkeypatch):
+    """Legacy platform credentials do not make the Feishu fork look multi-platform."""
     from hermes_cli import dump
 
-    monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
-    monkeypatch.setenv("MATRIX_HOMESERVER_URL", "https://matrix.example.org")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "token")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "token")
+    monkeypatch.setenv("WHATSAPP_ENABLED", "true")
+    monkeypatch.delenv("FEISHU_APP_ID", raising=False)
+    monkeypatch.delenv("API_SERVER_ENABLED", raising=False)
+    monkeypatch.delenv("API_SERVER_KEY", raising=False)
+    monkeypatch.delenv("WEBHOOK_ENABLED", raising=False)
+    monkeypatch.delenv("WEBHOOK_SECRET", raising=False)
 
-    assert "matrix" not in dump._configured_platforms()
+    assert dump._configured_platforms() == []

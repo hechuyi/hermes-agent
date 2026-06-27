@@ -110,42 +110,20 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
         )
         return None
 
-# Valid delivery platforms — used to validate user-supplied platform names
-# in cron delivery targets, preventing env var enumeration via crafted names.
-_KNOWN_DELIVERY_PLATFORMS = frozenset({
-    "telegram", "discord", "slack", "whatsapp", "signal",
-    "matrix", "mattermost", "homeassistant", "dingtalk", "feishu",
-    "wecom", "wecom_callback", "weixin", "sms", "email", "webhook", "bluebubbles",
-    "qqbot", "yuanbao",
-})
+# Valid delivery platforms — cron output delivery is intentionally Feishu-only
+# in this runtime profile.  Web tools, model/provider selection, MCP discovery,
+# and other agent tools are unrelated to this delivery whitelist.
+_KNOWN_DELIVERY_PLATFORMS = frozenset({"feishu"})
+_FEISHU_CHAT_ID_PREFIXES = ("oc_", "ou_", "on_", "chat_", "open_")
+_FEISHU_THREAD_ID_PREFIXES = ("om_", "msg_", "message_")
 
 # Platforms that support a configured cron/notification home target, mapped to
 # the environment variable used by gateway setup/runtime config.
 _HOME_TARGET_ENV_VARS = {
-    "matrix": "MATRIX_HOME_ROOM",
-    "telegram": "TELEGRAM_HOME_CHANNEL",
-    "discord": "DISCORD_HOME_CHANNEL",
-    "slack": "SLACK_HOME_CHANNEL",
-    "signal": "SIGNAL_HOME_CHANNEL",
-    "mattermost": "MATTERMOST_HOME_CHANNEL",
-    "sms": "SMS_HOME_CHANNEL",
-    "email": "EMAIL_HOME_ADDRESS",
-    "dingtalk": "DINGTALK_HOME_CHANNEL",
     "feishu": "FEISHU_HOME_CHANNEL",
-    "wecom": "WECOM_HOME_CHANNEL",
-    "weixin": "WEIXIN_HOME_CHANNEL",
-    "bluebubbles": "BLUEBUBBLES_HOME_CHANNEL",
-    "qqbot": "QQBOT_HOME_CHANNEL",
-    "whatsapp": "WHATSAPP_HOME_CHANNEL",
 }
 
-# Legacy env var names kept for back-compat.  Each entry is the current
-# primary env var → the previous name.  _get_home_target_chat_id falls
-# back to the legacy name if the primary is unset, so users who set the
-# old name before the rename keep working until they migrate.
-_LEGACY_HOME_TARGET_ENV_VARS = {
-    "QQBOT_HOME_CHANNEL": "QQ_HOME_CHANNEL",
-}
+_LEGACY_HOME_TARGET_ENV_VARS = {}
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
 
@@ -282,48 +260,26 @@ def _cron_job_origin_log_suffix(job: dict) -> str:
 
 
 def _plugin_cron_env_var(platform_name: str) -> str:
-    """Return the cron home-channel env var registered by a plugin platform.
-
-    Falls through the platform registry so plugins that set
-    ``cron_deliver_env_var`` on their ``PlatformEntry`` get cron delivery
-    support without editing this module.
-    """
-    try:
-        from hermes_cli.plugins import discover_plugins
-        discover_plugins()  # idempotent
-        from gateway.platform_registry import platform_registry
-        entry = platform_registry.get(platform_name.lower())
-        if entry and entry.cron_deliver_env_var:
-            return entry.cron_deliver_env_var
-    except Exception:
-        pass
+    """Plugin platform cron delivery is disabled in the Feishu-only runtime."""
+    del platform_name
     return ""
 
 
 def _is_known_delivery_platform(platform_name: str) -> bool:
     """Whether ``platform_name`` is a valid cron delivery target.
 
-    Hardcoded built-ins in ``_KNOWN_DELIVERY_PLATFORMS`` are checked first;
-    plugin platforms registered via ``PlatformEntry`` are accepted if they
-    provide a ``cron_deliver_env_var``.
+    Cron output delivery is intentionally limited to Feishu.
     """
-    name = platform_name.lower()
-    if name in _KNOWN_DELIVERY_PLATFORMS:
-        return True
-    return bool(_plugin_cron_env_var(name))
+    return platform_name.lower() in _KNOWN_DELIVERY_PLATFORMS
 
 
 def _resolve_home_env_var(platform_name: str) -> str:
     """Return the env var name for a platform's cron home channel.
 
-    Built-in platforms are in ``_HOME_TARGET_ENV_VARS``; plugin platforms are
-    resolved from the platform registry.
+    Only Feishu exposes a cron home-channel env var in this runtime.
     """
     name = platform_name.lower()
-    env_var = _HOME_TARGET_ENV_VARS.get(name)
-    if env_var:
-        return env_var
-    return _plugin_cron_env_var(name)
+    return _HOME_TARGET_ENV_VARS.get(name, "")
 
 
 def _get_home_target_chat_id(platform_name: str) -> str:
@@ -336,27 +292,30 @@ def _get_home_target_chat_id(platform_name: str) -> str:
         legacy = _LEGACY_HOME_TARGET_ENV_VARS.get(env_var)
         if legacy:
             value = os.getenv(legacy, "")
+    value = value.strip()
+    if platform_name.lower() == "feishu" and value and not value.startswith(_FEISHU_CHAT_ID_PREFIXES):
+        logger.warning(
+            "Ignoring invalid FEISHU_HOME_CHANNEL value for cron delivery: expected Feishu chat/user ID"
+        )
+        return ""
     return value
 
 
-def _get_home_target_thread_id(platform_name: str) -> Optional[str]:
-    """Return the optional thread/topic ID for a platform home target.
+def _valid_feishu_target(chat_id: object, thread_id: object = None) -> bool:
+    """Return whether chat/thread IDs are shaped like Feishu delivery IDs."""
+    chat = str(chat_id or "").strip()
+    if not chat.startswith(_FEISHU_CHAT_ID_PREFIXES):
+        return False
+    if thread_id is None or str(thread_id).strip() == "":
+        return True
+    return str(thread_id).strip().startswith(_FEISHU_THREAD_ID_PREFIXES)
 
-    Telegram-only override: ``TELEGRAM_CRON_THREAD_ID`` takes precedence over
-    ``TELEGRAM_HOME_CHANNEL_THREAD_ID`` for cron delivery. When topic mode is
-    enabled, deliveries that land in the root DM (thread_id unset) end up in
-    the system-only lobby where the user cannot reply — the gateway returns
-    the lobby reminder and drops ``reply_to_message_id`` (#24409). Pointing
-    cron at a dedicated topic via this env var lets replies work as expected
-    without changing the lobby invariant.
-    """
+
+def _get_home_target_thread_id(platform_name: str) -> Optional[str]:
+    """Return the optional Feishu thread/topic ID for a home target."""
     env_var = _resolve_home_env_var(platform_name)
     if not env_var:
         return None
-    if platform_name.lower() == "telegram":
-        cron_thread = os.getenv("TELEGRAM_CRON_THREAD_ID", "").strip()
-        if cron_thread:
-            return cron_thread
     value = os.getenv(f"{env_var}_THREAD_ID", "").strip()
     if not value:
         legacy = _LEGACY_HOME_TARGET_ENV_VARS.get(env_var)
@@ -366,21 +325,13 @@ def _get_home_target_thread_id(platform_name: str) -> Optional[str]:
 
 
 def _iter_home_target_platforms():
-    """Iterate built-in + plugin platform names that expose a home channel.
+    """Iterate Feishu home-channel platform names.
 
-    Used by the ``deliver=origin`` fallback when the job has no origin.
+    Used by the ``deliver=origin`` fallback when the job has no origin and by
+    the ``all`` routing token.
     """
     for name in _HOME_TARGET_ENV_VARS:
         yield name
-    try:
-        from hermes_cli.plugins import discover_plugins
-        discover_plugins()  # idempotent
-        from gateway.platform_registry import platform_registry
-        for entry in platform_registry.plugin_entries():
-            if entry.cron_deliver_env_var and entry.name not in _HOME_TARGET_ENV_VARS:
-                yield entry.name
-    except Exception:
-        pass
 
 
 def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[dict]:
@@ -393,6 +344,19 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
 
     if deliver_value == "origin":
         if origin:
+            if not _is_known_delivery_platform(str(origin["platform"])):
+                logger.warning(
+                    "Job '%s': unsupported origin delivery platform %r",
+                    job.get("id", job.get("name", "?")),
+                    origin.get("platform"),
+                )
+                return None
+            if not _valid_feishu_target(origin.get("chat_id"), origin.get("thread_id")):
+                logger.warning(
+                    "Job '%s': invalid Feishu origin delivery target",
+                    job.get("id", job.get("name", "?")),
+                )
+                return None
             return {
                 "platform": origin["platform"],
                 "chat_id": str(origin["chat_id"]),
@@ -403,6 +367,9 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
         for platform_name in _iter_home_target_platforms():
             chat_id = _get_home_target_chat_id(platform_name)
             if chat_id:
+                thread_id = _get_home_target_thread_id(platform_name)
+                if not _valid_feishu_target(chat_id, thread_id):
+                    continue
                 logger.info(
                     "Job '%s' has deliver=origin but no origin; falling back to %s home channel",
                     job.get("name", job.get("id", "?")),
@@ -411,13 +378,20 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
                 return {
                     "platform": platform_name,
                     "chat_id": chat_id,
-                    "thread_id": _get_home_target_thread_id(platform_name),
+                    "thread_id": thread_id,
                 }
         return None
 
     if ":" in deliver_value:
         platform_name, rest = deliver_value.split(":", 1)
         platform_key = platform_name.lower()
+        if not _is_known_delivery_platform(platform_key):
+            logger.warning(
+                "Job '%s': unsupported cron delivery platform %r in deliver target",
+                job.get("id", job.get("name", "?")),
+                platform_name,
+            )
+            return None
 
         from tools.send_message_tool import _parse_target_ref
 
@@ -442,6 +416,14 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
         except Exception:
             pass
 
+        if not _valid_feishu_target(chat_id, thread_id):
+            logger.warning(
+                "Job '%s': invalid Feishu cron delivery target %r",
+                job.get("id", job.get("name", "?")),
+                deliver_value,
+            )
+            return None
+
         return {
             "platform": platform_name,
             "chat_id": chat_id,
@@ -449,23 +431,29 @@ def _resolve_single_delivery_target(job: dict, deliver_value: str) -> Optional[d
         }
 
     platform_name = deliver_value
+    if not _is_known_delivery_platform(platform_name):
+        return None
     if origin and origin.get("platform") == platform_name:
+        if not _valid_feishu_target(origin.get("chat_id"), origin.get("thread_id")):
+            return None
         return {
             "platform": platform_name,
             "chat_id": str(origin["chat_id"]),
             "thread_id": origin.get("thread_id"),
         }
 
-    if not _is_known_delivery_platform(platform_name):
-        return None
     chat_id = _get_home_target_chat_id(platform_name)
     if not chat_id:
+        return None
+
+    thread_id = _get_home_target_thread_id(platform_name)
+    if not _valid_feishu_target(chat_id, thread_id):
         return None
 
     return {
         "platform": platform_name,
         "chat_id": chat_id,
-        "thread_id": _get_home_target_thread_id(platform_name),
+        "thread_id": thread_id,
     }
 
 
@@ -473,13 +461,14 @@ def _normalize_deliver_value(deliver) -> str:
     """Normalize a stored/submitted ``deliver`` value to its canonical string form.
 
     The contract is that ``deliver`` is a string (``"local"``, ``"origin"``,
-    ``"telegram"``, ``"telegram:-1001:17"``, or comma-separated combinations).
+    ``"feishu"``, ``"feishu:oc_xxx[:message_id]"``, or comma-separated
+    combinations).
     Historically some callers — MCP clients passing an array, direct edits of
     ``jobs.json``, or stale code paths — have stored a list/tuple like
-    ``["telegram"]``.  ``str(["telegram"])`` would serialize to the literal
-    string ``"['telegram']"``, which is not a known platform and fails
-    resolution silently.  Flatten lists/tuples into a comma-separated string
-    so both forms work.  Returns ``"local"`` for anything falsy.
+    ``["feishu"]``.  A raw stringification would serialize to an array-shaped
+    literal, which is not a known platform and fails resolution silently.
+    Flatten lists/tuples into a comma-separated string so both forms work.
+    Returns ``"local"`` for anything falsy.
     """
     if deliver is None or deliver == "":
         return "local"
@@ -490,19 +479,17 @@ def _normalize_deliver_value(deliver) -> str:
 
 
 # Routing intent tokens — resolved at fire time, not create time, so a
-# job created before Telegram was wired up will pick up Telegram once it
-# comes online.  ``all`` expands into the set of connected platforms
-# (those with a configured home chat_id) in _expand_routing_tokens.
+# job created before Feishu was wired up will pick up Feishu once it
+# comes online.  ``all`` expands into the configured Feishu home target.
 _ROUTING_TOKENS = frozenset({"all"})
 
 
 def _expand_routing_tokens(part: str) -> List[str]:
     """Expand a routing-intent token to concrete platform names.
 
-    ``all`` expands to every platform in ``_iter_home_target_platforms()``
-    that has a configured home chat_id right now.  Unknown / non-token
-    values pass through unchanged as a single-element list, so the caller
-    can treat every token uniformly.
+    ``all`` expands to Feishu when it has a configured home chat_id right now.
+    Unknown / non-token values pass through unchanged as a single-element list,
+    so the caller can treat every token uniformly.
     """
     token = part.lower()
     if token not in _ROUTING_TOKENS:
@@ -517,10 +504,10 @@ def _expand_routing_tokens(part: str) -> List[str]:
 def _resolve_delivery_targets(job: dict) -> List[dict]:
     """Resolve all concrete auto-delivery targets for a cron job.
 
-    Accepts the legacy comma-separated ``deliver`` string plus the
-    ``all`` routing-intent token, which expands to every platform with
-    a configured home channel.  Tokens may be combined with explicit
-    targets: ``origin,all`` and ``all,telegram:-100:17`` both work.
+    Accepts the comma-separated ``deliver`` string plus the ``all``
+    routing-intent token, which expands to the configured Feishu home channel.
+    Tokens may be combined with explicit targets: ``origin,all`` and
+    ``all,feishu:oc_xxx:message_id`` both work.
     Duplicate (platform, chat_id, thread_id) tuples are collapsed by the
     existing dedup pass.
     """
@@ -554,7 +541,7 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
 
 
 # Media extension sets — audio routing is centralized in gateway.platforms.base
-# via should_send_media_as_audio() so Telegram-specific rules stay in one place.
+# via should_send_media_as_audio() so platform-specific rules stay in one place.
 _VIDEO_EXTS = frozenset({'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'})
 _IMAGE_EXTS = frozenset({'.jpg', '.jpeg', '.png', '.webp', '.gif'})
 
@@ -1222,7 +1209,7 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     # no_agent short-circuit — the script IS the job, no LLM involvement.
     # ---------------------------------------------------------------
     # This mirrors the classic "run a bash script on a timer, send its
-    # stdout to telegram" watchdog pattern. The agent path is skipped
+    # stdout to the configured delivery target" watchdog pattern. The agent path is skipped
     # entirely: no AIAgent, no prompt, no tool loop, no token spend.
     #
     # We check this BEFORE importing run_agent / constructing SessionDB so
@@ -1416,8 +1403,8 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     #     and HERMES_SESSION_CHAT_ID to populate watcher_platform / chat_id,
     #     which would route completion notifications to the origin chat
     #     instead of via HERMES_CRON_AUTO_DELIVER_* below.
-    #   - tools/tts_tool.py: picks Opus vs MP3 based on
-    #     HERMES_SESSION_PLATFORM == "telegram".
+    #   - tools/tts_tool.py: picks message-platform-specific media encoding
+    #     based on HERMES_SESSION_PLATFORM.
     #   - tools/skills_tool.py + agent/prompt_builder.py: per-platform
     #     skill-disable lists and the system-prompt cache key both consume
     #     HERMES_SESSION_PLATFORM.
