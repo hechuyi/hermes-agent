@@ -442,6 +442,7 @@ class TestPlatformReconnectWatcher:
             "attempts": 25,
             "next_retry": time.monotonic() - 1,
         }
+        before_retry = time.monotonic()
 
         fail_adapter = StubAdapter(
             succeed=False, fatal_error="DNS failure", fatal_retryable=True
@@ -474,6 +475,7 @@ class TestPlatformReconnectWatcher:
         assert info["attempts"] == 26
         assert info["next_retry"] != float("inf")
         assert info["next_retry"] > time.monotonic()
+        assert info["next_retry"] - before_retry <= 300.1
 
     @pytest.mark.asyncio
     async def test_reconnect_exception_never_auto_pauses_retryable_failures(self):
@@ -486,6 +488,7 @@ class TestPlatformReconnectWatcher:
             "attempts": 25,
             "next_retry": time.monotonic() - 1,
         }
+        before_retry = time.monotonic()
 
         real_sleep = asyncio.sleep
 
@@ -517,6 +520,7 @@ class TestPlatformReconnectWatcher:
         assert info["attempts"] == 26
         assert info["next_retry"] != float("inf")
         assert info["next_retry"] > time.monotonic()
+        assert info["next_retry"] - before_retry <= 300.1
 
     @pytest.mark.asyncio
     async def test_reconnect_connect_exception_disconnects_unused_adapter_only(self):

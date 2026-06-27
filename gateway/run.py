@@ -6478,7 +6478,8 @@ class GatewayRunner:
         failures (bad auth, etc.) still drop out of the queue immediately.
         Manual ``/platform pause`` and ``/platform resume`` remain available
         for operator control, but the watcher does not auto-pause retryable
-        failures.
+        failures: parking a platform on a transient DNS/network outage can
+        leave it silent after connectivity has already recovered.
         """
         _BACKOFF_CAP = 300  # 5 minutes max between retries
 
@@ -6578,6 +6579,9 @@ class GatewayRunner:
                             "Reconnect %s failed, next retry in %ds",
                             platform.value, backoff,
                         )
+                        # Anything reaching this branch is retryable: explicit
+                        # non-retryable adapter errors were handled above. Keep
+                        # retrying at the cap instead of auto-pausing.
                         if self.adapters.get(platform) is not adapter:
                             await self._safe_adapter_disconnect(adapter, platform)
                 except Exception as e:
@@ -6596,6 +6600,9 @@ class GatewayRunner:
                         "Reconnect %s error: %s, next retry in %ds",
                         platform.value, e, backoff,
                     )
+                    # Raised reconnect errors are treated as transient
+                    # connection failures and stay queued for the same reason:
+                    # the next successful retry should self-heal the platform.
 
             # Check every 10 seconds for platforms that need reconnection
             for _ in range(10):
