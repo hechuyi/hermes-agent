@@ -209,6 +209,27 @@ class TestBrowserEvalSupervisorPath:
         assert "primitive" in out["error"].lower()
         assert "dom node" in out["error"].lower()
 
+    def test_supervisor_reference_chain_error_becomes_guidance(self, monkeypatch):
+        import tools.browser_tool as bt
+
+        sup = MagicMock()
+        sup.evaluate_runtime.return_value = {
+            "ok": False,
+            "error": "RuntimeError: CDP error: Object reference chain is too long",
+        }
+        _patch_supervisor(monkeypatch, sup)
+        monkeypatch.setattr(
+            bt,
+            "_run_browser_command",
+            lambda *a, **kw: pytest.fail("reference-chain supervisor errors must not be retried"),
+        )
+
+        out = json.loads(bt._browser_eval("document.body"))
+        assert out["success"] is False
+        assert "reference chain" not in out["error"].lower()
+        assert "primitive" in out["error"].lower()
+        assert "dom node" in out["error"].lower()
+
 
 # ---------------------------------------------------------------------------
 # Response shaping: CDPSupervisor.evaluate_runtime

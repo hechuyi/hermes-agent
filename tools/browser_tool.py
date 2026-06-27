@@ -2828,6 +2828,17 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     if _is_camofox_mode():
         return _camofox_eval(expression, task_id)
 
+    def _reference_chain_guidance() -> Dict[str, Any]:
+        return {
+            "success": False,
+            "error": (
+                "Expression returned a live DOM node / NodeList / Window, "
+                "which can't be serialized. Extract a primitive value "
+                "(e.g. .innerText, .href, .src, .value) or use "
+                "JSON.stringify() / a snapshot tool instead."
+            ),
+        }
+
     effective_task_id = _last_session_key(task_id or "default")
 
     # --- Fast path: route through the supervisor's persistent CDP WS ---------
@@ -2862,6 +2873,8 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
             # through to the subprocess path (which would just re-run and
             # produce the same exception, but slower).
             err = sup_result.get("error") or "evaluate_runtime failed"
+            if "reference chain is too long" in err.lower():
+                return json.dumps(_reference_chain_guidance(), ensure_ascii=False)
             if "supervisor" not in err.lower():
                 # Real JS-side error — return it.
                 return json.dumps({"success": False, "error": err}, ensure_ascii=False)
@@ -2888,15 +2901,7 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
             }
             return json.dumps(_copy_fallback_warning(response, result))
         if "reference chain is too long" in err.lower():
-            response = {
-                "success": False,
-                "error": (
-                    "Expression returned a live DOM node / NodeList / Window, "
-                    "which can't be serialized. Extract a primitive value "
-                    "(e.g. .innerText, .href, .src, .value) or use "
-                    "JSON.stringify() / a snapshot tool instead."
-                ),
-            }
+            response = _reference_chain_guidance()
             return json.dumps(_copy_fallback_warning(response, result))
         response = {
             "success": False,
