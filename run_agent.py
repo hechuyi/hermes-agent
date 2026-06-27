@@ -245,6 +245,22 @@ from hermes_cli.persistence_contract import (
 # exhaust the system thread limit (RuntimeError: can't start new thread).
 _openrouter_prewarm_done = threading.Event()
 
+
+def resolve_session_source(platform: Optional[str] = None) -> str:
+    """Return the durable session source label for DB rows/context engines.
+
+    Gateway workers set ``HERMES_SESSION_PLATFORM`` in ``gateway.session_context``;
+    that task-local value is authoritative because ``platform`` and
+    ``os.environ`` can be stale in concurrent gateway turns.
+    """
+    try:
+        from gateway.session_context import get_session_env
+
+        context_source = get_session_env("HERMES_SESSION_PLATFORM", "")
+    except Exception:
+        context_source = ""
+    return context_source or platform or os.environ.get("HERMES_SESSION_SOURCE", "cli")
+
 # =========================================================================
 # Large tool result handler — save oversized output to temp file
 # =========================================================================
@@ -560,7 +576,7 @@ class AIAgent:
                 }
             self._session_db.create_session(
                 session_id=self.session_id,
-                source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                source=resolve_session_source(self.platform),
                 model=self.model,
                 model_config=self._session_init_model_config,
                 system_prompt=self._cached_system_prompt,
@@ -622,7 +638,7 @@ class AIAgent:
             start_context = {
                 "old_session_id": old_session_id,
                 "carry_over_context": carry_over_context,
-                "platform": getattr(self, "platform", None) or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                "platform": resolve_session_source(getattr(self, "platform", None)),
                 "model": getattr(self, "model", ""),
                 "context_length": getattr(engine, "context_length", None),
                 "conversation_id": getattr(self, "_gateway_session_key", None),
@@ -1492,6 +1508,31 @@ class AIAgent:
         result = self._flush_messages_to_session_db(messages, conversation_history)
         self._last_persistence_result = result
         return result
+
+    def _flush_incremental_tool_progress_to_session_db(self, messages: List[Dict]) -> None:
+        """Best-effort DB flush after tool-call progress is appended.
+
+        Tool turns can be long and crash-prone. Flushing after assistant
+        tool_calls / tool results reach canonical history narrows the window
+        where checkpointable tool progress exists only in memory.
+        """
+        try:
+            self._session_messages = messages
+            result = self._flush_messages_to_session_db(messages, None)
+            self._last_persistence_result = result
+            if result.get(PERSISTENCE_ATTEMPTED) and not result.get(PERSISTENCE_OK):
+                logger.warning(
+                    "Incremental tool progress persistence failed: class=%s stage=%s role=%s index=%s",
+                    result.get(PERSISTENCE_FAILURE_CLASS),
+                    result.get(PERSISTENCE_STAGE),
+                    result.get(PERSISTENCE_ROLE),
+                    result.get(PERSISTENCE_MESSAGE_INDEX),
+                )
+        except Exception as exc:
+            logger.warning(
+                "Incremental tool progress persistence raised: %s",
+                self._sanitize_persistence_reason(exc),
+            )
 
     @staticmethod
     def _assistant_content_digest(content: Any) -> Optional[str]:

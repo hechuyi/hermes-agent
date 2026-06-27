@@ -779,6 +779,14 @@ class ContextCompressor(ContextEngine):
         tokens = prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens
         if tokens < self.threshold_tokens:
             return False
+        if (
+            self.awaiting_real_usage_after_compression
+            and self.last_prompt_tokens == -1
+            and self.last_compression_rough_tokens > 0
+        ):
+            tolerated_overage = max(4096, int(self.threshold_tokens * 0.05))
+            if tokens <= self.threshold_tokens + tolerated_overage:
+                return False
         # Anti-thrashing: back off if recent compressions were ineffective
         if self._ineffective_compression_count >= 2:
             if not self.quiet_mode:

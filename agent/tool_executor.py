@@ -70,6 +70,21 @@ def _ra():
     return run_agent
 
 
+def _flush_incremental_tool_progress(agent, messages: list) -> None:
+    """Best-effort persistence after canonical tool progress is appended."""
+    try:
+        flush = getattr(agent, "_flush_incremental_tool_progress_to_session_db", None)
+        if callable(flush):
+            flush(messages)
+            return
+        raw_flush = getattr(agent, "_flush_messages_to_session_db", None)
+        if callable(raw_flush):
+            agent._session_messages = messages
+            raw_flush(messages, None)
+    except Exception as exc:
+        logger.debug("incremental tool progress flush failed: %s", exc)
+
+
 def _tool_search_scoped_names(agent) -> frozenset[str]:
     """Return deferred tool names this agent may invoke through tool_call."""
     try:
@@ -147,6 +162,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 f"[Tool execution cancelled — {tc.function.name} was skipped due to user interrupt]",
                 tc.id,
             ))
+        _flush_incremental_tool_progress(agent, messages)
         return
 
     # ── Parse args + pre-execution bookkeeping ───────────────────────
@@ -511,6 +527,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         # Same as the sequential path: drain between each collected
         # result so the steer lands as early as possible.
         agent._apply_pending_steer_to_tool_results(messages, 1)
+        _flush_incremental_tool_progress(agent, messages)
 
     # ── Per-turn aggregate budget enforcement ─────────────────────────
     num_tools = len(parsed_calls)
@@ -546,6 +563,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     "tool_call_id": skipped_tc.id,
                 }
                 messages.append(skip_msg)
+            _flush_incremental_tool_progress(agent, messages)
             break
 
         function_name = tool_call.function.name
@@ -938,6 +956,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
         # injection lands as soon as a tool finishes — not after the
         # entire batch.  The model sees it on the next API iteration.
         agent._apply_pending_steer_to_tool_results(messages, 1)
+        _flush_incremental_tool_progress(agent, messages)
 
         if not agent.quiet_mode:
             if agent.verbose_logging:
@@ -958,6 +977,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     f"[Tool execution skipped — {skipped_name} was not started. User sent a new message]",
                     skipped_tc.id,
                 ))
+            _flush_incremental_tool_progress(agent, messages)
             break
 
         if agent.tool_delay > 0 and i < len(assistant_message.tool_calls):

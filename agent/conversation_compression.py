@@ -474,9 +474,15 @@ def compress_context(
             except Exception:
                 os.environ["HERMES_SESSION_ID"] = agent.session_id
             agent._session_db_created = False
+            try:
+                from run_agent import resolve_session_source
+
+                session_source = resolve_session_source(getattr(agent, "platform", None))
+            except Exception:
+                session_source = agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli")
             agent._session_db.create_session(
                 session_id=agent.session_id,
-                source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                source=session_source,
                 model=agent.model,
                 model_config=agent._session_init_model_config,
                 parent_session_id=old_session_id,
@@ -533,11 +539,13 @@ def compress_context(
     # Warn on repeated compressions (quality degrades with each pass)
     _cc = agent.context_compressor.compression_count
     if _cc >= 2:
-        agent._vprint(
-            f"{agent.log_prefix}⚠️  Session compressed {_cc} times — "
-            f"accuracy may degrade. Consider /new to start fresh.",
-            force=True,
-        )
+        _warning_key = f"repeated-compression:{_cc}"
+        if getattr(agent, "_last_repeated_compression_warning_key", None) != _warning_key:
+            agent._last_repeated_compression_warning_key = _warning_key
+            agent._emit_status(
+                f"⚠️  Session compressed {_cc} times — "
+                f"accuracy may degrade. Consider /new to start fresh."
+            )
 
     # Keep the post-compression rough estimate for diagnostics, but do not
     # treat it as provider-reported prompt usage. Schema-heavy rough estimates

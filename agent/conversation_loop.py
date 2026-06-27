@@ -3734,6 +3734,7 @@ def run_conversation(
 
                     assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
                     messages.append(assistant_msg)
+                    agent._flush_incremental_tool_progress_to_session_db(messages)
                     for tc in assistant_message.tool_calls:
                         if tc.function.name not in agent.valid_tool_names:
                             content = f"Tool '{tc.function.name}' does not exist. Available tools: {available}"
@@ -3745,6 +3746,7 @@ def run_conversation(
                             "tool_call_id": tc.id,
                             "content": content,
                         })
+                    agent._flush_incremental_tool_progress_to_session_db(messages)
                     continue
                 # Reset retry counter on successful tool call validation
                 agent._invalid_tool_retries = 0
@@ -3817,6 +3819,7 @@ def run_conversation(
                         # Append the assistant message with its (broken) tool_calls
                         recovery_assistant = agent._build_assistant_message(assistant_message, finish_reason)
                         messages.append(recovery_assistant)
+                        agent._flush_incremental_tool_progress_to_session_db(messages)
                         
                         # Respond with tool error results for each tool call
                         invalid_names = {name for name, _ in invalid_json_args}
@@ -3836,6 +3839,7 @@ def run_conversation(
                                 "tool_call_id": tc.id,
                                 "content": tool_result,
                             })
+                        agent._flush_incremental_tool_progress_to_session_db(messages)
                         continue
                 
                 # Reset retry counter on successful JSON validation
@@ -3906,6 +3910,7 @@ def run_conversation(
 
                 messages.append(assistant_msg)
                 agent._emit_interim_assistant_message(assistant_msg)
+                agent._flush_incremental_tool_progress_to_session_db(messages)
 
                 # Close any open streaming display (response box, reasoning
                 # box) before tool execution begins.  Intermediate turns may
