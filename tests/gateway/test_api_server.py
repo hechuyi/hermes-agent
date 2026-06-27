@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import stat
+import threading
 import time
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -437,6 +438,130 @@ class TestAuth:
 
 
 # ---------------------------------------------------------------------------
+# Concurrency cap (gateway.api_server.max_concurrent_runs)
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrencyCap:
+    def test_adapter_reads_configured_concurrency_cap(self):
+        cfg = {"gateway": {"api_server": {"max_concurrent_runs": 3}}}
+        with patch("hermes_cli.config.load_config", return_value=cfg):
+            adapter = APIServerAdapter(PlatformConfig(enabled=True))
+
+        assert adapter._max_concurrent_runs == 3
+
+    def test_adapter_defaults_concurrency_cap_to_10_when_unset(self):
+        with patch("hermes_cli.config.load_config", return_value={}):
+            adapter = APIServerAdapter(PlatformConfig(enabled=True))
+
+        assert adapter._max_concurrent_runs == 10
+
+    def test_concurrency_gate_counts_chat_responses_and_runs(self):
+        adapter = _make_adapter()
+        adapter._max_concurrent_runs = 2
+        adapter._inflight_agent_runs = 1
+        adapter._run_streams = {"run_busy": object()}
+
+        resp = adapter._concurrency_limited_response()
+
+        assert resp is not None
+        assert resp.status == 429
+        assert resp.headers["Retry-After"] == "1"
+        data = json.loads(resp.text)
+        assert data["error"]["type"] == "rate_limit_error"
+        assert data["error"]["code"] == "rate_limit_exceeded"
+        assert "max 2" in data["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_run_agent_tracks_inflight_counter_until_agent_finishes(self, adapter):
+        started = threading.Event()
+        release = threading.Event()
+
+        class BlockingAgent:
+            session_prompt_tokens = 1
+            session_completion_tokens = 2
+            session_total_tokens = 3
+
+            def run_conversation(self, **kwargs):
+                started.set()
+                assert release.wait(timeout=2)
+                return {"final_response": "ok"}
+
+        with patch.object(adapter, "_create_agent", return_value=BlockingAgent()):
+            task = asyncio.create_task(
+                adapter._run_agent(
+                    user_message="hello",
+                    conversation_history=[],
+                    session_id="session-123",
+                )
+            )
+            try:
+                assert await asyncio.to_thread(started.wait, 2)
+                assert getattr(adapter, "_inflight_agent_runs", None) == 1
+            finally:
+                release.set()
+                await asyncio.wait_for(task, timeout=2)
+
+        assert adapter._inflight_agent_runs == 0
+
+    @pytest.mark.asyncio
+    async def test_chat_completions_returns_stable_429_when_cap_reached(self, adapter):
+        adapter._max_concurrent_runs = 1
+        adapter._inflight_agent_runs = 0
+        adapter._run_streams = {"run_busy": object()}
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/v1/chat/completions", json={"model": "test"})
+            data = await resp.json()
+
+        assert resp.status == 429
+        assert resp.headers["Retry-After"] == "1"
+        assert data["error"]["type"] == "rate_limit_error"
+        assert data["error"]["code"] == "rate_limit_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_responses_returns_stable_429_when_cap_reached(self, adapter):
+        adapter._max_concurrent_runs = 1
+        adapter._inflight_agent_runs = 0
+        adapter._run_streams = {"run_busy": object()}
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/v1/responses", json={"model": "test"})
+            data = await resp.json()
+
+        assert resp.status == 429
+        assert resp.headers["Retry-After"] == "1"
+        assert data["error"]["type"] == "rate_limit_error"
+        assert data["error"]["code"] == "rate_limit_exceeded"
+
+    @pytest.mark.asyncio
+    async def test_runs_returns_stable_429_when_cap_reached(self, adapter):
+        adapter._max_concurrent_runs = 1
+        adapter._inflight_agent_runs = 0
+        adapter._run_streams = {"run_busy": object()}
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post("/v1/runs", json={"model": "test"})
+            data = await resp.json()
+
+        assert resp.status == 429
+        assert resp.headers["Retry-After"] == "1"
+        assert data["error"]["type"] == "rate_limit_error"
+        assert data["error"]["code"] == "rate_limit_exceeded"
+
+    def test_zero_concurrency_cap_disables_gate(self):
+        adapter = _make_adapter()
+        adapter._max_concurrent_runs = 0
+        adapter._inflight_agent_runs = 999
+        adapter._run_streams = {"run_busy": object()}
+
+        assert adapter._concurrency_limited_response() is None
+
+
+# ---------------------------------------------------------------------------
 # Helpers for HTTP tests
 # ---------------------------------------------------------------------------
 
@@ -466,6 +591,7 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/v1/toolsets", adapter._handle_toolsets)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
     app.router.add_post("/v1/responses", adapter._handle_responses)
+    app.router.add_post("/v1/runs", adapter._handle_runs)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
     app.router.add_delete("/v1/responses/{response_id}", adapter._handle_delete_response)
     return app

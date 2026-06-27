@@ -1776,6 +1776,14 @@ DEFAULT_CONFIG = {
         # multi-tool agent turn. Bridged to HERMES_MEDIA_TRUST_RECENT_SECONDS.
         # Only consulted when ``strict`` is true.
         "trust_recent_files_seconds": 600,
+
+        # OpenAI-compatible API server platform.
+        "api_server": {
+            # Maximum concurrent agent runs accepted across /v1/runs,
+            # /v1/chat/completions, and /v1/responses. Requests beyond this
+            # cap receive HTTP 429 with Retry-After. Set to 0 to disable.
+            "max_concurrent_runs": 10,
+        },
     },
 
     # Session storage — controls automatic cleanup of ~/.hermes/state.db.
