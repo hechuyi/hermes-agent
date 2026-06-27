@@ -642,6 +642,7 @@ class TestPreflightCompression:
         agent.compression_enabled = True
         agent.context_compressor.context_length = 2000
         agent.context_compressor.threshold_tokens = 200
+        agent.context_compressor.last_prompt_tokens = 100
 
         big_history = []
         for i in range(20):
@@ -665,6 +666,7 @@ class TestPreflightCompression:
         # And vetoed: even though tokens >= threshold, no compression ran.
         mock_compress.assert_not_called()
         assert result["completed"] is True
+        assert agent.context_compressor.last_prompt_tokens > 100
 
     def test_preflight_seeds_display_tokens_when_compression_aborts(self, agent):
         """Display should reflect fresh preflight size when compression no-ops."""

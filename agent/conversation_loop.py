@@ -695,6 +695,17 @@ def run_conversation(
         )
 
         _preflight_deferred = _defer_preflight(_preflight_tokens)
+        if (
+            not _preflight_deferred
+            and _preflight_tokens > (_compressor.last_prompt_tokens or 0)
+        ):
+            # The CLI/ACP context display reads last_prompt_tokens, which
+            # otherwise updates only from successful provider usage. Seed it
+            # with the fresh preflight estimate so a failed/no-op compression
+            # or anti-thrash veto does not leave the display stuck at an older,
+            # smaller value. Skipped for deferred estimates because those are
+            # known noisy relative to the last real provider prompt.
+            _compressor.last_prompt_tokens = _preflight_tokens
         _should_preflight_compress = (
             False
             if _preflight_deferred
@@ -709,15 +720,6 @@ def run_conversation(
                 f"{_compressor.threshold_tokens:,}",
                 f"{getattr(_compressor, 'last_real_prompt_tokens', 0):,}",
             )
-
-        if _should_preflight_compress and _preflight_tokens > (
-            _compressor.last_prompt_tokens or 0
-        ):
-            # The CLI/ACP context display reads last_prompt_tokens, which
-            # otherwise updates only from successful provider usage. Seed it
-            # with the fresh preflight estimate so a failed/no-op compression
-            # does not leave the display stuck at an older, smaller value.
-            _compressor.last_prompt_tokens = _preflight_tokens
 
         if _should_preflight_compress:
             logger.info(
