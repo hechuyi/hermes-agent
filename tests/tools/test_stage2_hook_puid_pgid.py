@@ -15,8 +15,10 @@ by the Dockerfile.  This test targets the post-rework location.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -157,3 +159,56 @@ def test_uid_gid_validation_rejects_invalid_values(
     assert var_name in proc.stderr
     assert f"'{value}'" in proc.stderr
     assert "expected integer in range 1-65534 and not 0/root" in proc.stderr
+
+
+def test_stage2_hook_runs_config_migration_as_hermes(stage2_text: str) -> None:
+    assert "scripts/docker_config_migrate.py" in stage2_text
+    assert 'as_hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/docker_config_migrate.py"' in stage2_text
+    assert "docker_config_migration_failed" in stage2_text
+    assert "exit \"$migration_status\"" in stage2_text
+
+
+def test_stage2_hook_documents_config_migration_opt_out(stage2_text: str) -> None:
+    assert "HERMES_SKIP_CONFIG_MIGRATION" in stage2_text
+
+
+def test_stage2_hook_does_not_warning_continue_config_migration_failure(stage2_text: str) -> None:
+    migration_block_start = stage2_text.index("# --- Migrate persisted config schema ---")
+    migration_block_end = stage2_text.index("# auth.json:", migration_block_start)
+    migration_block = stage2_text[migration_block_start:migration_block_end]
+    assert "Warning: docker_config_migrate.py failed; continuing" not in migration_block
+    assert "|| echo" not in migration_block
+
+
+def _migration_block(stage2_text: str) -> str:
+    start = stage2_text.index("# --- Migrate persisted config schema ---")
+    end = stage2_text.index("# auth.json:", start)
+    block = stage2_text[start:end]
+    match = re.search(r"(if \[ -f \"\$HERMES_HOME/config\.yaml\" \]; then\n(?:.*\n)*?fi)", block)
+    assert match, "expected stage2 config migration if-block"
+    return match.group(1)
+
+
+def test_stage2_hook_propagates_config_migration_failure_status(stage2_text: str) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        home = tmp_path / "home"
+        home.mkdir()
+        (home / "config.yaml").write_text("_config_version: 0\n", encoding="utf-8")
+        script = (
+            "set -eu\n"
+            f'HERMES_HOME="{home}"\n'
+            'INSTALL_DIR="/opt/hermes"\n'
+            'as_hermes() { return 37; }\n'
+            + _migration_block(stage2_text)
+            + "\n"
+        )
+        proc = subprocess.run([bash, "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 37
+    assert "failure_class=docker_config_migration_failed" in proc.stderr
+    assert "stage=config_migration" in proc.stderr
+    assert "action=abort" in proc.stderr
+    assert "exit_status=37" in proc.stderr

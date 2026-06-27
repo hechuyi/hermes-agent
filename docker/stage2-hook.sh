@@ -221,16 +221,16 @@ if [ "$needs_chown" = true ]; then
                 echo "[stage2] Warning: chown $HERMES_HOME/$sub failed (rootless container?) — continuing"
         fi
     done
-    # Hermes-owned trees under $INSTALL_DIR must be re-chowned when the UID
-    # is remapped — otherwise:
-    #   - .venv: lazy_deps.py cannot install runtime Python packages
-    #     with EACCES (#15012, #21100)
-    #   - node_modules: root-level dependencies (browser tooling / Node-backed
-    #     helpers) that runtime code may walk/update.
-    # The set mirrors the build-time `chown -R hermes:hermes` line in the
-    # Dockerfile — keep them in sync if the Dockerfile chown set changes.
-    # These are under $INSTALL_DIR (not $HERMES_HOME), so the bind-mount
-    # concern doesn't apply — recursive is fine.
+fi
+
+# Hermes-owned build trees under $INSTALL_DIR must be re-chowned whenever
+# they are not owned by the runtime hermes UID. This is intentionally
+# independent of the $HERMES_HOME ownership check above: usermod may already
+# make /opt/data match the remapped UID while /opt/hermes/.venv and
+# /opt/hermes/node_modules still carry the image build-time UID.
+venv_owner=$(stat -c %u "$INSTALL_DIR/.venv" 2>/dev/null || echo "")
+if [ -n "$venv_owner" ] && [ "$venv_owner" != "$actual_hermes_uid" ]; then
+    echo "[stage2] Fixing ownership of build trees under $INSTALL_DIR to hermes ($actual_hermes_uid)"
     chown -R hermes:hermes \
         "$INSTALL_DIR/.venv" \
         "$INSTALL_DIR/node_modules" \
@@ -248,6 +248,23 @@ fi
 if [ -d "$HERMES_HOME/profiles" ]; then
     chown -R hermes:hermes "$HERMES_HOME/profiles" 2>/dev/null || true
 fi
+
+# Reset ownership of hermes-owned top-level state files on every boot.
+# These files are easy to create as root via `docker exec <container> hermes`
+# and are not covered by the targeted subdirectory chown above. Keep this as
+# an explicit allowlist so unrelated host-owned files in a bind-mounted
+# $HERMES_HOME are not touched.
+for f in \
+    auth.json auth.lock .env \
+    state.db state.db-shm state.db-wal \
+    hermes_state.db \
+    response_store.db response_store.db-shm response_store.db-wal \
+    gateway.pid gateway.lock gateway_state.json processes.json \
+    active_profile; do
+    if [ -e "$HERMES_HOME/$f" ]; then
+        chown hermes:hermes "$HERMES_HOME/$f" 2>/dev/null || true
+    fi
+done
 
 # --- config.yaml permissions ---
 # Ensure config.yaml is readable by the hermes runtime user even if it
@@ -302,6 +319,21 @@ seed_one "SOUL.md" "docker/SOUL.md"
 if [ -f "$HERMES_HOME/.env" ]; then
     chown hermes:hermes "$HERMES_HOME/.env" 2>/dev/null || true
     chmod 600 "$HERMES_HOME/.env" 2>/dev/null || true
+fi
+
+# --- Migrate persisted config schema ---
+# Docker image upgrades replace code under $INSTALL_DIR but preserve the
+# mounted $HERMES_HOME. Run non-interactive config migrations after first-boot
+# seeding and before supervised services start. Set
+# HERMES_SKIP_CONFIG_MIGRATION=1 for controlled/manual migrations.
+if [ -f "$HERMES_HOME/config.yaml" ]; then
+    if as_hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/scripts/docker_config_migrate.py"; then
+        :
+    else
+        migration_status=$?
+        echo "[stage2] ERROR failure_class=docker_config_migration_failed stage=config_migration action=abort exit_status=$migration_status" >&2
+        exit "$migration_status"
+    fi
 fi
 
 # auth.json: bootstrap from env on first boot only. Same semantics as the
