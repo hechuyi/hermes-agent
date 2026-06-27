@@ -2617,11 +2617,15 @@ class TestConcurrentToolExecution:
         )
         agent._checkpoint_mgr.enabled = True
 
-        with patch("run_agent.handle_function_call", return_value="result_read_file"):
+        with patch("run_agent.handle_function_call", return_value="result_read_file") as mock_hfc:
             with patch.object(agent._checkpoint_mgr, "ensure_checkpoint") as cp_mock:
                 agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
 
         cp_mock.assert_not_called()
+        mock_hfc.assert_called_once()
+        assert mock_hfc.call_args.args == ("read_file", {"path": "other.py"}, "task-1")
+        assert mock_hfc.call_args.kwargs["tool_call_id"] == "c2"
+        assert mock_hfc.call_args.kwargs["skip_pre_tool_call_hook"] is True
 
     def test_concurrent_blocked_patch_skips_checkpoint(self, agent, monkeypatch):
         """Concurrent path: blocked patch should not trigger checkpoint."""
@@ -2640,11 +2644,15 @@ class TestConcurrentToolExecution:
         )
         agent._checkpoint_mgr.enabled = True
 
-        with patch("run_agent.handle_function_call", return_value="result_read_file"):
+        with patch("run_agent.handle_function_call", return_value="result_read_file") as mock_hfc:
             with patch.object(agent._checkpoint_mgr, "ensure_checkpoint") as cp_mock:
                 agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
 
         cp_mock.assert_not_called()
+        mock_hfc.assert_called_once()
+        assert mock_hfc.call_args.args == ("read_file", {"path": "other.py"}, "task-1")
+        assert mock_hfc.call_args.kwargs["tool_call_id"] == "c2"
+        assert mock_hfc.call_args.kwargs["skip_pre_tool_call_hook"] is True
 
     def test_concurrent_blocked_terminal_skips_checkpoint(self, agent, monkeypatch):
         """Concurrent path: blocked destructive terminal should not trigger checkpoint."""
@@ -2663,12 +2671,16 @@ class TestConcurrentToolExecution:
         )
         agent._checkpoint_mgr.enabled = True
 
-        with patch("run_agent.handle_function_call", return_value="result_read_file"):
+        with patch("run_agent.handle_function_call", return_value="result_read_file") as mock_hfc:
             with patch.object(agent._checkpoint_mgr, "ensure_checkpoint") as cp_mock:
                 with patch("agent.tool_executor._is_destructive_command", return_value=True):
                     agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
 
         cp_mock.assert_not_called()
+        mock_hfc.assert_called_once()
+        assert mock_hfc.call_args.args == ("read_file", {"path": "other.py"}, "task-1")
+        assert mock_hfc.call_args.kwargs["tool_call_id"] == "c2"
+        assert mock_hfc.call_args.kwargs["skip_pre_tool_call_hook"] is True
 
     def test_concurrent_blocked_write_does_not_steal_slot_from_allowed_write(
         self, agent, monkeypatch
@@ -2698,11 +2710,19 @@ class TestConcurrentToolExecution:
         )
         agent._checkpoint_mgr.enabled = True
 
-        with patch("run_agent.handle_function_call", return_value="result_write_file"):
+        with patch("run_agent.handle_function_call", return_value="result_write_file") as mock_hfc:
             with patch.object(agent._checkpoint_mgr, "ensure_checkpoint") as cp_mock:
                 agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
 
         cp_mock.assert_called_once()
+        mock_hfc.assert_called_once()
+        assert mock_hfc.call_args.args == (
+            "write_file",
+            {"path": "dup.txt", "content": "allowed"},
+            "task-1",
+        )
+        assert mock_hfc.call_args.kwargs["tool_call_id"] == "c2"
+        assert mock_hfc.call_args.kwargs["skip_pre_tool_call_hook"] is True
 
     def test_blocked_memory_tool_does_not_reset_counter(self, agent, monkeypatch):
         """Blocked memory tool should not reset the nudge counter."""
