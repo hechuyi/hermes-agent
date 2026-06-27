@@ -133,6 +133,21 @@ _RATE_LIMIT_PATTERNS = [
     "servicequotaexceededexception",
 ]
 
+_OVERLOADED_PATTERNS = [
+    "overloaded",
+    "temporarily overloaded",
+    "service is temporarily overloaded",
+    "service may be temporarily overloaded",
+    "server is overloaded",
+    "server overloaded",
+    "service overloaded",
+    "service is overloaded",
+    "upstream overloaded",
+    "currently overloaded",
+    "at capacity",
+    "over capacity",
+]
+
 # Usage-limit patterns that need disambiguation (could be billing OR rate_limit)
 _USAGE_LIMIT_PATTERNS = [
     "usage limit",
@@ -830,7 +845,11 @@ def _classify_by_status(
         )
 
     if status_code == 429:
-        # Already checked long_context_tier above; this is a normal rate limit
+        if any(p in error_msg for p in _OVERLOADED_PATTERNS):
+            return result_fn(
+                FailoverReason.overloaded,
+                retryable=True,
+            )
         return result_fn(
             FailoverReason.rate_limit,
             retryable=True,
@@ -1180,6 +1199,9 @@ def _classify_by_message(
             should_fallback=True,
         )
 
+    if any(p in error_msg for p in _OVERLOADED_PATTERNS):
+        return result_fn(FailoverReason.overloaded, retryable=True)
+
     # Rate limit patterns
     if any(p in error_msg for p in _RATE_LIMIT_PATTERNS):
         return result_fn(
@@ -1261,18 +1283,24 @@ def _extract_status_code(error: Exception) -> Optional[int]:
 
 def _extract_error_body(error: Exception) -> dict:
     """Extract the structured error body from an SDK exception."""
-    body = getattr(error, "body", None)
-    if isinstance(body, dict):
-        return body
-    # Some errors have .response.json()
-    response = getattr(error, "response", None)
-    if response is not None:
-        try:
-            json_body = response.json()
-            if isinstance(json_body, dict):
-                return json_body
-        except Exception:
-            pass
+    current = error
+    for _ in range(5):
+        body = getattr(current, "body", None)
+        if isinstance(body, dict):
+            return body
+        # Some errors have .response.json()
+        response = getattr(current, "response", None)
+        if response is not None:
+            try:
+                json_body = response.json()
+                if isinstance(json_body, dict):
+                    return json_body
+            except Exception:
+                pass
+        cause = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+        if cause is None or cause is current:
+            break
+        current = cause
     return {}
 
 

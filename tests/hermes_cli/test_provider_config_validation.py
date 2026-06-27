@@ -193,3 +193,39 @@ class TestNormalizeCustomProviderEntry:
         result = _normalize_custom_provider_entry(entry)
         assert result is not None
         assert "models" not in result
+
+    def test_env_var_placeholder_in_base_url_not_rejected(self):
+        entry = {
+            "name": "PROVIDER_A",
+            "base_url": "${PROVIDER_A_BASE_URL}",
+            "key_env": "PROVIDER_A_API_KEY",
+        }
+        result = _normalize_custom_provider_entry(entry, provider_key="PROVIDER_A")
+        assert result is not None
+        assert result["base_url"] == "${PROVIDER_A_BASE_URL}"
+
+    def test_multiple_env_vars_in_base_url(self):
+        entry = {
+            "name": "multi-var-provider",
+            "base_url": "${SCHEME}://${HOST}:${PORT}/v1",
+        }
+        result = _normalize_custom_provider_entry(entry)
+        assert result is not None
+        assert result["base_url"] == "${SCHEME}://${HOST}:${PORT}/v1"
+
+    def test_bare_brace_region_placeholder_accepted(self):
+        entry = {
+            "name": "regional",
+            "base_url": "https://{region}.api.example.com/v1",
+        }
+        result = _normalize_custom_provider_entry(entry, provider_key="regional")
+        assert result is not None
+        assert result["base_url"] == "https://{region}.api.example.com/v1"
+
+    def test_invalid_url_without_placeholder_still_rejected(self):
+        entry = {
+            "name": "bad",
+            "base_url": "not-a-url",
+        }
+        result = _normalize_custom_provider_entry(entry, provider_key="bad")
+        assert result is None
