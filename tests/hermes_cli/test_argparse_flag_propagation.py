@@ -183,3 +183,65 @@ class TestAcceptHooksOnAgentSubparsers:
             f"stderr: {result.stderr[:300]}"
         )
         assert "unrecognized arguments" not in result.stderr
+
+
+class TestGatewayCompatPlatformFlag:
+    """Stale setup/docs hints used `gateway <verb> --platform feishu`.
+
+    The lifecycle commands operate on the gateway service as a whole, but
+    accepting the hidden flag keeps older headless command lines parseable.
+    """
+
+    @pytest.mark.parametrize("verb", ["start", "restart", "status"])
+    def test_gateway_lifecycle_accepts_hidden_platform_flag(self, verb):
+        import subprocess
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "hermes_cli.main",
+                "gateway",
+                verb,
+                "--platform",
+                "feishu",
+                "--help",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        assert result.returncode == 0, (
+            f"gateway {verb} returned {result.returncode}\n"
+            f"stdout: {result.stdout[:300]}\n"
+            f"stderr: {result.stderr[:300]}"
+        )
+        assert "unrecognized arguments" not in result.stderr
+        assert "--platform" not in result.stdout
+
+
+class TestMcpReauthParser:
+    def test_mcp_reauth_is_registered(self):
+        import subprocess
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "hermes_cli.main",
+                "mcp",
+                "reauth",
+                "--help",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        assert result.returncode == 0, (
+            f"mcp reauth returned {result.returncode}\n"
+            f"stdout: {result.stdout[:300]}\n"
+            f"stderr: {result.stderr[:300]}"
+        )
+        assert "--all" in result.stdout

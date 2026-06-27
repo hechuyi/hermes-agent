@@ -24,15 +24,18 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Sequence
 
 log = logging.getLogger(__name__)
 
-# Only this prior state triggers automatic restart. Everything else
+# Only this desired state triggers automatic restart. Everything else
 # (startup_failed, starting, stopped, missing) registers the slot in
 # the down state and waits for explicit user action — this avoids the
 # crash-loop where a broken gateway keeps being restarted across
-# `docker restart` cycles.
+# `docker restart` cycles. Older installs only have gateway_state;
+# newer lifecycle commands persist desired_state separately so a transient
+# runtime state does not erase the operator's durable start/stop intent
+# across pod/container recreation.
 _AUTOSTART_STATES = frozenset({"running"})
 
 # Stale runtime files we sweep before recreating service slots. These
@@ -57,6 +60,7 @@ def reconcile_profile_gateways(
     hermes_home: Path,
     scandir: Path,
     dry_run: bool = False,
+    container_argv: Sequence[str] | None = None,
 ) -> list[ReconcileAction]:
     """Recreate s6 service registrations for every persistent profile.
 
@@ -82,6 +86,8 @@ def reconcile_profile_gateways(
             directories are created at ``<scandir>/gateway-<profile>/``.
         dry_run: When True, walk and return the action list without
             touching the filesystem. For tests and `--dry-run` debug.
+        container_argv: Optional container PID 1 argv override. Production
+            reads ``/proc``; tests inject it directly.
 
     Returns:
         One :class:`ReconcileAction` per profile, in this order:
@@ -92,9 +98,16 @@ def reconcile_profile_gateways(
     # Default profile — always register, even if nothing has ever
     # populated the root profile dir. The slot exists so
     # ``hermes gateway start`` (no ``-p``) has somewhere to land;
-    # auto-up only when the prior state was "running" (same rule as
-    # named profiles).
-    default_prior_state = _read_prior_state(hermes_home)
+    # auto-up only when the desired state was "running" (same rule as
+    # named profiles). If the container was launched with the legacy
+    # `gateway run` command and no state exists yet, seed that intent as
+    # `running` so the s6 reconciler preserves pre-s6 behavior.
+    legacy_default_state = _maybe_migrate_legacy_gateway_run_state(
+        hermes_home,
+        container_argv=container_argv,
+        dry_run=dry_run,
+    )
+    default_prior_state = legacy_default_state or _read_desired_state(hermes_home)
     default_should_start = default_prior_state in _AUTOSTART_STATES
     if not dry_run:
         _cleanup_stale_runtime_files(hermes_home)
@@ -129,7 +142,7 @@ def reconcile_profile_gateways(
                 )
                 continue
 
-            prior_state = _read_prior_state(entry)
+            prior_state = _read_desired_state(entry)
             should_start = prior_state in _AUTOSTART_STATES
 
             if not dry_run:
@@ -147,15 +160,118 @@ def reconcile_profile_gateways(
     return actions
 
 
-def _read_prior_state(profile_dir: Path) -> str | None:
-    """Read gateway_state.json's ``gateway_state`` field, or None if
-    missing or unparseable. Unparseable counts as "no prior state" so
-    we don't bork the whole reconciliation on a corrupt file."""
+def _maybe_migrate_legacy_gateway_run_state(
+    hermes_home: Path,
+    *,
+    container_argv: Sequence[str] | None,
+    dry_run: bool,
+) -> str | None:
+    """Seed root gateway_state for pre-s6 `gateway run` containers.
+
+    The earlier tini image let Docker users run the gateway as the container
+    command (`docker run ... gateway run`). After the s6 migration, profile
+    gateways are restored from persisted gateway_state.json; a legacy container
+    with no state file would otherwise register the default service down and
+    never start. Only synthesize state when no root gateway_state.json exists
+    so explicit stopped/failed states keep winning across restarts.
+    """
+    state_file = hermes_home / "gateway_state.json"
+    if state_file.exists():
+        return None
+
+    if os.environ.get("HERMES_GATEWAY_NO_SUPERVISE", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        return None
+
+    argv = tuple(container_argv) if container_argv is not None else _read_container_argv()
+    if not _is_legacy_gateway_run_request(argv):
+        return None
+
+    if not dry_run:
+        import time
+
+        state_file.write_text(
+            json.dumps(
+                {
+                    "gateway_state": "running",
+                    "desired_state": "running",
+                    "timestamp": int(time.time()),
+                    "migrated_from": "legacy-container-cmd",
+                }
+            )
+            + "\n"
+        )
+    return "running"
+
+
+def _read_container_argv() -> tuple[str, ...]:
+    """Best-effort read of the container's main program argv."""
+    try:
+        raw = Path("/proc/1/cmdline").read_bytes()
+        argv = tuple(part.decode("utf-8", "replace") for part in raw.split(b"\0") if part)
+        if any("main-wrapper.sh" in part for part in argv):
+            return argv
+    except OSError:
+        pass
+
+    try:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                raw = (entry / "cmdline").read_bytes()
+            except OSError:
+                continue
+            argv = tuple(
+                part.decode("utf-8", "replace") for part in raw.split(b"\0") if part
+            )
+            if any("main-wrapper.sh" in part for part in argv):
+                return argv
+    except OSError:
+        pass
+
+    return ()
+
+
+def _strip_container_argv_prefix(argv: Sequence[str]) -> list[str]:
+    """Strip s6/wrapper argv prefix, leaving Hermes command arguments."""
+    args = list(argv)
+    wrapper_idx = next(
+        (i for i, arg in enumerate(args) if arg.endswith("main-wrapper.sh")),
+        None,
+    )
+    if wrapper_idx is not None:
+        args = args[wrapper_idx + 1 :]
+    elif args and Path(args[0]).name == "init":
+        args = args[1:]
+
+    if args and Path(args[0]).name == "hermes":
+        args = args[1:]
+    return args
+
+
+def _is_legacy_gateway_run_request(argv: Sequence[str]) -> bool:
+    """Return True for container commands equivalent to `gateway run`."""
+    args = _strip_container_argv_prefix(argv)
+    if "--no-supervise" in args:
+        return False
+    return len(args) >= 2 and args[0] == "gateway" and args[1] == "run"
+
+
+def _read_desired_state(profile_dir: Path) -> str | None:
+    """Read desired_state, falling back to legacy gateway_state."""
     state_file = profile_dir / "gateway_state.json"
     if not state_file.exists():
         return None
     try:
-        return json.loads(state_file.read_text()).get("gateway_state")
+        data = json.loads(state_file.read_text())
+        desired_state = data.get("desired_state")
+        if desired_state is not None:
+            return desired_state
+        return data.get("gateway_state")
     except (OSError, json.JSONDecodeError):
         log.warning(
             "could not read %s; treating as no prior state", state_file,

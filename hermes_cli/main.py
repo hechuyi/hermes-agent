@@ -174,6 +174,15 @@ def _add_accept_hooks_flag(parser) -> None:
     )
 
 
+def _add_compat_platform_flag(parser) -> None:
+    """Accept stale `gateway <verb> --platform X` docs without advertising it."""
+    parser.add_argument(
+        "--platform",
+        dest="platform",
+        help=argparse.SUPPRESS,
+    )
+
+
 def _require_tty(command_name: str) -> None:
     """Exit with a clear error if stdin is not a terminal.
 
@@ -9886,6 +9895,10 @@ _AGENT_SUBCOMMANDS = {
 }
 
 
+def _is_tui_chat_launch(args) -> bool:
+    return bool(getattr(args, "tui", False) or os.environ.get("HERMES_TUI") == "1")
+
+
 def _command_has_dedicated_mcp_startup(args) -> bool:
     if args.command == "acp":
         return True
@@ -9897,6 +9910,8 @@ def _command_has_dedicated_mcp_startup(args) -> bool:
 
 
 def _should_background_mcp_startup(args) -> bool:
+    if _is_tui_chat_launch(args):
+        return False
     return args.command in {None, "chat", "rl"}
 
 
@@ -9920,7 +9935,9 @@ def _prepare_agent_startup(args) -> None:
             exc_info=True,
         )
     _run_inline_mcp_discovery = True
-    if _command_has_dedicated_mcp_startup(args):
+    if _is_tui_chat_launch(args):
+        _run_inline_mcp_discovery = False
+    elif _command_has_dedicated_mcp_startup(args):
         _run_inline_mcp_discovery = False
     elif _should_background_mcp_startup(args):
         try:
@@ -10295,6 +10312,7 @@ def main():
         action="store_true",
         help="Kill ALL stale gateway processes across all profiles before starting",
     )
+    _add_compat_platform_flag(gateway_start)
 
     # gateway stop
     gateway_stop = gateway_subparsers.add_parser("stop", help="Stop gateway service")
@@ -10323,6 +10341,7 @@ def main():
         action="store_true",
         help="Kill ALL gateway processes across all profiles before restarting",
     )
+    _add_compat_platform_flag(gateway_restart)
 
     # gateway status
     gateway_status = gateway_subparsers.add_parser("status", help="Show gateway status")
@@ -10338,6 +10357,7 @@ def main():
         action="store_true",
         help="Target the Linux system-level gateway service",
     )
+    _add_compat_platform_flag(gateway_status)
 
     # gateway install
     gateway_install = gateway_subparsers.add_parser(
@@ -12007,6 +12027,19 @@ Examples:
         help="Force re-authentication for an OAuth-based MCP server",
     )
     mcp_login_p.add_argument("name", help="Server name to re-authenticate")
+
+    mcp_reauth_p = mcp_sub.add_parser(
+        "reauth",
+        help="Re-authenticate one OAuth MCP server, or all of them (--all)",
+    )
+    mcp_reauth_p.add_argument(
+        "name", nargs="?", help="Server name to re-authenticate (omit with --all)"
+    )
+    mcp_reauth_p.add_argument(
+        "--all",
+        action="store_true",
+        help="Re-authenticate every OAuth server in config, one at a time",
+    )
 
     # ── Catalog (Nous-approved MCPs shipped with the repo) ─────────────────
     mcp_sub.add_parser(

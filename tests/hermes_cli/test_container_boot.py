@@ -484,6 +484,84 @@ def test_default_slot_autostarts_when_root_state_running(tmp_path: Path) -> None
     assert not (scandir / "gateway-default" / "down").exists()
 
 
+def test_legacy_container_gateway_run_seeds_default_desired_state(
+    tmp_path: Path,
+) -> None:
+    """A pre-s6 container launched as `gateway run` has no state file yet.
+
+    On first s6 boot, reconcile should preserve that command intent by
+    starting the default gateway slot and persisting desired_state=running.
+    """
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path,
+        scandir=scandir,
+        dry_run=False,
+        container_argv=(
+            "/bin/sh",
+            "-e",
+            "/run/s6/basedir/scripts/rc.init",
+            "top",
+            "/opt/hermes/docker/main-wrapper.sh",
+            "gateway",
+            "run",
+        ),
+    )
+
+    assert actions[0] == ReconcileAction(
+        profile="default",
+        prior_state="running",
+        action="started",
+    )
+    assert not (scandir / "gateway-default" / "down").exists()
+    state = json.loads((tmp_path / "gateway_state.json").read_text())
+    assert state["gateway_state"] == "running"
+    assert state["desired_state"] == "running"
+    assert state["migrated_from"] == "legacy-container-cmd"
+
+
+def test_legacy_container_gateway_run_dry_run_does_not_write_state(
+    tmp_path: Path,
+) -> None:
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path,
+        scandir=scandir,
+        dry_run=True,
+        container_argv=("/init", "/opt/hermes/docker/main-wrapper.sh", "gateway", "run"),
+    )
+
+    assert actions[0] == ReconcileAction(
+        profile="default",
+        prior_state="running",
+        action="started",
+    )
+    assert not (tmp_path / "gateway_state.json").exists()
+
+
+def test_legacy_container_gateway_run_does_not_override_stopped_state(
+    tmp_path: Path,
+) -> None:
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _seed_default_root(tmp_path, state="stopped")
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path,
+        scandir=scandir,
+        dry_run=False,
+        container_argv=("/init", "/opt/hermes/docker/main-wrapper.sh", "gateway", "run"),
+    )
+
+    assert actions[0] == ReconcileAction(
+        profile="default",
+        prior_state="stopped",
+        action="registered",
+    )
+    assert (scandir / "gateway-default" / "down").exists()
+
+
 def test_default_slot_does_not_autostart_when_root_state_stopped(
     tmp_path: Path,
 ) -> None:
