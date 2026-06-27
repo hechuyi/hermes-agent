@@ -1,6 +1,6 @@
 """Shared helper classes for gateway platform adapters.
 
-Extracts common patterns that were duplicated across 5-7 adapters:
+Extracts common patterns shared by Feishu/API/headless adapters:
 message deduplication, text batch aggregation, markdown stripping,
 and thread participation tracking.
 """
@@ -27,9 +27,8 @@ logger = logging.getLogger(__name__)
 class MessageDeduplicator:
     """TTL-based message deduplication cache.
 
-    Replaces the identical ``_seen_messages`` / ``_is_duplicate()`` pattern
-    previously duplicated in discord, slack, dingtalk, wecom, weixin,
-    mattermost, and feishu adapters.
+    Replaces adapter-local ``_seen_messages`` / ``_is_duplicate()`` patterns
+    with one neutral implementation.
 
     Usage::
 
@@ -81,8 +80,8 @@ class MessageDeduplicator:
 class TextBatchAggregator:
     """Aggregates rapid-fire text events into single messages.
 
-    Replaces the ``_enqueue_text_event`` / ``_flush_text_batch`` pattern
-    previously duplicated in telegram, discord, matrix, wecom, and feishu.
+    Replaces adapter-local ``_enqueue_text_event`` / ``_flush_text_batch``
+    patterns with one neutral implementation.
 
     Usage::
 
@@ -178,10 +177,10 @@ _RE_MULTI_NEWLINE = re.compile(r"\n{3,}")
 
 
 def strip_markdown(text: str) -> str:
-    """Strip markdown formatting for plain-text platforms (SMS, iMessage, etc.).
+    """Strip markdown formatting for plain-text gateway surfaces.
 
-    Replaces the identical ``_strip_markdown()`` functions previously
-    duplicated in sms.py, bluebubbles.py, and feishu.py.
+    Replaces adapter-local ``_strip_markdown()`` implementations, including
+    Feishu plain-text fallbacks.
     """
     text = _RE_BOLD.sub(r"\1", text)
     text = _RE_ITALIC_STAR.sub(r"\1", text)
@@ -201,13 +200,12 @@ def strip_markdown(text: str) -> str:
 class ThreadParticipationTracker:
     """Persistent tracking of threads the bot has participated in.
 
-    Replaces the identical ``_load/_save_participated_threads`` +
-    ``_mark_thread_participated`` pattern previously duplicated in
-    discord.py and matrix.py.
+    Replaces adapter-local ``_load/_save_participated_threads`` +
+    ``_mark_thread_participated`` implementations.
 
     Usage::
 
-        self._threads = ThreadParticipationTracker("discord")
+        self._threads = ThreadParticipationTracker("feishu")
 
         # Check membership:
         if thread_id in self._threads:
@@ -268,8 +266,7 @@ class ThreadParticipationTracker:
 def redact_phone(phone: str) -> str:
     """Redact a phone number for logging, preserving country code and last 4.
 
-    Replaces the identical ``_redact_phone()`` functions in signal.py,
-    sms.py, and bluebubbles.py.
+    Replaces adapter-local ``_redact_phone()`` implementations.
     """
     if not phone:
         return "<none>"

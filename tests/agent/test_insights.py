@@ -60,9 +60,9 @@ def populated_db(db):
     db.append_message("s1", role="user", content="Thanks!")
     db.append_message("s1", role="assistant", content="You're welcome!")
 
-    # Session 2: Telegram, gpt-4o, ended, 5 days ago
+    # Session 2: API, gpt-4o, ended, 5 days ago
     db.create_session(
-        session_id="s2", source="telegram",
+        session_id="s2", source="api",
         model="gpt-4o", user_id="user1",
     )
     db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = 's2'", (now - 5 * day,))
@@ -101,9 +101,9 @@ def populated_db(db):
         tool_calls=[{"function": {"name": "skill_view", "arguments": '{"name":"systematic-debugging"}'}}],
     )
 
-    # Session 4: Discord, same model as s1, ended, 1 day ago
+    # Session 4: Feishu, same model as s1, ended, 1 day ago
     db.create_session(
-        session_id="s4", source="discord",
+        session_id="s4", source="feishu",
         model="anthropic/claude-sonnet-4-20250514", user_id="user2",
     )
     db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = 's4'", (now - 1 * day,))
@@ -327,8 +327,8 @@ class TestInsightsPopulated:
 
         platform_names = [p["platform"] for p in platforms]
         assert "cli" in platform_names
-        assert "telegram" in platform_names
-        assert "discord" in platform_names
+        assert "api" in platform_names
+        assert "feishu" in platform_names
 
         cli = next(p for p in platforms if p["platform"] == "cli")
         assert cli["sessions"] == 2  # s1 + s3
@@ -410,15 +410,15 @@ class TestInsightsPopulated:
 
         assert report["overview"]["total_sessions"] == 2  # s1, s3
 
-    def test_source_filter_telegram(self, populated_db):
+    def test_source_filter_api(self, populated_db):
         engine = InsightsEngine(populated_db)
-        report = engine.generate(days=30, source="telegram")
+        report = engine.generate(days=30, source="api")
 
         assert report["overview"]["total_sessions"] == 1  # s2
 
     def test_source_filter_nonexistent(self, populated_db):
         engine = InsightsEngine(populated_db)
-        report = engine.generate(days=30, source="slack")
+        report = engine.generate(days=30, source="cron")
 
         assert report["empty"] is True
 
@@ -475,7 +475,7 @@ class TestTerminalFormatting:
         # Multi-platform, so Platforms section should show
         assert "Platforms" in text
         assert "cli" in text
-        assert "telegram" in text
+        assert "api" in text
 
     def test_terminal_format_shows_bar_chart(self, populated_db):
         engine = InsightsEngine(populated_db)

@@ -60,7 +60,7 @@ def test_concurrent_compression_does_not_fork_session(tmp_path: Path) -> None:
     db = SessionDB(db_path=tmp_path / "state.db")
     try:
         parent_sid = "PARENT_TEST_SESSION"
-        db.create_session(parent_sid, source="discord")
+        db.create_session(parent_sid, source="feishu")
 
         agent_a = _build_agent_with_db(db, parent_sid)
         agent_b = _build_agent_with_db(db, parent_sid)
@@ -94,7 +94,7 @@ def test_skipped_compression_returns_messages_unchanged(tmp_path: Path) -> None:
     db = SessionDB(db_path=tmp_path / "state.db")
     try:
         parent_sid = "LOSER_TEST"
-        db.create_session(parent_sid, source="discord")
+        db.create_session(parent_sid, source="feishu")
         assert db.try_acquire_compression_lock(parent_sid, "external_holder") is True
 
         agent = _build_agent_with_db(db, parent_sid)
@@ -143,7 +143,7 @@ def test_missing_lock_subsystem_fails_open_not_infinite_loop(tmp_path: Path) -> 
     db = SessionDB(db_path=tmp_path / "state.db")
     try:
         parent_sid = "SKEW_TEST_SESSION"
-        db.create_session(parent_sid, source="discord")
+        db.create_session(parent_sid, source="feishu")
 
         agent = _build_agent_with_db(db, parent_sid)
         agent._session_db = _NoLockSubsystemDB(db)

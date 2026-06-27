@@ -154,8 +154,8 @@ class TestScanSkillCommands:
     def test_get_skill_commands_rescans_when_platform_scope_changes(self, tmp_path):
         """Platform-specific disabled-skill caches must not leak across platforms.
 
-        Regression test for #14536: a gateway process serving Telegram
-        and Discord concurrently would seed the process-global cache
+        Regression test for #14536: a gateway process serving Feishu
+        and the headless API server concurrently would seed the process-global cache
         with whichever platform scanned first, and subsequent
         ``get_skill_commands()`` calls from the other platform silently
         inherited that filter.
@@ -165,10 +165,10 @@ class TestScanSkillCommands:
 
         def _disabled_skills():
             platform = os.getenv("HERMES_PLATFORM")
-            if platform == "telegram":
-                return {"telegram-only"}
-            if platform == "discord":
-                return {"discord-only"}
+            if platform == "feishu":
+                return {"feishu-only"}
+            if platform == "api_server":
+                return {"api-server-only"}
             return set()
 
         with (
@@ -178,30 +178,30 @@ class TestScanSkillCommands:
             patch.object(sc_mod, "_skill_commands_platform", None),
         ):
             _make_skill(tmp_path, "shared")
-            _make_skill(tmp_path, "telegram-only")
-            _make_skill(tmp_path, "discord-only")
+            _make_skill(tmp_path, "feishu-only")
+            _make_skill(tmp_path, "api-server-only")
 
-            with patch.dict(os.environ, {"HERMES_PLATFORM": "telegram"}):
-                telegram_commands = dict(get_skill_commands())
+            with patch.dict(os.environ, {"HERMES_PLATFORM": "feishu"}):
+                feishu_commands = dict(get_skill_commands())
 
-            assert "/shared" in telegram_commands
-            assert "/discord-only" in telegram_commands
-            assert "/telegram-only" not in telegram_commands
+            assert "/shared" in feishu_commands
+            assert "/api-server-only" in feishu_commands
+            assert "/feishu-only" not in feishu_commands
 
-            with patch.dict(os.environ, {"HERMES_PLATFORM": "discord"}):
-                discord_commands = dict(get_skill_commands())
+            with patch.dict(os.environ, {"HERMES_PLATFORM": "api_server"}):
+                api_server_commands = dict(get_skill_commands())
 
-            assert "/shared" in discord_commands
-            assert "/telegram-only" in discord_commands
-            assert "/discord-only" not in discord_commands
+            assert "/shared" in api_server_commands
+            assert "/feishu-only" in api_server_commands
+            assert "/api-server-only" not in api_server_commands
 
-            # Switching back to telegram must also rescan — not re-serve
-            # the discord view that was just cached.
-            with patch.dict(os.environ, {"HERMES_PLATFORM": "telegram"}):
-                telegram_again = dict(get_skill_commands())
+            # Switching back to Feishu must also rescan — not re-serve
+            # the API server view that was just cached.
+            with patch.dict(os.environ, {"HERMES_PLATFORM": "feishu"}):
+                feishu_again = dict(get_skill_commands())
 
-            assert "/telegram-only" not in telegram_again
-            assert "/discord-only" in telegram_again
+            assert "/feishu-only" not in feishu_again
+            assert "/api-server-only" in feishu_again
 
     def test_get_skill_commands_rescans_when_session_platform_changes(self, tmp_path):
         """``HERMES_SESSION_PLATFORM`` from the gateway session context must
@@ -229,10 +229,10 @@ class TestScanSkillCommands:
                 os.getenv("HERMES_PLATFORM")
                 or get_session_env("HERMES_SESSION_PLATFORM")
             )
-            if platform == "telegram":
-                return {"telegram-only"}
-            if platform == "discord":
-                return {"discord-only"}
+            if platform == "feishu":
+                return {"feishu-only"}
+            if platform == "api_server":
+                return {"api-server-only"}
             return set()
 
         with (
@@ -242,32 +242,32 @@ class TestScanSkillCommands:
             patch.object(sc_mod, "_skill_commands_platform", None),
         ):
             _make_skill(tmp_path, "shared")
-            _make_skill(tmp_path, "telegram-only")
-            _make_skill(tmp_path, "discord-only")
+            _make_skill(tmp_path, "feishu-only")
+            _make_skill(tmp_path, "api-server-only")
 
-            # First simulated gateway request: telegram handler.
-            tokens = set_session_vars(platform="telegram")
+            # First simulated gateway request: Feishu handler.
+            tokens = set_session_vars(platform="feishu")
             try:
-                telegram_commands = dict(get_skill_commands())
+                feishu_commands = dict(get_skill_commands())
             finally:
                 clear_session_vars(tokens)
 
-            assert "/shared" in telegram_commands
-            assert "/discord-only" in telegram_commands
-            assert "/telegram-only" not in telegram_commands
+            assert "/shared" in feishu_commands
+            assert "/api-server-only" in feishu_commands
+            assert "/feishu-only" not in feishu_commands
 
-            # Second simulated gateway request: discord handler. The cache
-            # was just populated for telegram; the rescan trigger must fire
+            # Second simulated gateway request: API server handler. The cache
+            # was just populated for Feishu; the rescan trigger must fire
             # off the ContextVar change, not just an env-var change.
-            tokens = set_session_vars(platform="discord")
+            tokens = set_session_vars(platform="api_server")
             try:
-                discord_commands = dict(get_skill_commands())
+                api_server_commands = dict(get_skill_commands())
             finally:
                 clear_session_vars(tokens)
 
-            assert "/shared" in discord_commands
-            assert "/telegram-only" in discord_commands
-            assert "/discord-only" not in discord_commands
+            assert "/shared" in api_server_commands
+            assert "/feishu-only" in api_server_commands
+            assert "/api-server-only" not in api_server_commands
 
     def test_get_skill_commands_rescans_when_leaving_platform_scope(self, tmp_path, monkeypatch):
         """Returning to no-platform-scope (CLI / cron / RL) after a gateway
@@ -281,8 +281,8 @@ class TestScanSkillCommands:
         from agent.skill_commands import get_skill_commands
 
         def _disabled_skills():
-            if os.getenv("HERMES_PLATFORM") == "telegram":
-                return {"telegram-only"}
+            if os.getenv("HERMES_PLATFORM") == "feishu":
+                return {"feishu-only"}
             return set()
 
         with (
@@ -292,24 +292,24 @@ class TestScanSkillCommands:
             patch.object(sc_mod, "_skill_commands_platform", None),
         ):
             _make_skill(tmp_path, "shared")
-            _make_skill(tmp_path, "telegram-only")
+            _make_skill(tmp_path, "feishu-only")
 
-            monkeypatch.setenv("HERMES_PLATFORM", "telegram")
-            telegram_commands = dict(get_skill_commands())
-            assert "/telegram-only" not in telegram_commands
+            monkeypatch.setenv("HERMES_PLATFORM", "feishu")
+            feishu_commands = dict(get_skill_commands())
+            assert "/feishu-only" not in feishu_commands
 
             # Drop back to no platform scope — bare CLI / cron / RL rollouts.
             monkeypatch.delenv("HERMES_PLATFORM", raising=False)
             bare_commands = dict(get_skill_commands())
 
-            assert "/telegram-only" in bare_commands
+            assert "/feishu-only" in bare_commands
             assert sc_mod._skill_commands_platform is None
 
     def test_get_skill_commands_does_not_rescan_when_platform_unchanged(self, tmp_path):
         """Same-platform back-to-back calls must hit the cache, not rescan.
 
         The rescan trigger is *change* in platform scope, not "always
-        re-resolve." A gateway serving consecutive telegram requests must
+        re-resolve." A gateway serving consecutive Feishu requests must
         not pay the scan cost for each one.
         """
         import agent.skill_commands as sc_mod
@@ -319,7 +319,7 @@ class TestScanSkillCommands:
             patch("tools.skills_tool.SKILLS_DIR", tmp_path),
             patch.object(sc_mod, "_skill_commands", {}),
             patch.object(sc_mod, "_skill_commands_platform", None),
-            patch.dict(os.environ, {"HERMES_PLATFORM": "telegram"}),
+            patch.dict(os.environ, {"HERMES_PLATFORM": "feishu"}),
         ):
             _make_skill(tmp_path, "shared")
             # Prime the cache.
@@ -379,8 +379,8 @@ class TestScanSkillCommands:
 
 
 class TestResolveSkillCommandKey:
-    """Telegram bot-command names disallow hyphens, so the menu registers
-    skills with hyphens swapped for underscores. When Telegram autocomplete
+    """Bot-command menus may disallow hyphens, so the menu registers
+    skills with hyphens swapped for underscores. When autocomplete
     sends the underscored form back, we need to find the hyphenated key.
     """
 
@@ -391,7 +391,7 @@ class TestResolveSkillCommandKey:
             assert resolve_skill_command_key("claude-code") == "/claude-code"
 
     def test_underscore_form_resolves_to_hyphenated_skill(self, tmp_path):
-        """/claude_code from Telegram autocomplete must resolve to /claude-code."""
+        """/claude_code from menu autocomplete must resolve to /claude-code."""
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(tmp_path, "claude-code")
             scan_skill_commands()
@@ -559,7 +559,7 @@ Generate some audio.
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             from gateway.session_context import clear_session_vars, set_session_vars
 
-            tokens = set_session_vars(platform="telegram")
+            tokens = set_session_vars(platform="feishu")
             try:
                 _make_skill(
                     tmp_path,

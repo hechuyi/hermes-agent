@@ -316,19 +316,19 @@ class TestGatewayRuntimeStatus:
 
         status.write_runtime_status(
             gateway_state="startup_failed",
-            exit_reason="telegram conflict",
-            platform="telegram",
+            exit_reason="feishu conflict",
+            platform="feishu",
             platform_state="fatal",
-            error_code="telegram_polling_conflict",
-            error_message="another poller is active",
+            error_code="feishu_stream_conflict",
+            error_message="another Feishu stream is active",
         )
 
         payload = status.read_runtime_status()
         assert payload["gateway_state"] == "startup_failed"
-        assert payload["exit_reason"] == "telegram conflict"
-        assert payload["platforms"]["telegram"]["state"] == "fatal"
-        assert payload["platforms"]["telegram"]["error_code"] == "telegram_polling_conflict"
-        assert payload["platforms"]["telegram"]["error_message"] == "another poller is active"
+        assert payload["exit_reason"] == "feishu conflict"
+        assert payload["platforms"]["feishu"]["state"] == "fatal"
+        assert payload["platforms"]["feishu"]["error_code"] == "feishu_stream_conflict"
+        assert payload["platforms"]["feishu"]["error_message"] == "another Feishu stream is active"
 
     def test_write_runtime_status_explicit_none_clears_stale_fields(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -336,16 +336,16 @@ class TestGatewayRuntimeStatus:
         status.write_runtime_status(
             gateway_state="startup_failed",
             exit_reason="stale error",
-            platform="discord",
+            platform="api_server",
             platform_state="fatal",
-            error_code="discord_timeout",
+            error_code="api_server_timeout",
             error_message="stale platform error",
         )
 
         status.write_runtime_status(
             gateway_state="running",
             exit_reason=None,
-            platform="discord",
+            platform="api_server",
             platform_state="connected",
             error_code=None,
             error_message=None,
@@ -354,9 +354,9 @@ class TestGatewayRuntimeStatus:
         payload = status.read_runtime_status()
         assert payload["gateway_state"] == "running"
         assert payload["exit_reason"] is None
-        assert payload["platforms"]["discord"]["state"] == "connected"
-        assert payload["platforms"]["discord"]["error_code"] is None
-        assert payload["platforms"]["discord"]["error_message"] is None
+        assert payload["platforms"]["api_server"]["state"] == "connected"
+        assert payload["platforms"]["api_server"]["error_code"] is None
+        assert payload["platforms"]["api_server"]["error_message"] is None
 
 
 class TestTerminatePid:
@@ -426,7 +426,7 @@ class TestScopedLocks:
 
     def test_acquire_scoped_lock_rejects_live_other_process(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
-        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path = tmp_path / "locks" / "feishu-app-token-2bb80d537b1da3e3.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({
             "pid": 99999,
@@ -439,7 +439,7 @@ class TestScopedLocks:
         monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 123)
 
-        acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
+        acquired, existing = status.acquire_scoped_lock("feishu-app-token", "secret", metadata={"platform": "feishu"})
 
         assert acquired is False
         assert existing["pid"] == 99999
@@ -453,7 +453,7 @@ class TestScopedLocks:
         must be treated as stale.
         """
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
-        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path = tmp_path / "locks" / "feishu-app-token-2bb80d537b1da3e3.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({
             "pid": 873,
@@ -472,12 +472,12 @@ class TestScopedLocks:
         # unrelated process's name.  This confirms the PID was reused.
         monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: "/usr/libexec/bluetoothuserd")
 
-        acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
+        acquired, existing = status.acquire_scoped_lock("feishu-app-token", "secret", metadata={"platform": "feishu"})
 
         assert acquired is True
         payload = json.loads(lock_path.read_text())
         assert payload["pid"] == os.getpid()
-        assert payload["metadata"]["platform"] == "telegram"
+        assert payload["metadata"]["platform"] == "feishu"
 
     def test_acquire_scoped_lock_keeps_lock_when_cmdline_unreadable_but_record_is_gateway(self, tmp_path, monkeypatch):
         """Windows regression: ps unavailable so cmdline cannot be read.
@@ -489,7 +489,7 @@ class TestScopedLocks:
         gateway at startup — before declaring the lock stale.
         """
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
-        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path = tmp_path / "locks" / "feishu-app-token-2bb80d537b1da3e3.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({
             "pid": 99999,
@@ -505,7 +505,7 @@ class TestScopedLocks:
         monkeypatch.setattr(status, "_looks_like_gateway_process", lambda pid: False)
         monkeypatch.setattr(status, "_read_process_cmdline", lambda pid: None)
 
-        acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
+        acquired, existing = status.acquire_scoped_lock("feishu-app-token", "secret", metadata={"platform": "feishu"})
 
         assert acquired is False
         assert existing["pid"] == 99999
@@ -513,7 +513,7 @@ class TestScopedLocks:
     def test_acquire_scoped_lock_keeps_lock_when_pid_reused_by_gateway(self, tmp_path, monkeypatch):
         """When start_time is None but the live PID still looks like a gateway, keep the lock."""
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
-        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path = tmp_path / "locks" / "feishu-app-token-2bb80d537b1da3e3.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({
             "pid": 99999,
@@ -526,14 +526,14 @@ class TestScopedLocks:
         monkeypatch.setattr(status, "_get_process_start_time", lambda pid: None)
         monkeypatch.setattr(status, "_looks_like_gateway_process", lambda pid: True)
 
-        acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
+        acquired, existing = status.acquire_scoped_lock("feishu-app-token", "secret", metadata={"platform": "feishu"})
 
         assert acquired is False
         assert existing["pid"] == 99999
 
     def test_acquire_scoped_lock_replaces_stale_record(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
-        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path = tmp_path / "locks" / "feishu-app-token-2bb80d537b1da3e3.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({
             "pid": 99999,
@@ -544,35 +544,35 @@ class TestScopedLocks:
         # Post-#21561: simulate "PID gone" via _pid_exists returning False.
         monkeypatch.setattr(status, "_pid_exists", lambda pid: False)
 
-        acquired, existing = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
+        acquired, existing = status.acquire_scoped_lock("feishu-app-token", "secret", metadata={"platform": "feishu"})
 
         assert acquired is True
         payload = json.loads(lock_path.read_text())
         assert payload["pid"] == os.getpid()
-        assert payload["metadata"]["platform"] == "telegram"
+        assert payload["metadata"]["platform"] == "feishu"
 
     def test_acquire_scoped_lock_recovers_empty_lock_file(self, tmp_path, monkeypatch):
         """Empty lock file (0 bytes) left by a crashed process should be treated as stale."""
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
-        lock_path = tmp_path / "locks" / "slack-app-token-2bb80d537b1da3e3.lock"
+        lock_path = tmp_path / "locks" / "api-server-key-2bb80d537b1da3e3.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text("")  # simulate crash between O_CREAT and json.dump
 
-        acquired, existing = status.acquire_scoped_lock("slack-app-token", "secret", metadata={"platform": "slack"})
+        acquired, existing = status.acquire_scoped_lock("api-server-key", "secret", metadata={"platform": "api_server"})
 
         assert acquired is True
         payload = json.loads(lock_path.read_text())
         assert payload["pid"] == os.getpid()
-        assert payload["metadata"]["platform"] == "slack"
+        assert payload["metadata"]["platform"] == "api_server"
 
     def test_acquire_scoped_lock_recovers_corrupt_lock_file(self, tmp_path, monkeypatch):
         """Lock file with invalid JSON should be treated as stale."""
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
-        lock_path = tmp_path / "locks" / "slack-app-token-2bb80d537b1da3e3.lock"
+        lock_path = tmp_path / "locks" / "api-server-key-2bb80d537b1da3e3.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text("{truncated")  # simulate partial write
 
-        acquired, existing = status.acquire_scoped_lock("slack-app-token", "secret", metadata={"platform": "slack"})
+        acquired, existing = status.acquire_scoped_lock("api-server-key", "secret", metadata={"platform": "api_server"})
 
         assert acquired is True
         payload = json.loads(lock_path.read_text())
@@ -581,12 +581,12 @@ class TestScopedLocks:
     def test_release_scoped_lock_only_removes_current_owner(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "locks"))
 
-        acquired, _ = status.acquire_scoped_lock("telegram-bot-token", "secret", metadata={"platform": "telegram"})
+        acquired, _ = status.acquire_scoped_lock("feishu-app-token", "secret", metadata={"platform": "feishu"})
         assert acquired is True
-        lock_path = tmp_path / "locks" / "telegram-bot-token-2bb80d537b1da3e3.lock"
+        lock_path = tmp_path / "locks" / "feishu-app-token-2bb80d537b1da3e3.lock"
         assert lock_path.exists()
 
-        status.release_scoped_lock("telegram-bot-token", "secret")
+        status.release_scoped_lock("feishu-app-token", "secret")
         assert not lock_path.exists()
 
     def test_release_all_scoped_locks_can_target_single_owner(self, tmp_path, monkeypatch):
@@ -594,8 +594,8 @@ class TestScopedLocks:
         lock_dir = tmp_path / "locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
 
-        target_lock = lock_dir / "telegram-bot-token-target.lock"
-        other_lock = lock_dir / "slack-app-token-other.lock"
+        target_lock = lock_dir / "feishu-app-token-target.lock"
+        other_lock = lock_dir / "api-server-key-other.lock"
         target_lock.write_text(json.dumps({
             "pid": 111,
             "start_time": 222,
@@ -621,7 +621,7 @@ class TestScopedLocks:
         lock_dir = tmp_path / "locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
 
-        reused_pid_lock = lock_dir / "telegram-bot-token-reused.lock"
+        reused_pid_lock = lock_dir / "feishu-app-token-reused.lock"
         reused_pid_lock.write_text(json.dumps({
             "pid": 111,
             "start_time": 999,

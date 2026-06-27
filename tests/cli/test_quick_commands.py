@@ -142,7 +142,7 @@ class TestGatewayQuickCommands:
         event.source = MagicMock()
         event.source.user_id = "test_user"
         event.source.user_name = "Test User"
-        event.source.platform.value = "telegram"
+        event.source.platform.value = "api_server"
         event.source.chat_type = "dm"
         event.source.chat_id = "123"
         return event

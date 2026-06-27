@@ -98,11 +98,10 @@ class TestCleanForDisplay:
 class TestFinalizeCapabilityGate:
     """Verify REQUIRES_EDIT_FINALIZE gates the redundant final edit.
 
-    Platforms that don't need an explicit finalize signal (Telegram,
-    Slack, Matrix, …) should skip the redundant final edit when the
-    mid-stream edit already delivered the final content.  Platforms that
-    *do* need it (DingTalk AI Cards) must always receive a finalize=True
-    edit at the end of the stream.
+    Adapters that don't need an explicit finalize signal should skip the
+    redundant final edit when the mid-stream edit already delivered the
+    final content. Adapters that *do* need it must always receive a
+    finalize=True edit at the end of the stream.
     """
 
     @pytest.mark.asyncio
@@ -747,7 +746,7 @@ class TestSegmentBreakOnToolBoundary:
         adapter.send = AsyncMock(side_effect=send_results)
 
         # First two edits succeed, everything after fails with flood control
-        # — simulating Telegram's "edit once then get rate-limited" pattern.
+        # — simulating an "edit once then get rate-limited" platform pattern.
         edit_results = [
             SimpleNamespace(success=True),   # "Hello world ▉"  — succeeds
             SimpleNamespace(success=False, error="flood_control:6.0"),  # "Hello world more ▉" — flood triggered
@@ -1113,13 +1112,13 @@ class TestFinalContentDeliveredGuard:
         subsequent finalize edit fails, _final_content_delivered must stay
         False so the gateway does not suppress its fallback send (#25010).
 
-        Simulates TelegramAdapter which sets REQUIRES_EDIT_FINALIZE=True,
+        Simulates an adapter that sets REQUIRES_EDIT_FINALIZE=True,
         requiring a second finalize edit even when content is unchanged."""
         adapter = MagicMock()
-        adapter.REQUIRES_EDIT_FINALIZE = True  # Telegram adapter behavior
+        adapter.REQUIRES_EDIT_FINALIZE = True  # explicit finalize adapter behavior
         # First send (initial streaming message) succeeds
         # Mid-stream finalize edit succeeds
-        # Final finalize edit FAILS (e.g. flood control on Telegram)
+        # Final finalize edit FAILS (for example, flood control)
         adapter.edit_message = AsyncMock(side_effect=[
             SimpleNamespace(success=True),   # mid-stream edit
             SimpleNamespace(success=True),   # finalize edit on line 548
@@ -1229,7 +1228,7 @@ class TestFinalContentDeliveredGuard:
 
 class TestEditOverflowSplitAndDeliver:
     """When edit_message split-and-delivers an oversized payload across the
-    original message + N continuations (Telegram >4096 UTF-16), the consumer
+    original message + N continuations, the consumer
     must update _message_id to the latest continuation, reset _last_sent_text,
     and fire on_new_message so subsequent tool-progress bubbles linearize
     below the new visible message."""
@@ -1978,15 +1977,15 @@ class TestOnNewMessageCallback:
         assert consumer.already_sent is True
 
 
-class TestUtf16OverflowDetection:
-    """Regression coverage for #11170 — Telegram counts message length in
+class TestLegacyTelegramUtf16OverflowDetection:
+    """Legacy compatibility coverage for #11170 — Telegram counts message length in
     UTF-16 code units, not Python codepoints. A response with supplementary
     characters (emoji, CJK in some ranges) can have len()=3000 codepoints
     but utf16_len()=5000+ units, blowing past Telegram's 4096 limit."""
 
     def _make_telegram_like_adapter(self):
         """Construct a minimal BasePlatformAdapter subclass that overrides
-        message_len_fn like Telegram does."""
+        message_len_fn like the legacy Telegram adapter does."""
         from gateway.platforms.base import utf16_len, BasePlatformAdapter
 
         TelegramLikeAdapter = type(
@@ -2029,7 +2028,7 @@ class TestUtf16OverflowDetection:
 
         # 🚀 is 1 codepoint = 2 UTF-16 units. 2200 of them = 2200 codepoints,
         # 4400 UTF-16 units. Under the codepoint-equivalent limit (would not
-        # trigger split with len()) but over Telegram's UTF-16 4096 limit.
+        # trigger split with len()) but over the legacy UTF-16 4096 limit.
         emoji_text = "🚀" * 2200
         assert len(emoji_text) < adapter.MAX_MESSAGE_LENGTH, (
             "Test setup invariant: codepoint count under limit"
@@ -2046,8 +2045,8 @@ class TestUtf16OverflowDetection:
 
         # The fix: stream consumer detects UTF-16 overflow and calls
         # truncate_message to split. Without the fix, len() would return
-        # 2200 (under 4096) and no split would fire — Telegram would then
-        # reject the send or render \x00 artifacts.
+        # 2200 (under 4096) and no split would fire — the legacy adapter
+        # would then reject the send or render null artifacts.
         adapter.truncate_message.assert_called(), (
             "UTF-16 overflow not detected — emoji text bypassed split path"
         )

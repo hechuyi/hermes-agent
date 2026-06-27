@@ -1,8 +1,8 @@
 """
 Base platform adapter interface.
 
-All platform adapters (Telegram, Discord, WhatsApp, Weixin, and more) inherit from this
-and implement the required methods.
+Feishu, API/headless, and compatibility adapters inherit from this and
+implement the required methods.
 """
 
 import asyncio
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # Kept in sync with tools/send_message_tool.py and cron/scheduler.py via
 # should_send_media_as_audio() below.
 _AUDIO_EXTS = frozenset({'.ogg', '.opus', '.mp3', '.wav', '.m4a', '.flac'})
-# Telegram's Bot API sendAudio only accepts MP3 / M4A. Other audio
+# Legacy Telegram compatibility: Bot API sendAudio only accepts MP3 / M4A. Other audio
 # formats either need to go through sendVoice (Opus/OGG) or must be
 # delivered as a regular document.
 _TELEGRAM_AUDIO_ATTACHMENT_EXTS = frozenset({'.mp3', '.m4a'})
@@ -68,11 +68,11 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
     """Build platform-aware thread metadata for adapter sends.
 
     Most platforms route threaded sends with a generic ``thread_id`` metadata
-    value. Telegram private-chat topics created through Hermes' DM-topic helper
-    are exposed in updates as ``message_thread_id`` plus a reply anchor. Live
-    user-message replies route with ``message_thread_id`` + ``reply_to_message_id``;
-    synthetic/resumed sends that have no reply anchor fall back to Telegram's
-    ``direct_messages_topic_id`` when the Bot API supports it.
+    value. Legacy Telegram private-chat topics created through Hermes'
+    DM-topic helper are exposed in updates as ``message_thread_id`` plus a
+    reply anchor. Live user-message replies route with ``message_thread_id`` +
+    ``reply_to_message_id``; synthetic/resumed sends that have no reply anchor
+    fall back to ``direct_messages_topic_id`` when that Bot API supports it.
     """
     thread_id = getattr(source, "thread_id", None)
     if thread_id is None:
@@ -177,11 +177,12 @@ def _delivery_leg_metadata(metadata: dict | None, leg_key: str) -> dict | None:
 def _reply_anchor_for_event(event) -> str | None:
     """Return reply_to id for platforms that need reply semantics.
 
-    Telegram forum/supergroup topics should be routed by topic metadata, not by
-    replying to the triggering message. Hermes-created Telegram private-chat
-    topic lanes prefer replying to the triggering user message so the answer
-    stays attached to the active lane; synthetic/resumed sends fall back to
-    ``direct_messages_topic_id`` metadata when no message id is available.
+    Legacy Telegram forum/supergroup topics should be routed by topic metadata,
+    not by replying to the triggering message. Hermes-created Telegram
+    private-chat topic lanes prefer replying to the triggering user message so
+    the answer stays attached to the active lane; synthetic/resumed sends fall
+    back to ``direct_messages_topic_id`` metadata when no message id is
+    available.
     """
     source = getattr(event, "source", None)
     platform = _platform_name(getattr(source, "platform", None))
@@ -203,7 +204,7 @@ def should_send_media_as_audio(platform, ext: str, is_voice: bool = False) -> bo
     Other platforms: every recognized audio extension routes through the
     audio sender.
 
-    Telegram: the Bot API only accepts MP3/M4A for sendAudio and
+    Legacy Telegram compatibility: the Bot API only accepts MP3/M4A for sendAudio and
     Opus/OGG for sendVoice. Opus/OGG is only routed as audio when the
     caller flagged ``is_voice=True`` (so we don't turn a regular audio
     attachment into a voice bubble just because the file happens to be
@@ -223,11 +224,12 @@ def should_send_media_as_audio(platform, ext: str, is_voice: bool = False) -> bo
 def utf16_len(s: str) -> int:
     """Count UTF-16 code units in *s*.
 
-    Telegram's message-length limit (4 096) is measured in UTF-16 code units,
-    **not** Unicode code-points.  Characters outside the Basic Multilingual
-    Plane (emoji like 😀, CJK Extension B, musical symbols, …) are encoded as
-    surrogate pairs and therefore consume **two** UTF-16 code units each, even
-    though Python's ``len()`` counts them as one.
+    Legacy Telegram compatibility: its message-length limit (4 096) is
+    measured in UTF-16 code units, **not** Unicode code-points.  Characters
+    outside the Basic Multilingual Plane (emoji like 😀, CJK Extension B,
+    musical symbols, …) are encoded as surrogate pairs and therefore consume
+    **two** UTF-16 code units each, even though Python's ``len()`` counts them
+    as one.
 
     Ported from nearai/ironclaw#2304 which discovered the same discrepancy in
     Rust's ``chars().count()``.
@@ -470,7 +472,7 @@ def resolve_proxy_url(
 
 
 def proxy_kwargs_for_bot(proxy_url: str | None) -> dict:
-    """Build kwargs for ``commands.Bot()`` / ``discord.Client()`` with proxy.
+    """Build kwargs for bot/client constructors that accept proxy options.
 
     Returns:
       - SOCKS URL  → ``{"connector": ProxyConnector(..., rdns=True)}``
@@ -650,7 +652,7 @@ async def _ssrf_redirect_guard(response):
 # When users send images on messaging platforms, we download them to a local
 # cache directory so they can be analyzed by the vision tool (which accepts
 # local file paths). This avoids issues with ephemeral platform URLs
-# (e.g. Telegram file URLs expire after ~1 hour).
+# (for example, signed platform URLs may expire quickly).
 # ---------------------------------------------------------------------------
 
 # Default location: {HERMES_HOME}/cache/images/ (legacy: image_cache/)
@@ -1108,9 +1110,9 @@ def validate_media_delivery_path(path: str) -> Optional[str]:
     Default mode (single-user / private gateway): accept any existing regular
     file that isn't under the credential / system-path denylist
     (``_MEDIA_DELIVERY_DENIED_PREFIXES`` + ``~/.ssh``, ``~/.aws``, etc.).
-    This matches the symmetry of inbound delivery — Telegram/Discord/Slack
-    will hand the agent any file the user uploads, and the agent can hand
-    back any file that isn't a credential.
+    This matches the symmetry of inbound delivery: chat/API surfaces can hand
+    the agent user-uploaded files, and the agent can hand back any file that
+    isn't a credential.
 
     Strict mode (opt-in via ``gateway.strict`` in ``config.yaml`` or
     ``HERMES_MEDIA_DELIVERY_STRICT=1``): the file MUST live under a
@@ -1214,8 +1216,8 @@ SUPPORTED_DOCUMENT_TYPES = {
 # Image document types
 #
 # Image extensions that platforms may deliver as "documents" rather than
-# native photo attachments (Telegram users uploading via the file picker,
-# clients that wrap stickers/screenshots as files, etc.). When we see one
+# native photo attachments (users uploading via a file picker, clients that
+# wrap stickers/screenshots as files, etc.). When we see one
 # of these, we route the bytes through the image cache and the normal
 # vision/photo handling path instead of rejecting them as unsupported
 # documents.
@@ -1382,13 +1384,12 @@ class MessageEvent:
     raw_message: Any = None
     message_id: Optional[str] = None
 
-    # Platform-specific update identifier.  For Telegram this is the
+    # Platform-specific update identifier. Legacy Telegram uses the
     # ``update_id`` from the PTB Update wrapper; other platforms currently
-    # ignore it.  Used by ``/restart`` to record the triggering update so the
-    # new gateway can advance the Telegram offset past it and avoid processing
-    # the same ``/restart`` twice if PTB's graceful-shutdown ACK times out
-    # ("Error while calling `get_updates` one more time to mark all fetched
-    # updates" in gateway.log).
+    # ignore it. Used by ``/restart`` to record the triggering update so the
+    # new gateway can advance the compatibility adapter's offset past it and
+    # avoid processing the same ``/restart`` twice if graceful shutdown ACK
+    # times out.
     platform_update_id: Optional[int] = None
     
     # Media attachments
@@ -1400,11 +1401,11 @@ class MessageEvent:
     reply_to_message_id: Optional[str] = None
     reply_to_text: Optional[str] = None  # Text of the replied-to message (for context injection)
     
-    # Auto-loaded skill(s) for topic/channel bindings (e.g., Telegram DM Topics,
-    # Discord channel_skill_bindings).  A single name or ordered list.
+    # Auto-loaded skill(s) for topic/channel bindings.  A single name or
+    # ordered list.
     auto_skill: Optional[str | list[str]] = None
 
-    # Per-channel ephemeral system prompt (e.g. Discord channel_prompts).
+    # Per-channel ephemeral system prompt.
     # Applied at API call time and never persisted to transcript history.
     channel_prompt: Optional[str] = None
 
@@ -1502,7 +1503,7 @@ class SendResult:
     raw_response: Any = None
     retryable: bool = False  # True for transient connection errors — base will retry automatically
     # When the adapter had to split an oversized payload across multiple
-    # platform messages (e.g. Telegram edit_message overflow split-and-deliver),
+    # platform messages,
     # ``message_id`` is the LAST visible message id (so subsequent edits target
     # the most recent chunk) and these are the additional message ids that
     # made up the full payload, in send order.  Empty tuple for the common
@@ -1563,9 +1564,9 @@ def merge_pending_message_event(
     the whole burst.
 
     When ``merge_text`` is enabled, rapid follow-up TEXT events are appended
-    instead of replacing the pending turn. This is used for Telegram bursty
-    follow-ups so a multi-part user thought is not silently truncated to only
-    the last queued fragment.
+    instead of replacing the pending turn. This is used for bursty follow-ups
+    so a multi-part user thought is not silently truncated to only the last
+    queued fragment.
     """
     existing = pending_messages.get(session_key)
     if existing:
@@ -1679,14 +1680,13 @@ def resolve_channel_skills(
     Config format::
 
         channel_skill_bindings:
-          - id: "C0123"          # Slack channel ID or Discord channel/forum ID
+          - id: "oc_123"         # Feishu chat ID or API conversation ID
             skills: ["skill-a", "skill-b"]
           - id: "D0ABCDE"
             skill: "solo-skill"  # single string also accepted
 
     Prefers an exact match on *channel_id*; falls back to *parent_id*
-    (useful for forum threads / Slack threads inheriting the parent channel's
-    binding).
+    (useful for threaded conversations inheriting the parent channel's binding).
 
     Returns a deduplicated list of skill names (order preserved), or None if
     no match is found.
@@ -1807,7 +1807,7 @@ class BasePlatformAdapter(ABC):
         """Return the length function for measuring message size on this platform.
 
         Override in adapters whose platform counts characters differently from
-        Python ``len`` (e.g. Telegram counts UTF-16 code units).
+        Python ``len`` (for example, legacy UTF-16 compatibility adapters).
         """
         return len
 
@@ -1833,11 +1833,8 @@ class BasePlatformAdapter(ABC):
     ) -> bool:
         """Whether this adapter supports native streaming-draft updates.
 
-        Telegram Bot API 9.5 introduced ``sendMessageDraft``, which renders an
-        animated streaming preview as the bot calls it repeatedly with the
-        same ``draft_id`` and growing text.  Adapters that implement
-        ``send_draft`` should return True here for the chat types where the
-        platform supports it (Telegram restricts drafts to private DMs).
+        Adapters that implement ``send_draft`` should return True here for the
+        chat types where the platform supports native streaming-draft updates.
 
         Default implementation returns False.  Stream consumers fall back to
         the edit-based path (``send`` + ``edit_message``) when this returns
@@ -2048,9 +2045,9 @@ class BasePlatformAdapter(ABC):
         """
         Set the session store for checking active sessions.
         
-        Used by adapters that need to check if a thread/conversation
-        has an active session before processing messages (e.g., Slack
-        thread replies without explicit mentions).
+        Used by adapters that need to check if a thread/conversation has an
+        active session before processing messages, such as thread replies
+        without explicit mentions.
         """
         self._session_store = session_store
     
@@ -2093,8 +2090,8 @@ class BasePlatformAdapter(ABC):
     # Default: the adapter treats ``finalize=True`` on edit_message as a
     # no-op and is happy to have the stream consumer skip redundant final
     # edits.  Subclasses that *require* an explicit finalize call to close
-    # out the message lifecycle (e.g. rich card / AI assistant surfaces
-    # such as DingTalk AI Cards) override this to True (class attribute or
+    # out the message lifecycle, such as rich cards or assistant surfaces,
+    # override this to True (class attribute or
     # property) so the stream consumer knows not to short-circuit.
     REQUIRES_EDIT_FINALIZE: bool = False
 
@@ -2117,10 +2114,7 @@ class BasePlatformAdapter(ABC):
         directly.
 
         Default implementation returns ``None`` — adapters that support
-        threads override this. See:
-          - Telegram: forum topics in groups, DM topics with bot API 9.4+
-          - Discord:  text-channel threads (1440-min auto-archive)
-          - Slack:    seed-message thread anchoring
+        threads or conversation forks override this.
         """
         return None
 
@@ -2139,12 +2133,11 @@ class BasePlatformAdapter(ABC):
         sending a new message.
 
         ``finalize`` signals that this is the last edit in a streaming
-        sequence.  Most platforms (Telegram, Slack, Discord, Matrix,
-        etc.) treat it as a no-op because their edit APIs have no notion
+        sequence.  Most adapters treat it as a no-op because their edit APIs have no notion
         of message lifecycle state — an edit is an edit.  Platforms that
         render streaming updates with a distinct "in progress" state and
-        require explicit closure (e.g. rich card / AI assistant surfaces
-        such as DingTalk AI Cards) use it to finalize the message and
+        require explicit closure, such as rich card or assistant surfaces,
+        use it to finalize the message and
         transition the UI out of the streaming indicator — those should
         also set ``REQUIRES_EDIT_FINALIZE = True`` so callers route a
         final edit through even when content is unchanged.  Callers
@@ -2170,8 +2163,7 @@ class BasePlatformAdapter(ABC):
         platform's visible timestamp reflects completion time.
 
         Returns ``True`` on successful deletion, ``False`` otherwise.
-        Subclasses should override for platforms with a deletion API
-        (e.g. Telegram ``deleteMessage``).
+        Subclasses should override for platforms with a deletion API.
         """
         return False
 
@@ -2208,7 +2200,7 @@ class BasePlatformAdapter(ABC):
         """Spawn a detached task that deletes ``message_id`` after ``ttl_seconds``.
 
         Best-effort — failures (gateway restart, permission denied, message
-        too old for Telegram's 48h window) are swallowed at debug level.
+        outside the platform's deletion window) are swallowed at debug level.
         Does not block the caller.
         """
 
@@ -2250,8 +2242,8 @@ class BasePlatformAdapter(ABC):
         acknowledge — the current caller is ``/reload-mcp``, which
         invalidates the provider prompt cache.
 
-        Platforms with inline-button support (Telegram, Discord, Slack,
-        Matrix, Feishu) should override this to render three buttons:
+        Platforms with inline-button support, including Feishu, should
+        override this to render three buttons:
         Approve Once / Always Approve / Cancel.  Button callbacks MUST be
         routed back through the gateway by calling
         ``GatewayRunner._resolve_slash_confirm(confirm_id, choice)`` where
@@ -2264,7 +2256,7 @@ class BasePlatformAdapter(ABC):
 
         ``confirm_id`` is a short string generated by the gateway; the
         adapter stores it alongside any platform-specific state needed to
-        route the callback (e.g. Telegram's ``_approval_state`` dict).
+        route the callback (for example, an adapter callback-state dict).
         """
         return SendResult(success=False, error="Not supported")
 
@@ -2303,8 +2295,7 @@ class BasePlatformAdapter(ABC):
         ``mark_awaiting_text()`` so that the gateway text-intercept
         (:meth:`GatewayRunner._maybe_intercept_clarify_text`) catches the
         user's reply instead of timing out.
-        Adapters with native button UIs (Telegram, Discord) SHOULD
-        override this for a richer UX.
+        Adapters with native button UIs should override this for a richer UX.
         """
         if choices:
             lines = [f"❓ {question}", ""]
@@ -2350,7 +2341,7 @@ class BasePlatformAdapter(ABC):
         Send a typing indicator.
         
         Override in subclasses if the platform supports it.
-        metadata: optional dict with platform-specific context (e.g. thread_id for Slack).
+        metadata: optional dict with platform-specific context (for example, thread_id).
         """
         pass
 
@@ -2475,8 +2466,8 @@ class BasePlatformAdapter(ABC):
         """
         Send an animated GIF natively via the platform API.
         
-        Override in subclasses to send GIFs as proper animations
-        (e.g., Telegram send_animation) so they auto-play inline.
+        Override in subclasses to send GIFs as proper animations so they
+        auto-play inline when the platform supports native animations.
         Default falls back to send_image.
         """
         return await self.send_image(chat_id=chat_id, image_url=animation_url, caption=caption, reply_to=reply_to, metadata=metadata)
@@ -2547,9 +2538,8 @@ class BasePlatformAdapter(ABC):
         """
         Send an audio file as a native voice message via the platform API.
         
-        Override in subclasses to send audio as voice bubbles (Telegram)
-        or file attachments (Discord). Default falls back to sending the
-        file path as text.
+        Override in subclasses to send audio as voice bubbles or file
+        attachments. Default falls back to sending the file path as text.
         """
         text = f"🔊 Audio: {audio_path}"
         if caption:
@@ -2726,10 +2716,9 @@ class BasePlatformAdapter(ABC):
             [[audio_as_voice]]
             MEDIA:/path/to/audio.ogg
 
-        Skills that produce large/lossless images (e.g. info-graph, where a
-        rendered JPG is 1-2 MB but Telegram's sendPhoto recompresses to
-        ~200 KB at 1280px) can use ``[[as_document]]`` to request unmodified
-        delivery via sendDocument instead of sendPhoto/sendMediaGroup. The
+        Skills that produce large/lossless images can use ``[[as_document]]``
+        to request unmodified delivery via document/file upload instead of
+        image upload paths that may recompress media. The
         directive is detected at the dispatch sites (which have access to the
         original response); this method just strips it so it never leaks into
         user-visible text. Per-file granularity is intentionally not exposed —
@@ -2869,22 +2858,19 @@ class BasePlatformAdapter(ABC):
         """
         Continuously send typing indicator until cancelled.
         
-        Telegram/Discord typing status expires after ~5 seconds, so we refresh every 2
-        to recover quickly after progress messages interrupt it.
+        Some platform typing indicators expire after ~5 seconds, so we refresh
+        every 2 seconds to recover quickly after progress messages interrupt it.
         
         Skips send_typing when the chat is in ``_typing_paused`` (e.g. while
-        the agent is waiting for dangerous-command approval).  This is critical
-        for Slack's Assistant API where ``assistant_threads_setStatus`` disables
-        the compose box — pausing lets the user type ``/approve`` or ``/deny``.
+        the agent is waiting for dangerous-command approval). This is critical
+        for surfaces where typing/status APIs disable the compose box; pausing
+        lets the user type ``/approve`` or ``/deny``.
 
         Each ``send_typing`` call is bounded by a ~1.5s timeout so a slow
-        network round-trip can't stall the refresh cadence.  Telegram- and
-        Discord-side typing expire after ~5s; if any individual send_typing
-        takes longer than the refresh interval, the bubble would die and
-        stay dead until that call returns.  Abandoning the slow call lets
-        the next tick fire a fresh send_typing on schedule — as long as
-        one of them succeeds within the 5s platform-side window, the bubble
-        stays visible across provider stalls / upstream API timeouts.
+        network round-trip can't stall the refresh cadence. If any individual
+        send_typing takes longer than the refresh interval, the indicator can
+        disappear until that call returns. Abandoning the slow call lets the
+        next tick fire a fresh send_typing on schedule.
         """
         # Bound each send_typing round-trip so the refresh cadence isn't
         # gated on network health.  Must stay below ``interval`` so a slow
@@ -3050,8 +3036,7 @@ class BasePlatformAdapter(ABC):
         return entry if callable(entry) else None
 
     # ── Processing lifecycle hooks ──────────────────────────────────────────
-    # Subclasses override these to react to message processing events
-    # (e.g. Discord adds 👀/✅/❌ reactions).
+    # Subclasses override these to react to message processing events.
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Hook called when background processing begins."""
@@ -3938,8 +3923,8 @@ class BasePlatformAdapter(ABC):
                 # Capture [[as_document]] before extract_media strips it, so the
                 # dispatch partition below can route image-extension files
                 # through send_document instead of send_multiple_images. Used
-                # by skills that produce large/lossless images (e.g. info-graph)
-                # where Telegram's sendPhoto recompression destroys legibility.
+                # by skills that produce large/lossless images where platform
+                # photo recompression destroys legibility.
                 force_document_attachments = "[[as_document]]" in response
 
                 # Extract MEDIA:<path> tags (from TTS tool) before other processing
@@ -4025,7 +4010,7 @@ class BasePlatformAdapter(ABC):
                     _reply_anchor = _reply_anchor_for_event(event)
                     # Mark final response messages for notification delivery.
                     # Platform adapters that support per-message notification
-                    # control (e.g. Telegram's disable_notification) use this
+                    # control use this
                     # flag to override silent-mode and ensure the final
                     # response triggers a push notification.
                     # Clone to avoid mutating the metadata shared with the
@@ -4096,8 +4081,8 @@ class BasePlatformAdapter(ABC):
                 # can be sent as a single batch (Signal RPC). When
                 # ``[[as_document]]`` was set on the original response, image
                 # files skip the photo path and route to send_document below
-                # so they're delivered with original bytes (no Telegram
-                # sendPhoto recompression).
+                # so they're delivered with original bytes (no platform photo
+                # recompression).
                 from urllib.parse import quote as _quote
                 _image_paths: list = []
                 _non_image_media: list = []
@@ -4319,7 +4304,7 @@ class BasePlatformAdapter(ABC):
                     pass
             # Stop typing indicator
             await _stop_typing_task()
-            # Also cancel any platform-level persistent typing tasks (e.g. Discord)
+            # Also cancel any platform-level persistent typing tasks.
             # that may have been recreated by _keep_typing after the last stop_typing()
             try:
                 if hasattr(self, "stop_typing"):
@@ -4519,8 +4504,7 @@ class BasePlatformAdapter(ABC):
         """
         Format a message for this platform.
         
-        Override in subclasses to handle platform-specific formatting
-        (e.g., Telegram MarkdownV2, Discord markdown).
+        Override in subclasses to handle platform-specific formatting.
         
         Default implementation returns content as-is.
         """
@@ -4545,8 +4529,8 @@ class BasePlatformAdapter(ABC):
             max_length: Maximum length per chunk (platform-specific)
             len_fn: Optional length function for measuring string length.
                      Defaults to ``len`` (Unicode code-points).  Pass
-                     ``utf16_len`` for platforms that measure message
-                     length in UTF-16 code units (e.g. Telegram).
+                     ``utf16_len`` for compatibility adapters that measure
+                     message length in UTF-16 code units.
 
         Returns:
             List of message chunks
@@ -4581,7 +4565,7 @@ class BasePlatformAdapter(ABC):
                 break
 
             # Find a natural split point (prefer newlines, then spaces).
-            # When _len != len (e.g. utf16_len for Telegram), headroom is
+            # When _len != len (for example, utf16_len compatibility), headroom is
             # measured in the custom unit.  We need codepoint-based slice
             # positions that stay within the custom-unit budget.
             #
@@ -4604,7 +4588,7 @@ class BasePlatformAdapter(ABC):
             # backticks, the split falls inside inline code — the resulting
             # chunk would have an unpaired backtick and any special characters
             # (like parentheses) inside the broken span would be unescaped,
-            # causing MarkdownV2 parse errors on Telegram.
+            # causing platform markdown parse errors.
             candidate = remaining[:split_at]
             backtick_count = candidate.count("`") - candidate.count("\\`")
             if backtick_count % 2 == 1:

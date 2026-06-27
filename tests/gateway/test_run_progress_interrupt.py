@@ -23,7 +23,7 @@ from gateway.session import SessionSource
 
 
 class ProgressCaptureAdapter(BasePlatformAdapter):
-    def __init__(self, platform=Platform.TELEGRAM):
+    def __init__(self, platform=Platform.FEISHU):
         super().__init__(PlatformConfig(enabled=True, token="***"), platform)
         self.sent = []
         self.edits = []
@@ -98,11 +98,11 @@ class InterruptedAgent:
     def run_conversation(self, message, conversation_history=None, task_id=None):
         # Parallel tool batch — in production these come from one LLM
         # response with 5 tool_calls.  All are post-interrupt.
-        self.tool_progress_callback("tool.started", "web_search", "cognee hermes", {})
-        self.tool_progress_callback("tool.started", "web_search", "McBee deer hunting", {})
-        self.tool_progress_callback("tool.started", "web_search", "kuzu graph db", {})
-        self.tool_progress_callback("tool.started", "web_search", "moonshot kimi api", {})
-        self.tool_progress_callback("tool.started", "web_search", "platform.moonshot.cn", {})
+        self.tool_progress_callback("tool.started", "web_search", "internal docs search", {})
+        self.tool_progress_callback("tool.started", "web_search", "release note lookup", {})
+        self.tool_progress_callback("tool.started", "web_search", "graph database notes", {})
+        self.tool_progress_callback("tool.started", "web_search", "provider api status", {})
+        self.tool_progress_callback("tool.started", "web_search", "internal api host", {})
         time.sleep(0.35)  # let the drain loop attempt to process the queue
         return {"final_response": "interrupted", "messages": [], "api_calls": 1}
 
@@ -152,10 +152,10 @@ async def _run_once(monkeypatch, tmp_path, agent_cls, session_id):
         lambda: {"api_key": "fake"},
     )
     source = SessionSource(
-        platform=Platform.TELEGRAM,
-        chat_id="-1001",
+        platform=Platform.FEISHU,
+        chat_id="oc_feishu_group",
         chat_type="group",
-        thread_id="17585",
+        thread_id="omt_feishu_thread",
     )
     result = await runner._run_agent(
         message="hi",
@@ -163,7 +163,7 @@ async def _run_once(monkeypatch, tmp_path, agent_cls, session_id):
         history=[],
         source=source,
         session_id=session_id,
-        session_key="agent:main:telegram:group:-1001:17585",
+        session_key="agent:main:feishu:group:oc_feishu_group:omt_feishu_thread",
     )
     return adapter, result
 
@@ -203,11 +203,11 @@ async def test_progress_suppressed_when_agent_is_interrupted(monkeypatch, tmp_pa
 
     # None of the post-interrupt queries should appear.
     for leaked_query in (
-        "cognee hermes",
-        "McBee deer hunting",
-        "kuzu graph db",
-        "moonshot kimi api",
-        "platform.moonshot.cn",
+        "internal docs search",
+        "release note lookup",
+        "graph database notes",
+        "provider api status",
+        "internal api host",
     ):
         assert leaked_query not in rendered, (
             f"event '{leaked_query}' leaked into the UI after interrupt — "

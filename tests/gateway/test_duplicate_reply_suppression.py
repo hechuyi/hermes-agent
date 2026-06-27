@@ -63,14 +63,14 @@ async def test_failed_agent_user_persistence_proof_controls_gateway_db_rewrite(
 
     runner = object.__new__(GatewayRunner)
     source = SessionSource(
-        platform=Platform.DISCORD,
+        platform=Platform.FEISHU,
         chat_id="c1",
         chat_type="dm",
         user_id="u1",
     )
     event = MessageEvent(text="hello", source=source, message_id="m1")
     session_entry = SimpleNamespace(
-        session_key="agent:main:discord:dm:c1",
+        session_key="agent:main:feishu:dm:c1",
         session_id="session-1",
         created_at=datetime.now(),
         updated_at=datetime.now(),
@@ -87,7 +87,7 @@ async def test_failed_agent_user_persistence_proof_controls_gateway_db_rewrite(
     session_store.clear_resume_pending = MagicMock()
     runner.session_store = session_store
     runner.adapters = {
-        Platform.DISCORD: SimpleNamespace(
+        Platform.FEISHU: SimpleNamespace(
             stop_typing=AsyncMock(),
             send=AsyncMock(),
         )
@@ -290,14 +290,14 @@ async def test_queued_mixed_proof_skips_only_persisted_prefix_rows(monkeypatch):
 
     runner = object.__new__(GatewayRunner)
     source = SessionSource(
-        platform=Platform.DISCORD,
+        platform=Platform.FEISHU,
         chat_id="c1",
         chat_type="dm",
         user_id="u1",
     )
     event = MessageEvent(text="first queued", source=source, message_id="m1")
     session_entry = SimpleNamespace(
-        session_key="agent:main:discord:dm:c1",
+        session_key="agent:main:feishu:dm:c1",
         session_id="session-1",
         created_at=datetime.now(),
         updated_at=datetime.now(),
@@ -310,7 +310,7 @@ async def test_queued_mixed_proof_skips_only_persisted_prefix_rows(monkeypatch):
     session_store.clear_resume_pending = MagicMock()
     runner.session_store = session_store
     runner.adapters = {
-        Platform.DISCORD: SimpleNamespace(
+        Platform.FEISHU: SimpleNamespace(
             stop_typing=AsyncMock(),
             send=AsyncMock(),
         )
@@ -383,7 +383,7 @@ class StubAdapter(BasePlatformAdapter):
     """Minimal concrete adapter for testing."""
 
     def __init__(self):
-        super().__init__(PlatformConfig(enabled=True, token="fake"), Platform.DISCORD)
+        super().__init__(PlatformConfig(enabled=True, token="fake"), Platform.FEISHU)
         self.sent = []
 
     async def connect(self):
@@ -407,7 +407,7 @@ def _make_event(text="hello", chat_id="c1", user_id="u1"):
     return MessageEvent(
         text=text,
         source=SessionSource(
-            platform=Platform.DISCORD,
+            platform=Platform.FEISHU,
             chat_id=chat_id,
             chat_type="dm",
             user_id=user_id,
@@ -520,8 +520,8 @@ class TestOnlyFinalStreamDeliverySuppressesFinalSend:
     stream consumer confirmed the final assistant reply was delivered.
 
     Partial streamed output is not enough. If only already_sent=True,
-    the fallback final send must still happen so Telegram users don't lose
-    the real answer."""
+    the fallback final send must still happen so users don't lose the real
+    answer."""
 
     def _make_mock_stream_consumer(self, already_sent=False, final_response_sent=False):
         sc = SimpleNamespace(

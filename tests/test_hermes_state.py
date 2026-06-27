@@ -132,7 +132,7 @@ class TestSessionLifecycle:
         assert session["input_tokens"] == 300
 
     def test_update_token_counts_backfills_model_when_null(self, db):
-        db.create_session(session_id="s1", source="telegram")
+        db.create_session(session_id="s1", source="api")
         db.update_token_counts("s1", input_tokens=10, output_tokens=5, model="openai/gpt-5.4")
 
         session = db.get_session("s1")
@@ -148,7 +148,7 @@ class TestSessionLifecycle:
     def test_update_session_model_overwrites_existing(self, db):
         db.create_session(
             session_id="s1",
-            source="telegram",
+            source="api",
             model="xiaomi/mimo-v2.5-pro",
         )
         db.update_token_counts(
@@ -503,7 +503,7 @@ class TestMessageStorage:
         assert all(row["conversation_scope_id"] is None for row in rows)
 
     def test_observed_flag_round_trips_for_gateway_replay(self, db):
-        db.create_session(session_id="s1", source="telegram:-100")
+        db.create_session(session_id="s1", source="feishu:oc_group")
         db.append_message(
             "s1",
             role="user",
@@ -547,7 +547,11 @@ class TestMessageStorage:
         assert session["tool_call_count"] == 1
 
     def test_tool_call_count_matches_actual_calls(self, db):
-        """tool_call_count should equal the number of tool calls made, not messages."""
+        """tool_call_count should equal the number of tool calls made, not messages.
+
+        Legacy Home Assistant tool names remain covered here as tool-name
+        compatibility data, not as a current platform runtime surface.
+        """
         db.create_session(session_id="s1", source="cli")
 
         # Assistant makes 2 parallel tool calls in one message
@@ -679,10 +683,11 @@ class TestMessageStorage:
         assert conv[0] == {"role": "user", "content": "Hello"}
         assert conv[1] == {"role": "assistant", "content": "Hi!"}
 
-    def test_platform_message_id_round_trips(self, db):
-        """Platform-side message ids (yuanbao msg_id, telegram update_id, …)
-        survive append → get_messages_as_conversation under the
-        ``message_id`` key so platform recall flows can match by exact id."""
+    def test_legacy_platform_message_id_round_trips(self, db):
+        """Legacy compatibility: platform-side message ids (yuanbao msg_id,
+        telegram update_id, …) survive append → get_messages_as_conversation
+        under the ``message_id`` key so historical platform recall flows can
+        match by exact id."""
         db.create_session(session_id="s_pmi", source="yuanbao")
         db.append_message(
             "s_pmi",
@@ -699,10 +704,10 @@ class TestMessageStorage:
         # Assistant row had no platform id — must not gain one spuriously.
         assert "message_id" not in assistant_msg
 
-    def test_replace_messages_preserves_platform_message_id(self, db):
-        """``rewrite_transcript`` (which goes through replace_messages) must
-        keep the platform_message_id round-trip working for /retry, /undo,
-        /compress and yuanbao's recall rewrite path."""
+    def test_replace_messages_preserves_legacy_platform_message_id(self, db):
+        """Legacy compatibility: ``rewrite_transcript`` must keep the
+        platform_message_id round-trip working for /retry, /undo, /compress
+        and yuanbao's historical recall rewrite path."""
         db.create_session(session_id="s_rep", source="yuanbao")
         db.replace_messages(
             "s_rep",
@@ -826,7 +831,7 @@ class TestMessageStorage:
         """Reasoning text is stored for assistant messages and restored by
         get_messages_as_conversation() so providers receive coherent multi-turn
         reasoning context."""
-        db.create_session(session_id="s1", source="telegram")
+        db.create_session(session_id="s1", source="api")
         db.append_message("s1", role="user", content="create a cron job")
         db.append_message(
             "s1",
@@ -850,7 +855,7 @@ class TestMessageStorage:
     def test_reasoning_details_persisted_and_restored(self, db):
         """reasoning_details (structured array) is round-tripped through JSON
         serialization in the DB."""
-        db.create_session(session_id="s1", source="telegram")
+        db.create_session(session_id="s1", source="api")
         details = [
             {"type": "reasoning.summary", "summary": "Thinking about tools"},
             {"type": "reasoning.encrypted_content", "encrypted_content": "abc123"},
@@ -951,7 +956,7 @@ class TestMessageStorage:
 
     def test_reasoning_not_set_for_non_assistant(self, db):
         """reasoning is never leaked onto user or tool messages."""
-        db.create_session(session_id="s1", source="telegram")
+        db.create_session(session_id="s1", source="api")
         db.append_message("s1", role="user", content="hi")
         db.append_message("s1", role="assistant", content="hello", reasoning=None)
 
@@ -1012,13 +1017,13 @@ class TestFTS5Search:
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="CLI question about Python")
 
-        db.create_session(session_id="s2", source="telegram")
-        db.append_message("s2", role="user", content="Telegram question about Python")
+        db.create_session(session_id="s2", source="api")
+        db.append_message("s2", role="user", content="API question about Python")
 
-        results = db.search_messages("Python", source_filter=["telegram"])
-        # Should only find the telegram message
+        results = db.search_messages("Python", source_filter=["api"])
+        # Should only find the API message
         sources = [r["source"] for r in results]
-        assert all(s == "telegram" for s in sources)
+        assert all(s == "api" for s in sources)
 
     def test_search_default_sources_include_acp(self, db):
         db.create_session(session_id="s1", source="acp")
@@ -1028,16 +1033,16 @@ class TestFTS5Search:
         sources = [r["source"] for r in results]
         assert "acp" in sources
 
-    def test_search_default_includes_all_platforms(self, db):
-        """Default search (no source_filter) should find sessions from any platform."""
-        for src in ("cli", "telegram", "signal", "homeassistant", "acp", "matrix"):
+    def test_search_default_includes_all_current_sources(self, db):
+        """Default search (no source_filter) should find any current source."""
+        for src in ("cli", "api", "feishu", "cron", "acp"):
             sid = f"s-{src}"
             db.create_session(session_id=sid, source=src)
             db.append_message(sid, role="user", content=f"universal search test from {src}")
 
         results = db.search_messages("universal search test")
         found_sources = {r["source"] for r in results}
-        assert found_sources == {"cli", "telegram", "signal", "homeassistant", "acp", "matrix"}
+        assert found_sources == {"cli", "api", "feishu", "cron", "acp"}
 
     def test_search_with_role_filter(self, db):
         db.create_session(session_id="s1", source="cli")
@@ -1290,7 +1295,7 @@ class TestCJKSearchFallback:
         assert results[0]["session_id"] == "s1"
 
     def test_chinese_bigram_query(self, db):
-        db.create_session(session_id="s1", source="telegram")
+        db.create_session(session_id="s1", source="api")
         db.append_message("s1", role="user", content="今天讨论A2A通信协议的实现")
         results = db.search_messages("通信")
         assert len(results) == 1
@@ -1312,13 +1317,13 @@ class TestCJKSearchFallback:
         """Guards against the SQL-builder bug where filter clauses land
         after LIMIT/OFFSET (seen in one of the duplicate PRs)."""
         db.create_session(session_id="s1", source="cli")
-        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s2", source="api")
         db.append_message("s1", role="user", content="记忆断裂在CLI")
-        db.append_message("s2", role="user", content="记忆断裂在Telegram")
+        db.append_message("s2", role="user", content="记忆断裂在API")
 
-        results = db.search_messages("记忆断裂", source_filter=["telegram"])
+        results = db.search_messages("记忆断裂", source_filter=["api"])
         assert len(results) == 1
-        assert results[0]["source"] == "telegram"
+        assert results[0]["source"] == "api"
 
     def test_cjk_fallback_preserves_exclude_sources(self, db):
         db.create_session(session_id="s1", source="cli")
@@ -1389,7 +1394,7 @@ class TestCJKSearchFallback:
         results.  The LIKE path must always run for CJK queries.
         """
         db.create_session(session_id="s1", source="cli")
-        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s2", source="api")
         db.append_message("s1", role="user", content="昨晚讨论了记忆系统")
         db.append_message("s2", role="user", content="昨晚的会议纪要已发送")
         results = db.search_messages("昨晚")
@@ -1436,7 +1441,7 @@ class TestCJKSearchFallback:
         The per-token check must route such queries to the LIKE fallback.
         """
         db.create_session(session_id="s1", source="cli")
-        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s2", source="api")
         db.create_session(session_id="s3", source="cli")
         db.append_message("s1", role="user", content="广西是个好地方，去过桂林")
         db.append_message("s2", role="user", content="漓江风景很美，值得旅游")
@@ -1451,13 +1456,13 @@ class TestCJKSearchFallback:
     def test_cjk_short_token_or_query_preserves_filters(self, db):
         """Source filter applies correctly in the short-token LIKE path (#20494)."""
         db.create_session(session_id="s1", source="cli")
-        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s2", source="api")
         db.append_message("s1", role="user", content="广西旅游攻略cli")
-        db.append_message("s2", role="user", content="广西旅游攻略telegram")
+        db.append_message("s2", role="user", content="广西旅游攻略api")
 
-        results = db.search_messages("广西 OR 旅游", source_filter=["telegram"])
+        results = db.search_messages("广西 OR 旅游", source_filter=["api"])
         assert len(results) == 1
-        assert results[0]["source"] == "telegram"
+        assert results[0]["source"] == "api"
 
 
 # =========================================================================
@@ -1467,14 +1472,14 @@ class TestCJKSearchFallback:
 class TestSearchSessions:
     def test_list_all_sessions(self, db):
         db.create_session(session_id="s1", source="cli")
-        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s2", source="api")
 
         sessions = db.search_sessions()
         assert len(sessions) == 2
 
     def test_filter_by_source(self, db):
         db.create_session(session_id="s1", source="cli")
-        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s2", source="api")
 
         sessions = db.search_sessions(source="cli")
         assert len(sessions) == 1
@@ -1499,15 +1504,15 @@ class TestCounts:
     def test_session_count(self, db):
         assert db.session_count() == 0
         db.create_session(session_id="s1", source="cli")
-        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s2", source="api")
         assert db.session_count() == 2
 
     def test_session_count_by_source(self, db):
         db.create_session(session_id="s1", source="cli")
-        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s2", source="api")
         db.create_session(session_id="s3", source="cli")
         assert db.session_count(source="cli") == 2
-        assert db.session_count(source="telegram") == 1
+        assert db.session_count(source="api") == 1
 
     def test_message_count_total(self, db):
         assert db.message_count() == 0
@@ -1575,7 +1580,7 @@ class TestDeleteAndExport:
 
     def test_export_all(self, db):
         db.create_session(session_id="s1", source="cli")
-        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s2", source="api")
         db.append_message("s1", role="user", content="A")
 
         exports = db.export_all()
@@ -1583,7 +1588,7 @@ class TestDeleteAndExport:
 
     def test_export_all_with_source(self, db):
         db.create_session(session_id="s1", source="cli")
-        db.create_session(session_id="s2", source="telegram")
+        db.create_session(session_id="s2", source="api")
 
         exports = db.export_all(source="cli")
         assert len(exports) == 1
@@ -1630,7 +1635,7 @@ class TestPruneSessions:
         assert db.get_session("active") is not None
 
     def test_prune_with_source_filter(self, db):
-        for sid, src in [("old_cli", "cli"), ("old_tg", "telegram")]:
+        for sid, src in [("old_cli", "cli"), ("old_api", "api")]:
             db.create_session(session_id=sid, source=src)
             db.end_session(sid, end_reason="done")
             db._conn.execute(
@@ -1642,7 +1647,7 @@ class TestPruneSessions:
         pruned = db.prune_sessions(older_than_days=90, source="cli")
         assert pruned == 1
         assert db.get_session("old_cli") is None
-        assert db.get_session("old_tg") is not None
+        assert db.get_session("old_api") is not None
 
     def test_prune_with_multilevel_chain(self, db):
         """Pruning old sessions orphans newer children instead of crashing on FK."""
@@ -2145,8 +2150,9 @@ class TestSchemaInit:
         assert {"chat_id", "chat_type", "thread_id", "session_key"}.isdisjoint(columns)
         db.close()
 
-    def test_apply_telegram_topic_migration_creates_topic_tables_explicitly(self, tmp_path):
-        """The /topic opt-in path owns the DB migration for Telegram topic mode."""
+    def test_legacy_telegram_topic_migration_creates_topic_tables_explicitly(self, tmp_path):
+        """Legacy compatibility: the retired Telegram /topic opt-in path owns
+        its DB migration and remains readable for historical data."""
         old_db = tmp_path / "old.db"
         import sqlite3
 
@@ -2220,7 +2226,8 @@ class TestSchemaInit:
         assert db.get_meta("telegram_dm_topic_schema_version") == "2"
         db.close()
 
-    def test_telegram_topic_binding_roundtrip_requires_explicit_schema(self, tmp_path):
+    def test_legacy_telegram_topic_binding_roundtrip_requires_explicit_schema(self, tmp_path):
+        """Legacy compatibility: historical Telegram topic bindings round-trip."""
         db = SessionDB(db_path=tmp_path / "state.db")
         db.create_session(
             session_id="topic-session",
@@ -2248,7 +2255,8 @@ class TestSchemaInit:
         assert db.get_meta("telegram_dm_topic_schema_version") == "2"
         db.close()
 
-    def test_telegram_topic_binding_refuses_to_relink_session_to_another_topic(self, tmp_path):
+    def test_legacy_telegram_topic_binding_refuses_to_relink_session_to_another_topic(self, tmp_path):
+        """Legacy compatibility: historical Telegram topic bindings stay one-to-one."""
         db = SessionDB(db_path=tmp_path / "state.db")
         db.create_session(
             session_id="topic-session",
@@ -2273,7 +2281,8 @@ class TestSchemaInit:
             )
         db.close()
 
-    def test_list_unlinked_telegram_sessions_for_user_excludes_bound_and_other_users(self, tmp_path):
+    def test_legacy_list_unlinked_telegram_sessions_for_user_excludes_bound_and_other_users(self, tmp_path):
+        """Legacy compatibility: old Telegram topic-mode session discovery."""
         db = SessionDB(db_path=tmp_path / "state.db")
         db.create_session(
             session_id="old-unlinked",
@@ -3277,7 +3286,7 @@ class TestSchemaInit:
             conn.execute(
                 "INSERT INTO sessions (id, source, started_at, message_count) "
                 "VALUES (?, ?, ?, ?)",
-                (f"s{idx}", "telegram", 1000.0 + idx, 2),
+                (f"s{idx}", "api", 1000.0 + idx, 2),
             )
             for msg_idx in range(2):
                 conn.execute(
@@ -3629,7 +3638,7 @@ class TestListSessionsRich:
 
     def test_rich_list_source_filter(self, db):
         db.create_session("s1", "cli")
-        db.create_session("s2", "telegram")
+        db.create_session("s2", "api")
         sessions = db.list_sessions_rich(source="cli")
         assert len(sessions) == 1
         assert sessions[0]["id"] == "s1"
@@ -4388,7 +4397,7 @@ class TestExcludeSources:
     def test_list_sessions_rich_excludes_tool_source(self, db):
         db.create_session("s1", "cli")
         db.create_session("s2", "tool")
-        db.create_session("s3", "telegram")
+        db.create_session("s3", "api")
         sessions = db.list_sessions_rich(exclude_sources=["tool"])
         ids = [s["id"] for s in sessions]
         assert "s1" in ids
@@ -4407,7 +4416,7 @@ class TestExcludeSources:
         """When source= is explicit, exclude_sources should not conflict."""
         db.create_session("s1", "cli")
         db.create_session("s2", "tool")
-        db.create_session("s3", "telegram")
+        db.create_session("s3", "api")
         # Explicit source filter: only tool sessions, no exclusion
         sessions = db.list_sessions_rich(source="tool")
         ids = [s["id"] for s in sessions]
@@ -4417,7 +4426,7 @@ class TestExcludeSources:
         db.create_session("s1", "cli")
         db.create_session("s2", "tool")
         db.create_session("s3", "cron")
-        db.create_session("s4", "telegram")
+        db.create_session("s4", "api")
         sessions = db.list_sessions_rich(exclude_sources=["tool", "cron"])
         ids = [s["id"] for s in sessions]
         assert "s1" in ids
@@ -4449,7 +4458,7 @@ class TestExcludeSources:
         """source_filter (include) and exclude_sources can coexist."""
         db.create_session("s1", "cli")
         db.append_message("s1", "user", "Golang test")
-        db.create_session("s2", "telegram")
+        db.create_session("s2", "api")
         db.append_message("s2", "user", "Golang test")
         db.create_session("s3", "tool")
         db.append_message("s3", "user", "Golang test")

@@ -39,7 +39,7 @@ async def _run_one_notifier_tick(monkeypatch, runner):
 def _make_runner(adapter):
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
-    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner.adapters = {Platform.FEISHU: adapter}
     runner._kanban_sub_fail_counts = {}
     return runner
 
@@ -48,7 +48,7 @@ def _create_completed_subscription(summary="done once"):
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="notify once", assignee="worker")
-        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kb.add_notify_sub(conn, task_id=tid, platform="feishu", chat_id="chat-1")
         kb.complete_task(conn, tid, summary=summary)
         return tid
     finally:
@@ -61,7 +61,7 @@ def _unseen_terminal_events(tid):
         _, events = kb.unseen_events_for_sub(
             conn,
             task_id=tid,
-            platform="telegram",
+            platform="feishu",
             chat_id="chat-1",
             kinds=["completed", "blocked", "gave_up", "crashed", "timed_out"],
         )
@@ -114,7 +114,7 @@ def test_kanban_notifier_rewinds_claim_if_adapter_disconnects(tmp_path, monkeypa
 
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._running = True
-    runner.adapters = DisconnectedAdapters({Platform.TELEGRAM: RecordingAdapter()})
+    runner.adapters = DisconnectedAdapters({Platform.FEISHU: RecordingAdapter()})
     runner._kanban_sub_fail_counts = {}
 
     asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
@@ -130,7 +130,7 @@ def test_kanban_db_path_is_test_isolated_from_real_home():
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
-        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kb.add_notify_sub(conn, task_id=tid, platform="feishu", chat_id="chat-1")
     finally:
         conn.close()
 
@@ -193,7 +193,7 @@ def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="cycle test", assignee="worker")
-        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kb.add_notify_sub(conn, task_id=tid, platform="feishu", chat_id="chat-1")
         # First crash — fired by the dispatcher when the worker PID dies.
         kb._append_event(conn, tid, kind="crashed")
     finally:

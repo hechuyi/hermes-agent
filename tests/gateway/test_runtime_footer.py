@@ -152,13 +152,13 @@ def test_format_footer_unknown_field_silently_ignored():
 # ---------------------------------------------------------------------------
 
 def test_resolve_defaults_off_empty_config():
-    cfg = resolve_footer_config({}, "telegram")
+    cfg = resolve_footer_config({}, "feishu")
     assert cfg == {"enabled": False, "fields": ["model", "context_pct", "cwd"]}
 
 
 def test_resolve_global_enable():
     user = {"display": {"runtime_footer": {"enabled": True}}}
-    cfg = resolve_footer_config(user, "telegram")
+    cfg = resolve_footer_config(user, "feishu")
     assert cfg["enabled"] is True
     assert cfg["fields"] == ["model", "context_pct", "cwd"]
 
@@ -168,14 +168,14 @@ def test_resolve_platform_override_wins():
         "display": {
             "runtime_footer": {"enabled": True, "fields": ["model"]},
             "platforms": {
-                "slack": {"runtime_footer": {"enabled": False}},
+                "api_server": {"runtime_footer": {"enabled": False}},
             },
         },
     }
-    # Telegram picks up the global enable
-    assert resolve_footer_config(user, "telegram")["enabled"] is True
-    # Slack overrides to off
-    assert resolve_footer_config(user, "slack")["enabled"] is False
+    # Feishu picks up the global enable
+    assert resolve_footer_config(user, "feishu")["enabled"] is True
+    # API/headless path overrides to off
+    assert resolve_footer_config(user, "api_server")["enabled"] is False
 
 
 def test_resolve_platform_can_add_fields_only():
@@ -183,22 +183,22 @@ def test_resolve_platform_can_add_fields_only():
         "display": {
             "runtime_footer": {"enabled": True},
             "platforms": {
-                "discord": {"runtime_footer": {"fields": ["context_pct"]}},
+                "api_server": {"runtime_footer": {"fields": ["context_pct"]}},
             },
         },
     }
-    tg = resolve_footer_config(user, "telegram")
-    assert tg["enabled"] is True
-    assert tg["fields"] == ["model", "context_pct", "cwd"]
-    dc = resolve_footer_config(user, "discord")
-    assert dc["enabled"] is True
-    assert dc["fields"] == ["context_pct"]
+    fs = resolve_footer_config(user, "feishu")
+    assert fs["enabled"] is True
+    assert fs["fields"] == ["model", "context_pct", "cwd"]
+    api = resolve_footer_config(user, "api_server")
+    assert api["enabled"] is True
+    assert api["fields"] == ["context_pct"]
 
 
 def test_resolve_ignores_malformed_config():
     # Non-dict runtime_footer shouldn't crash
     user = {"display": {"runtime_footer": "on"}}
-    cfg = resolve_footer_config(user, "telegram")
+    cfg = resolve_footer_config(user, "feishu")
     assert cfg["enabled"] is False
 
 
@@ -209,7 +209,7 @@ def test_resolve_ignores_malformed_config():
 def test_build_footer_empty_when_disabled():
     out = build_footer_line(
         user_config={},
-        platform_key="telegram",
+        platform_key="feishu",
         model="openai/gpt-5.4",
         context_tokens=10, context_length=100,
         cwd="/tmp",
@@ -221,7 +221,7 @@ def test_build_footer_returns_rendered_when_enabled(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     out = build_footer_line(
         user_config={"display": {"runtime_footer": {"enabled": True}}},
-        platform_key="telegram",
+        platform_key="feishu",
         model="openai/gpt-5.4",
         context_tokens=25, context_length=100,
         cwd=str(tmp_path / "proj"),
@@ -235,12 +235,12 @@ def test_build_footer_per_platform_off_suppresses():
     user = {
         "display": {
             "runtime_footer": {"enabled": True},
-            "platforms": {"slack": {"runtime_footer": {"enabled": False}}},
+            "platforms": {"api_server": {"runtime_footer": {"enabled": False}}},
         },
     }
     out = build_footer_line(
         user_config=user,
-        platform_key="slack",
+        platform_key="api_server",
         model="openai/gpt-5.4",
         context_tokens=10, context_length=100,
         cwd="/tmp",
@@ -252,7 +252,7 @@ def test_build_footer_no_data_returns_empty_even_when_enabled():
     # Enabled, but context_length is None AND cwd empty AND model empty ⇒ no fields
     out = build_footer_line(
         user_config={"display": {"runtime_footer": {"enabled": True}}},
-        platform_key="telegram",
+        platform_key="feishu",
         model="",
         context_tokens=0, context_length=None,
         cwd="",

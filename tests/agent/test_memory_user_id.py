@@ -71,12 +71,12 @@ class TestMemoryManagerUserIdThreading:
 
         mgr.initialize_all(
             session_id="sess-123",
-            platform="telegram",
-            user_id="tg_user_42",
+            platform="feishu",
+            user_id="feishu_user_42",
         )
 
-        assert p._init_kwargs.get("user_id") == "tg_user_42"
-        assert p._init_kwargs.get("platform") == "telegram"
+        assert p._init_kwargs.get("user_id") == "feishu_user_42"
+        assert p._init_kwargs.get("platform") == "feishu"
         assert p._init_session_id == "sess-123"
 
     def test_chat_context_forwarded_to_provider(self):
@@ -86,20 +86,20 @@ class TestMemoryManagerUserIdThreading:
 
         mgr.initialize_all(
             session_id="sess-chat",
-            platform="discord",
-            user_id="discord_u_7",
+            platform="feishu",
+            user_id="ou_feishu_7",
             user_name="fakeusername",
-            chat_id="1485316232612941897",
-            chat_name="fakeassistantname-forums",
+            chat_id="oc_feishu_group",
+            chat_name="fakeassistantname-group",
             chat_type="thread",
-            thread_id="1491249007475949698",
+            thread_id="omt_feishu_thread",
         )
 
         assert p._init_kwargs.get("user_name") == "fakeusername"
-        assert p._init_kwargs.get("chat_id") == "1485316232612941897"
-        assert p._init_kwargs.get("chat_name") == "fakeassistantname-forums"
+        assert p._init_kwargs.get("chat_id") == "oc_feishu_group"
+        assert p._init_kwargs.get("chat_name") == "fakeassistantname-group"
         assert p._init_kwargs.get("chat_type") == "thread"
-        assert p._init_kwargs.get("thread_id") == "1491249007475949698"
+        assert p._init_kwargs.get("thread_id") == "omt_feishu_thread"
 
     def test_no_user_id_when_cli(self):
         """CLI sessions should not have user_id in kwargs."""
@@ -125,7 +125,7 @@ class TestMemoryManagerUserIdThreading:
         # (the agent code only adds user_id to kwargs when it's truthy)
         mgr.initialize_all(
             session_id="sess-789",
-            platform="discord",
+            platform="api",
         )
 
         assert "user_id" not in p._init_kwargs
@@ -140,14 +140,14 @@ class TestMemoryManagerUserIdThreading:
 
         mgr.initialize_all(
             session_id="sess-multi",
-            platform="slack",
-            user_id="slack_U12345",
+            platform="feishu",
+            user_id="ou_feishu_U12345",
         )
 
-        assert p1._init_kwargs.get("user_id") == "slack_U12345"
-        assert p1._init_kwargs.get("platform") == "slack"
-        assert p2._init_kwargs.get("user_id") == "slack_U12345"
-        assert p2._init_kwargs.get("platform") == "slack"
+        assert p1._init_kwargs.get("user_id") == "ou_feishu_U12345"
+        assert p1._init_kwargs.get("platform") == "feishu"
+        assert p2._init_kwargs.get("user_id") == "ou_feishu_U12345"
+        assert p2._init_kwargs.get("platform") == "feishu"
 
 
 # ---------------------------------------------------------------------------
@@ -170,9 +170,9 @@ class TestMem0UserIdScoping:
             "agent_id": "hermes",
             "rerank": True,
         }):
-            provider.initialize(session_id="test-sess", user_id="tg_user_99")
+            provider.initialize(session_id="test-sess", user_id="feishu_user_99")
 
-        assert provider._user_id == "tg_user_99"
+        assert provider._user_id == "feishu_user_99"
 
     def test_no_user_id_falls_back_to_config(self):
         """Without user_id in kwargs, should use config default."""
@@ -267,12 +267,12 @@ class TestHonchoUserIdScoping:
             mock_manager_cls.return_value = mock_manager
             provider.initialize(
                 session_id="test-sess",
-                user_id="discord_user_789",
-                platform="discord",
+                user_id="feishu_user_789",
+                platform="feishu",
             )
 
         assert mock_cfg.peer_name == "static-user"
-        assert mock_manager_cls.call_args.kwargs["runtime_user_peer_name"] == "discord_user_789"
+        assert mock_manager_cls.call_args.kwargs["runtime_user_peer_name"] == "feishu_user_789"
 
     def test_session_manager_prefers_runtime_user_id_over_config_peer_name(self):
         """Session manager should isolate gateway users even when config peer_name is static."""
@@ -294,7 +294,7 @@ class TestHonchoUserIdScoping:
         manager = HonchoSessionManager(
             honcho=MagicMock(),
             config=mock_cfg,
-            runtime_user_peer_name="discord_user_789",
+            runtime_user_peer_name="feishu_user_789",
         )
 
         with patch.object(manager, "_get_or_create_peer", return_value=MagicMock()), patch.object(
@@ -302,9 +302,9 @@ class TestHonchoUserIdScoping:
             "_get_or_create_honcho_session",
             return_value=(MagicMock(), []),
         ):
-            session = manager.get_or_create("discord:channel-1")
+            session = manager.get_or_create("feishu:oc_group")
 
-        assert session.user_peer_id == "discord_user_789"
+        assert session.user_peer_id == "feishu_user_789"
 
     def test_no_user_id_preserves_config_peer_name(self):
         """Without user_id, the config peer_name should be preserved."""
@@ -356,4 +356,3 @@ class TestAIAgentUserIdPropagation:
             agent = object.__new__(AIAgent)
             agent._user_id = None
             assert agent._user_id is None
-
