@@ -2581,6 +2581,46 @@ def _disable_prompt_toolkit_cpr_warning(app) -> None:
         pass
 
 
+def _terminal_may_leak_cpr() -> bool:
+    """Return whether prompt_toolkit CPR queries should be disabled."""
+    if os.environ.get("PROMPT_TOOLKIT_NO_CPR") == "1":
+        return True
+    return any(os.environ.get(v) for v in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
+
+
+def _build_cpr_disabled_output(stdout):
+    """Build a prompt_toolkit Vt100 output with CPR disabled.
+
+    ``Vt100_Output.from_pty()`` does not expose ``enable_cpr`` in
+    prompt_toolkit 3.x, so this mirrors its size callback setup and calls the
+    constructor directly. Returning ``None`` keeps interactive startup on the
+    default output path if the terminal or prompt_toolkit version is unexpected.
+    """
+    try:
+        from prompt_toolkit.data_structures import Size
+        from prompt_toolkit.output.vt100 import Vt100_Output, _get_size
+
+        def _get_term_size():
+            rows = columns = None
+            try:
+                rows, columns = _get_size(stdout.fileno())
+            except Exception:
+                pass
+            return Size(rows=rows or 24, columns=columns or 80)
+
+        return Vt100_Output(stdout, _get_term_size, enable_cpr=False)
+    except Exception:
+        return None
+
+
+def _prompt_toolkit_output_kwargs(stdout) -> dict[str, object]:
+    """Return conditional Application kwargs for terminal output handling."""
+    if not _terminal_may_leak_cpr():
+        return {}
+    output = _build_cpr_disabled_output(stdout)
+    return {"output": output} if output is not None else {}
+
+
 def _strip_leaked_terminal_responses_with_meta(text: str) -> tuple[str, bool]:
     """Strip leaked terminal control-response sequences from user input.
 
@@ -14536,6 +14576,7 @@ class HermesCLI:
             style=style,
             full_screen=False,
             mouse_support=False,
+            **_prompt_toolkit_output_kwargs(sys.stdout),
             **({'cursor': _STEADY_CURSOR} if _STEADY_CURSOR is not None else {}),
         )
         _disable_prompt_toolkit_cpr_warning(app)

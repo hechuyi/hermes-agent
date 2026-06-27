@@ -247,6 +247,83 @@ class TestPromptToolkitTerminalCompatibility:
 
         assert renderer.cpr_not_supported_callback is None
 
+    def test_cpr_gating_is_narrow(self, monkeypatch):
+        from cli import _terminal_may_leak_cpr
+
+        for var in ("PROMPT_TOOLKIT_NO_CPR", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
+            monkeypatch.delenv(var, raising=False)
+
+        assert _terminal_may_leak_cpr() is False
+
+        monkeypatch.setenv("PROMPT_TOOLKIT_NO_CPR", "1")
+        assert _terminal_may_leak_cpr() is True
+
+        monkeypatch.setenv("PROMPT_TOOLKIT_NO_CPR", "0")
+        assert _terminal_may_leak_cpr() is False
+
+        monkeypatch.delenv("PROMPT_TOOLKIT_NO_CPR", raising=False)
+        monkeypatch.setenv("SSH_CONNECTION", "1.2.3.4 5555 5.6.7.8 22")
+        assert _terminal_may_leak_cpr() is True
+
+    def test_build_cpr_disabled_output_uses_vt100_constructor(self, monkeypatch):
+        from cli import _build_cpr_disabled_output
+        import prompt_toolkit.output.vt100 as vt100
+
+        calls = {}
+
+        class FakeStdout:
+            def fileno(self):
+                return 42
+
+        class FakeVt100Output:
+            def __init__(self, stdout, get_size, *, enable_cpr=True):
+                calls["stdout"] = stdout
+                calls["get_size"] = get_size
+                self.enable_cpr = enable_cpr
+
+        monkeypatch.setattr(vt100, "_get_size", lambda fileno: (33, 132))
+        monkeypatch.setattr(vt100, "Vt100_Output", FakeVt100Output)
+
+        stdout = FakeStdout()
+        output = _build_cpr_disabled_output(stdout)
+
+        assert output is not None
+        assert output.enable_cpr is False
+        assert calls["stdout"] is stdout
+        assert calls["get_size"]().rows == 33
+        assert calls["get_size"]().columns == 132
+
+    def test_build_cpr_disabled_output_returns_none_on_constructor_failure(self, monkeypatch):
+        from cli import _build_cpr_disabled_output
+        import prompt_toolkit.output.vt100 as vt100
+
+        class FakeStdout:
+            def fileno(self):
+                return 42
+
+        def raise_constructor(*args, **kwargs):
+            raise RuntimeError("constructor failed")
+
+        monkeypatch.setattr(vt100, "Vt100_Output", raise_constructor)
+
+        assert _build_cpr_disabled_output(FakeStdout()) is None
+
+    def test_cpr_disabled_output_kwargs_are_conditional(self, monkeypatch):
+        import cli as cli_mod
+
+        sentinel_stdout = object()
+        sentinel_output = object()
+
+        monkeypatch.setattr(cli_mod, "_terminal_may_leak_cpr", lambda: False)
+        monkeypatch.setattr(cli_mod, "_build_cpr_disabled_output", lambda stdout: sentinel_output)
+        assert cli_mod._prompt_toolkit_output_kwargs(sentinel_stdout) == {}
+
+        monkeypatch.setattr(cli_mod, "_terminal_may_leak_cpr", lambda: True)
+        assert cli_mod._prompt_toolkit_output_kwargs(sentinel_stdout) == {"output": sentinel_output}
+
+        monkeypatch.setattr(cli_mod, "_build_cpr_disabled_output", lambda stdout: None)
+        assert cli_mod._prompt_toolkit_output_kwargs(sentinel_stdout) == {}
+
 
 class TestSingleQueryState:
     def test_voice_and_interrupt_state_initialized_before_run(self):
