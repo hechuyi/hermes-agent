@@ -703,6 +703,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
         _creation_locks,
         _creation_locks_lock,
         _resolve_container_task_id,
+        sanitize_container_cwd,
     )
     import time
 
@@ -760,7 +761,11 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
             else:
                 image = ""
 
-            cwd = overrides.get("cwd") or config["cwd"]
+            cwd = sanitize_container_cwd(
+                overrides.get("cwd") or config["cwd"],
+                config["cwd"],
+                env_type,
+            )
             logger.info("Creating new %s environment for task %s...", env_type, task_id[:8])
 
             container_config = None

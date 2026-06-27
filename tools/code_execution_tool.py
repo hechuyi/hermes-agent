@@ -602,6 +602,7 @@ def _get_or_create_env(task_id: str):
         _get_env_config, _last_activity, _start_cleanup_thread,
         _creation_locks, _creation_locks_lock, _task_env_overrides,
         _resolve_container_task_id,
+        sanitize_container_cwd,
     )
 
     effective_task_id = _resolve_container_task_id(task_id)
@@ -626,7 +627,10 @@ def _get_or_create_env(task_id: str):
 
         config = _get_env_config()
         env_type = config["env_type"]
-        overrides = _task_env_overrides.get(effective_task_id, {})
+        overrides = (
+            (_task_env_overrides.get(task_id) if task_id else None)
+            or _task_env_overrides.get(effective_task_id, {})
+        )
 
         if env_type == "docker":
             image = overrides.get("docker_image") or config["docker_image"]
@@ -639,7 +643,11 @@ def _get_or_create_env(task_id: str):
         else:
             image = ""
 
-        cwd = overrides.get("cwd") or config["cwd"]
+        cwd = sanitize_container_cwd(
+            overrides.get("cwd") or config["cwd"],
+            config["cwd"],
+            env_type,
+        )
 
         container_config = None
         if env_type in {"docker", "singularity", "modal", "daytona"}:

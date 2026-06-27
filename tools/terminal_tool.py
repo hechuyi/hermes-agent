@@ -942,6 +942,16 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
         with _env_lock:
             env = _active_environments.get(task_id) or _active_environments.get(container_id)
         if env is not None and getattr(env, "cwd", None) is not None:
+            env_type = _environment_backend(env)
+            default_cwd = getattr(env, "cwd", None) or "/root"
+            if env_type in _CONTAINER_BACKENDS:
+                config = _get_env_config()
+                default_cwd = config.get("cwd") or default_cwd
+            new_cwd = sanitize_container_cwd(
+                new_cwd,
+                default_cwd,
+                env_type,
+            )
             env.cwd = new_cwd
 
 
@@ -1021,6 +1031,63 @@ def _safe_getcwd() -> str:
         return os.getenv("TERMINAL_CWD") or os.path.expanduser("~")
 
 
+_HOST_CWD_PREFIXES = ("/Users/", "/home/", "C:\\", "C:/")
+_CONTAINER_BACKENDS = frozenset({"docker", "singularity", "modal", "daytona"})
+
+
+def _environment_backend(env: Any) -> str:
+    """Best-effort backend name for a live environment instance."""
+    if isinstance(env, _DockerEnvironment):
+        return "docker"
+    if isinstance(env, _SingularityEnvironment):
+        return "singularity"
+    if isinstance(env, (_ModalEnvironment, _ManagedModalEnvironment)):
+        return "modal"
+    name = type(env).__name__.lower()
+    for backend in _CONTAINER_BACKENDS:
+        if backend in name:
+            return backend
+    if "ssh" in name:
+        return "ssh"
+    return "local"
+
+
+def _is_unusable_container_cwd(cwd: str | None) -> bool:
+    """Return True for host or relative paths that cannot be a container cwd."""
+    if not cwd:
+        return False
+
+    candidate = os.path.expanduser(str(cwd).strip())
+    if not candidate:
+        return False
+    if any(candidate.startswith(prefix) for prefix in _HOST_CWD_PREFIXES):
+        return True
+    return not candidate.startswith("/")
+
+
+def sanitize_container_cwd(
+    cwd: str | None,
+    default_cwd: str,
+    env_type: str,
+) -> str:
+    """Return a cwd safe for *env_type*, falling back for container backends.
+
+    Container backends run in Linux-like sandboxes, so cwd must be an absolute
+    in-container path such as /workspace, /root, /app, or /opt/project. Host
+    paths and relative paths are meaningful to local/ssh backends but unusable
+    as docker/modal/singularity/daytona working directories.
+    """
+    if not cwd:
+        return default_cwd
+    if env_type not in _CONTAINER_BACKENDS:
+        return cwd
+
+    candidate = os.path.expanduser(str(cwd).strip())
+    if _is_unusable_container_cwd(candidate):
+        return default_cwd
+    return candidate
+
+
 def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
     # Default image with Python and Node.js for maximum compatibility
@@ -1047,25 +1114,24 @@ def _get_env_config() -> Dict[str, Any]:
     if cwd:
         cwd = os.path.expanduser(cwd)
     host_cwd = None
-    host_prefixes = ("/Users/", "/home/", "C:\\", "C:/")
     if env_type == "docker" and mount_docker_cwd:
         docker_cwd_source = os.getenv("TERMINAL_CWD") or _safe_getcwd()
         candidate = os.path.abspath(os.path.expanduser(docker_cwd_source))
         if (
-            any(candidate.startswith(p) for p in host_prefixes)
+            any(candidate.startswith(p) for p in _HOST_CWD_PREFIXES)
             or (os.path.isabs(candidate) and os.path.isdir(candidate) and not candidate.startswith(("/workspace", "/root")))
         ):
             host_cwd = candidate
             cwd = "/workspace"
-    elif env_type in {"modal", "docker", "singularity", "daytona"} and cwd:
+    elif env_type in _CONTAINER_BACKENDS:
         # Host paths and relative paths that won't work inside containers
-        is_host_path = any(cwd.startswith(p) for p in host_prefixes)
-        is_relative = not os.path.isabs(cwd)  # e.g. "." or "src/"
-        if (is_host_path or is_relative) and cwd != default_cwd:
-            logger.info("Ignoring TERMINAL_CWD=%r for %s backend "
-                        "(host/relative path won't work in sandbox). Using %r instead.",
-                        cwd, env_type, default_cwd)
-            cwd = default_cwd
+        sanitized_cwd = sanitize_container_cwd(cwd, default_cwd, env_type)
+        if sanitized_cwd != cwd:
+            if cwd:
+                logger.info("Ignoring TERMINAL_CWD=%r for %s backend "
+                            "(host/relative path won't work in sandbox). Using %r instead.",
+                            cwd, env_type, default_cwd)
+            cwd = sanitized_cwd
 
     return {
         "env_type": env_type,
@@ -1805,7 +1871,11 @@ def terminal_tool(
         else:
             image = ""
 
-        cwd = overrides.get("cwd") or config["cwd"]
+        cwd = sanitize_container_cwd(
+            overrides.get("cwd") or config["cwd"],
+            config["cwd"],
+            env_type,
+        )
         default_timeout = config["timeout"]
         effective_timeout = timeout or default_timeout
 
