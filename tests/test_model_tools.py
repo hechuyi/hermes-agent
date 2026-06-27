@@ -386,3 +386,57 @@ class TestCoerceNumberInfNan:
         assert _coerce_number("42") == 42
         assert _coerce_number("3.14") == 3.14
         assert _coerce_number("1e3") == 1000
+
+
+# =========================================================================
+# disabled_toolsets handling for hermes-* platform bundles
+# =========================================================================
+
+class TestDisabledToolsetsPlatformBundles:
+    def _tool_names(self, *, enabled_toolsets, disabled_toolsets=None):
+        from model_tools import _clear_tool_defs_cache, get_tool_definitions
+
+        _clear_tool_defs_cache()
+        return {
+            tool["function"]["name"]
+            for tool in get_tool_definitions(
+                enabled_toolsets=enabled_toolsets,
+                disabled_toolsets=disabled_toolsets,
+                quiet_mode=True,
+                skip_tool_search_assembly=True,
+            )
+        }
+
+    def test_disabled_platform_bundle_preserves_core_tools(self):
+        baseline = self._tool_names(enabled_toolsets=["hermes-cli"])
+        disabled_platform = self._tool_names(
+            enabled_toolsets=["hermes-cli"],
+            disabled_toolsets=["hermes-feishu"],
+        )
+
+        assert {"terminal", "read_file", "web_search"} <= baseline
+        assert {"terminal", "read_file", "web_search"} <= disabled_platform
+
+    def test_disabled_real_core_toolset_removes_that_core_surface(self):
+        baseline = self._tool_names(enabled_toolsets=["hermes-cli"])
+        disabled_web = self._tool_names(
+            enabled_toolsets=["hermes-cli"],
+            disabled_toolsets=["web"],
+        )
+
+        assert {"web_search", "web_extract"} <= baseline
+        assert "web_search" not in disabled_web
+        assert "web_extract" not in disabled_web
+        assert "terminal" in disabled_web
+        assert "read_file" in disabled_web
+
+    def test_platform_bundle_and_real_core_disable_compose(self):
+        names = self._tool_names(
+            enabled_toolsets=["hermes-cli"],
+            disabled_toolsets=["hermes-feishu", "web"],
+        )
+
+        assert "web_search" not in names
+        assert "web_extract" not in names
+        assert "terminal" in names
+        assert "read_file" in names

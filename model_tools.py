@@ -34,6 +34,8 @@ from toolsets import resolve_toolset, validate_toolset
 
 logger = logging.getLogger(__name__)
 
+_WARNED_DISABLED_BUNDLES: set = set()
+
 
 # =============================================================================
 # Async Bridging  (single source of truth -- used by registry.dispatch too)
@@ -398,8 +400,24 @@ def _compute_tool_definitions(
     if disabled_toolsets:
         for toolset_name in disabled_toolsets:
             if validate_toolset(toolset_name):
-                resolved = resolve_toolset(toolset_name)
-                tools_to_include.difference_update(resolved)
+                if toolset_name.startswith("hermes-"):
+                    from toolsets import bundle_non_core_tools
+
+                    resolved = sorted(bundle_non_core_tools(toolset_name))
+                    tools_to_include.difference_update(resolved)
+                    if not quiet_mode and toolset_name not in _WARNED_DISABLED_BUNDLES:
+                        _WARNED_DISABLED_BUNDLES.add(toolset_name)
+                        logger.info(
+                            "agent.disabled_toolsets contains platform-bundle "
+                            "name '%s'; core tools are preserved and only its "
+                            "platform-specific tools are removed. Bundle names "
+                            "usually belong in `toolsets:`, not "
+                            "`disabled_toolsets`.",
+                            toolset_name,
+                        )
+                else:
+                    resolved = resolve_toolset(toolset_name)
+                    tools_to_include.difference_update(resolved)
                 if not quiet_mode:
                     print(f"🚫 Disabled toolset '{toolset_name}': {', '.join(resolved) if resolved else 'no tools'}")
             elif toolset_name in _LEGACY_TOOLSET_MAP:

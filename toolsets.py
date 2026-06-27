@@ -441,6 +441,23 @@ def get_toolset(name: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def bundle_non_core_tools(toolset_name: str) -> Set[str]:
+    """Return a ``hermes-*`` bundle's platform-specific tools, excluding core."""
+    core = set(_HERMES_CORE_TOOLS)
+    toolset = get_toolset(toolset_name)
+    if not toolset:
+        return set(resolve_toolset(toolset_name)) - core
+
+    tools = set(toolset.get("tools", [])) - core
+    for included_name in toolset.get("includes", []):
+        included = get_toolset(included_name)
+        if included:
+            tools.update(set(included.get("tools", [])) - core)
+        else:
+            tools.update(set(resolve_toolset(included_name)) - core)
+    return tools
+
+
 def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
     """
     Recursively resolve a toolset to get all tool names.
