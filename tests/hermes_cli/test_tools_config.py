@@ -138,39 +138,9 @@ def test_get_platform_tools_removed_platform_has_no_implicit_toolsets():
     assert enabled == set()
 
 
-def test_get_platform_tools_homeassistant_toolset_enabled_for_cron_when_hass_token_set(monkeypatch):
-    """HA toolset is runtime-gated by check_fn (requires HASS_TOKEN).
-
-    When HASS_TOKEN is set, the user has explicitly opted in — _DEFAULT_OFF_TOOLSETS
-    shouldn't also strip HA from platforms (like cron) that run through
-    _get_platform_tools without an explicit saved toolset list.
-
-    Regression guard for Norbert's HA cron breakage after #14798 made cron
-    honor per-platform tool config.
-    """
-    monkeypatch.setenv("HASS_TOKEN", "fake-test-token")
-
-    cron_enabled = _get_platform_tools({}, "cron")
-    assert "homeassistant" in cron_enabled
-    # moa must stay off — the original goal of #14798
-    assert "moa" not in cron_enabled
-
-    cli_enabled = _get_platform_tools({}, "cli")
-    assert "homeassistant" in cli_enabled
-
-
-def test_get_platform_tools_homeassistant_toolset_off_for_cron_when_hass_token_missing(monkeypatch):
-    """Without HASS_TOKEN, HA stays off by default — preserves #14798's behavior
-    for users who never configured HA."""
-    monkeypatch.delenv("HASS_TOKEN", raising=False)
-
-    cron_enabled = _get_platform_tools({}, "cron")
-    assert "homeassistant" not in cron_enabled
-
-
 def test_get_platform_tools_x_search_auto_enabled_when_xai_oauth_present(monkeypatch):
     """x_search toolset auto-enables across platforms when xAI Grok OAuth
-    tokens are present, mirroring the HASS_TOKEN → homeassistant rule.
+    tokens are present.
 
     The user already authenticated via SuperGrok OAuth; they shouldn't have
     to also click through `hermes tools` → X (Twitter) Search to flip the
@@ -287,7 +257,7 @@ def test_get_platform_tools_ignores_stale_computer_use_opt_in():
 def test_get_platform_tools_mixed_does_not_resurrect_default_off():
     """Expansion must subtract _DEFAULT_OFF_TOOLSETS from the implicit
     pull-in. Without this, ``hermes-cli`` expansion would re-enable
-    ``moa`` / ``rl`` / ``homeassistant`` for users who never opted in."""
+    default-off toolsets for users who never opted in."""
     config = {"platform_toolsets": {"cli": ["hermes-cli", "terminal"]}}
 
     enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
@@ -333,10 +303,10 @@ def test_apply_toolset_change_can_enable_default_off_toolset_from_default():
     config = {}
 
     with patch("hermes_cli.tools_config.save_config"):
-        _apply_toolset_change(config, "cli", ["homeassistant"], "enable")
+        _apply_toolset_change(config, "cli", ["spotify"], "enable")
 
     saved = set(config["platform_toolsets"]["cli"])
-    assert "homeassistant" in saved
+    assert "spotify" in saved
     assert "terminal" in saved
 
 
@@ -510,7 +480,7 @@ def test_save_platform_tools_handles_invalid_existing_config():
 
 
 def test_save_platform_tools_does_not_preserve_platform_default_toolsets():
-    """Platform default toolsets (hermes-cli, hermes-telegram, etc.) must NOT
+    """Platform default toolsets (hermes-cli, etc.) must NOT
     be preserved across saves.
 
     These "super" toolsets resolve to ALL tools, so if they survive in the
@@ -519,7 +489,7 @@ def test_save_platform_tools_does_not_preserve_platform_default_toolsets():
     terminal, etc.) and treated platform defaults as unknown custom entries
     (like MCP server names), causing them to be kept unconditionally.
 
-    Regression test: user unchecks image_gen and homeassistant via
+    Regression test: user unchecks image_gen and moa via
     ``hermes tools``, but hermes-cli stays in the config and re-enables
     everything on the next read.
     """
@@ -534,7 +504,7 @@ def test_save_platform_tools_does_not_preserve_platform_default_toolsets():
         }
     }
 
-    # User unchecks image_gen, homeassistant, moa — keeps the rest
+    # User unchecks image_gen and moa — keeps the rest
     new_selection = {
         "browser", "clarify", "code_execution", "cronjob",
         "delegation", "file", "memory", "session_search",
@@ -556,7 +526,6 @@ def test_save_platform_tools_does_not_preserve_platform_default_toolsets():
 
     # Tools the user unchecked must NOT be present
     assert "image_gen" not in saved
-    assert "homeassistant" not in saved
     assert "moa" not in saved
 
 

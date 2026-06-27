@@ -2,7 +2,7 @@
 Lazy dependency installer for opt-in Hermes Agent backends.
 
 Many Hermes features (Mistral TTS, ElevenLabs TTS, Honcho memory, Bedrock,
-Slack, Matrix, etc.) require Python packages that not every user needs. The
+Feishu, etc.) require Python packages that not every user needs. The
 historical approach was to bundle them all under ``pyproject.toml`` extras
 (``hermes-agent[all]``) and install them eagerly at setup time. That has
 two problems:
@@ -120,38 +120,11 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "memory.honcho": ("honcho-ai==2.0.1",),
     "memory.hindsight": ("hindsight-client==0.6.1",),
 
-    # ─── Messaging platforms (lazy-installable on demand) ──────────────────
-    "platform.telegram": ("python-telegram-bot[webhooks]==22.6",),
-    # brotlicffi gives aiohttp a working 2-arg Decompressor.process() for
-    # Discord CDN's Brotli-encoded attachments. Without it, aiohttp falls
-    # back to google's `Brotli` package (1-arg API), and any .txt/.md/.doc
-    # uploaded to the Discord gateway fails to decode at att.read() with
-    # "Can not decode content-encoding: br" — see #12511 / #15744.
-    "platform.discord": ("discord.py[voice]==2.7.1", "brotlicffi==1.2.0.1"),
-    "platform.slack": (
-        "slack-bolt==1.27.0",
-        "slack-sdk==3.40.1",
-        "aiohttp==3.13.4",  # CVE-2026-34513/34518/34519/34520/34525
-    ),
-    "platform.matrix": (
-        "mautrix[encryption]==0.21.0",
-        "aiosqlite==0.22.1",
-        "asyncpg==0.31.0",
-        "aiohttp-socks==0.11.0",
-    ),
-    "platform.dingtalk": (
-        "dingtalk-stream==0.24.3",
-        "alibabacloud-dingtalk==2.2.42",
-        "qrcode==7.4.2",
-    ),
+    # ─── Feishu runtime platform ──────────────────────────────────────────
     "platform.feishu": (
         "lark-oapi==1.5.3",
         "qrcode==7.4.2",
     ),
-    # WeCom callback-mode adapter — parses untrusted XML POST bodies. Pulls
-    # defusedxml only; aiohttp/httpx are core dependencies of every messaging
-    # adapter and ship via `platform.discord` / `platform.slack` / etc.
-    "platform.wecom_callback": ("defusedxml==0.7.1",),
 
     # ─── Terminal backends ─────────────────────────────────────────────────
     "terminal.modal": ("modal==1.3.4",),
@@ -581,24 +554,18 @@ def ensure_and_bind(
 
     Returns True on success, False if deps couldn't be installed or imported.
 
-    Example usage in a platform adapter::
+    Example usage in a backend adapter::
 
-        def check_slack_requirements() -> bool:
-            if SLACK_AVAILABLE:
+        def check_backend_requirements() -> bool:
+            if BACKEND_AVAILABLE:
                 return True
             def _import():
-                from slack_bolt.async_app import AsyncApp
-                from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
-                from slack_sdk.web.async_client import AsyncWebClient
-                import aiohttp
+                from some_backend import Client
                 return {
-                    "AsyncApp": AsyncApp,
-                    "AsyncSocketModeHandler": AsyncSocketModeHandler,
-                    "AsyncWebClient": AsyncWebClient,
-                    "aiohttp": aiohttp,
-                    "SLACK_AVAILABLE": True,
+                    "Client": Client,
+                    "BACKEND_AVAILABLE": True,
                 }
-            return ensure_and_bind("platform.slack", _import, globals(), prompt=False)
+            return ensure_and_bind("feature.backend", _import, globals(), prompt=False)
     """
     try:
         ensure(feature, prompt=prompt)

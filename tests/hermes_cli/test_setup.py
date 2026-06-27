@@ -147,27 +147,17 @@ def test_setup_custom_providers_synced(tmp_path, monkeypatch):
 
 def test_setup_gateway_skips_service_install_when_systemctl_missing(monkeypatch, capsys):
     env = {
-        "TELEGRAM_BOT_TOKEN": "",
-        "TELEGRAM_HOME_CHANNEL": "",
-        "DISCORD_BOT_TOKEN": "",
-        "DISCORD_HOME_CHANNEL": "",
-        "SLACK_BOT_TOKEN": "",
-        "SLACK_HOME_CHANNEL": "",
-        "MATRIX_HOMESERVER": "https://matrix.example.com",
-        "MATRIX_USER_ID": "@alice:example.com",
-        "MATRIX_PASSWORD": "",
-        "MATRIX_ACCESS_TOKEN": "token",
-        "BLUEBUBBLES_SERVER_URL": "",
-        "BLUEBUBBLES_HOME_CHANNEL": "",
-        "WHATSAPP_ENABLED": "",
-        "WEBHOOK_ENABLED": "",
+        "FEISHU_APP_ID": "cli_test_app",
+        "FEISHU_APP_SECRET": "cli_test_secret",
     }
 
     import hermes_cli.gateway as gateway_mod
 
     monkeypatch.setattr(setup_mod, "get_env_value", lambda key: env.get(key, ""))
     monkeypatch.setattr(gateway_mod, "get_env_value", lambda key: env.get(key, ""))
+    monkeypatch.setattr(setup_mod, "prompt_checklist", lambda *args, **kwargs: [0])
     monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *args, **kwargs: False)
+    monkeypatch.setattr(gateway_mod, "prompt_yes_no", lambda *args, **kwargs: False)
     monkeypatch.setattr("platform.system", lambda: "Linux")
 
     monkeypatch.setattr(gateway_mod, "supports_systemd_services", lambda: False)
@@ -186,27 +176,17 @@ def test_setup_gateway_skips_service_install_when_systemctl_missing(monkeypatch,
 def test_setup_gateway_in_container_shows_docker_guidance(monkeypatch, capsys):
     """setup_gateway() in a Docker container shows Docker-specific restart instructions."""
     env = {
-        "TELEGRAM_BOT_TOKEN": "",
-        "TELEGRAM_HOME_CHANNEL": "",
-        "DISCORD_BOT_TOKEN": "",
-        "DISCORD_HOME_CHANNEL": "",
-        "SLACK_BOT_TOKEN": "",
-        "SLACK_HOME_CHANNEL": "",
-        "MATRIX_HOMESERVER": "https://matrix.example.com",
-        "MATRIX_USER_ID": "@alice:example.com",
-        "MATRIX_PASSWORD": "",
-        "MATRIX_ACCESS_TOKEN": "token",
-        "BLUEBUBBLES_SERVER_URL": "",
-        "BLUEBUBBLES_HOME_CHANNEL": "",
-        "WHATSAPP_ENABLED": "",
-        "WEBHOOK_ENABLED": "",
+        "FEISHU_APP_ID": "cli_test_app",
+        "FEISHU_APP_SECRET": "cli_test_secret",
     }
 
     import hermes_cli.gateway as gateway_mod
 
     monkeypatch.setattr(setup_mod, "get_env_value", lambda key: env.get(key, ""))
     monkeypatch.setattr(gateway_mod, "get_env_value", lambda key: env.get(key, ""))
+    monkeypatch.setattr(setup_mod, "prompt_checklist", lambda *args, **kwargs: [0])
     monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *args, **kwargs: False)
+    monkeypatch.setattr(gateway_mod, "prompt_yes_no", lambda *args, **kwargs: False)
     monkeypatch.setattr("platform.system", lambda: "Linux")
 
     monkeypatch.setattr(gateway_mod, "supports_systemd_services", lambda: False)
@@ -481,35 +461,3 @@ def test_modal_setup_persists_direct_mode_when_user_chooses_their_own_account(tm
 
     assert config["terminal"]["backend"] == "modal"
     assert config["terminal"]["modal_mode"] == "direct"
-
-
-def test_setup_slack_saves_home_channel(monkeypatch):
-    """_setup_slack() saves SLACK_HOME_CHANNEL when the user provides one."""
-    saved = {}
-    prompts = iter(["xoxb-test-token", "xapp-test-token", "", "C01ABC2DE3F"])
-
-    monkeypatch.setattr(setup_mod, "get_env_value", lambda key: "")
-    monkeypatch.setattr(setup_mod, "save_env_value", lambda k, v: saved.update({k: v}))
-    monkeypatch.setattr(setup_mod, "prompt", lambda *_a, **_kw: next(prompts))
-    monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *_a, **_kw: False)
-    monkeypatch.setattr(setup_mod, "_write_slack_manifest_and_instruct", lambda: None)
-
-    setup_mod._setup_slack()
-
-    assert saved.get("SLACK_HOME_CHANNEL") == "C01ABC2DE3F"
-
-
-def test_setup_slack_home_channel_empty_not_saved(monkeypatch):
-    """_setup_slack() does not save SLACK_HOME_CHANNEL when left blank."""
-    saved = {}
-    prompts = iter(["xoxb-test-token", "xapp-test-token", "", ""])
-
-    monkeypatch.setattr(setup_mod, "get_env_value", lambda key: "")
-    monkeypatch.setattr(setup_mod, "save_env_value", lambda k, v: saved.update({k: v}))
-    monkeypatch.setattr(setup_mod, "prompt", lambda *_a, **_kw: next(prompts))
-    monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *_a, **_kw: False)
-    monkeypatch.setattr(setup_mod, "_write_slack_manifest_and_instruct", lambda: None)
-
-    setup_mod._setup_slack()
-
-    assert "SLACK_HOME_CHANNEL" not in saved

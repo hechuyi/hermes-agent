@@ -269,10 +269,11 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
     Resolve a human-friendly channel name to a numeric ID.
 
     Matching strategy (case-insensitive, first match wins):
-    - Discord: "bot-home", "#bot-home", "GuildName/bot-home"
-    - Telegram: display name or group name
-    - Slack: "engineering", "#engineering"
+    - Feishu: display name or cached chat name
     """
+    if platform_name != "feishu":
+        return None
+
     directory = load_directory()
     channels = directory.get("platforms", {}).get(platform_name, [])
     if not channels:
@@ -295,7 +296,7 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
         if _normalize_channel_query(_channel_target_name(platform_name, ch)) == query:
             return ch["id"]
 
-    # 2. Guild-qualified match for Discord ("GuildName/channel")
+    # 2. Guild-qualified match for legacy directory entries
     if "/" in query:
         guild_part, ch_part = query.rsplit("/", 1)
         for ch in channels:
@@ -314,7 +315,9 @@ def resolve_channel_name(platform_name: str, name: str) -> Optional[str]:
 def format_directory_for_display() -> str:
     """Format the channel directory as a human-readable list for the model."""
     directory = load_directory()
-    platforms = directory.get("platforms", {})
+    platforms = {
+        "feishu": directory.get("platforms", {}).get("feishu", [])
+    }
 
     if not any(platforms.values()):
         return "No messaging platforms connected or no channels discovered yet."
@@ -325,33 +328,12 @@ def format_directory_for_display() -> str:
         if not channels:
             continue
 
-        # Group Discord channels by guild
-        if plat_name == "discord":
-            guilds: Dict[str, List] = {}
-            dms: List = []
-            for ch in channels:
-                guild = ch.get("guild")
-                if guild:
-                    guilds.setdefault(guild, []).append(ch)
-                else:
-                    dms.append(ch)
-
-            for guild_name, guild_channels in sorted(guilds.items()):
-                lines.append(f"Discord ({guild_name}):")
-                for ch in sorted(guild_channels, key=lambda c: c["name"]):
-                    lines.append(f"  discord:{_channel_target_name(plat_name, ch)}")
-            if dms:
-                lines.append("Discord (DMs):")
-                for ch in dms:
-                    lines.append(f"  discord:{_channel_target_name(plat_name, ch)}")
-            lines.append("")
-        else:
-            lines.append(f"{plat_name.title()}:")
-            for ch in channels:
-                lines.append(f"  {plat_name}:{_channel_target_name(plat_name, ch)}")
-            lines.append("")
+        lines.append("Feishu:")
+        for ch in channels:
+            lines.append(f"  feishu:{_channel_target_name(plat_name, ch)}")
+        lines.append("")
 
     lines.append('Use these as the "target" parameter when sending.')
-    lines.append('Bare platform name (e.g. "telegram") sends to home channel.')
+    lines.append('Bare platform name "feishu" sends to the configured Feishu home channel.')
 
     return "\n".join(lines)
