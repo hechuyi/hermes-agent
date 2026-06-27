@@ -106,6 +106,14 @@ class TestBuildToolPreview:
         assert result is not None
         assert "find something" in result
 
+    def test_browser_type_preview_redacts_text(self):
+        secret = "correct horse battery staple"
+
+        result = build_tool_preview("browser_type", {"text": secret})
+
+        assert result == "[redacted]"
+        assert secret not in result
+
     def test_false_like_args_zero(self):
         """Non-dict falsy values should return None, not crash."""
         assert build_tool_preview("terminal", 0) is None
@@ -171,6 +179,14 @@ class TestCuteToolMessagePreviewLength:
         line = get_cute_tool_message("patch", {"path": "/tmp/a.py"}, 0.1, result=result)
 
         assert "[error]" not in line
+
+    def test_browser_type_preview_redacts_typed_text(self):
+        secret = "correct horse battery staple"
+
+        line = get_cute_tool_message("browser_type", {"ref": "@e3", "text": secret}, 0.1)
+
+        assert "[redacted]" in line
+        assert secret not in line
 
 
 class TestWebProviderLabel:

@@ -235,9 +235,13 @@ class TestCamofoxInteractions:
         camofox_navigate("https://x.com", task_id="t5")
 
         mock_post.return_value = _mock_response(json_data={"ok": True})
-        result = json.loads(camofox_type("@e3", "hello world", task_id="t5"))
+        secret = "correct horse battery staple"
+        result_text = camofox_type("@e3", secret, task_id="t5")
+        result = json.loads(result_text)
         assert result["success"] is True
-        assert result["typed"] == "hello world"
+        assert result["typed"] == "[redacted]"
+        assert secret not in result_text
+        assert mock_post.call_args.kwargs["json"]["text"] == secret
 
     @patch("tools.browser_camofox.requests.post")
     def test_scroll(self, mock_post, monkeypatch):
@@ -426,5 +430,4 @@ class TestBrowserToolRouting:
         monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
         from tools.browser_tool import check_browser_requirements
         assert check_browser_requirements() is True
-
 

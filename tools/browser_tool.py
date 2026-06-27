@@ -2629,9 +2629,11 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     result = _run_browser_command(effective_task_id, "fill", [ref, text])
 
     if result.get("success"):
+        from agent.redact import redact_browser_typed_text
+
         response = {
             "success": True,
-            "typed": text,
+            "typed": redact_browser_typed_text(text),
             "element": ref
         }
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)

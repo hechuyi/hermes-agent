@@ -61,6 +61,27 @@ class TestBrowserSecretExfil:
         assert parsed["success"] is True
         assert calls[0] == ("open", ["https://wttr.in/K%C3%B6ln"])
 
+    def test_browser_type_redacts_typed_result_but_sends_raw_text(self):
+        from tools.browser_tool import browser_type
+
+        secret = "correct horse battery staple"
+        calls = []
+
+        def fake_run(task_id, command, args, **_kwargs):
+            calls.append((task_id, command, args))
+            return {"success": True, "data": {}}
+
+        with patch("tools.browser_tool._run_browser_command", side_effect=fake_run), \
+             patch("tools.browser_tool._is_camofox_mode", return_value=False), \
+             patch("tools.browser_tool._last_session_key", return_value="task-typed"):
+            result = browser_type("@e3", secret, task_id="task-typed")
+
+        parsed = json.loads(result)
+        assert parsed["success"] is True
+        assert parsed["typed"] == "[redacted]"
+        assert secret not in result
+        assert calls == [("task-typed", "fill", ["@e3", secret])]
+
 
 class TestWebExtractSecretExfil:
     """Verify web_extract_tool blocks URLs containing secrets."""

@@ -244,6 +244,19 @@ def mask_secret(
     return f"{value[:head]}...{value[-tail:]}"
 
 
+def redact_browser_typed_text(text: str | None) -> str:
+    """Redact browser-entered text before returning or displaying it.
+
+    Browser typing commonly carries passwords, API keys, bearer tokens, OAuth
+    codes, or other opaque credentials that may not match recognizable secret
+    regexes. The browser backend must still receive the raw text; only the
+    presentation/result surface is replaced.
+    """
+    if text is None:
+        return ""
+    return "[redacted]" if str(text) else ""
+
+
 def _mask_token(token: str) -> str:
     """Mask a log token — conservative 18-char floor, preserves 6 prefix / 4 suffix."""
     # Empty input: historically this returned "***" rather than "". Preserve.

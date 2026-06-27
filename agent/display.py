@@ -14,6 +14,7 @@ from difflib import unified_diff
 from pathlib import Path
 
 from utils import safe_json_loads
+from agent.redact import redact_browser_typed_text
 from agent.tool_result_classification import file_mutation_result_landed
 
 # ANSI escape codes for coloring tool failure indicators
@@ -254,7 +255,10 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
     if isinstance(value, list):
         value = value[0] if value else ""
 
-    preview = _oneline(str(value))
+    if tool_name == "browser_type" and key == "text":
+        preview = redact_browser_typed_text(value)
+    else:
+        preview = _oneline(str(value))
     if not preview:
         return None
     if max_len > 0 and len(preview) > max_len:
@@ -949,7 +953,7 @@ def get_cute_tool_message(
     if tool_name == "browser_click":
         return _wrap(f"┊ 👆 click     {args.get('ref', '?')}  {dur}")
     if tool_name == "browser_type":
-        return _wrap(f"┊ ⌨️  type      \"{_trunc(args.get('text', ''), 30)}\"  {dur}")
+        return _wrap(f"┊ ⌨️  type      \"{redact_browser_typed_text(args.get('text', ''))}\"  {dur}")
     if tool_name == "browser_scroll":
         d = args.get("direction", "down")
         arrow = {"down": "↓", "up": "↑", "right": "→", "left": "←"}.get(d, "↓")
@@ -1045,5 +1049,4 @@ def get_cute_tool_message(
 # =========================================================================
 # Honcho session line (one-liner with clickable OSC 8 hyperlink)
 # =========================================================================
-
 

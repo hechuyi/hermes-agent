@@ -562,9 +562,11 @@ def camofox_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
             f"/tabs/{session['tab_id']}/type",
             {"userId": session["user_id"], "ref": clean_ref, "text": text},
         )
+        from agent.redact import redact_browser_typed_text
+
         return json.dumps({
             "success": True,
-            "typed": text,
+            "typed": redact_browser_typed_text(text),
             "element": clean_ref,
         })
     except Exception as e:
@@ -789,6 +791,5 @@ def camofox_console(clear: bool = False, task_id: Optional[str] = None) -> str:
         "note": "Console log capture is not available with the Camofox backend. "
                 "Use browser_snapshot or browser_vision to inspect page state.",
     })
-
 
 
