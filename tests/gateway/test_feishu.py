@@ -1,9 +1,11 @@
 """Tests for the Feishu gateway integration."""
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from collections import OrderedDict
@@ -5076,6 +5078,29 @@ class TestFeishuFetchMessageText(unittest.TestCase):
         self.assertNotIn("m_0", adapter._message_text_cache)
         self.assertEqual(len(adapter._message_text_cache), _FEISHU_MESSAGE_TEXT_CACHE_SIZE)
 
+    def test_fetch_message_text_new_entry_becomes_most_recent(self):
+        from gateway.platforms.feishu import _FEISHU_MESSAGE_TEXT_CACHE_SIZE
+
+        adapter = self._build_adapter()
+        for i in range(_FEISHU_MESSAGE_TEXT_CACHE_SIZE):
+            adapter._message_text_cache[f"m_{i}"] = f"text {i}"
+
+        parent = SimpleNamespace(
+            body=SimpleNamespace(content=json.dumps({"text": "new text"})),
+            msg_type="text",
+            mentions=[],
+        )
+        response = Mock()
+        response.success = Mock(return_value=True)
+        response.data = SimpleNamespace(items=[parent])
+        adapter._client.im.v1.message.get = Mock(return_value=response)
+
+        self.assertEqual(asyncio.run(adapter._fetch_message_text("m_new")), "new text")
+
+        self.assertIn("m_new", adapter._message_text_cache)
+        self.assertNotIn("m_0", adapter._message_text_cache)
+        self.assertEqual(len(adapter._message_text_cache), _FEISHU_MESSAGE_TEXT_CACHE_SIZE)
+
     def test_build_mentions_map_string_id_shape(self):
         """_build_mentions_map accepts the reply-history shape (id as str +
         id_type='open_id'). user_id id_type is not load-bearing for self
@@ -5360,3 +5385,66 @@ class TestChatLockEviction(unittest.TestCase):
                 second.release()
 
         asyncio.run(_run())
+
+
+class TestFeishuSdkExecutor(unittest.TestCase):
+    def _make_adapter(self):
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = object.__new__(FeishuAdapter)
+        adapter._sdk_executor_lock = threading.Lock()
+        adapter._sdk_executor = None
+        adapter._sdk_executor_closing = False
+        return adapter
+
+    def test_get_sdk_executor_creates_owned_pool(self):
+        adapter = self._make_adapter()
+        executor = adapter._get_sdk_executor()
+        self.assertIsInstance(executor, concurrent.futures.ThreadPoolExecutor)
+        self.assertIs(adapter._get_sdk_executor(), executor)
+        adapter._shutdown_sdk_executor()
+
+    def test_get_sdk_executor_recreates_after_external_shutdown(self):
+        adapter = self._make_adapter()
+        first = adapter._get_sdk_executor()
+        first.shutdown(wait=True)
+
+        second = adapter._get_sdk_executor()
+
+        self.assertIsNot(second, first)
+        self.assertFalse(getattr(second, "_shutdown", False))
+        adapter._shutdown_sdk_executor()
+
+    def test_shutdown_refuses_executor_resurrection(self):
+        adapter = self._make_adapter()
+        adapter._get_sdk_executor()
+        adapter._shutdown_sdk_executor()
+
+        self.assertTrue(adapter._sdk_executor_closing)
+        with self.assertRaisesRegex(RuntimeError, "shutting down"):
+            adapter._get_sdk_executor()
+
+    def test_connect_rearms_sdk_executor_before_early_failure(self):
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = self._make_adapter()
+        adapter._sdk_executor_closing = True
+        adapter._app_id = ""
+        adapter._app_secret = ""
+
+        ok = asyncio.run(FeishuAdapter.connect(adapter))
+
+        self.assertFalse(ok)
+        self.assertFalse(adapter._sdk_executor_closing)
+
+    def test_run_blocking_uses_owned_pool(self):
+        adapter = self._make_adapter()
+        captured = {}
+
+        def work():
+            captured["thread"] = threading.current_thread().name
+            return "ok"
+
+        self.assertEqual(asyncio.run(adapter._run_blocking(work)), "ok")
+        self.assertTrue(captured["thread"].startswith("hermes-feishu-sdk"))
+        adapter._shutdown_sdk_executor()

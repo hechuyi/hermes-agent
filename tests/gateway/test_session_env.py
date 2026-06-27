@@ -358,3 +358,18 @@ async def test_run_in_executor_with_context_propagates_exceptions():
 
     with pytest.raises(ValueError, match="boom"):
         await runner._run_in_executor_with_context(blow_up)
+
+
+@pytest.mark.asyncio
+async def test_gateway_executor_refuses_resurrection_after_shutdown():
+    """A real gateway shutdown must not be undone by executor recreation."""
+    runner = object.__new__(GatewayRunner)
+
+    try:
+        assert await runner._run_in_executor_with_context(lambda: "first") == "first"
+        runner._shutdown_executor()
+
+        with pytest.raises(RuntimeError, match="shutting down"):
+            await runner._run_in_executor_with_context(lambda: "second")
+    finally:
+        runner._shutdown_executor()

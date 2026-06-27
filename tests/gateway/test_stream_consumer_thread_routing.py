@@ -143,6 +143,9 @@ class TestOverflowFirstMessage:
 class TestFeishuFallbackThreadRouting:
     """Verify FeishuAdapter._send_raw_message create routes never target topics."""
 
+    async def _passthrough_blocking(self, func, *args):
+        return func(*args)
+
     def test_runner_feishu_topic_stream_metadata_includes_reply_anchor(self):
         source = SimpleNamespace(
             platform=Platform.FEISHU,
@@ -182,6 +185,7 @@ class TestFeishuFallbackThreadRouting:
         adapter._client = mock_client
         adapter._build_create_message_body = FeishuAdapter._build_create_message_body
         adapter._build_create_message_request = FeishuAdapter._build_create_message_request
+        adapter._run_blocking = self._passthrough_blocking
 
         import json
         result = await FeishuAdapter._send_raw_message(
@@ -242,6 +246,7 @@ class TestFeishuFallbackThreadRouting:
         adapter._client = mock_client
         adapter._build_reply_message_body = FeishuAdapter._build_reply_message_body
         adapter._build_reply_message_request = FeishuAdapter._build_reply_message_request
+        adapter._run_blocking = self._passthrough_blocking
 
         import json
         result = await FeishuAdapter._send_raw_message(
@@ -283,6 +288,7 @@ class TestFeishuFallbackThreadRouting:
         adapter._client = mock_client
         adapter._build_reply_message_body = FeishuAdapter._build_reply_message_body
         adapter._build_reply_message_request = FeishuAdapter._build_reply_message_request
+        adapter._run_blocking = self._passthrough_blocking
 
         import json
         result = await FeishuAdapter._send_raw_message(
@@ -318,6 +324,7 @@ class TestFeishuFallbackThreadRouting:
         adapter._client = mock_client
         adapter._build_create_message_body = FeishuAdapter._build_create_message_body
         adapter._build_create_message_request = FeishuAdapter._build_create_message_request
+        adapter._run_blocking = self._passthrough_blocking
 
         import json
         result = await FeishuAdapter._send_raw_message(

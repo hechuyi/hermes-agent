@@ -42,6 +42,8 @@ def make_adapter_skeleton(
     adapter._bot_user_id = bot_user_id
     adapter._bot_name = ""
     adapter._app_id = ""
+    adapter._gateway_event_state_dir = None
+    adapter._hermes_tools_state_dir = None
     adapter._admins = set()
     adapter._group_rules = {}
     adapter._group_policy = group_policy
