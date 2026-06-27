@@ -16,6 +16,9 @@ from hermes_cli.webhook import (
 )
 
 
+LEGACY_DELIVERY_TERMS = ("telegram", "discord", "slack")
+
+
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -57,7 +60,7 @@ class TestSubscribe:
             name="gh-issues",
             events="issues,pull_request",
             prompt="Issue: {issue.title}",
-            deliver="telegram",
+            deliver="feishu",
             deliver_chat_id="12345",
             description="Watch GitHub",
         ))
@@ -65,7 +68,7 @@ class TestSubscribe:
         route = subs["gh-issues"]
         assert route["events"] == ["issues", "pull_request"]
         assert route["prompt"] == "Issue: {issue.title}"
-        assert route["deliver"] == "telegram"
+        assert route["deliver"] == "feishu"
         assert route["deliver_extra"] == {"chat_id": "12345"}
 
     def test_custom_secret(self):
@@ -90,6 +93,20 @@ class TestSubscribe:
         webhook_command(_make_args(webhook_action="subscribe", name="bad name!"))
         out = capsys.readouterr().out
         assert "Error" in out or "Invalid" in out
+        assert _load_subscriptions() == {}
+
+    def test_deliver_only_error_uses_current_delivery_examples(self, capsys):
+        webhook_command(_make_args(
+            webhook_action="subscribe",
+            name="direct",
+            deliver="log",
+            deliver_only=True,
+        ))
+
+        out = capsys.readouterr().out.lower()
+        assert "feishu" in out
+        for term in LEGACY_DELIVERY_TERMS:
+            assert term not in out
         assert _load_subscriptions() == {}
 
 

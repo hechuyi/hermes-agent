@@ -14,18 +14,18 @@ metadata:
 
 # Hermes Agent
 
-Hermes Agent is an open-source AI agent framework by Nous Research that runs in your terminal, messaging platforms, and IDEs. It belongs to the same category as Claude Code (Anthropic), Codex (OpenAI), and OpenClaw — autonomous coding and task-execution agents that use tool calling to interact with your system. Hermes works with any LLM provider (OpenRouter, Anthropic, OpenAI, DeepSeek, local models, and 15+ others) and runs on Linux, macOS, and WSL.
+Hermes Agent is an open-source AI agent framework by Nous Research that runs in your terminal, Feishu gateway, API server, and IDE integrations. It belongs to the same category as Claude Code (Anthropic), Codex (OpenAI), and OpenClaw — autonomous coding and task-execution agents that use tool calling to interact with your system. Hermes works with any LLM provider (OpenRouter, Anthropic, OpenAI, DeepSeek, local models, and 15+ others) and runs on Linux, macOS, and WSL.
 
 What makes Hermes different:
 
 - **Self-improving through skills** — Hermes learns from experience by saving reusable procedures as skills. When it solves a complex problem, discovers a workflow, or gets corrected, it can persist that knowledge as a skill document that loads into future sessions. Skills accumulate over time, making the agent better at your specific tasks and environment.
 - **Persistent memory across sessions** — remembers who you are, your preferences, environment details, and lessons learned. Pluggable memory backends (built-in, Honcho, Mem0, and more) let you choose how memory works.
-- **Multi-platform gateway** — the same agent runs on Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, and 10+ other platforms with full tool access, not just chat.
+- **Gateway runtime** — the same agent runs through the Feishu gateway and API server with tool access, not just chat.
 - **Provider-agnostic** — swap models and providers mid-workflow without changing anything else. Credential pools rotate across multiple API keys automatically.
 - **Profiles** — run multiple independent Hermes instances with isolated configs, sessions, skills, and memory.
 - **Extensible** — plugins, MCP servers, custom tools, webhook triggers, cron scheduling, and the full Python ecosystem.
 
-People use Hermes for software development, research, system administration, data analysis, content creation, home automation, and anything else that benefits from an AI agent with persistent context and full system access.
+People use Hermes for software development, research, system administration, data analysis, content creation, and anything else that benefits from an AI agent with persistent context and full system access.
 
 **This skill helps you work with Hermes Agent effectively** — setting it up, configuring features, spawning additional agent instances, troubleshooting issues, finding the right commands and settings, and understanding how the system works when you need to extend or contribute to it.
 
@@ -140,7 +140,7 @@ hermes mcp test NAME        Test connection
 hermes mcp configure NAME   Toggle tool selection
 ```
 
-### Gateway (Messaging Platforms)
+### Gateway
 
 ```
 hermes gateway run          Start gateway foreground
@@ -148,10 +148,10 @@ hermes gateway install      Install as background service
 hermes gateway start/stop   Control the service
 hermes gateway restart      Restart the service
 hermes gateway status       Check status
-hermes gateway setup        Configure platforms
+hermes gateway setup        Configure gateway surfaces
 ```
 
-Supported platforms: Telegram, Discord, Slack, WhatsApp, Signal, Email, SMS, Matrix, Mattermost, Home Assistant, DingTalk, Feishu, WeCom, BlueBubbles (iMessage), Weixin (WeChat), API Server, Webhooks. Open WebUI connects via the API Server adapter.
+Supported gateway surfaces in this runtime fork: Feishu and API Server. Open WebUI connects via the API Server adapter.
 
 Platform docs: https://hermes-agent.nousresearch.com/docs/user-guide/messaging/
 
@@ -234,7 +234,7 @@ Type these during an interactive chat session. New commands land fairly
 often; if something below looks stale, run `/help` in-session for the
 authoritative list or see the [live slash commands reference](https://hermes-agent.nousresearch.com/docs/reference/slash-commands).
 The registry of record is `hermes_cli/commands.py` — every consumer
-(autocomplete, Telegram menu, Slack mapping, `/help`) derives from it.
+(autocomplete, gateway help, `/help`) derives from it.
 
 ### Session Control
 ```
@@ -297,7 +297,6 @@ The registry of record is `hermes_cli/commands.py` — every consumer
 /restart             Restart gateway (gateway)
 /sethome             Set current chat as home channel (gateway)
 /update              Update Hermes to latest (gateway)
-/topic [sub]         Enable or inspect Telegram DM topic sessions (gateway)
 /platforms (/gateway) Show platform connection status (gateway)
 ```
 
@@ -419,18 +418,13 @@ Enable/disable via `hermes tools` (interactive) or `hermes tools enable/disable 
 | `delegation` | Subagent task delegation |
 | `cronjob` | Scheduled task management |
 | `clarify` | Ask user clarifying questions |
-| `messaging` | Cross-platform message sending |
+| `messaging` | Gateway message sending |
 | `todo` | In-session task planning and tracking |
 | `kanban` | Multi-agent work-queue tools (gated to workers) |
 | `debugging` | Extra introspection/debug tools (off by default) |
 | `safe` | Minimal, low-risk toolset for locked-down sessions |
-| `spotify` | Spotify playback and playlist control |
-| `homeassistant` | Smart home control (off by default) |
-| `discord` | Discord integration tools |
-| `discord_admin` | Discord admin/moderation tools |
 | `feishu_doc` | Feishu (Lark) document tools |
 | `feishu_drive` | Feishu (Lark) drive tools |
-| `yuanbao` | Yuanbao integration tools |
 | `rl` | Reinforcement learning tools (off by default) |
 | `moa` | Mixture of Agents (off by default) |
 
@@ -501,7 +495,7 @@ To keep the model away from network or media tools entirely, open `hermes tools`
 
 ### STT (Voice → Text)
 
-Voice messages from messaging platforms are auto-transcribed.
+Voice messages from supported gateway surfaces are auto-transcribed.
 
 Provider priority (auto-detected):
 1. **Local faster-whisper** — free, no API key: `pip install faster-whisper`
@@ -838,11 +832,6 @@ Common gateway problems:
 - **Gateway dies on WSL2 close**: WSL2 requires `systemd=true` in `/etc/wsl.conf` for systemd services to work. Without it, gateway falls back to `nohup` (dies when session closes).
 - **Gateway crash loop**: Reset the failed state: `systemctl --user reset-failed hermes-gateway`
 
-### Platform-specific issues
-- **Discord bot silent**: Must enable **Message Content Intent** in Bot → Privileged Gateway Intents.
-- **Slack bot only works in DMs**: Must subscribe to `message.channels` event. Without it, the bot ignores public channels.
-- **Windows-specific issues** (`Alt+Enter` newline, WinError 10106, UTF-8 BOM config, test suite, line endings): see the dedicated **Windows-Specific Quirks** section above.
-
 ### Auxiliary models not working
 If `auxiliary` tasks (vision, compression, session_search) fail silently, the `auto` provider can't find a backend. Either set `OPENROUTER_API_KEY` or `GOOGLE_API_KEY`, or explicitly configure each auxiliary task's provider:
 ```bash
@@ -894,8 +883,8 @@ hermes-agent/
 │   └── main.py           # CLI entry point and argparse
 ├── tools/                # One file per tool
 │   └── registry.py       # Central tool registry
-├── gateway/              # Messaging gateway
-│   └── platforms/        # Platform adapters (telegram, discord, etc.)
+├── gateway/              # Gateway runtime
+│   └── platforms/        # Feishu and API server adapters
 ├── cron/                 # Job scheduler
 ├── tests/                # ~3000 pytest tests
 └── website/              # Docusaurus docs site
@@ -939,7 +928,7 @@ All handlers must return JSON strings. Use `get_hermes_home()` for paths, never 
 2. Add handler in `cli.py` → `process_command()`
 3. (Optional) Add gateway handler in `gateway/run.py`
 
-All consumers (help text, autocomplete, Telegram menu, Slack mapping) derive from the central registry automatically.
+All consumers (help text, autocomplete, gateway help) derive from the central registry automatically.
 
 ### Agent Loop (High Level)
 
@@ -1000,7 +989,7 @@ Factual guidance about the host OS, user home, cwd, terminal backend, and shell 
 Full design notes, the exact emitted strings, and testing pitfalls:
 `references/prompt-builder-environment-hints.md`.
 
-**Refactor-safety pattern (POSIX-equivalence guard):** when you extract inline logic into a helper that adds Windows/platform-specific behavior, keep a `_legacy_<name>` oracle function in the test file that's a verbatim copy of the old code, then parametrize-diff against it. Example: `tests/tools/test_code_execution_windows_env.py::TestPosixEquivalence`. This locks in the invariant that POSIX behavior is bit-for-bit identical and makes any future drift fail loudly with a clear diff.
+**Refactor-safety pattern (POSIX-equivalence guard):** when you extract inline logic into a helper that adds Windows or OS-specific behavior, keep a `_legacy_<name>` oracle function in the test file that's a verbatim copy of the old code, then parametrize-diff against it. Example: `tests/tools/test_code_execution_windows_env.py::TestPosixEquivalence`. This locks in the invariant that POSIX behavior is bit-for-bit identical and makes any future drift fail loudly with a clear diff.
 
 ### Commit Conventions
 

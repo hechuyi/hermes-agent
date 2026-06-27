@@ -72,6 +72,23 @@ class TestLoadConfigDefaults:
             assert config["terminal"]["backend"] == "local"
             assert config["display"]["interim_assistant_messages"] is True
 
+    def test_default_config_does_not_expose_legacy_chat_platform_sections(self, tmp_path):
+        legacy_platforms = {
+            "telegram",
+            "discord",
+            "slack",
+            "whatsapp",
+            "mattermost",
+            "matrix",
+        }
+
+        assert legacy_platforms.isdisjoint(DEFAULT_CONFIG)
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            config = load_config()
+
+        assert legacy_platforms.isdisjoint(config)
+
     def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             config_path = tmp_path / "config.yaml"
@@ -530,6 +547,74 @@ class TestOptionalEnvVarsRegistry:
             all_vars.extend(vars_list)
         assert "TAVILY_API_KEY" in all_vars
 
+    def test_legacy_platform_env_vars_remain_registered_for_compatibility(self):
+        """Historical platform vars stay known for .env parsing and direct writes."""
+        from hermes_cli.config import OPTIONAL_ENV_VARS
+
+        for name in (
+            "TELEGRAM_BOT_TOKEN",
+            "DISCORD_BOT_TOKEN",
+            "SLACK_BOT_TOKEN",
+            "BLUEBUBBLES_SERVER_URL",
+        ):
+            assert name in OPTIONAL_ENV_VARS
+
+        from hermes_cli.config import ENV_VARS_BY_VERSION
+        assert "WHATSAPP_ENABLED" in ENV_VARS_BY_VERSION[5]
+
+    def test_missing_env_vars_hide_legacy_platform_prompts(self, tmp_path):
+        """Setup/config missing-env prompts should not suggest old platform tokens."""
+        from hermes_cli.config import get_missing_env_vars
+
+        hidden_prefixes = (
+            "TELEGRAM_",
+            "DISCORD_",
+            "SLACK_",
+            "WHATSAPP_",
+            "BLUEBUBBLES_",
+            "YUANBAO_",
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=False):
+            missing_names = {item["name"] for item in get_missing_env_vars()}
+
+        assert not any(
+            name.startswith(hidden_prefixes) for name in missing_names
+        )
+
+    def test_missing_env_vars_keep_api_and_webhook_prompts(self, tmp_path):
+        """API server and webhook entries remain user-visible."""
+        from hermes_cli.config import get_missing_env_vars
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}, clear=False):
+            missing_names = {item["name"] for item in get_missing_env_vars()}
+
+        assert "API_SERVER_KEY" in missing_names
+        assert "WEBHOOK_SECRET" in missing_names
+
+    def test_show_config_reports_current_gateway_surfaces_only(self, tmp_path, capsys):
+        """The config summary should not promote historical platform adapters."""
+        from hermes_cli import config as cfg_mod
+
+        env = {
+            "FEISHU_APP_ID": "cli_test_app",
+            "FEISHU_APP_SECRET": "cli_test_secret",
+            "API_SERVER_ENABLED": "true",
+            "WEBHOOK_ENABLED": "true",
+            "TELEGRAM_BOT_TOKEN": "legacy-token",
+            "DISCORD_BOT_TOKEN": "legacy-token",
+        }
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path), **env}, clear=False):
+            cfg_mod.show_config()
+
+        out = capsys.readouterr().out
+        assert "Feishu/Lark:" in out
+        assert "API server:" in out
+        assert "Webhook:" in out
+        assert "Telegram:" not in out
+        assert "Discord:" not in out
+
 
 class TestConfigMigrationSecretPrompts:
     def test_required_secret_env_prompt_uses_masked_prompt(self, tmp_path, monkeypatch):
@@ -795,10 +880,7 @@ class TestInterimAssistantMessageConfig:
 
 
 class TestDiscordChannelPromptsConfig:
-    def test_default_config_includes_discord_channel_prompts(self):
-        assert DEFAULT_CONFIG["discord"]["channel_prompts"] == {}
-
-    def test_migrate_adds_discord_channel_prompts_default(self, tmp_path):
+    def test_migrate_preserves_user_owned_legacy_discord_config(self, tmp_path):
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
             yaml.safe_dump({"_config_version": 17, "discord": {"auto_thread": True}}),
@@ -812,7 +894,7 @@ class TestDiscordChannelPromptsConfig:
         from hermes_cli.config import DEFAULT_CONFIG
         assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
         assert raw["discord"]["auto_thread"] is True
-        assert raw["discord"]["channel_prompts"] == {}
+        assert "channel_prompts" not in raw["discord"]
 
 
 class TestUserMessagePreviewConfig:

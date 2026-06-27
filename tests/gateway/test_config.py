@@ -17,12 +17,12 @@ from gateway.config import (
 
 class TestHomeChannelRoundtrip:
     def test_to_dict_from_dict(self):
-        hc = HomeChannel(platform=Platform.DISCORD, chat_id="999", name="general")
+        hc = HomeChannel(platform=Platform.FEISHU, chat_id="oc_999", name="general")
         d = hc.to_dict()
         restored = HomeChannel.from_dict(d)
 
-        assert restored.platform == Platform.DISCORD
-        assert restored.chat_id == "999"
+        assert restored.platform == Platform.FEISHU
+        assert restored.chat_id == "oc_999"
         assert restored.name == "general"
 
 
@@ -32,8 +32,8 @@ class TestPlatformConfigRoundtrip:
             enabled=True,
             token="tok_123",
             home_channel=HomeChannel(
-                platform=Platform.TELEGRAM,
-                chat_id="555",
+                platform=Platform.FEISHU,
+                chat_id="oc_555",
                 name="Home",
             ),
             extra={"foo": "bar"},
@@ -43,7 +43,7 @@ class TestPlatformConfigRoundtrip:
 
         assert restored.enabled is True
         assert restored.token == "tok_123"
-        assert restored.home_channel.chat_id == "555"
+        assert restored.home_channel.chat_id == "oc_555"
         assert restored.extra == {"foo": "bar"}
 
     def test_disabled_no_token(self):
@@ -72,24 +72,28 @@ class TestPlatformConfigRoundtrip:
 
 
 class TestGetConnectedPlatforms:
-    def test_returns_enabled_with_token(self):
+    def test_returns_current_enabled_platforms_with_required_config(self):
         config = GatewayConfig(
             platforms={
-                Platform.TELEGRAM: PlatformConfig(enabled=True, token="t"),
-                Platform.DISCORD: PlatformConfig(enabled=False, token="d"),
-                Platform.SLACK: PlatformConfig(enabled=True),  # no token
+                Platform.FEISHU: PlatformConfig(
+                    enabled=True,
+                    extra={"app_id": "cli_current"},
+                ),
+                Platform.API_SERVER: PlatformConfig(enabled=False, extra={"key": "k"}),
+                Platform.LOCAL: PlatformConfig(enabled=True),  # no connection material
             },
         )
         connected = config.get_connected_platforms()
-        assert Platform.TELEGRAM in connected
-        assert Platform.DISCORD not in connected
-        assert Platform.SLACK not in connected
+        assert Platform.FEISHU in connected
+        assert Platform.API_SERVER not in connected
+        assert Platform.LOCAL not in connected
 
     def test_empty_platforms(self):
         config = GatewayConfig()
         assert config.get_connected_platforms() == []
 
-    def test_dingtalk_recognised_via_extras(self):
+    def test_legacy_dingtalk_recognised_via_extras_for_internal_schema_compatibility(self):
+        """Legacy enum compatibility: not a current runtime candidate."""
         config = GatewayConfig(
             platforms={
                 Platform.DINGTALK: PlatformConfig(
@@ -100,10 +104,8 @@ class TestGetConnectedPlatforms:
         )
         assert Platform.DINGTALK in config.get_connected_platforms()
 
-    def test_dingtalk_recognised_via_env_vars(self, monkeypatch):
-        """DingTalk configured via env vars (no extras) should still be
-        recognised as connected — covers the case where _apply_env_overrides
-        hasn't populated extras yet."""
+    def test_legacy_dingtalk_recognised_via_env_vars_for_internal_schema_compatibility(self, monkeypatch):
+        """Legacy enum compatibility: not a current runtime candidate."""
         monkeypatch.setenv("DINGTALK_CLIENT_ID", "env_cid")
         monkeypatch.setenv("DINGTALK_CLIENT_SECRET", "env_sec")
         config = GatewayConfig(
@@ -113,7 +115,8 @@ class TestGetConnectedPlatforms:
         )
         assert Platform.DINGTALK in config.get_connected_platforms()
 
-    def test_dingtalk_missing_creds_not_connected(self, monkeypatch):
+    def test_legacy_dingtalk_missing_creds_not_connected_for_internal_schema_compatibility(self, monkeypatch):
+        """Legacy enum compatibility: not a current runtime candidate."""
         monkeypatch.delenv("DINGTALK_CLIENT_ID", raising=False)
         monkeypatch.delenv("DINGTALK_CLIENT_SECRET", raising=False)
         config = GatewayConfig(
@@ -123,7 +126,8 @@ class TestGetConnectedPlatforms:
         )
         assert Platform.DINGTALK not in config.get_connected_platforms()
 
-    def test_dingtalk_disabled_not_connected(self):
+    def test_legacy_dingtalk_disabled_not_connected_for_internal_schema_compatibility(self):
+        """Legacy enum compatibility: not a current runtime candidate."""
         config = GatewayConfig(
             platforms={
                 Platform.DINGTALK: PlatformConfig(
@@ -189,10 +193,10 @@ class TestGatewayConfigRoundtrip:
     def test_full_roundtrip(self):
         config = GatewayConfig(
             platforms={
-                Platform.TELEGRAM: PlatformConfig(
+                Platform.FEISHU: PlatformConfig(
                     enabled=True,
                     token="tok_123",
-                    home_channel=HomeChannel(Platform.TELEGRAM, "123", "Home"),
+                    home_channel=HomeChannel(Platform.FEISHU, "oc_123", "Home"),
                 ),
             },
             reset_triggers=["/new"],
@@ -205,8 +209,8 @@ class TestGatewayConfigRoundtrip:
         d = config.to_dict()
         restored = GatewayConfig.from_dict(d)
 
-        assert Platform.TELEGRAM in restored.platforms
-        assert restored.platforms[Platform.TELEGRAM].token == "tok_123"
+        assert Platform.FEISHU in restored.platforms
+        assert restored.platforms[Platform.FEISHU].token == "tok_123"
         assert restored.reset_triggers == ["/new"]
         assert restored.quick_commands == {"limits": {"type": "exec", "command": "echo ok"}}
         assert restored.group_sessions_per_user is False
@@ -214,11 +218,11 @@ class TestGatewayConfigRoundtrip:
         assert restored.group_conversation_scope_per_user is True
         assert restored.thread_conversation_scope_per_user is True
 
-    def test_roundtrip_preserves_unauthorized_dm_behavior(self):
+    def test_roundtrip_preserves_feishu_unauthorized_dm_behavior(self):
         config = GatewayConfig(
             unauthorized_dm_behavior="ignore",
             platforms={
-                Platform.WHATSAPP: PlatformConfig(
+                Platform.FEISHU: PlatformConfig(
                     enabled=True,
                     extra={"unauthorized_dm_behavior": "pair"},
                 ),
@@ -228,7 +232,7 @@ class TestGatewayConfigRoundtrip:
         restored = GatewayConfig.from_dict(config.to_dict())
 
         assert restored.unauthorized_dm_behavior == "ignore"
-        assert restored.platforms[Platform.WHATSAPP].extra["unauthorized_dm_behavior"] == "pair"
+        assert restored.platforms[Platform.FEISHU].extra["unauthorized_dm_behavior"] == "pair"
 
     def test_from_dict_coerces_quoted_false_always_log_local(self):
         restored = GatewayConfig.from_dict({"always_log_local": "false"})
@@ -236,15 +240,15 @@ class TestGatewayConfigRoundtrip:
 
     def test_get_notice_delivery_defaults_to_public(self):
         config = GatewayConfig(
-            platforms={Platform.SLACK: PlatformConfig(enabled=True, token="***")}
+            platforms={Platform.FEISHU: PlatformConfig(enabled=True, token="***")}
         )
 
-        assert config.get_notice_delivery(Platform.SLACK) == "public"
+        assert config.get_notice_delivery(Platform.FEISHU) == "public"
 
     def test_get_notice_delivery_honors_platform_override(self):
         config = GatewayConfig(
             platforms={
-                Platform.SLACK: PlatformConfig(
+                Platform.FEISHU: PlatformConfig(
                     enabled=True,
                     token="***",
                     extra={"notice_delivery": "private"},
@@ -252,7 +256,7 @@ class TestGatewayConfigRoundtrip:
             }
         )
 
-        assert config.get_notice_delivery(Platform.SLACK) == "private"
+        assert config.get_notice_delivery(Platform.FEISHU) == "private"
 
 
 class TestLoadGatewayConfig:
@@ -334,93 +338,52 @@ class TestLoadGatewayConfig:
 
         assert config.thread_sessions_per_user is False
 
-    def test_bridges_discord_thread_require_mention_from_config_yaml(self, tmp_path, monkeypatch):
-        """discord.thread_require_mention in config.yaml should reach the runtime env var."""
+    def test_bridges_feishu_shared_keys_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
-            "discord:\n"
-            "  thread_require_mention: true\n",
-            encoding="utf-8",
-        )
-
-        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-        monkeypatch.delenv("DISCORD_THREAD_REQUIRE_MENTION", raising=False)
-
-        load_gateway_config()
-
-        assert os.environ.get("DISCORD_THREAD_REQUIRE_MENTION") == "true"
-
-    def test_thread_require_mention_yaml_does_not_overwrite_env(self, tmp_path, monkeypatch):
-        """Explicit env var should win over config.yaml (env > yaml precedence)."""
-        hermes_home = tmp_path / ".hermes"
-        hermes_home.mkdir()
-        config_path = hermes_home / "config.yaml"
-        config_path.write_text(
-            "discord:\n"
-            "  thread_require_mention: false\n",
-            encoding="utf-8",
-        )
-
-        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-        monkeypatch.setenv("DISCORD_THREAD_REQUIRE_MENTION", "true")  # user override
-
-        load_gateway_config()
-
-        # Env value preserved, not clobbered by yaml.
-        assert os.environ.get("DISCORD_THREAD_REQUIRE_MENTION") == "true"
-
-    def test_bridges_discord_allow_from_from_config_yaml(self, tmp_path, monkeypatch):
-        """discord.allow_from should populate DISCORD_ALLOWED_USERS for auth."""
-        hermes_home = tmp_path / ".hermes"
-        hermes_home.mkdir()
-        config_path = hermes_home / "config.yaml"
-        config_path.write_text(
-            "discord:\n"
+            "feishu:\n"
             "  allow_from:\n"
-            "    - \"123456789012345678\"\n"
-            "    - \"999888777666555444\"\n",
+            "    - ou_operator\n"
+            "  channel_prompts:\n"
+            "    oc_research: Research mode\n"
+            "    oc_ops: Operations mode\n"
+            "  notice_delivery: private\n"
+            "  unauthorized_dm_behavior: ignore\n",
             encoding="utf-8",
         )
 
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-        monkeypatch.delenv("DISCORD_ALLOWED_USERS", raising=False)
 
         config = load_gateway_config()
 
-        assert config.platforms[Platform.DISCORD].extra["allow_from"] == [
-            "123456789012345678",
-            "999888777666555444",
-        ]
-        assert os.environ.get("DISCORD_ALLOWED_USERS") == (
-            "123456789012345678,999888777666555444"
-        )
+        feishu = config.platforms[Platform.FEISHU]
+        assert feishu.extra["allow_from"] == ["ou_operator"]
+        assert feishu.extra["channel_prompts"] == {
+            "oc_research": "Research mode",
+            "oc_ops": "Operations mode",
+        }
+        assert config.get_notice_delivery(Platform.FEISHU) == "private"
+        assert config.get_unauthorized_dm_behavior(Platform.FEISHU) == "ignore"
 
-    def test_bridges_discord_gateway_platform_extra_allow_from_to_env(self, tmp_path, monkeypatch):
-        """gateway.platforms.discord.extra.allow_from should reach Discord auth."""
+    def test_feishu_shared_key_yaml_does_not_overwrite_env_bridge(self, tmp_path, monkeypatch):
+        """Explicit env vars still win over config.yaml for active Feishu bridges."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
-            "gateway:\n"
-            "  platforms:\n"
-            "    discord:\n"
-            "      extra:\n"
-            "        allow_from:\n"
-            "          - \"123456789012345678\"\n",
+            "feishu:\n"
+            "  allow_bots: all\n",
             encoding="utf-8",
         )
 
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-        monkeypatch.delenv("DISCORD_ALLOWED_USERS", raising=False)
+        monkeypatch.setenv("FEISHU_ALLOW_BOTS", "none")
 
-        config = load_gateway_config()
+        load_gateway_config()
 
-        assert config.platforms[Platform.DISCORD].extra["allow_from"] == [
-            "123456789012345678",
-        ]
-        assert os.environ.get("DISCORD_ALLOWED_USERS") == "123456789012345678"
+        assert os.environ.get("FEISHU_ALLOW_BOTS") == "none"
 
     def test_bridges_nested_gateway_platforms_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
@@ -429,12 +392,12 @@ class TestLoadGatewayConfig:
         config_path.write_text(
             "gateway:\n"
             "  platforms:\n"
-            "    telegram:\n"
+            "    feishu:\n"
             "      enabled: true\n"
             "      token: nested-token\n"
             "      home_channel:\n"
-            "        platform: telegram\n"
-            "        chat_id: \"123\"\n"
+            "        platform: feishu\n"
+            "        chat_id: oc_123\n"
             "        name: Nested Home\n"
             "      extra:\n"
             "        reply_prefix: nested\n",
@@ -445,15 +408,15 @@ class TestLoadGatewayConfig:
 
         config = load_gateway_config()
 
-        telegram = config.platforms[Platform.TELEGRAM]
-        assert telegram.enabled is True
-        assert telegram.token == "nested-token"
-        assert telegram.home_channel == HomeChannel(
-            platform=Platform.TELEGRAM,
-            chat_id="123",
+        feishu = config.platforms[Platform.FEISHU]
+        assert feishu.enabled is True
+        assert feishu.token == "nested-token"
+        assert feishu.home_channel == HomeChannel(
+            platform=Platform.FEISHU,
+            chat_id="oc_123",
             name="Nested Home",
         )
-        assert telegram.extra["reply_prefix"] == "nested"
+        assert feishu.extra["reply_prefix"] == "nested"
 
     def test_top_level_platforms_override_nested_gateway_platforms(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
@@ -462,13 +425,13 @@ class TestLoadGatewayConfig:
         config_path.write_text(
             "gateway:\n"
             "  platforms:\n"
-            "    telegram:\n"
+            "    feishu:\n"
             "      enabled: false\n"
             "      token: nested-token\n"
             "      extra:\n"
             "        reply_prefix: nested\n"
             "platforms:\n"
-            "  telegram:\n"
+            "  feishu:\n"
             "    enabled: true\n"
             "    token: top-token\n"
             "    extra:\n"
@@ -480,10 +443,10 @@ class TestLoadGatewayConfig:
 
         config = load_gateway_config()
 
-        telegram = config.platforms[Platform.TELEGRAM]
-        assert telegram.enabled is True
-        assert telegram.token == "top-token"
-        assert telegram.extra["reply_prefix"] == "top"
+        feishu = config.platforms[Platform.FEISHU]
+        assert feishu.enabled is True
+        assert feishu.token == "top-token"
+        assert feishu.extra["reply_prefix"] == "top"
 
     def test_bridges_quoted_false_platform_enabled_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
@@ -534,15 +497,15 @@ class TestLoadGatewayConfig:
 
         assert config.always_log_local is False
 
-    def test_bridges_discord_channel_prompts_from_config_yaml(self, tmp_path, monkeypatch):
+    def test_bridges_feishu_channel_prompts_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
-            "discord:\n"
+            "feishu:\n"
             "  channel_prompts:\n"
-            "    \"123\": Research mode\n"
-            "    456: Therapist mode\n",
+            "    oc_research: Research mode\n"
+            "    oc_ops: Operations mode\n",
             encoding="utf-8",
         )
 
@@ -550,12 +513,13 @@ class TestLoadGatewayConfig:
 
         config = load_gateway_config()
 
-        assert config.platforms[Platform.DISCORD].extra["channel_prompts"] == {
-            "123": "Research mode",
-            "456": "Therapist mode",
+        assert config.platforms[Platform.FEISHU].extra["channel_prompts"] == {
+            "oc_research": "Research mode",
+            "oc_ops": "Operations mode",
         }
 
-    def test_bridges_discord_history_backfill_settings_from_config_yaml(self, tmp_path, monkeypatch):
+    def test_ignores_legacy_discord_history_backfill_yaml_as_runtime_surface(self, tmp_path, monkeypatch):
+        """Legacy Discord YAML must not seed env or survive as a runtime platform."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -570,12 +534,14 @@ class TestLoadGatewayConfig:
         monkeypatch.delenv("DISCORD_HISTORY_BACKFILL", raising=False)
         monkeypatch.delenv("DISCORD_HISTORY_BACKFILL_LIMIT", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.getenv("DISCORD_HISTORY_BACKFILL") == "true"
-        assert os.getenv("DISCORD_HISTORY_BACKFILL_LIMIT") == "17"
+        assert Platform.DISCORD not in config.platforms
+        assert os.getenv("DISCORD_HISTORY_BACKFILL") is None
+        assert os.getenv("DISCORD_HISTORY_BACKFILL_LIMIT") is None
 
-    def test_bridges_telegram_channel_prompts_from_config_yaml(self, tmp_path, monkeypatch):
+    def test_ignores_legacy_telegram_channel_prompts_yaml_as_runtime_surface(self, tmp_path, monkeypatch):
+        """Legacy Telegram YAML may parse internally, but is pruned from this runtime fork."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -591,12 +557,10 @@ class TestLoadGatewayConfig:
 
         config = load_gateway_config()
 
-        assert config.platforms[Platform.TELEGRAM].extra["channel_prompts"] == {
-            "-1001234567": "Research assistant",
-            "789": "Creative writing",
-        }
+        assert Platform.TELEGRAM not in config.platforms
 
-    def test_bridges_slack_channel_prompts_from_config_yaml(self, tmp_path, monkeypatch):
+    def test_ignores_legacy_slack_channel_prompts_yaml_as_runtime_surface(self, tmp_path, monkeypatch):
+        """Legacy Slack YAML may parse internally, but is pruned from this runtime fork."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -611,9 +575,7 @@ class TestLoadGatewayConfig:
 
         config = load_gateway_config()
 
-        assert config.platforms[Platform.SLACK].extra["channel_prompts"] == {
-            "C01ABC": "Code review mode",
-        }
+        assert Platform.SLACK not in config.platforms
 
     def test_bridges_feishu_allow_bots_from_config_yaml_to_env(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
@@ -631,22 +593,6 @@ class TestLoadGatewayConfig:
 
         assert os.environ.get("FEISHU_ALLOW_BOTS") == "mentions"
 
-    def test_feishu_allow_bots_env_takes_precedence_over_config_yaml(self, tmp_path, monkeypatch):
-        hermes_home = tmp_path / ".hermes"
-        hermes_home.mkdir()
-        config_path = hermes_home / "config.yaml"
-        config_path.write_text(
-            "feishu:\n  allow_bots: all\n",
-            encoding="utf-8",
-        )
-
-        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-        monkeypatch.setenv("FEISHU_ALLOW_BOTS", "none")
-
-        load_gateway_config()
-
-        assert os.environ.get("FEISHU_ALLOW_BOTS") == "none"
-
     def test_invalid_quick_commands_in_config_yaml_are_ignored(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
@@ -659,13 +605,13 @@ class TestLoadGatewayConfig:
 
         assert config.quick_commands == {}
 
-    def test_bridges_unauthorized_dm_behavior_from_config_yaml(self, tmp_path, monkeypatch):
+    def test_bridges_feishu_unauthorized_dm_behavior_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
             "unauthorized_dm_behavior: ignore\n"
-            "whatsapp:\n"
+            "feishu:\n"
             "  unauthorized_dm_behavior: pair\n",
             encoding="utf-8",
         )
@@ -675,9 +621,10 @@ class TestLoadGatewayConfig:
         config = load_gateway_config()
 
         assert config.unauthorized_dm_behavior == "ignore"
-        assert config.platforms[Platform.WHATSAPP].extra["unauthorized_dm_behavior"] == "pair"
+        assert config.platforms[Platform.FEISHU].extra["unauthorized_dm_behavior"] == "pair"
 
-    def test_bridges_telegram_disable_link_previews_from_config_yaml(self, tmp_path, monkeypatch):
+    def test_ignores_legacy_telegram_disable_link_previews_yaml_as_runtime_surface(self, tmp_path, monkeypatch):
+        """Legacy Telegram presentation keys are not a current runtime surface."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -691,9 +638,10 @@ class TestLoadGatewayConfig:
 
         config = load_gateway_config()
 
-        assert config.platforms[Platform.TELEGRAM].extra["disable_link_previews"] is True
+        assert Platform.TELEGRAM not in config.platforms
 
-    def test_bridges_telegram_extra_base_url_from_config_yaml(self, tmp_path, monkeypatch):
+    def test_ignores_legacy_telegram_extra_base_url_yaml_as_runtime_surface(self, tmp_path, monkeypatch):
+        """Legacy Telegram adapter keys are not a current runtime surface."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -708,17 +656,14 @@ class TestLoadGatewayConfig:
 
         config = load_gateway_config()
 
-        assert (
-            config.platforms[Platform.TELEGRAM].extra["base_url"]
-            == "https://custom-proxy.example.com/bot"
-        )
+        assert Platform.TELEGRAM not in config.platforms
 
-    def test_bridges_notice_delivery_from_config_yaml(self, tmp_path, monkeypatch):
+    def test_bridges_feishu_notice_delivery_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
-            "slack:\n"
+            "feishu:\n"
             "  notice_delivery: private\n",
             encoding="utf-8",
         )
@@ -727,9 +672,10 @@ class TestLoadGatewayConfig:
 
         config = load_gateway_config()
 
-        assert config.get_notice_delivery(Platform.SLACK) == "private"
+        assert config.get_notice_delivery(Platform.FEISHU) == "private"
 
-    def test_bridges_telegram_proxy_url_from_config_yaml(self, tmp_path, monkeypatch):
+    def test_ignores_legacy_telegram_proxy_url_yaml_as_runtime_surface(self, tmp_path, monkeypatch):
+        """Legacy Telegram proxy YAML must not seed env in the Feishu runtime fork."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -742,12 +688,13 @@ class TestLoadGatewayConfig:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("TELEGRAM_PROXY", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        import os
-        assert os.environ.get("TELEGRAM_PROXY") == "socks5://127.0.0.1:1080"
+        assert Platform.TELEGRAM not in config.platforms
+        assert os.environ.get("TELEGRAM_PROXY") is None
 
-    def test_telegram_proxy_env_takes_precedence_over_config(self, tmp_path, monkeypatch):
+    def test_legacy_telegram_proxy_env_is_preserved_but_not_runtime_config(self, tmp_path, monkeypatch):
+        """Existing legacy env remains untouched, but Telegram is not exposed."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -760,80 +707,26 @@ class TestLoadGatewayConfig:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.setenv("TELEGRAM_PROXY", "socks5://from-env:1080")
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        import os
+        assert Platform.TELEGRAM not in config.platforms
         assert os.environ.get("TELEGRAM_PROXY") == "socks5://from-env:1080"
 
 
 class TestHomeChannelEnvOverrides:
-    """Home channel env vars should apply even when the platform was already
-    configured via config.yaml (not just when credential env vars create it)."""
+    """Current runtime home channel env vars should apply to existing config."""
 
     def test_existing_platform_configs_accept_home_channel_env_overrides(self):
         cases = [
             (
-                Platform.SLACK,
-                PlatformConfig(enabled=True, token="xoxb-from-config"),
-                {"SLACK_HOME_CHANNEL": "C123", "SLACK_HOME_CHANNEL_NAME": "Ops"},
-                ("C123", "Ops"),
-            ),
-            (
-                Platform.WHATSAPP,
-                PlatformConfig(enabled=True),
+                Platform.FEISHU,
+                PlatformConfig(enabled=True, extra={"app_id": "cli_current"}),
                 {
-                    "WHATSAPP_HOME_CHANNEL": "1234567890@lid",
-                    "WHATSAPP_HOME_CHANNEL_NAME": "Owner DM",
+                    "FEISHU_HOME_CHANNEL": "oc_123",
+                    "FEISHU_HOME_CHANNEL_NAME": "Ops",
+                    "FEISHU_HOME_CHANNEL_THREAD_ID": "omt_456",
                 },
-                ("1234567890@lid", "Owner DM"),
-            ),
-            (
-                Platform.SIGNAL,
-                PlatformConfig(
-                    enabled=True,
-                    extra={"http_url": "http://localhost:9090", "account": "+15551234567"},
-                ),
-                {"SIGNAL_HOME_CHANNEL": "+1555000", "SIGNAL_HOME_CHANNEL_NAME": "Phone"},
-                ("+1555000", "Phone"),
-            ),
-            (
-                Platform.MATTERMOST,
-                PlatformConfig(
-                    enabled=True,
-                    token="mm-token",
-                    extra={"url": "https://mm.example.com"},
-                ),
-                {"MATTERMOST_HOME_CHANNEL": "ch_abc123", "MATTERMOST_HOME_CHANNEL_NAME": "General"},
-                ("ch_abc123", "General"),
-            ),
-            (
-                Platform.MATRIX,
-                PlatformConfig(
-                    enabled=True,
-                    token="syt_abc123",
-                    extra={"homeserver": "https://matrix.example.org"},
-                ),
-                {"MATRIX_HOME_ROOM": "!room123:example.org", "MATRIX_HOME_ROOM_NAME": "Bot Room"},
-                ("!room123:example.org", "Bot Room"),
-            ),
-            (
-                Platform.EMAIL,
-                PlatformConfig(
-                    enabled=True,
-                    extra={
-                        "address": "hermes@test.com",
-                        "imap_host": "imap.test.com",
-                        "smtp_host": "smtp.test.com",
-                    },
-                ),
-                {"EMAIL_HOME_ADDRESS": "user@test.com", "EMAIL_HOME_ADDRESS_NAME": "Inbox"},
-                ("user@test.com", "Inbox"),
-            ),
-            (
-                Platform.SMS,
-                PlatformConfig(enabled=True, api_key="token_abc"),
-                {"SMS_HOME_CHANNEL": "+15559876543", "SMS_HOME_CHANNEL_NAME": "My Phone"},
-                ("+15559876543", "My Phone"),
+                ("oc_123", "Ops", "omt_456"),
             ),
         ]
 
@@ -844,4 +737,4 @@ class TestHomeChannelEnvOverrides:
 
             home = config.platforms[platform].home_channel
             assert home is not None, f"{platform.value}: home_channel should not be None"
-            assert (home.chat_id, home.name) == expected, platform.value
+            assert (home.chat_id, home.name, home.thread_id) == expected, platform.value

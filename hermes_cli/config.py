@@ -1267,7 +1267,7 @@ DEFAULT_CONFIG = {
         # responses and content messages are never touched.  Default 0
         # (disabled) preserves prior behavior.
         "ephemeral_system_ttl": 0,
-        "platforms": {},  # Per-platform display overrides: {"telegram": {"tool_progress": "all"}, "slack": {"tool_progress": "off"}}
+        "platforms": {},  # Per-surface display overrides: {"feishu": {"tool_progress": "all"}, "api": {"runtime_footer": {"enabled": True}}}
         # Gateway runtime-metadata footer appended to the FINAL message of a turn
         # (disabled by default to keep replies minimal). When enabled, renders
         # e.g. `model · 68% · ~/projects/hermes`. Per-platform overrides go under
@@ -1524,83 +1524,6 @@ DEFAULT_CONFIG = {
     # IANA timezone (e.g. "Asia/Kolkata", "America/New_York").
     # Empty string means use server-local time.
     "timezone": "",
-
-    # Slack platform settings (gateway mode)
-    "slack": {
-        "require_mention": True,       # Require @mention to respond in channels
-        "free_response_channels": "",  # Comma-separated channel IDs where bot responds without mention
-        "allowed_channels": "",        # If set, bot ONLY responds in these channel IDs (whitelist)
-        "channel_prompts": {},         # Per-channel ephemeral system prompts
-    },
-
-    # Discord platform settings (gateway mode)
-    "discord": {
-        "require_mention": True,       # Require @mention to respond in server channels
-        "free_response_channels": "",  # Comma-separated channel IDs where bot responds without mention
-        "allowed_channels": "",        # If set, bot ONLY responds in these channel IDs (whitelist)
-        "auto_thread": True,           # Auto-create threads on @mention in channels (like Slack)
-        "thread_require_mention": False,  # If True, require @mention in threads too (multi-bot threads)
-        "history_backfill": True,         # If True, prepend recent channel scrollback when bot is triggered (recovers messages missed while require_mention gated them out)
-        "history_backfill_limit": 50,     # Max number of recent messages to scan when assembling the backfill block
-        "reactions": True,             # Add 👀/✅/❌ reactions to messages during processing
-        "channel_prompts": {},         # Per-channel ephemeral system prompts (forum parents apply to child threads)
-        # Opt-in DM role-based auth (#12136). By default, DISCORD_ALLOWED_ROLES
-        # authorizes only guild messages in the role's own guild — DMs require
-        # DISCORD_ALLOWED_USERS. Set dm_role_auth_guild to a guild ID to also
-        # authorize DMs from members of that one trusted guild holding the
-        # allowed role. Unset / empty / 0 = secure default (DM role-auth off).
-        "dm_role_auth_guild": "",
-        # discord / discord_admin tools: restrict which actions the agent may call.
-        # Default (empty) = all actions allowed (subject to bot privileged intents).
-        # Accepts comma-separated string ("list_guilds,list_channels,fetch_messages")
-        # or YAML list. Unknown names are dropped with a warning at load time.
-        # Actions: list_guilds, server_info, list_channels, channel_info,
-        # list_roles, member_info, search_members, fetch_messages, list_pins,
-        # pin_message, unpin_message, create_thread, add_role, remove_role.
-        "server_actions": "",
-        # Accept arbitrary attachment file types (not just SUPPORTED_DOCUMENT_TYPES).
-        # When True, any uploaded file is cached to disk with mime
-        # application/octet-stream and the path is surfaced to the agent so it
-        # can use terminal/read_file/etc. against it. Default False preserves
-        # the historical allowlist behaviour.
-        # Env override: DISCORD_ALLOW_ANY_ATTACHMENT.
-        "allow_any_attachment": False,
-        # Maximum bytes per attachment the gateway will cache. The whole file
-        # is held in memory while being written, so unlimited uploads carry a
-        # real memory cost. Default 32 MiB matches the historical hardcoded
-        # cap. Set to 0 for no cap. Env override: DISCORD_MAX_ATTACHMENT_BYTES.
-        "max_attachment_bytes": 33554432,
-    },
-
-    # WhatsApp platform settings (gateway mode)
-    "whatsapp": {
-        # Reply prefix prepended to every outgoing WhatsApp message.
-        # Default (None) uses the built-in "⚕ *Hermes Agent*" header.
-        # Set to "" (empty string) to disable the header entirely.
-        # Supports \n for newlines, e.g. "🤖 *My Bot*\n──────\n"
-    },
-
-    # Telegram platform settings (gateway mode)
-    "telegram": {
-        "reactions": False,            # Add 👀/✅/❌ reactions to messages during processing
-        "channel_prompts": {},         # Per-chat/topic ephemeral system prompts (topics inherit from parent group)
-        "allowed_chats": "",           # If set, bot ONLY responds in these group/supergroup chat IDs (whitelist)
-    },
-
-    # Mattermost platform settings (gateway mode)
-    "mattermost": {
-        "require_mention": True,       # Require @mention to respond in channels
-        "free_response_channels": "",  # Comma-separated channel IDs where bot responds without mention
-        "allowed_channels": "",        # If set, bot ONLY responds in these channel IDs (whitelist)
-        "channel_prompts": {},         # Per-channel ephemeral system prompts
-    },
-
-    # Matrix platform settings (gateway mode)
-    "matrix": {
-        "require_mention": True,       # Require @mention to respond in rooms
-        "free_response_rooms": "",     # Comma-separated room IDs where bot responds without mention
-        "allowed_rooms": "",           # If set, bot ONLY responds in these room IDs (whitelist)
-    },
 
     # Approval mode for dangerous commands:
     #   manual — always prompt the user (default)
@@ -3142,6 +3065,40 @@ OPTIONAL_ENV_VARS = {
 # self-hosted / custom gateway setups regardless of subscription state.
 
 
+_USER_VISIBLE_MESSAGING_PROMPT_PREFIXES = (
+    "FEISHU_",
+    "API_SERVER_",
+    "WEBHOOK_",
+    "GATEWAY_",
+)
+
+_LEGACY_PLATFORM_PROMPT_PREFIXES = (
+    "TELEGRAM_",
+    "DISCORD_",
+    "SLACK_",
+    "WHATSAPP_",
+    "BLUEBUBBLES_",
+    "YUANBAO_",
+)
+
+
+def _is_hidden_legacy_platform_prompt(var_name: str, info: Optional[Dict[str, Any]] = None) -> bool:
+    """Return True for legacy platform vars kept for compatibility only."""
+    if var_name.startswith(_LEGACY_PLATFORM_PROMPT_PREFIXES):
+        return True
+    if info and info.get("category") == "messaging":
+        return not var_name.startswith(_USER_VISIBLE_MESSAGING_PROMPT_PREFIXES)
+    return False
+
+
+def iter_user_visible_optional_env_vars():
+    """Yield optional env vars that should appear in setup/config prompts."""
+    for var_name, info in OPTIONAL_ENV_VARS.items():
+        if _is_hidden_legacy_platform_prompt(var_name, info):
+            continue
+        yield var_name, info
+
+
 def get_missing_env_vars(required_only: bool = False) -> List[Dict[str, Any]]:
     """
     Check which environment variables are missing.
@@ -3157,7 +3114,7 @@ def get_missing_env_vars(required_only: bool = False) -> List[Dict[str, Any]]:
     
     # Check optional vars (if not required_only)
     if not required_only:
-        for var_name, info in OPTIONAL_ENV_VARS.items():
+        for var_name, info in iter_user_visible_optional_env_vars():
             if not get_env_value(var_name):
                 missing.append({"name": var_name, **info, "is_required": False})
     
@@ -4291,7 +4248,11 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
         new_and_unset = [
             (name, OPTIONAL_ENV_VARS[name])
             for name in sorted(new_var_names)
-            if not get_env_value(name) and name in OPTIONAL_ENV_VARS
+            if (
+                not get_env_value(name)
+                and name in OPTIONAL_ENV_VARS
+                and not _is_hidden_legacy_platform_prompt(name, OPTIONAL_ENV_VARS[name])
+            )
         ]
         if new_and_unset:
             print(f"\n  {len(new_and_unset)} new optional key(s) in this update:")
@@ -5434,12 +5395,14 @@ def show_config():
     # Messaging
     print()
     print(color("◆ Messaging Platforms", Colors.CYAN, Colors.BOLD))
-    
-    telegram_token = get_env_value('TELEGRAM_BOT_TOKEN')
-    discord_token = get_env_value('DISCORD_BOT_TOKEN')
-    
-    print(f"  Telegram:     {'configured' if telegram_token else color('not configured', Colors.DIM)}")
-    print(f"  Discord:      {'configured' if discord_token else color('not configured', Colors.DIM)}")
+
+    feishu_ready = bool(get_env_value('FEISHU_APP_ID') and get_env_value('FEISHU_APP_SECRET'))
+    api_enabled = (get_env_value('API_SERVER_ENABLED') or '').lower() in {'1', 'true', 'yes', 'on'}
+    webhook_enabled = (get_env_value('WEBHOOK_ENABLED') or '').lower() in {'1', 'true', 'yes', 'on'}
+
+    print(f"  Feishu/Lark:  {'configured' if feishu_ready else color('not configured', Colors.DIM)}")
+    print(f"  API server:   {'enabled' if api_enabled else color('disabled', Colors.DIM)}")
+    print(f"  Webhook:      {'enabled' if webhook_enabled else color('disabled', Colors.DIM)}")
     
     # Skill config
     try:
@@ -5705,7 +5668,7 @@ def config_command(args):
         
         print()
         print(color("  Optional:", Colors.BOLD))
-        for var_name, info in OPTIONAL_ENV_VARS.items():
+        for var_name, info in iter_user_visible_optional_env_vars():
             if get_env_value(var_name):
                 print(f"    ✓ {var_name}")
             else:

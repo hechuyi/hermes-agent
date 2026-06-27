@@ -524,8 +524,8 @@ class TestRunJobEnvVarCleanup:
             "prompt": "test",
             "schedule_display": "every 1h",
             "origin": {
-                "platform": "telegram",
-                "chat_id": "12345",
+                "platform": "feishu",
+                "chat_id": "oc_12345",
                 "chat_name": "Test Chat",
             },
         }

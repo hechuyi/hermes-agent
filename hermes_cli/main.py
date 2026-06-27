@@ -10775,7 +10775,7 @@ def main():
     cron_create.add_argument("--name", help="Optional human-friendly job name")
     cron_create.add_argument(
         "--deliver",
-        help="Delivery target: origin, local, telegram, discord, signal, or platform:chat_id",
+        help="Delivery target: origin, local, feishu, or feishu:oc_xxx[:message_id]",
     )
     cron_create.add_argument("--repeat", type=int, help="Optional repeat count")
     cron_create.add_argument(
@@ -10822,7 +10822,10 @@ def main():
     cron_edit.add_argument("--schedule", help="New schedule")
     cron_edit.add_argument("--prompt", help="New prompt/task instruction")
     cron_edit.add_argument("--name", help="New job name")
-    cron_edit.add_argument("--deliver", help="New delivery target")
+    cron_edit.add_argument(
+        "--deliver",
+        help="New delivery target: origin, local, feishu, or feishu:oc_xxx[:message_id]",
+    )
     cron_edit.add_argument("--repeat", type=int, help="New repeat count")
     cron_edit.add_argument(
         "--skill",
@@ -10936,12 +10939,12 @@ def main():
     wh_sub.add_argument(
         "--deliver",
         default="log",
-        help="Delivery target: log, telegram, discord, slack, etc.",
+        help="Delivery target: log, feishu, or feishu:oc_xxx[:message_id]",
     )
     wh_sub.add_argument(
         "--deliver-chat-id",
         default="",
-        help="Target chat ID for cross-platform delivery",
+        help="Target Feishu chat ID for delivery",
     )
     wh_sub.add_argument(
         "--secret", default="", help="HMAC secret (auto-generated if omitted)"
@@ -11321,7 +11324,7 @@ Examples:
         "approve", help="Approve a pairing code"
     )
     pairing_approve_parser.add_argument(
-        "platform", help="Platform name (telegram, discord, slack, whatsapp)"
+        "platform", help="Platform name (feishu)"
     )
     pairing_approve_parser.add_argument("code", help="Pairing code to approve")
 
@@ -12044,7 +12047,7 @@ Examples:
 
     sessions_list = sessions_subparsers.add_parser("list", help="List recent sessions")
     sessions_list.add_argument(
-        "--source", help="Filter by source (cli, telegram, discord, etc.)"
+        "--source", help="Filter by source (cli, feishu, api_server, cron)"
     )
     sessions_list.add_argument(
         "--limit", type=int, default=20, help="Max sessions to show"
@@ -12117,7 +12120,7 @@ Examples:
         help="Interactive session picker — browse, search, and resume sessions",
     )
     sessions_browse.add_argument(
-        "--source", help="Filter by source (cli, telegram, discord, etc.)"
+        "--source", help="Filter by source (cli, feishu, api_server, cron)"
     )
     sessions_browse.add_argument(
         "--limit", type=int, default=500, help="Max sessions to load (default: 500)"
@@ -12384,7 +12387,7 @@ Examples:
         "--days", type=int, default=30, help="Number of days to analyze (default: 30)"
     )
     insights_parser.add_argument(
-        "--source", help="Filter by platform (cli, telegram, discord, etc.)"
+        "--source", help="Filter by source (cli, feishu, api_server, cron)"
     )
 
     def cmd_insights(args):
@@ -12922,7 +12925,7 @@ Examples:
     prompt_size_parser.add_argument(
         "--platform",
         default="cli",
-        help="Platform to simulate (cli, telegram, discord, ...). Default: cli",
+        help="Runtime surface to simulate (cli, feishu, api_server, cron). Default: cli",
     )
     prompt_size_parser.add_argument(
         "--json",

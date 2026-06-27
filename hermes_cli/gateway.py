@@ -3937,10 +3937,9 @@ def gateway_setup():
         _configure_platform(platforms[choice])
 
     # ── Post-setup: offer to install/restart gateway ──
-    # Consider any platform (built-in or plugin) where the user has made
-    # meaningful progress.  ``_platform_status`` already handles plugin
-    # entries via their check_fn and per-platform dual-states like
-    # WhatsApp's "enabled, not paired".
+    # The setup surface is intentionally Feishu-only.  ``_all_platforms()``
+    # excludes legacy/plugin messaging platforms, so this progress check stays
+    # scoped to the supported onboarding path.
     def _is_progress(status: str) -> bool:
         s = status.lower()
         return not (

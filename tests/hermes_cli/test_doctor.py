@@ -298,6 +298,17 @@ class TestDoctorMemoryProviderSection:
             doctor_mod.run_doctor(Namespace(fix=False))
         return buf.getvalue()
 
+    def test_default_optional_packages_exclude_legacy_platform_sdks(
+        self, monkeypatch, tmp_path
+    ):
+        out = self._run_doctor_and_capture(monkeypatch, tmp_path, provider="")
+        assert "Croniter (cron expressions)" in out
+        assert "python-telegram-bot" not in out
+        assert "discord.py" not in out
+        assert "telegram" not in out.lower()
+        assert "discord" not in out.lower()
+        assert "slack" not in out.lower()
+
     def test_no_provider_shows_builtin_ok(self, monkeypatch, tmp_path):
         out = self._run_doctor_and_capture(monkeypatch, tmp_path, provider="")
         assert "Memory Provider" in out

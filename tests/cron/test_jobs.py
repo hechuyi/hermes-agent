@@ -263,7 +263,7 @@ class TestJobCRUD:
     def test_default_delivery_origin(self, tmp_cron_dir):
         job = create_job(
             prompt="Test", schedule="30m",
-            origin={"platform": "telegram", "chat_id": "123"},
+            origin={"platform": "feishu", "chat_id": "oc_123"},
         )
         assert job["deliver"] == "origin"
 
@@ -478,11 +478,11 @@ class TestMarkJobRun:
     def test_delivery_error_tracked_separately(self, tmp_cron_dir):
         """Agent succeeds but delivery fails — both tracked independently."""
         job = create_job(prompt="Report", schedule="every 1h")
-        mark_job_run(job["id"], success=True, delivery_error="platform 'telegram' not configured")
+        mark_job_run(job["id"], success=True, delivery_error="delivery adapter not configured")
         updated = get_job(job["id"])
         assert updated["last_status"] == "ok"
         assert updated["last_error"] is None
-        assert updated["last_delivery_error"] == "platform 'telegram' not configured"
+        assert updated["last_delivery_error"] == "delivery adapter not configured"
 
     def test_delivery_error_cleared_on_success(self, tmp_cron_dir):
         """Successful delivery clears the previous delivery error."""
@@ -499,11 +499,11 @@ class TestMarkJobRun:
         """Agent fails AND delivery fails — both errors recorded."""
         job = create_job(prompt="Report", schedule="every 1h")
         mark_job_run(job["id"], success=False, error="model timeout",
-                     delivery_error="platform 'discord' not enabled")
+                     delivery_error="delivery adapter timeout")
         updated = get_job(job["id"])
         assert updated["last_status"] == "error"
         assert updated["last_error"] == "model timeout"
-        assert updated["last_delivery_error"] == "platform 'discord' not enabled"
+        assert updated["last_delivery_error"] == "delivery adapter timeout"
 
     def test_recurring_cron_not_disabled_when_croniter_missing(self, tmp_cron_dir, monkeypatch):
         """Regression test for issue #16265.

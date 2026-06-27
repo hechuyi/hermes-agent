@@ -30,7 +30,7 @@ class TestSpecSafety:
         "elevenlabs>=1.0,<2",
         "honcho-ai>=2.0.1,<3",
         "boto3>=1.35.0,<2",
-        "mautrix[encryption]>=0.20,<1",
+        "example-pkg[fast]>=0.20,<1",
         "google-api-python-client>=2.100,<3",
         "youtube-transcript-api>=1.2.0",
         "qrcode>=7.0,<8",
@@ -263,21 +263,21 @@ class TestIsSatisfiedVersionAware:
         assert ld._is_satisfied("honcho-ai==2.0.1") is False
 
     def test_range_within_returns_true(self, monkeypatch):
-        self._fake_version(monkeypatch, {"slack-bolt": "1.27.0"})
-        assert ld._is_satisfied("slack-bolt>=1.18.0,<2") is True
+        self._fake_version(monkeypatch, {"boto3": "1.42.89"})
+        assert ld._is_satisfied("boto3>=1.35.0,<2") is True
 
     def test_range_above_returns_false(self, monkeypatch):
         # Installed too new for the upper bound.
-        self._fake_version(monkeypatch, {"slack-bolt": "2.0.0"})
-        assert ld._is_satisfied("slack-bolt>=1.18.0,<2") is False
+        self._fake_version(monkeypatch, {"boto3": "2.0.0"})
+        assert ld._is_satisfied("boto3>=1.35.0,<2") is False
 
     def test_range_below_returns_false(self, monkeypatch):
-        self._fake_version(monkeypatch, {"slack-bolt": "1.0.0"})
-        assert ld._is_satisfied("slack-bolt>=1.18.0,<2") is False
+        self._fake_version(monkeypatch, {"boto3": "1.34.99"})
+        assert ld._is_satisfied("boto3>=1.35.0,<2") is False
 
     def test_package_not_installed_returns_false(self, monkeypatch):
         self._fake_version(monkeypatch, {})
-        assert ld._is_satisfied("anthropic==0.86.0") is False
+        assert ld._is_satisfied("anthropic==0.87.0") is False
 
     def test_bare_package_name_presence_is_enough(self, monkeypatch):
         # No version constraint — presence alone counts as satisfied.
@@ -285,14 +285,14 @@ class TestIsSatisfiedVersionAware:
         assert ld._is_satisfied("somepkg") is True
 
     def test_extras_block_in_spec_is_stripped(self, monkeypatch):
-        # mautrix[encryption]==0.21.0 — the [encryption] block must not
+        # example-pkg[fast]==0.21.0 — the [fast] block must not
         # confuse the specifier parser.
-        self._fake_version(monkeypatch, {"mautrix": "0.21.0"})
-        assert ld._is_satisfied("mautrix[encryption]==0.21.0") is True
+        self._fake_version(monkeypatch, {"example-pkg": "0.21.0"})
+        assert ld._is_satisfied("example-pkg[fast]==0.21.0") is True
 
     def test_extras_block_mismatch_returns_false(self, monkeypatch):
-        self._fake_version(monkeypatch, {"mautrix": "0.20.0"})
-        assert ld._is_satisfied("mautrix[encryption]==0.21.0") is False
+        self._fake_version(monkeypatch, {"example-pkg": "0.20.0"})
+        assert ld._is_satisfied("example-pkg[fast]==0.21.0") is False
 
 
 # ---------------------------------------------------------------------------
@@ -315,17 +315,26 @@ class TestActiveFeatures:
         assert "memory.honcho" in active
         # Backends the user never enabled stay quiet.
         assert "memory.hindsight" not in active
-        assert "platform.slack" not in active
+        assert "search.exa" not in active
 
     def test_multi_package_feature_active_if_any_present(self, monkeypatch):
-        # platform.slack has 3 packages; only one needs to be present
+        # Only one package from a multi-package feature needs to be present
         # for the feature to count as active (user activated it before,
-        # one transitive may have been uninstalled separately).
+        # one dependency may have been uninstalled separately).
+        monkeypatch.setitem(
+            ld.LAZY_DEPS,
+            "test.multi_package",
+            (
+                "alpha-client==1.0.0",
+                "beta-client==1.0.0",
+                "gamma-client==1.0.0",
+            ),
+        )
         monkeypatch.setattr(
             ld, "_is_present",
-            lambda spec: ld._pkg_name_from_spec(spec) == "slack-bolt",
+            lambda spec: ld._pkg_name_from_spec(spec) == "beta-client",
         )
-        assert "platform.slack" in ld.active_features()
+        assert "test.multi_package" in ld.active_features()
 
 
 class TestRefreshActiveFeatures:

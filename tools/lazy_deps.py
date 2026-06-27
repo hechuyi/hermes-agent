@@ -225,8 +225,8 @@ def _spec_is_safe(spec: str) -> bool:
 def _pkg_name_from_spec(spec: str) -> str:
     """Extract the bare package name from a pip spec.
 
-    ``"slack-bolt>=1.18.0,<2"`` → ``"slack-bolt"``
-    ``"mautrix[encryption]>=0.20"`` → ``"mautrix"``
+    ``"lark-oapi==1.5.3"`` → ``"lark-oapi"``
+    ``"example-pkg[fast]>=1.0"`` → ``"example-pkg"``
     """
     m = re.match(r"^([A-Za-z0-9_][A-Za-z0-9_.\-]*)", spec)
     return m.group(1) if m else spec
@@ -236,7 +236,7 @@ def _specifier_from_spec(spec: str) -> str:
     """Extract just the version-specifier portion of a pip spec.
 
     ``"honcho-ai==2.0.1"`` → ``"==2.0.1"``
-    ``"mautrix[encryption]>=0.20,<1"`` → ``">=0.20,<1"``
+    ``"example-pkg[fast]>=0.20,<1"`` → ``">=0.20,<1"``
     ``"package"`` → ``""`` (no version constraint)
     """
     # Strip the package name + optional [extras] block.

@@ -15,27 +15,66 @@ from gateway.config import Platform, PlatformConfig, GatewayConfig
 class TestPlatformEnumDynamic:
     """Test that Platform enum accepts unknown values for plugin platforms."""
 
-    def test_builtin_members_still_work(self):
-        assert Platform.TELEGRAM.value == "telegram"
-        assert Platform("telegram") is Platform.TELEGRAM
+    def test_runtime_builtin_members_still_work(self):
+        assert Platform.FEISHU.value == "feishu"
+        assert Platform("feishu") is Platform.FEISHU
 
-    def test_dynamic_member_created(self):
-        p = Platform("irc")
-        assert p.value == "irc"
-        assert p.name == "IRC"
+    def test_dynamic_member_created_for_registered_platform(self):
+        from gateway.platform_registry import platform_registry as _reg
+
+        entry = PlatformEntry(
+            name="irc",
+            label="IRC",
+            adapter_factory=lambda cfg: MagicMock(),
+            check_fn=lambda: True,
+            source="plugin",
+        )
+        _reg.register(entry)
+        try:
+            p = Platform("irc")
+            assert p.value == "irc"
+            assert p.name == "IRC"
+        finally:
+            _reg.unregister("irc")
 
     def test_dynamic_member_identity_stable(self):
         """Same value returns same object (cached)."""
-        a = Platform("irc")
-        b = Platform("irc")
-        assert a is b
+        from gateway.platform_registry import platform_registry as _reg
+
+        entry = PlatformEntry(
+            name="irc-stable",
+            label="IRC Stable",
+            adapter_factory=lambda cfg: MagicMock(),
+            check_fn=lambda: True,
+            source="plugin",
+        )
+        _reg.register(entry)
+        try:
+            a = Platform("irc-stable")
+            b = Platform("irc-stable")
+            assert a is b
+        finally:
+            _reg.unregister("irc-stable")
 
     def test_dynamic_member_case_normalised(self):
         """Mixed case normalised to lowercase."""
-        a = Platform("IRC")
-        b = Platform("irc")
-        assert a is b
-        assert a.value == "irc"
+        from gateway.platform_registry import platform_registry as _reg
+
+        entry = PlatformEntry(
+            name="irc-case",
+            label="IRC Case",
+            adapter_factory=lambda cfg: MagicMock(),
+            check_fn=lambda: True,
+            source="plugin",
+        )
+        _reg.register(entry)
+        try:
+            a = Platform("IRC-CASE")
+            b = Platform("irc-case")
+            assert a is b
+            assert a.value == "irc-case"
+        finally:
+            _reg.unregister("irc-case")
 
     def test_dynamic_member_with_hyphens(self):
         """Registered plugin platforms with hyphens work once registered."""
@@ -208,17 +247,17 @@ class TestPlatformRegistry:
 class TestGatewayConfigPluginPlatform:
     """Test that GatewayConfig parses and validates plugin platforms."""
 
-    def test_from_dict_accepts_plugin_platform(self):
+    def test_from_dict_keeps_only_known_platforms(self):
         data = {
             "platforms": {
-                "telegram": {"enabled": True, "token": "test-token"},
-                "irc": {"enabled": True, "extra": {"server": "irc.libera.chat"}},
+                "feishu": {"enabled": True, "extra": {"app_id": "app"}},
+                "unknown-config-platform": {"enabled": True, "extra": {"server": "irc.libera.chat"}},
             }
         }
         cfg = GatewayConfig.from_dict(data)
         platform_values = {p.value for p in cfg.platforms}
-        assert "telegram" in platform_values
-        assert "irc" in platform_values
+        assert "feishu" in platform_values
+        assert "unknown-config-platform" not in platform_values
 
     def test_get_connected_platforms_includes_registered_plugin(self):
         """Plugin platform with registry entry passes get_connected_platforms."""
@@ -328,17 +367,17 @@ class TestPlatformEntryExtendedFields:
 
 
 class TestCronPlatformResolution:
-    """Test that cron delivery accepts plugin platform names."""
+    """Test runtime platform resolution boundaries."""
 
-    def test_builtin_platform_resolves(self):
+    def test_runtime_platform_resolves(self):
         """Built-in platform names resolve via Platform() call."""
-        p = Platform("telegram")
-        assert p is Platform.TELEGRAM
+        p = Platform("feishu")
+        assert p is Platform.FEISHU
 
-    def test_plugin_platform_resolves(self):
-        """Plugin platform names create dynamic enum members."""
-        p = Platform("irc")
-        assert p.value == "irc"
+    def test_unregistered_plugin_platform_rejected(self):
+        """Unregistered plugin platform names are rejected."""
+        with pytest.raises(ValueError):
+            Platform("unregistered-cron-platform")
 
     def test_invalid_platform_type_rejected(self):
         """Non-string values are still rejected."""
@@ -350,7 +389,7 @@ class TestCronPlatformResolution:
 
 
 class TestPlatformsMerge:
-    """Test get_all_platforms() merges with registry."""
+    """Test static runtime platform display."""
 
     def test_get_all_platforms_includes_builtins(self):
         from hermes_cli.platforms import get_all_platforms, PLATFORMS
@@ -358,7 +397,7 @@ class TestPlatformsMerge:
         for key in PLATFORMS:
             assert key in merged
 
-    def test_get_all_platforms_includes_plugin(self):
+    def test_get_all_platforms_ignores_registered_plugin(self):
         from hermes_cli.platforms import get_all_platforms
         from gateway.platform_registry import platform_registry as _reg
 
@@ -372,12 +411,11 @@ class TestPlatformsMerge:
         ))
         try:
             merged = get_all_platforms()
-            assert "testmerge" in merged
-            assert "TestMerge" in merged["testmerge"].label
+            assert "testmerge" not in merged
         finally:
             _reg.unregister("testmerge")
 
-    def test_platform_label_plugin_fallback(self):
+    def test_platform_label_unknown_uses_default(self):
         from hermes_cli.platforms import platform_label
         from gateway.platform_registry import platform_registry as _reg
 
@@ -390,8 +428,8 @@ class TestPlatformsMerge:
             emoji="🏷️",
         ))
         try:
-            label = platform_label("labeltest")
-            assert "LabelTest" in label
+            label = platform_label("labeltest", default="fallback")
+            assert label == "fallback"
         finally:
             _reg.unregister("labeltest")
 
@@ -480,8 +518,8 @@ class TestApplyYamlConfigFnDispatch:
             reg.unregister("myhookplat")
             os.environ.pop(env_var, None)
 
-    def test_hook_returned_dict_merges_into_extra(self, tmp_path, monkeypatch):
-        """A hook that returns a dict has it merged into PlatformConfig.extra."""
+    def test_hook_returned_dict_does_not_expand_runtime(self, tmp_path, monkeypatch):
+        """A non-runtime plugin hook can run without entering gateway config."""
 
         def _hook(yaml_cfg, platform_cfg):
             return {"seeded_key": "seeded_value", "flag": platform_cfg.get("flag")}
@@ -497,11 +535,7 @@ class TestApplyYamlConfigFnDispatch:
             cfg = load_gateway_config()
 
             plat = Platform("myextraplat")
-            assert plat in cfg.platforms
-            extra = cfg.platforms[plat].extra
-            assert extra.get("seeded_key") == "seeded_value"
-            # flag value carried through from yaml_cfg arg.
-            assert extra.get("flag") is True
+            assert plat not in cfg.platforms
         finally:
             reg.unregister("myextraplat")
 
@@ -594,7 +628,7 @@ class TestApplyYamlConfigFnDispatch:
 
         reg = self._register_hook("myabsentplat", _hook)
         try:
-            home = self._write_config(tmp_path, "telegram:\n  k: v\n")
+            home = self._write_config(tmp_path, "feishu:\n  k: v\n")
             monkeypatch.setenv("HERMES_HOME", str(home))
 
             from gateway.config import load_gateway_config
@@ -673,9 +707,8 @@ class TestPluginPlatformSharedKeyBridge:
         (hermes_home / "config.yaml").write_text(content, encoding="utf-8")
         return hermes_home
 
-    def test_shared_keys_bridged_for_plugin_platform(self, tmp_path, monkeypatch):
-        """A plugin platform's ``require_mention``/``dm_policy``/etc. flow into
-        ``PlatformConfig.extra`` without the plugin needing its own bridge."""
+    def test_shared_keys_do_not_expand_plugin_runtime(self, tmp_path, monkeypatch):
+        """Plugin shared keys do not add platforms outside this runtime."""
         from gateway.platform_registry import platform_registry as _reg
 
         _reg.register(PlatformEntry(
@@ -700,26 +733,17 @@ class TestPluginPlatformSharedKeyBridge:
             cfg = load_gateway_config()
 
             plat = Platform("mysharedplat")
-            assert plat in cfg.platforms
-            extra = cfg.platforms[plat].extra
-            assert extra.get("require_mention") is True
-            assert extra.get("dm_policy") == "allow"
-            assert extra.get("reply_prefix") == "→ "
-            assert extra.get("allow_from") == ["alice", "bob"]
+            assert plat not in cfg.platforms
         finally:
             _reg.unregister("mysharedplat")
 
 
 class TestPluginEnablementGate:
-    """Plugin platforms must NOT auto-enable on check_fn alone (#31116).
+    """Plugin probes run before unsupported platforms are pruned (#31116).
 
-    When a plugin registers ``is_connected`` (the "did the user actually
-    configure credentials" probe), ``load_gateway_config`` must consult it
-    before flipping ``enabled = True``.  Without this gate, ``check_fn``
-    semantics ("the SDK is importable") get conflated with "the user wants
-    this platform on", and the gateway tries to connect to e.g. Discord
-    with no token — emitting noisy retry-forever errors on every fresh
-    install that has the plugin loaded.
+    This runtime keeps gateway platforms static: local, Feishu, and API
+    server. Registry hooks may still run for plugin bookkeeping, but they
+    must not expand the live gateway runtime surface.
     """
 
     def _write_config(self, tmp_path, content: str = ""):
@@ -733,10 +757,9 @@ class TestPluginEnablementGate:
     ):
         """check_fn=True + is_connected=False must NOT enable the platform.
 
-        Reproduces #31116: Discord plugin loads, its check_fn lazy-installs
-        discord.py and returns True, but the user has no DISCORD_BOT_TOKEN.
-        Previously this auto-enabled Discord and the gateway spammed
-        ``ERROR ... [Discord] No bot token configured`` on every reconnect.
+        Reproduces #31116: a plugin can report available dependencies while
+        still lacking user configuration. It must not become a live gateway
+        platform on check_fn alone.
         """
         from gateway.platform_registry import platform_registry as _reg
 
@@ -764,10 +787,10 @@ class TestPluginEnablementGate:
         finally:
             _reg.unregister("myunconfiguredplat")
 
-    def test_plugin_with_is_connected_true_is_enabled(
+    def test_plugin_with_is_connected_true_is_pruned_from_runtime(
         self, tmp_path, monkeypatch
     ):
-        """check_fn=True + is_connected=True still enables the platform."""
+        """check_fn=True + is_connected=True does not enter this runtime."""
         from gateway.platform_registry import platform_registry as _reg
 
         _reg.register(PlatformEntry(
@@ -786,20 +809,14 @@ class TestPluginEnablementGate:
             cfg = load_gateway_config()
 
             plat = Platform("myconfiguredplat")
-            assert plat in cfg.platforms
-            assert cfg.platforms[plat].enabled is True
+            assert plat not in cfg.platforms
         finally:
             _reg.unregister("myconfiguredplat")
 
-    def test_plugin_without_is_connected_falls_back_to_check_fn(
+    def test_plugin_without_is_connected_is_pruned_from_runtime(
         self, tmp_path, monkeypatch
     ):
-        """Legacy plugins that don't register is_connected keep working.
-
-        For plugins where ``is_connected is None``, gating on ``check_fn``
-        alone remains the contract — that's what callers without a
-        credential probe have always done.
-        """
+        """Legacy plugin entries do not expand the Feishu/API runtime."""
         from gateway.platform_registry import platform_registry as _reg
 
         _reg.register(PlatformEntry(
@@ -818,8 +835,7 @@ class TestPluginEnablementGate:
             cfg = load_gateway_config()
 
             plat = Platform("mylegacyplat")
-            assert plat in cfg.platforms
-            assert cfg.platforms[plat].enabled is True
+            assert plat not in cfg.platforms
         finally:
             _reg.unregister("mylegacyplat")
 
@@ -856,15 +872,10 @@ class TestPluginEnablementGate:
         finally:
             _reg.unregister("mybadprobeplat")
 
-    def test_yaml_enabled_true_overrides_is_connected_false(
+    def test_yaml_enabled_true_is_pruned_for_non_runtime_plugin(
         self, tmp_path, monkeypatch
     ):
-        """Explicit YAML ``enabled: true`` wins over is_connected=False.
-
-        If the user wrote ``platforms.X.enabled: true`` themselves, respect
-        that — they may be using a credential mechanism the plugin's
-        is_connected probe doesn't know about.  Don't fight them.
-        """
+        """Explicit YAML cannot add non-runtime plugin platforms."""
         from gateway.platform_registry import platform_registry as _reg
 
         _reg.register(PlatformEntry(
@@ -888,11 +899,7 @@ class TestPluginEnablementGate:
             cfg = load_gateway_config()
 
             plat = Platform("myexplicitplat")
-            assert plat in cfg.platforms
-            assert cfg.platforms[plat].enabled is True, (
-                "Explicit YAML enabled: true must win over plugin's "
-                "is_connected=False — user has the final say"
-            )
+            assert plat not in cfg.platforms
         finally:
             _reg.unregister("myexplicitplat")
 
@@ -937,15 +944,8 @@ class TestPluginEnablementGate:
             cfg = load_gateway_config()
 
             plat = Platform("myextrasplat")
-            assert plat in cfg.platforms, (
-                "is_connected was called with empty extras — "
-                "env_enablement_fn must seed the probe BEFORE the gate"
-            )
-            assert cfg.platforms[plat].enabled is True
-            # extras populated on the live config too
-            assert cfg.platforms[plat].extra.get("project_id") == "p"
-            assert cfg.platforms[plat].extra.get("subscription_name") == "s"
-            # and the probe saw them
+            assert plat not in cfg.platforms
+            # The probe still sees env-seeded extras before runtime pruning.
             assert seen_extras["snapshot"]["project_id"] == "p"
         finally:
             _reg.unregister("myextrasplat")

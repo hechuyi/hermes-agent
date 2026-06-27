@@ -9,12 +9,12 @@ from gateway.status import read_runtime_status
 
 class _RetryableFailureAdapter(BasePlatformAdapter):
     def __init__(self):
-        super().__init__(PlatformConfig(enabled=True, token="***"), Platform.TELEGRAM)
+        super().__init__(PlatformConfig(enabled=True, token="***"), Platform.FEISHU)
 
     async def connect(self) -> bool:
         self._set_fatal_error(
-            "telegram_connect_error",
-            "Telegram startup failed: temporary DNS resolution failure.",
+            "feishu_connect_error",
+            "Feishu startup failed: temporary DNS resolution failure.",
             retryable=True,
         )
         return False
@@ -31,7 +31,7 @@ class _RetryableFailureAdapter(BasePlatformAdapter):
 
 class _DisabledAdapter(BasePlatformAdapter):
     def __init__(self):
-        super().__init__(PlatformConfig(enabled=False, token="***"), Platform.TELEGRAM)
+        super().__init__(PlatformConfig(enabled=False, token="***"), Platform.FEISHU)
 
     async def connect(self) -> bool:
         raise AssertionError("connect should not be called for disabled platforms")
@@ -48,7 +48,7 @@ class _DisabledAdapter(BasePlatformAdapter):
 
 class _SuccessfulAdapter(BasePlatformAdapter):
     def __init__(self):
-        super().__init__(PlatformConfig(enabled=True, token="***"), Platform.DISCORD)
+        super().__init__(PlatformConfig(enabled=True, token="***"), Platform.API_SERVER)
 
     async def connect(self) -> bool:
         return True
@@ -69,13 +69,13 @@ async def test_runner_stays_alive_for_retryable_startup_errors(monkeypatch, tmp_
     degraded mode so the reconnect watcher can recover the platform when
     the underlying problem clears.  Previously this returned False from
     ``start()`` and exited the process, which converted a single broken
-    platform (e.g. unpaired WhatsApp, DNS blip on Telegram) into a
+    Feishu websocket/API surface into a
     systemd restart loop and killed cron jobs in the meantime.
     """
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     config = GatewayConfig(
         platforms={
-            Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")
+            Platform.FEISHU: PlatformConfig(enabled=True, token="***")
         },
         sessions_dir=tmp_path / "sessions",
     )
@@ -90,10 +90,10 @@ async def test_runner_stays_alive_for_retryable_startup_errors(monkeypatch, tmp_
     assert runner.should_exit_cleanly is False
     state = read_runtime_status()
     assert state["gateway_state"] in {"degraded", "running"}
-    # Telegram was queued for retry, not given up on.
-    assert Platform.TELEGRAM in runner._failed_platforms
-    assert state["platforms"]["telegram"]["state"] == "retrying"
-    assert state["platforms"]["telegram"]["error_code"] == "telegram_connect_error"
+    # Feishu was queued for retry, not given up on.
+    assert Platform.FEISHU in runner._failed_platforms
+    assert state["platforms"]["feishu"]["state"] == "retrying"
+    assert state["platforms"]["feishu"]["error_code"] == "feishu_connect_error"
 
 
 @pytest.mark.asyncio
@@ -101,7 +101,7 @@ async def test_runner_allows_cron_only_mode_when_no_platforms_are_enabled(monkey
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     config = GatewayConfig(
         platforms={
-            Platform.TELEGRAM: PlatformConfig(enabled=False, token="***")
+            Platform.FEISHU: PlatformConfig(enabled=False, token="***")
         },
         sessions_dir=tmp_path / "sessions",
     )
@@ -121,7 +121,7 @@ async def test_runner_records_connected_platform_state_on_success(monkeypatch, t
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     config = GatewayConfig(
         platforms={
-            Platform.DISCORD: PlatformConfig(enabled=True, token="***")
+            Platform.API_SERVER: PlatformConfig(enabled=True, token="***")
         },
         sessions_dir=tmp_path / "sessions",
     )
@@ -136,9 +136,9 @@ async def test_runner_records_connected_platform_state_on_success(monkeypatch, t
     assert ok is True
     state = read_runtime_status()
     assert state["gateway_state"] == "running"
-    assert state["platforms"]["discord"]["state"] == "connected"
-    assert state["platforms"]["discord"]["error_code"] is None
-    assert state["platforms"]["discord"]["error_message"] is None
+    assert state["platforms"]["api_server"]["state"] == "connected"
+    assert state["platforms"]["api_server"]["error_code"] is None
+    assert state["platforms"]["api_server"]["error_message"] is None
 
 
 @pytest.mark.asyncio
@@ -361,8 +361,8 @@ async def test_runner_degrades_gracefully_when_all_adapters_missing(monkeypatch,
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     config = GatewayConfig(
         platforms={
-            Platform.TELEGRAM: PlatformConfig(enabled=True, token="***"),
-            Platform.DISCORD: PlatformConfig(enabled=True, token="***"),
+            Platform.FEISHU: PlatformConfig(enabled=True, token="***"),
+            Platform.API_SERVER: PlatformConfig(enabled=True, token="***"),
         },
         sessions_dir=tmp_path / "sessions",
     )
@@ -396,7 +396,7 @@ def test_runner_warns_when_docker_gateway_lacks_explicit_output_mount(monkeypatc
     monkeypatch.setenv("TERMINAL_DOCKER_VOLUMES", '["/etc/localtime:/etc/localtime:ro"]')
     config = GatewayConfig(
         platforms={
-            Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")
+            Platform.FEISHU: PlatformConfig(enabled=True, token="***")
         },
         sessions_dir=tmp_path / "sessions",
     )

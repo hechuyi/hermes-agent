@@ -4,6 +4,9 @@ import pytest
 from hermes_cli.tips import TIPS, get_random_tip
 
 
+LEGACY_PLATFORM_TERMS = ("telegram", "discord", "slack")
+
+
 class TestTipsCorpus:
     """Validate the tip corpus itself."""
 
@@ -31,6 +34,11 @@ class TestTipsCorpus:
     def test_no_leading_trailing_whitespace(self):
         for i, tip in enumerate(TIPS):
             assert tip == tip.strip(), f"Tip {i} has leading/trailing whitespace"
+
+    def test_tips_do_not_promote_legacy_platform_targets(self):
+        corpus = "\n".join(TIPS).lower()
+        for term in LEGACY_PLATFORM_TERMS:
+            assert term not in corpus
 
 
 class TestGetRandomTip:

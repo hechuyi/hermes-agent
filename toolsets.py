@@ -26,8 +26,8 @@ Usage:
 from typing import List, Dict, Any, Set, Optional
 
 
-# Shared tool list for CLI and all messaging platform toolsets.
-# Edit this once to update all platforms simultaneously.
+# Shared core tool list for CLI and the Feishu/Lark runtime toolsets.
+# Edit this once to update those bundled surfaces simultaneously.
 _HERMES_CORE_TOOLS = [
     # Web
     "web_search", "web_extract",
@@ -294,10 +294,10 @@ TOOLSETS = {
     },
     
     # ==========================================================================
-    # Full Hermes toolsets (CLI + messaging platforms)
+    # Full Hermes toolsets (CLI + Feishu/Lark runtime)
     #
-    # All platforms share the same core tools (including send_message,
-    # which is gated on gateway running via its check_fn).
+    # Feishu/Lark runtime surfaces share the CLI core tools (including
+    # send_message, which is gated on gateway running via its check_fn).
     # ==========================================================================
 
     "hermes-acp": {

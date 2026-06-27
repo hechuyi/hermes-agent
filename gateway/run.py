@@ -13262,7 +13262,7 @@ class GatewayRunner:
     def _telegram_topic_auto_rename_disabled(self, source: SessionSource) -> bool:
         """Return True when operator disabled per-topic auto-rename for this Telegram chat.
 
-        Controlled via ``gateway.platforms.telegram.extra.disable_topic_auto_rename``.
+        Controlled via this platform's ``extra.disable_topic_auto_rename`` setting.
         Default is False (auto-rename enabled, preserves prior behaviour).
         """
         platform_cfg = (

@@ -183,7 +183,7 @@ discover_builtin_tools()
 # a module-level side effect.  It was removed because discover_mcp_tools()
 # internally uses a blocking future.result(timeout=120) wait, and the
 # gateway lazy-imports this module from inside the asyncio event loop on
-# the first user message — freezing Discord/Telegram heartbeats for up to
+# the first user message — freezing gateway session heartbeats for up to
 # 120s whenever any configured MCP server was slow or unreachable (#16856).
 #
 # Each entry point now runs discovery explicitly at its own startup:
@@ -256,7 +256,7 @@ _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
 
 def _clear_tool_defs_cache() -> None:
     """Drop memoized get_tool_definitions() results. Called when dynamic
-    schema dependencies change (e.g. discord capability cache reset,
+    schema dependencies change (e.g. tool capability cache reset,
     execute_code sandbox reconfigured)."""
     _tool_defs_cache.clear()
 
@@ -315,7 +315,7 @@ def get_tool_definitions(
     # check_fn results are TTL-cached one level down, inside
     # registry.get_definitions. The config-mtime fingerprint below captures
     # user-visible config edits that affect dynamic schemas (execute_code
-    # mode, discord action allowlist, etc.) without needing an explicit
+    # mode, tool allowlists, etc.) without needing an explicit
     # invalidate hook on every config-writer.
     if quiet_mode:
         cache_key = (
@@ -429,7 +429,7 @@ def _compute_tool_definitions(
     # Rebuild execute_code schema to only list sandbox tools that are actually
     # available.  Without this, the model sees "web_search is available in
     # execute_code" even when the API key isn't configured or the toolset is
-    # disabled (#560-discord).
+    # disabled.
     if "execute_code" in available_tool_names:
         from tools.code_execution_tool import SANDBOX_ALLOWED_TOOLS, build_execute_code_schema, _get_execution_mode
         sandbox_enabled = SANDBOX_ALLOWED_TOOLS & available_tool_names

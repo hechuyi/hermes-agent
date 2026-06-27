@@ -1347,7 +1347,7 @@ def setup_terminal_backend(config: dict):
         # Gateway/cron working directory
         print()
         print_info("Gateway working directory:")
-        print_info("  Used by Telegram/Discord/cron sessions.")
+        print_info("  Used by gateway and cron sessions.")
         print_info("  CLI/TUI always uses your launch directory instead.")
         current_cwd = cfg_get(config, "terminal", "cwd", default="")
         cwd = prompt("  Gateway working directory", current_cwd or str(Path.home()))
@@ -1732,7 +1732,7 @@ def setup_agent_settings(config: dict):
     # ── Session Reset Policy ──
     print_header("Session Reset Policy")
     print_info(
-        "Messaging sessions (Telegram, Discord, etc.) accumulate context over time."
+        "Gateway messaging sessions accumulate context over time."
     )
     print_info(
         "Each message adds to the conversation history, which means growing API costs."
@@ -1880,24 +1880,18 @@ def setup_gateway(config: dict):
         print_info("━" * 50)
         print_success("Messaging platforms configured!")
 
-        # Check if any home channels are missing
+        # Check if any current setup-menu platforms are missing home channels.
         missing_home = []
-        if get_env_value("TELEGRAM_BOT_TOKEN") and not get_env_value(
-            "TELEGRAM_HOME_CHANNEL"
-        ):
-            missing_home.append("Telegram")
-        if get_env_value("DISCORD_BOT_TOKEN") and not get_env_value(
-            "DISCORD_HOME_CHANNEL"
-        ):
-            missing_home.append("Discord")
-        if get_env_value("SLACK_BOT_TOKEN") and not get_env_value("SLACK_HOME_CHANNEL"):
-            missing_home.append("Slack")
-        if get_env_value("BLUEBUBBLES_SERVER_URL") and not get_env_value("BLUEBUBBLES_HOME_CHANNEL"):
-            missing_home.append("BlueBubbles")
-        if get_env_value("QQ_APP_ID") and not (
-            get_env_value("QQBOT_HOME_CHANNEL") or get_env_value("QQ_HOME_CHANNEL")
-        ):
-            missing_home.append("QQBot")
+        for platform in _all_platforms():
+            token_var = platform.get("token_var")
+            home_vars = [
+                item["name"]
+                for item in platform.get("vars", [])
+                if item.get("name", "").endswith("_HOME_CHANNEL")
+            ]
+            if token_var and get_env_value(token_var) and home_vars:
+                if not any(get_env_value(home_var) for home_var in home_vars):
+                    missing_home.append(_gateway_platform_short_label(platform["label"]))
 
         if missing_home:
             print()
@@ -1906,9 +1900,7 @@ def setup_gateway(config: dict):
             print_info("   messages can't be delivered to those platforms.")
             print_info("   Set one later with /set-home in your chat, or:")
             for plat in missing_home:
-                print_info(
-                    f"     hermes config set {plat.upper()}_HOME_CHANNEL <channel_id>"
-                )
+                print_info("     hermes setup gateway")
 
         # Offer to install the gateway as a system service
         import platform as _platform
@@ -2187,9 +2179,8 @@ def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]
     elif section_key == "gateway":
         from hermes_cli.gateway import _all_platforms, _platform_status
         # Count any non-empty status other than the "not configured" sentinel —
-        # platforms like WhatsApp ("enabled, not paired"), Matrix ("configured
-        # + E2EE"), and Signal ("partially configured") all indicate the user
-        # has already started setup and we shouldn't force the section to rerun.
+        # Non-empty statuses from the gateway registry indicate the user has
+        # already started setup and we shouldn't force the section to rerun.
         configured = [
             _gateway_platform_short_label(plat["label"])
             for plat in _all_platforms()
@@ -2853,9 +2844,9 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
     # Step 4: Offer messaging gateway setup
     print()
     gateway_choice = prompt_choice(
-        "Connect a messaging platform? (Telegram, Discord, etc.)",
+        "Connect Feishu/Lark, API server, or webhooks?",
         [
-            "Set up messaging now (recommended)",
+            "Set up gateway now (recommended)",
             "Skip — set up later with 'hermes setup gateway'",
         ],
         0,
@@ -2870,7 +2861,7 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
     print()
     print_info("  Configure all settings:    hermes setup")
     if gateway_choice != 0:
-        print_info("  Connect Telegram/Discord:  hermes setup gateway")
+        print_info("  Configure gateway:         hermes setup gateway")
     print()
 
     _print_setup_summary(config, hermes_home)
@@ -2965,65 +2956,40 @@ def _run_quick_setup(config: dict, hermes_home):
             var = missing_tools[idx]
             _prompt_api_key(var)
 
-    # ── Messaging platforms (checklist then prompt for selected) ──
+    # ── Gateway/API/Webhook settings (checklist then prompt for selected) ──
     if missing_messaging:
         print()
-        print_header("Messaging Platforms")
-        print_info("Connect Hermes to messaging apps to chat from anywhere.")
-        print_info("You can configure these later with 'hermes setup gateway'.")
+        print_header("Gateway, API, and Webhook Settings")
+        print_info("Configure gateway-adjacent settings exposed through environment variables.")
+        print_info("Use 'hermes setup gateway' for Feishu/Lark app credentials.")
 
-        # Group by platform (preserving order)
-        platform_order = []
-        platforms = {}
-        for var in missing_messaging:
-            name = var["name"]
-            if "TELEGRAM" in name:
-                plat = "Telegram"
-            elif "DISCORD" in name:
-                plat = "Discord"
-            elif "SLACK" in name:
-                plat = "Slack"
-            else:
-                continue
-            if plat not in platforms:
-                platform_order.append(plat)
-            platforms.setdefault(plat, []).append(var)
-
-        platform_labels = [
-            {
-                "Telegram": "📱 Telegram",
-                "Discord": "💬 Discord",
-                "Slack": "💼 Slack",
-            }.get(p, p)
-            for p in platform_order
+        setting_labels = [
+            f"{var.get('description', var['name'])} ({var['name']})"
+            for var in missing_messaging
         ]
 
         selected_indices = prompt_checklist(
-            "Which platforms would you like to set up?",
-            platform_labels,
+            "Which settings would you like to configure?",
+            setting_labels,
         )
 
         for idx in selected_indices:
-            plat = platform_order[idx]
-            vars_list = platforms[plat]
-            emoji = {"Telegram": "📱", "Discord": "💬", "Slack": "💼"}.get(plat, "")
+            var = missing_messaging[idx]
             print()
-            print(color(f"  ─── {emoji} {plat} ───", Colors.CYAN))
+            print(color(f"  ─── {var['name']} ───", Colors.CYAN))
+            print_info(f"  {var.get('description', '')}")
+            if var.get("url"):
+                print_info(f"  {var['url']}")
+            if var.get("password"):
+                value = prompt(f"  {var.get('prompt', var['name'])}", password=True)
+            else:
+                value = prompt(f"  {var.get('prompt', var['name'])}")
+            if value:
+                save_env_value(var["name"], value)
+                print_success("  ✓ Saved")
+            else:
+                print_warning("  Skipped")
             print()
-            for var in vars_list:
-                print_info(f"  {var.get('description', '')}")
-                if var.get("url"):
-                    print_info(f"  {var['url']}")
-                if var.get("password"):
-                    value = prompt(f"  {var.get('prompt', var['name'])}", password=True)
-                else:
-                    value = prompt(f"  {var.get('prompt', var['name'])}")
-                if value:
-                    save_env_value(var["name"], value)
-                    print_success("  ✓ Saved")
-                else:
-                    print_warning("  Skipped")
-                print()
 
     # Handle missing config fields
     if missing_config:

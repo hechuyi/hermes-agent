@@ -46,6 +46,7 @@ def sessions_dir(tmp_path):
 
 @pytest.fixture
 def sample_sessions():
+    """Legacy session corpus for read/list compatibility, not sendability."""
     return {
         "agent:main:telegram:dm:123456": {
             "session_key": "agent:main:telegram:dm:123456",
@@ -529,14 +530,14 @@ def _event_loop():
 
 
 class TestE2EConversationsList:
-    def test_list_all(self, mcp_server_e2e, _event_loop):
+    def test_list_all_legacy_history_sessions(self, mcp_server_e2e, _event_loop):
         server, _ = mcp_server_e2e
         result = _run_tool(server, "conversations_list")
         assert result["count"] == 3
         platforms = {c["platform"] for c in result["conversations"]}
         assert platforms == {"telegram", "discord", "slack"}
 
-    def test_list_sorted_by_updated(self, mcp_server_e2e, _event_loop):
+    def test_legacy_history_sessions_sorted_by_updated(self, mcp_server_e2e, _event_loop):
         server, _ = mcp_server_e2e
         result = _run_tool(server, "conversations_list")
         keys = [c["session_key"] for c in result["conversations"]]
@@ -545,13 +546,15 @@ class TestE2EConversationsList:
         assert keys[1] == "agent:main:discord:group:789:456"
         assert keys[2] == "agent:main:slack:group:C1234:U5678"
 
-    def test_filter_by_platform(self, mcp_server_e2e, _event_loop):
+    def test_filter_legacy_history_by_platform(self, mcp_server_e2e, _event_loop):
         server, _ = mcp_server_e2e
         result = _run_tool(server, "conversations_list", {"platform": "discord"})
         assert result["count"] == 1
         assert result["conversations"][0]["platform"] == "discord"
 
-    def test_filter_by_platform_case_insensitive(self, mcp_server_e2e, _event_loop):
+    def test_filter_legacy_history_by_platform_case_insensitive(
+        self, mcp_server_e2e, _event_loop
+    ):
         server, _ = mcp_server_e2e
         result = _run_tool(server, "conversations_list", {"platform": "TELEGRAM"})
         assert result["count"] == 1
@@ -798,6 +801,23 @@ class TestE2EMessagesSend:
         result = _run_tool(server, "messages_send", {"target": "", "message": "hi"})
         assert "error" in result
 
+    def test_send_rejects_legacy_platform_target_before_tool_dispatch(
+        self, fake_mcp_server, _event_loop, monkeypatch
+    ):
+        server, _ = fake_mcp_server
+        mock = MagicMock(return_value=json.dumps({"success": True}))
+        monkeypatch.setattr("tools.send_message_tool.send_message_tool", mock)
+
+        result = _run_tool(
+            server,
+            "messages_send",
+            {"target": "telegram:123456", "message": "Hello!"},
+        )
+
+        assert "error" in result
+        assert "Feishu" in result["error"]
+        mock.assert_not_called()
+
     def test_send_delegates_to_tool(self, mcp_server_e2e, _event_loop, monkeypatch):
         server, _ = mcp_server_e2e
         mock = MagicMock(return_value=json.dumps({"success": True, "platform": "feishu"}))
@@ -861,7 +881,9 @@ class TestE2EChannelsList:
         assert result["channels"][0]["target"] == "feishu:oc_chat"
         assert {c["platform"] for c in result["channels"]} == {"feishu"}
 
-    def test_channels_with_directory(self, mcp_server_e2e, _event_loop, monkeypatch):
+    def test_channels_with_directory_filters_legacy_non_delivery_platforms(
+        self, mcp_server_e2e, _event_loop, monkeypatch
+    ):
         """Populated channel_directory.json should be unwrapped via the 'platforms' key.
 
         Regression test for issue #21474: the writer wraps platforms under
@@ -897,7 +919,6 @@ class TestE2EChannelsList:
             "updated_at": "2026-05-07T12:00:00",
             "platforms": {
                 "feishu": [{"id": "oc_chat", "name": "Feishu Team", "type": "group"}],
-                "discord": [{"id": "789", "name": "general", "type": "text"}],
             },
         })
         server, _ = mcp_server_e2e
@@ -1108,17 +1129,17 @@ class TestEdgeCases:
         assert mcp_serve._load_sessions_index() == {}
 
     def test_sessions_without_origin(self, sessions_dir, monkeypatch):
-        data = {"agent:main:telegram:dm:111": {
-            "session_key": "agent:main:telegram:dm:111",
+        data = {"agent:main:feishu:dm:oc_111": {
+            "session_key": "agent:main:feishu:dm:oc_111",
             "session_id": "20260329_120000_xyz",
-            "platform": "telegram",
+            "platform": "feishu",
             "updated_at": "2026-03-29T12:00:00",
         }}
         (sessions_dir / "sessions.json").write_text(json.dumps(data))
         import mcp_serve
         monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: sessions_dir)
         entries = mcp_serve._load_sessions_index()
-        assert entries["agent:main:telegram:dm:111"]["platform"] == "telegram"
+        assert entries["agent:main:feishu:dm:oc_111"]["platform"] == "feishu"
 
     def test_bridge_start_stop(self):
         from mcp_serve import EventBridge
@@ -1151,14 +1172,14 @@ class TestEventBridgePollE2E:
 
         # Write sessions.json
         sessions_data = {
-            "agent:main:telegram:dm:poll_test": {
-                "session_key": "agent:main:telegram:dm:poll_test",
+            "agent:main:feishu:dm:oc_poll_test": {
+                "session_key": "agent:main:feishu:dm:oc_poll_test",
                 "session_id": session_id,
-                "platform": "telegram",
+                "platform": "feishu",
                 "chat_type": "dm",
                 "display_name": "PollTest",
                 "updated_at": "2026-03-29T15:00:05",
-                "origin": {"platform": "telegram", "chat_id": "poll_test"},
+                "origin": {"platform": "feishu", "chat_id": "oc_poll_test"},
             }
         }
         (sessions_dir / "sessions.json").write_text(json.dumps(sessions_data))
@@ -1208,12 +1229,12 @@ class TestEventBridgePollE2E:
         db_path = tmp_path / "state.db"
 
         sessions_data = {
-            "agent:main:telegram:dm:skip": {
-                "session_key": "agent:main:telegram:dm:skip",
+            "agent:main:feishu:dm:oc_skip": {
+                "session_key": "agent:main:feishu:dm:oc_skip",
                 "session_id": session_id,
-                "platform": "telegram",
+                "platform": "feishu",
                 "updated_at": "2026-03-29T15:00:05",
-                "origin": {"platform": "telegram", "chat_id": "skip"},
+                "origin": {"platform": "feishu", "chat_id": "oc_skip"},
             }
         }
         (sessions_dir / "sessions.json").write_text(json.dumps(sessions_data))
@@ -1260,12 +1281,12 @@ class TestEventBridgePollE2E:
         db_path = tmp_path / "state.db"
 
         sessions_data = {
-            "agent:main:telegram:dm:new": {
-                "session_key": "agent:main:telegram:dm:new",
+            "agent:main:feishu:dm:oc_new": {
+                "session_key": "agent:main:feishu:dm:oc_new",
                 "session_id": session_id,
-                "platform": "telegram",
+                "platform": "feishu",
                 "updated_at": "2026-03-29T15:00:05",
-                "origin": {"platform": "telegram", "chat_id": "new"},
+                "origin": {"platform": "feishu", "chat_id": "oc_new"},
             }
         }
         (sessions_dir / "sessions.json").write_text(json.dumps(sessions_data))
@@ -1304,7 +1325,7 @@ class TestEventBridgePollE2E:
         os.utime(db_path, None)
 
         # Update sessions.json updated_at to trigger re-check
-        sessions_data["agent:main:telegram:dm:new"]["updated_at"] = "2026-03-29T15:00:10"
+        sessions_data["agent:main:feishu:dm:oc_new"]["updated_at"] = "2026-03-29T15:00:10"
         (sessions_dir / "sessions.json").write_text(json.dumps(sessions_data))
 
         # Second poll — should detect the new message

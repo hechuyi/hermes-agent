@@ -785,17 +785,34 @@ class TestPromptBuilderConstants:
         assert len(DEFAULT_AGENT_IDENTITY) > 50
 
     def test_platform_hints_known_platforms(self):
-        assert "whatsapp" in PLATFORM_HINTS
-        assert "telegram" in PLATFORM_HINTS
-        assert "discord" in PLATFORM_HINTS
+        assert "feishu" in PLATFORM_HINTS
         assert "cron" in PLATFORM_HINTS
         assert "cli" in PLATFORM_HINTS
         assert "api_server" in PLATFORM_HINTS
         assert "webui" in PLATFORM_HINTS
 
+    def test_platform_hints_do_not_expose_removed_messaging_platforms(self):
+        removed_platforms = {
+            "bluebubbles",
+            "discord",
+            "email",
+            "mattermost",
+            "matrix",
+            "qqbot",
+            "signal",
+            "slack",
+            "sms",
+            "telegram",
+            "wecom",
+            "weixin",
+            "whatsapp",
+            "yuanbao",
+        }
+        assert removed_platforms.isdisjoint(PLATFORM_HINTS)
+
     def test_cli_hint_does_not_suggest_media_tags(self):
         # Regression: MEDIA:/path tags are intercepted only by messaging
-        # gateway platforms. On the CLI they render as literal text and
+        # gateway delivery surfaces. On the CLI they render as literal text and
         # confuse users. The CLI hint must steer the agent away from them.
         cli_hint = PLATFORM_HINTS["cli"]
         assert "MEDIA:" in cli_hint, (
@@ -807,21 +824,6 @@ class TestPromptBuilderConstants:
             marker in cli_hint.lower()
             for marker in ("do not emit media", "not intercepted", "do not", "don't")
         ), "CLI hint should explicitly discourage MEDIA: tags."
-        # Messaging hints should still advertise MEDIA: positively (sanity
-        # check that this test is calibrated correctly).
-        assert "include MEDIA:" in PLATFORM_HINTS["telegram"]
-
-    def test_platform_hints_mattermost(self):
-        hint = PLATFORM_HINTS["mattermost"]
-        assert "Mattermost" in hint
-        assert "MEDIA:" in hint
-        assert "Markdown" in hint
-
-    def test_platform_hints_matrix(self):
-        hint = PLATFORM_HINTS["matrix"]
-        assert "Matrix" in hint
-        assert "MEDIA:" in hint
-        assert "Markdown" in hint
 
     def test_platform_hints_feishu(self):
         hint = PLATFORM_HINTS["feishu"]

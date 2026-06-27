@@ -6,7 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from gateway.config import Platform, PlatformConfig
-from tools.send_message_tool import _parse_target_ref, _send_to_platform, send_message_tool
+from tools.send_message_tool import (
+    SEND_MESSAGE_SCHEMA,
+    _parse_target_ref,
+    _send_to_platform,
+    send_message_tool,
+)
 
 
 def _run_async_immediately(coro):
@@ -63,6 +68,24 @@ def test_send_message_delivers_to_feishu_and_rejects_other_platforms():
         force_document=False,
     )
     assert rejected["error"].startswith("Unsupported delivery platform: telegram")
+
+
+def test_send_message_schema_is_feishu_only():
+    serialized = json.dumps(SEND_MESSAGE_SCHEMA).lower()
+
+    assert "feishu" in serialized
+    assert "lark" in serialized
+    for old_platform in (
+        "discord",
+        "telegram",
+        "slack",
+        "whatsapp",
+        "signal",
+        "matrix",
+        "yuanbao",
+        "yb_",
+    ):
+        assert old_platform not in serialized
 
 
 def test_feishu_send_chunks_and_attaches_media_to_last_chunk():

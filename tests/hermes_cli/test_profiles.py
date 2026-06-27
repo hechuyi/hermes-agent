@@ -596,6 +596,12 @@ class TestAliasCollision:
         assert result is not None
         assert "subcommand" in result.lower()
 
+    def test_whatsapp_is_available_as_profile_alias_when_not_on_path(self, profile_env):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="")
+            result = check_alias_collision("whatsapp")
+        assert result is None
+
     def test_default_is_reserved(self, profile_env):
         result = check_alias_collision("default")
         assert result is not None

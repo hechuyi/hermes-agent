@@ -607,9 +607,9 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     Deliver job output to the configured target(s) (origin chat, specific platform, etc.).
 
     When ``adapters`` and ``loop`` are provided (gateway is running), tries to
-    use the live adapter first — this supports E2EE rooms (e.g. Matrix) where
-    the standalone HTTP path cannot encrypt.  Falls back to standalone send if
-    the adapter path fails or is unavailable.
+    use the live adapter first so adapter-managed delivery semantics are
+    preserved.  Falls back to standalone send if the adapter path fails or is
+    unavailable.
 
     Returns None on success, or an error string on failure.
     """
@@ -698,8 +698,8 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
             delivery_errors.append(msg)
             continue
 
-        # Prefer the live adapter when the gateway is running — this supports E2EE
-        # rooms (e.g. Matrix) where the standalone HTTP path cannot encrypt.
+        # Prefer the live adapter when the gateway is running so
+        # adapter-managed delivery semantics are preserved.
         runtime_adapter = (adapters or {}).get(platform)
         delivered = False
         if runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():

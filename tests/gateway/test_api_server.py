@@ -37,6 +37,21 @@ from gateway.platforms.api_server import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _memory_response_store_for_adapter_tests(request, monkeypatch):
+    if request.node.cls and request.node.cls.__name__ == "TestResponseStore":
+        return
+
+    def _memory_response_store(*args, **kwargs):
+        kwargs.setdefault("db_path", ":memory:")
+        return ResponseStore(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "gateway.platforms.api_server.ResponseStore",
+        _memory_response_store,
+    )
+
+
 # ---------------------------------------------------------------------------
 # check_api_server_requirements
 # ---------------------------------------------------------------------------
@@ -522,7 +537,7 @@ class TestHealthDetailedEndpoint:
         app = _create_app(adapter)
         with patch("gateway.status.read_runtime_status", return_value={
             "gateway_state": "running",
-            "platforms": {"telegram": {"state": "connected"}},
+            "platforms": {"feishu": {"state": "connected"}},
             "active_agents": 2,
             "exit_reason": None,
             "updated_at": "2026-04-14T00:00:00Z",
@@ -534,7 +549,7 @@ class TestHealthDetailedEndpoint:
                 assert data["status"] == "ok"
                 assert data["platform"] == "hermes-agent"
                 assert data["gateway_state"] == "running"
-                assert data["platforms"] == {"telegram": {"state": "connected"}}
+                assert data["platforms"] == {"feishu": {"state": "connected"}}
                 assert data["active_agents"] == 2
                 assert isinstance(data["pid"], int)
                 assert "updated_at" in data

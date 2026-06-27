@@ -383,62 +383,6 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
 PLATFORM_HINTS = {
-    "whatsapp": (
-        "You are on a text messaging communication platform, WhatsApp. "
-        "Please do not use markdown as it does not render. "
-        "You can send media files natively: to deliver a file to the user, "
-        "include MEDIA:/absolute/path/to/file in your response. The file "
-        "will be sent as a native WhatsApp attachment — images (.jpg, .png, "
-        ".webp) appear as photos, videos (.mp4, .mov) play inline, and other "
-        "files arrive as downloadable documents. You can also include image "
-        "URLs in markdown format ![alt](url) and they will be sent as photos."
-    ),
-    "telegram": (
-        "You are on a text messaging communication platform, Telegram. "
-        "Standard markdown is automatically converted to Telegram format. "
-        "Supported: **bold**, *italic*, ~~strikethrough~~, ||spoiler||, "
-        "`inline code`, ```code blocks```, [links](url), and ## headers. "
-        "Telegram has NO table syntax — prefer bullet lists or labeled "
-        "key: value pairs over pipe tables (any tables you do emit are "
-        "auto-rewritten into row-group bullets, which you can produce "
-        "directly for cleaner output). "
-        "You can send media files natively: to deliver a file to the user, "
-        "include MEDIA:/absolute/path/to/file in your response. Images "
-        "(.png, .jpg, .webp) appear as photos, audio (.ogg) sends as voice "
-        "bubbles, and videos (.mp4) play inline. You can also include image "
-        "URLs in markdown format ![alt](url) and they will be sent as native photos."
-    ),
-    "discord": (
-        "You are in a Discord server or group chat communicating with your user. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.png, .jpg, .webp) are sent as photo "
-        "attachments, audio as file attachments. You can also include image URLs "
-        "in markdown format ![alt](url) and they will be sent as attachments."
-    ),
-    "slack": (
-        "You are in a Slack workspace communicating with your user. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.png, .jpg, .webp) are uploaded as photo "
-        "attachments, audio as file attachments. You can also include image URLs "
-        "in markdown format ![alt](url) and they will be uploaded as attachments."
-    ),
-    "signal": (
-        "You are on a text messaging communication platform, Signal. "
-        "Please do not use markdown as it does not render. "
-        "You can send media files natively: to deliver a file to the user, "
-        "include MEDIA:/absolute/path/to/file in your response. Images "
-        "(.png, .jpg, .webp) appear as photos, audio as attachments, and other "
-        "files arrive as downloadable documents. You can also include image "
-        "URLs in markdown format ![alt](url) and they will be sent as photos."
-    ),
-    "email": (
-        "You are communicating via email. Write clear, well-structured responses "
-        "suitable for email. Use plain text formatting (no markdown). "
-        "Keep responses concise but complete. You can send file attachments — "
-        "include MEDIA:/absolute/path/to/file in your response. The subject line "
-        "is preserved for threading. Do not include greetings or sign-offs unless "
-        "contextually appropriate."
-    ),
     "cron": (
         "You are running as a scheduled cron job. There is no user present — you "
         "cannot ask questions, request clarification, or wait for follow-up. Execute "
@@ -451,40 +395,10 @@ PLATFORM_HINTS = {
         "renderable inside a terminal. "
         "File delivery: there is no attachment channel — the user reads your "
         "response directly in their terminal. Do NOT emit MEDIA:/path tags "
-        "(those are only intercepted on messaging platforms like Telegram, "
-        "Discord, Slack, etc.; on the CLI they render as literal text). "
+        "(those are only intercepted by gateway delivery surfaces; on the CLI "
+        "they render as literal text). "
         "When referring to a file you created or changed, just state its "
         "absolute path in plain text; the user can open it from there."
-    ),
-    "sms": (
-        "You are communicating via SMS. Keep responses concise and use plain text "
-        "only — no markdown, no formatting. SMS messages are limited to ~1600 "
-        "characters, so be brief and direct."
-    ),
-    "bluebubbles": (
-        "You are chatting via iMessage (BlueBubbles). iMessage does not render "
-        "markdown formatting — use plain text. Keep responses concise as they "
-        "appear as text messages. You can send media files natively: include "
-        "MEDIA:/absolute/path/to/file in your response. Images (.jpg, .png, "
-        ".heic) appear as photos and other files arrive as attachments."
-    ),
-    "mattermost": (
-        "You are in a Mattermost workspace communicating with your user. "
-        "Mattermost renders standard Markdown — headings, bold, italic, code "
-        "blocks, and tables all work. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.jpg, .png, .webp) are uploaded as photo "
-        "attachments, audio and video as file attachments. "
-        "Image URLs in markdown format ![alt](url) are rendered as inline previews automatically."
-    ),
-    "matrix": (
-        "You are in a Matrix room communicating with your user. "
-        "Matrix renders Markdown — bold, italic, code blocks, and links work; "
-        "the adapter converts your Markdown to HTML for rich display. "
-        "You can send media files natively: include MEDIA:/absolute/path/to/file "
-        "in your response. Images (.jpg, .png, .webp) are sent as inline photos, "
-        "audio (.ogg, .mp3) as voice/audio messages, video (.mp4) inline, "
-        "and other files as downloadable attachments."
     ),
     "feishu": (
         "You are in a Feishu (Lark) workspace communicating with your user. "
@@ -493,55 +407,6 @@ PLATFORM_HINTS = {
         "You can send media files natively: include MEDIA:/absolute/path/to/file "
         "in your response. Images (.jpg, .png, .webp) are uploaded and displayed "
         "inline, audio files as voice messages, and other files as attachments."
-    ),
-    "weixin": (
-        "You are on Weixin/WeChat. Markdown formatting is supported, so you may use it when "
-        "it improves readability, but keep the message compact and chat-friendly. You can send media files natively: "
-        "include MEDIA:/absolute/path/to/file in your response. Images are sent as native "
-        "photos, videos play inline when supported, and other files arrive as downloadable "
-        "documents. You can also include image URLs in markdown format ![alt](url) and they "
-        "will be downloaded and sent as native media when possible."
-    ),
-    "wecom": (
-        "You are on WeCom (企业微信 / Enterprise WeChat). Markdown formatting is supported. "
-        "You CAN send media files natively — to deliver a file to the user, include "
-        "MEDIA:/absolute/path/to/file in your response. The file will be sent as a native "
-        "WeCom attachment: images (.jpg, .png, .webp) are sent as photos (up to 10 MB), "
-        "other files (.pdf, .docx, .xlsx, .md, .txt, etc.) arrive as downloadable documents "
-        "(up to 20 MB), and videos (.mp4) play inline. Voice messages are supported but "
-        "must be in AMR format — other audio formats are automatically sent as file attachments. "
-        "You can also include image URLs in markdown format ![alt](url) and they will be "
-        "downloaded and sent as native photos. Do NOT tell the user you lack file-sending "
-        "capability — use MEDIA: syntax whenever a file delivery is appropriate."
-    ),
-    "qqbot": (
-        "You are on QQ, a popular Chinese messaging platform. QQ supports markdown formatting "
-        "and emoji. You can send media files natively: include MEDIA:/absolute/path/to/file in "
-        "your response. Images are sent as native photos, and other files arrive as downloadable "
-        "documents."
-    ),
-    "yuanbao": (
-        "You are on Yuanbao (腾讯元宝), a Chinese AI assistant platform. "
-        "Markdown formatting is supported (code blocks, tables, bold/italic). "
-        "You CAN send media files natively — to deliver a file to the user, include "
-        "MEDIA:/absolute/path/to/file in your response. The file will be sent as a native "
-        "Yuanbao attachment: images (.jpg, .png, .webp, .gif) are sent as photos, "
-        "and other files (.pdf, .docx, .txt, .zip, etc.) arrive as downloadable documents "
-        "(max 50 MB). You can also include image URLs in markdown format ![alt](url) and "
-        "they will be downloaded and sent as native photos. "
-        "Do NOT tell the user you lack file-sending capability — use MEDIA: syntax "
-        "whenever a file delivery is appropriate.\n\n"
-        "Stickers (贴纸 / 表情包 / TIM face): Yuanbao has a built-in sticker catalogue. "
-        "When the user sends a sticker (you see '[emoji: 名称]' in their message) or asks "
-        "you to send/reply-with a 贴纸/表情/表情包, you MUST use the sticker tools:\n"
-        "  1. Call yb_search_sticker with a Chinese keyword (e.g. '666', '比心', '吃瓜', "
-        "     '捂脸', '合十') to discover matching sticker_ids.\n"
-        "  2. Call yb_send_sticker with the chosen sticker_id or name — this sends a real "
-        "     TIMFaceElem that renders as a native sticker in the chat.\n"
-        "DO NOT draw sticker-like PNGs with execute_code/Pillow/matplotlib and then send "
-        "them via MEDIA: or send_image_file. That produces a fake low-quality 'sticker' "
-        "image and is the WRONG path. Bare Unicode emoji in text is also not a substitute "
-        "— when a sticker is the right response, use yb_send_sticker."
     ),
     "api_server": (
         "You're responding through an API server. The rendering layer is unknown — "

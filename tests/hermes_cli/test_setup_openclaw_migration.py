@@ -415,12 +415,12 @@ class TestGetSectionConfigSummary:
             result = setup_mod._get_section_config_summary({}, "gateway")
         assert result is None
 
-    def test_gateway_lists_platforms(self):
+    def test_gateway_lists_feishu_platform(self):
         def env_side(key):
-            if key == "TELEGRAM_BOT_TOKEN":
-                return "tok123"
-            if key == "DISCORD_BOT_TOKEN":
-                return "disc456"
+            if key == "FEISHU_APP_ID":
+                return "cli_test_app"
+            if key == "FEISHU_APP_SECRET":
+                return "cli_test_secret"
             return ""
 
         # Also patch gateway module's binding since _platform_status()
@@ -430,8 +430,7 @@ class TestGetSectionConfigSummary:
         with patch.object(setup_mod, "get_env_value", side_effect=env_side), \
              patch.object(gateway_mod, "get_env_value", side_effect=env_side):
             result = setup_mod._get_section_config_summary({}, "gateway")
-        assert "Telegram" in result
-        assert "Discord" in result
+        assert result == "Feishu / Lark"
 
     def test_tools_returns_none_without_keys(self):
         with patch.object(setup_mod, "get_env_value", return_value=""):
@@ -475,29 +474,25 @@ class TestGetSectionConfigSummary:
             )
         assert result == "MiniMax-M1"
 
-    def test_gateway_recognises_whatsapp_enabled(self):
-        """WhatsApp uses WHATSAPP_ENABLED (not WHATSAPP_PHONE_NUMBER_ID)."""
+    def test_gateway_ignores_legacy_platform_env_vars(self):
+        """Old platform credentials no longer make setup skip Feishu gateway setup."""
         def env_side(key):
-            return "true" if key == "WHATSAPP_ENABLED" else ""
+            if key in {
+                "TELEGRAM_BOT_TOKEN",
+                "DISCORD_BOT_TOKEN",
+                "SLACK_BOT_TOKEN",
+                "WHATSAPP_ENABLED",
+                "SIGNAL_HTTP_URL",
+                "BLUEBUBBLES_SERVER_URL",
+            }:
+                return "true"
+            return ""
 
         import hermes_cli.gateway as gateway_mod
         with patch.object(setup_mod, "get_env_value", side_effect=env_side), \
              patch.object(gateway_mod, "get_env_value", side_effect=env_side):
             result = setup_mod._get_section_config_summary({}, "gateway")
-        assert result is not None
-        assert "WhatsApp" in result
-
-    def test_gateway_recognises_signal_http_url(self):
-        """Signal uses SIGNAL_HTTP_URL (not SIGNAL_ACCOUNT)."""
-        def env_side(key):
-            return "http://signal.local" if key == "SIGNAL_HTTP_URL" else ""
-
-        import hermes_cli.gateway as gateway_mod
-        with patch.object(setup_mod, "get_env_value", side_effect=env_side), \
-             patch.object(gateway_mod, "get_env_value", side_effect=env_side):
-            result = setup_mod._get_section_config_summary({}, "gateway")
-        assert result is not None
-        assert "Signal" in result
+        assert result is None
 
     def test_model_ignores_bare_gh_token(self):
         """GH_TOKEN is commonly set for `gh` / git and must NOT count as a
@@ -542,9 +537,7 @@ class TestGetSectionConfigSummary:
         assert result == "gpt-5"
 
     def test_gateway_matches_platform_registry(self):
-        """Every built-in platform should be recognised by its primary
-        env-var sentinel — i.e. the summary must not drift from the
-        registry used by the setup checklist."""
+        """Every setup-menu platform should be recognised by its primary sentinel."""
         from hermes_cli.gateway import _PLATFORMS
 
         for plat in _PLATFORMS:
@@ -552,15 +545,12 @@ class TestGetSectionConfigSummary:
             env_var = plat.get("token_var")
             if not env_var:
                 continue
-            # Some platforms require a specific value shape (e.g. WhatsApp
-            # needs the literal "true"). Use a sentinel that satisfies every
-            # real validator _platform_status() currently checks.
             def env_side(key, _target=env_var):
-                if key != _target:
-                    return ""
-                if _target == "WHATSAPP_ENABLED":
-                    return "true"
-                return "x"
+                if key == _target:
+                    return "x"
+                if plat.get("key") == "feishu" and key == "FEISHU_APP_SECRET":
+                    return "secret"
+                return ""
             import hermes_cli.gateway as gateway_mod
             with patch.object(setup_mod, "get_env_value", side_effect=env_side), \
                  patch.object(gateway_mod, "get_env_value", side_effect=env_side):

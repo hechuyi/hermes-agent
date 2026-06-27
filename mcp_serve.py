@@ -131,6 +131,11 @@ def _is_sendable_channel_platform(platform_name: object) -> bool:
     return str(platform_name or "").lower() in _chat_delivery_platform_values()
 
 
+def _send_target_platform(target: object) -> str:
+    """Return the normalized platform prefix from an MCP send target."""
+    return str(target or "").split(":", 1)[0].strip().lower()
+
+
 def _matches_sendable_channel_filter(
     platform_name: object,
     requested_platform: Optional[str],
@@ -782,6 +787,15 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
         """
         if not target or not message:
             return json.dumps({"error": "Both target and message are required"})
+
+        platform_name = _send_target_platform(target)
+        if not _is_sendable_channel_platform(platform_name):
+            return json.dumps({
+                "error": (
+                    "Unsupported send target platform. MCP messages_send only "
+                    "accepts Feishu/Lark chat delivery targets."
+                )
+            })
 
         try:
             from tools.send_message_tool import send_message_tool

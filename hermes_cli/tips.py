@@ -33,7 +33,7 @@ TIPS = [
     "/tools disable browser temporarily removes browser tools for the current session.",
     "/browser connect attaches browser tools to your running Chromium-family browser via CDP.",
     "/plugins lists installed plugins and their status.",
-    "/cron manages scheduled tasks — set up recurring prompts with delivery to any platform.",
+    "/cron manages scheduled tasks — set up recurring prompts for Feishu, API, or headless delivery.",
     "/reload-mcp hot-reloads MCP server configuration without restarting.",
     "/usage shows token usage, cost breakdown, and session duration.",
     "/insights shows usage analytics for the last 30 days.",
@@ -72,7 +72,7 @@ TIPS = [
     "hermes chat --max-turns 200 overrides the default 90-iteration limit per turn.",
     "hermes chat --checkpoints enables filesystem snapshots before every destructive file change.",
     "hermes --yolo bypasses all dangerous command approval prompts for the entire session.",
-    "hermes chat --source telegram tags the session for filtering in hermes sessions list.",
+    "hermes chat --source feishu tags the session for filtering in hermes sessions list.",
     "hermes -p work chat runs under a specific profile without changing your default.",
 
     # --- CLI Subcommands ---
@@ -306,7 +306,7 @@ TIPS = [
     "Quick commands support two types: exec (run shell command directly) and alias (redirect to another command).",
     "Per-task delegation model: delegation.model and delegation.provider in config route subagents to cheaper models.",
     "delegation.reasoning_effort independently controls thinking depth for subagents.",
-    "display.platforms in config.yaml allows per-platform display overrides: {telegram: {tool_progress: all}}.",
+    "display.platforms in config.yaml allows per-surface display overrides: {feishu: {tool_progress: all}}.",
     "human_delay.mode in config simulates human typing speed — configurable min_ms/max_ms range.",
     "Config version migrations run automatically on load — new config keys appear without manual intervention.",
     "GPT and Codex models get special system prompt guidance for tool discipline and mandatory tool use.",
@@ -391,7 +391,7 @@ TIPS = [
 
     # --- Platform-specific ---
     'MATRIX_DEVICE_ID pins a stable device ID for E2EE — without it, keys rotate every start and historic decrypt breaks.',
-    'TELEGRAM_WEBHOOK_SECRET is required whenever TELEGRAM_WEBHOOK_URL is set — generate with openssl rand -hex 32.',
+    'WEBHOOK_SECRET protects the webhook gateway; hermes webhook subscribe generates per-route HMAC secrets.',
 
     # --- Batch ---
     "batch_runner.py --resume content-matches completed prompts by text so dataset reorders don't re-run finished work.",

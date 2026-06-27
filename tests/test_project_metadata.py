@@ -25,7 +25,21 @@ def _load_package_data():
 def test_non_feishu_channel_extras_are_removed():
     optional_dependencies = _load_optional_dependencies()
 
-    removed = {"slack", "matrix", "dingtalk", "wecom", "homeassistant", "sms"}
+    removed = {
+        "discord",
+        "discord-admin",
+        "discord_admin",
+        "telegram",
+        "yuanbao",
+        "slack",
+        "matrix",
+        "dingtalk",
+        "wecom",
+        "homeassistant",
+        "sms",
+        "whatsapp",
+        "signal",
+    }
     assert removed.isdisjoint(optional_dependencies)
     for extra_specs in optional_dependencies.values():
         assert not any(
@@ -155,6 +169,8 @@ def test_messaging_extra_includes_feishu_runtime_deps():
     optional_dependencies = _load_optional_dependencies()
 
     messaging_extra = optional_dependencies["messaging"]
+    feishu_extra = optional_dependencies["feishu"]
+    assert messaging_extra == feishu_extra
     assert any(dep.startswith("lark-oapi") for dep in messaging_extra)
     assert any(dep.startswith("qrcode") for dep in messaging_extra)
 
@@ -291,6 +307,79 @@ def test_toolsets_do_not_autogenerate_plugin_platform_aliases():
 
     assert "gateway.platform_registry" not in source
     assert "platform_registry.is_registered" not in source
+
+
+def test_legacy_messaging_tool_identifiers_are_not_exposed():
+    """Core tool metadata must not expose removed Discord/Yuanbao tools."""
+    scanned_files = [
+        "model_tools.py",
+        "acp_adapter/tools.py",
+        "toolsets.py",
+        "tools/registry.py",
+    ]
+    forbidden_snippets = [
+        "discord",
+        "discord_admin",
+        "yuanbao",
+        "yb_",
+    ]
+
+    offenders: list[str] = []
+    for relpath in scanned_files:
+        source = (REPO_ROOT / relpath).read_text(encoding="utf-8").lower()
+        for snippet in forbidden_snippets:
+            if snippet in source:
+                offenders.append(f"{relpath}: {snippet}")
+
+    assert not offenders
+
+
+def test_removed_self_registering_messaging_tool_modules_are_absent():
+    """Deleted platform tools must not be rediscovered as built-in tools."""
+    removed_modules = [
+        "tools/discord_tool.py",
+        "tools/yuanbao_tools.py",
+    ]
+    for relpath in removed_modules:
+        assert not (REPO_ROOT / relpath).exists(), relpath
+
+    from tools.registry import discover_builtin_tools
+
+    discovered = set(discover_builtin_tools(REPO_ROOT / "tools"))
+    assert "tools.discord_tool" not in discovered
+    assert "tools.yuanbao_tools" not in discovered
+
+
+def test_hermes_feishu_runtime_tool_names_do_not_expose_legacy_messaging_tools():
+    """The Feishu runtime toolset/model schemas must not expose legacy tools."""
+    forbidden_names = {
+        "discord",
+        "discord_admin",
+        "yuanbao",
+        "yb_chat",
+        "yb_search",
+        "yb_open",
+        "yb_login",
+        "yb_post",
+    }
+
+    from model_tools import get_tool_definitions
+    from toolsets import resolve_toolset
+
+    resolved_toolset_names = set(resolve_toolset("hermes-feishu"))
+    model_tool_names = {
+        definition["function"]["name"]
+        for definition in get_tool_definitions(
+            enabled_toolsets=["hermes-feishu"],
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+    }
+
+    assert forbidden_names.isdisjoint(resolved_toolset_names)
+    assert forbidden_names.isdisjoint(model_tool_names)
+    assert not any(name.startswith("yb_") for name in resolved_toolset_names)
+    assert not any(name.startswith("yb_") for name in model_tool_names)
 
 
 def test_removed_platform_plugin_surfaces_leave_no_runtime_references():
