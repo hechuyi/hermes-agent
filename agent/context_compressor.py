@@ -23,7 +23,11 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from agent.auxiliary_client import call_llm, _is_connection_error
+from agent.auxiliary_client import (
+    aux_interrupt_protection,
+    call_llm,
+    _is_connection_error,
+)
 from agent.context_engine import ContextEngine
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
@@ -719,6 +723,9 @@ class ContextCompressor(ContextEngine):
         # this flag to know "compression was attempted but aborted, freeze
         # the chat until the user manually retries via /compress".
         self._last_compress_aborted: bool = False
+        self._last_summary_auth_failure: bool = False
+        self._last_summary_network_failure: bool = False
+        self._last_summary_terminal_failure_kind: Optional[str] = None
         # When a user-configured summary model fails and we recover by
         # retrying on the main model, record the failure so gateway /
         # CLI callers can still warn the user even though compression
@@ -1288,11 +1295,19 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         """
         now = time.monotonic()
         if now < self._summary_failure_cooldown_until:
+            terminal_failure_kind = getattr(self, "_last_summary_terminal_failure_kind", None)
+            if terminal_failure_kind == "auth":
+                self._last_summary_auth_failure = True
+            elif terminal_failure_kind == "network":
+                self._last_summary_network_failure = True
             logger.debug(
                 "Skipping context summary during cooldown (%.0fs remaining)",
                 self._summary_failure_cooldown_until - now,
             )
             return None
+        self._last_summary_auth_failure = False
+        self._last_summary_network_failure = False
+        self._last_summary_terminal_failure_kind = None
 
         summary_budget = self._compute_summary_budget(turns_to_summarize)
         content_to_summarize = self._serialize_for_summary(turns_to_summarize)
@@ -1443,7 +1458,8 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             }
             if self.summary_model:
                 call_kwargs["model"] = self.summary_model
-            response = call_llm(**call_kwargs)
+            with aux_interrupt_protection():
+                response = call_llm(**call_kwargs)
             content = response.choices[0].message.content
             # Handle cases where content is not a string (e.g., dict from llama.cpp)
             if not isinstance(content, str):
@@ -1456,6 +1472,9 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             self._summary_failure_cooldown_until = 0.0
             self._summary_model_fallen_back = False
             self._last_summary_error = None
+            self._last_summary_auth_failure = False
+            self._last_summary_network_failure = False
+            self._last_summary_terminal_failure_kind = None
             return self._with_summary_prefix(summary)
         except RuntimeError:
             # No provider configured — long cooldown, unlikely to self-resolve
@@ -1503,6 +1522,16 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             # back to the main model instead of entering a 60-second cooldown.
             # See issue #18458.
             _is_streaming_closed = _is_connection_error(e)
+            _is_auth_error = (
+                _status in {401, 403}
+                or "invalid api key" in _err_str
+                or "invalid x-api-key" in _err_str
+                or ("api key" in _err_str and ("invalid" in _err_str or "blocked" in _err_str))
+                or "unauthorized" in _err_str
+                or "authentication" in _err_str
+            )
+            if _is_auth_error:
+                self._last_summary_auth_failure = True
             if _is_json_decode and not _is_model_not_found and not _is_timeout:
                 logger.error(
                     "Context compression failed: auxiliary LLM returned a "
@@ -1557,6 +1586,12 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             if len(err_text) > 220:
                 err_text = err_text[:217].rstrip() + "..."
             self._last_summary_error = err_text
+            if _is_auth_error:
+                self._last_summary_auth_failure = True
+                self._last_summary_terminal_failure_kind = "auth"
+            elif _is_streaming_closed:
+                self._last_summary_network_failure = True
+                self._last_summary_terminal_failure_kind = "network"
             logger.warning(
                 "Failed to generate context summary: %s. "
                 "Further summary attempts paused for %d seconds.",
@@ -1903,12 +1938,15 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         self._last_aux_model_failure_error = None
         self._last_aux_model_failure_model = None
         self._last_compress_aborted = False
+        self._last_summary_auth_failure = False
+        self._last_summary_network_failure = False
 
         # Manual /compress (force=True) bypasses the failure cooldown so the
         # user can retry immediately after an auto-compress abort.  Without
         # this, /compress would silently no-op for 30-60s after a failure.
         if force and self._summary_failure_cooldown_until > 0.0:
             self._summary_failure_cooldown_until = 0.0
+            self._last_summary_terminal_failure_kind = None
         n_messages = len(messages)
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)
         _min_for_compress = self._protect_head_size(messages) + 3 + 1
@@ -2007,19 +2045,42 @@ The user has requested that this compaction PRIORITISE preserving all informatio
         #           _last_summary_dropped_count for gateway hygiene to
         #           surface a warning.
         # Default is False (historical behavior).
-        if not summary and self.abort_on_summary_failure:
+        terminal_failure_kind = getattr(self, "_last_summary_terminal_failure_kind", None)
+        if not summary and (
+            self.abort_on_summary_failure
+            or self._last_summary_auth_failure
+            or self._last_summary_network_failure
+            or terminal_failure_kind in {"auth", "network"}
+        ):
             n_skipped = compress_end - compress_start
             self._last_summary_dropped_count = 0  # nothing actually dropped
             self._last_summary_fallback_used = False
             self._last_compress_aborted = True
             if not self.quiet_mode:
-                logger.warning(
-                    "Summary generation failed — aborting compression "
-                    "(compression.abort_on_summary_failure=true). "
-                    "%d message(s) preserved unchanged. Conversation is "
-                    "frozen until the next /compress or /new.",
-                    n_skipped,
-                )
+                if self._last_summary_auth_failure or terminal_failure_kind == "auth":
+                    logger.warning(
+                        "Summary generation failed with an authentication "
+                        "error — aborting compression. %d message(s) preserved "
+                        "unchanged; the session was NOT rotated. Check the "
+                        "provider credential or inference endpoint, then retry.",
+                        n_skipped,
+                    )
+                elif self._last_summary_network_failure or terminal_failure_kind == "network":
+                    logger.warning(
+                        "Summary generation failed with a network/connection "
+                        "error — aborting compression. %d message(s) preserved "
+                        "unchanged; the session was NOT rotated. Retry once "
+                        "connectivity recovers.",
+                        n_skipped,
+                    )
+                else:
+                    logger.warning(
+                        "Summary generation failed — aborting compression "
+                        "(compression.abort_on_summary_failure=true). "
+                        "%d message(s) preserved unchanged. Conversation is "
+                        "frozen until the next /compress or /new.",
+                        n_skipped,
+                    )
             return messages
 
         # Phase 4: Assemble compressed message list

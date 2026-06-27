@@ -374,6 +374,177 @@ class TestSummaryFailureCooldown:
         assert mock_call.call_count == 1
 
 
+class TestTerminalSummaryFailuresAbort:
+    """Terminal summary failures must preserve the original transcript.
+
+    The default fallback path is still useful for generic provider failures, but
+    auth and network failures are different: retrying after fixing credentials
+    or connectivity is safer than dropping the middle window for a static
+    fallback summary.
+    """
+
+    def _msgs(self, n=12):
+        return [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"}
+            for i in range(n)
+        ]
+
+    def _compressor(self, *, summary_model_override=None):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            return ContextCompressor(
+                model="main-model",
+                summary_model_override=summary_model_override,
+                quiet_mode=True,
+                protect_first_n=2,
+                protect_last_n=2,
+                abort_on_summary_failure=False,
+            )
+
+    def _auth_err(self, status=401):
+        err = Exception(f"{status} unauthorized: invalid API key")
+        err.status_code = status
+        return err
+
+    def _ok_response(self, text="summary via main model"):
+        mock_ok = MagicMock()
+        mock_ok.choices = [MagicMock()]
+        mock_ok.choices[0].message.content = text
+        return mock_ok
+
+    def test_generate_summary_flags_auth_failure(self):
+        c = self._compressor()
+
+        with patch("agent.context_compressor.call_llm", side_effect=self._auth_err(401)):
+            result = c._generate_summary(self._msgs())
+
+        assert result is None
+        assert c._last_summary_auth_failure is True
+        assert c._last_summary_network_failure is False
+
+    def test_403_also_flags_auth_failure(self):
+        c = self._compressor()
+
+        with patch("agent.context_compressor.call_llm", side_effect=self._auth_err(403)):
+            c._generate_summary(self._msgs())
+
+        assert c._last_summary_auth_failure is True
+
+    def test_compress_aborts_on_auth_failure_despite_flag_false(self):
+        c = self._compressor()
+        msgs = self._msgs()
+
+        with patch("agent.context_compressor.call_llm", side_effect=self._auth_err(401)):
+            result = c.compress(msgs, current_tokens=999999, force=True)
+
+        assert result == msgs
+        assert c._last_compress_aborted is True
+        assert c._last_summary_auth_failure is True
+        assert c._last_summary_fallback_used is False
+        assert c._last_summary_dropped_count == 0
+
+    def test_aux_model_auth_failure_recovers_on_main_no_abort(self):
+        c = self._compressor(summary_model_override="broken-aux-model")
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=[self._auth_err(401), self._ok_response()],
+        ) as mock_call:
+            result = c._generate_summary(self._msgs())
+
+        assert mock_call.call_count == 2
+        assert mock_call.call_args_list[0].kwargs.get("model") == "broken-aux-model"
+        assert "model" not in mock_call.call_args_list[1].kwargs
+        assert isinstance(result, str)
+        assert c._last_summary_auth_failure is False
+        assert c._last_summary_network_failure is False
+
+    def test_generate_summary_flags_network_failure(self):
+        c = self._compressor()
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=ConnectionError("connection reset by peer"),
+        ):
+            result = c._generate_summary(self._msgs())
+
+        assert result is None
+        assert c._last_summary_network_failure is True
+        assert c._last_summary_auth_failure is False
+
+    def test_compress_aborts_on_network_failure_despite_flag_false(self):
+        c = self._compressor()
+        msgs = self._msgs()
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=ConnectionError("connection reset by peer"),
+        ):
+            result = c.compress(msgs, current_tokens=999999, force=True)
+
+        assert result == msgs
+        assert c._last_compress_aborted is True
+        assert c._last_summary_network_failure is True
+        assert c._last_summary_fallback_used is False
+        assert c._last_summary_dropped_count == 0
+
+    def test_terminal_failure_cooldown_preserves_messages_without_retry(self):
+        c = self._compressor()
+        msgs = self._msgs()
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=ConnectionError("connection reset by peer"),
+        ) as mock_call:
+            first = c.compress(msgs, current_tokens=999999, force=True)
+
+        assert first == msgs
+        assert c._last_compress_aborted is True
+        assert mock_call.call_count == 1
+
+        with patch("agent.context_compressor.call_llm", return_value=self._ok_response()) as mock_call:
+            second = c.compress(msgs, current_tokens=999999)
+
+        assert second == msgs
+        assert c._last_compress_aborted is True
+        assert c._last_summary_network_failure is True
+        assert c._last_summary_fallback_used is False
+        assert mock_call.call_count == 0
+
+    def test_cooldown_reason_does_not_pollute_new_generic_failure(self):
+        c = self._compressor()
+        msgs = self._msgs()
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=ConnectionError("connection reset by peer"),
+        ):
+            assert c.compress(msgs, current_tokens=999999, force=True) == msgs
+
+        c._summary_failure_cooldown_until = 0.0
+        with patch("agent.context_compressor.call_llm", side_effect=Exception("500 provider error")):
+            result = c.compress(msgs, current_tokens=999999)
+
+        assert len(result) < len(msgs)
+        assert c._last_compress_aborted is False
+        assert c._last_summary_network_failure is False
+        assert c._last_summary_fallback_used is True
+
+    def test_aux_auth_then_main_generic_failure_uses_default_fallback(self):
+        c = self._compressor(summary_model_override="broken-aux-model")
+        msgs = self._msgs()
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=[self._auth_err(401), Exception("500 main provider error")],
+        ):
+            result = c.compress(msgs, current_tokens=999999, force=True)
+
+        assert len(result) < len(msgs)
+        assert c._last_compress_aborted is False
+        assert c._last_summary_auth_failure is False
+        assert c._last_summary_fallback_used is True
+
+
 class TestSummaryFallbackToMainModel:
     """When ``summary_model`` differs from the main model and the summary LLM
     call fails, the compressor should retry once on the main model before

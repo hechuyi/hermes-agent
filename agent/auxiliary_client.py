@@ -40,6 +40,7 @@ Payment / credit exhaustion fallback:
   their OpenRouter balance but has Codex OAuth or another provider available.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -110,6 +111,30 @@ from utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_aux_interrupt_protection = threading.local()
+
+
+def _aux_interrupt_protected() -> bool:
+    """Return whether the current thread is inside an atomic auxiliary call."""
+    return bool(getattr(_aux_interrupt_protection, "active", False))
+
+
+@contextlib.contextmanager
+def aux_interrupt_protection(active: bool = True):
+    """Temporarily mask gateway interrupts for atomic auxiliary work.
+
+    Compression summary generation must complete atomically; a mid-flight
+    interrupt would otherwise turn a recoverable summary into a destructive
+    fallback compaction. Timeouts are still checked by the caller.
+    """
+    previous = getattr(_aux_interrupt_protection, "active", False)
+    _aux_interrupt_protection.active = active
+    try:
+        yield
+    finally:
+        _aux_interrupt_protection.active = previous
 
 
 def _safe_isinstance(obj: Any, maybe_type: Any) -> bool:
@@ -790,7 +815,7 @@ class _CodexCompletionsAdapter:
                 raise TimeoutError(_timeout_message())
             try:
                 from tools.interrupt import is_interrupted
-                if is_interrupted():
+                if is_interrupted() and not _aux_interrupt_protected():
                     raise InterruptedError("Codex auxiliary Responses stream interrupted")
             except InterruptedError:
                 raise
