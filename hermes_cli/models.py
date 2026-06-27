@@ -2140,7 +2140,17 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
     if normalized == "anthropic":
         live = _fetch_anthropic_models()
         if live:
+            curated = list(_PROVIDER_MODELS.get("anthropic", []))
+            if curated:
+                merged = list(curated)
+                merged_lower = {m.lower() for m in curated}
+                for m in live:
+                    if m.lower() not in merged_lower:
+                        merged.append(m)
+                        merged_lower.add(m.lower())
+                return merged
             return live
+        return list(_PROVIDER_MODELS.get("anthropic", []))
     if normalized == "ollama-cloud":
         live = fetch_ollama_cloud_models(force_refresh=force_refresh)
         if live:
@@ -2212,8 +2222,17 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
             if not base_url:
                 base_url = _p.base_url
             if api_key:
-                live = _p.fetch_models(api_key=api_key)
+                live = _p.fetch_models(api_key=api_key, base_url=base_url or None)
                 if live:
+                    curated = list(_PROVIDER_MODELS.get(normalized, []))
+                    if curated:
+                        merged = list(curated)
+                        merged_lower = {m.lower() for m in curated}
+                        for m in live:
+                            if m.lower() not in merged_lower:
+                                merged.append(m)
+                                merged_lower.add(m.lower())
+                        return merged
                     return live
             # Use profile's fallback_models if defined
             if _p.fallback_models:
@@ -3759,6 +3778,24 @@ def validate_requested_model(
             suggestion_text = ""
             if suggestions:
                 suggestion_text = "\n  Similar models: " + ", ".join(f"`{s}`" for s in suggestions)
+
+            curated_models = [
+                model
+                for provider_key in _provider_keys(normalized)
+                for model in _PROVIDER_MODELS.get(provider_key, [])
+            ]
+            if curated_models:
+                curated_lower = {m.lower(): m for m in curated_models}
+                if requested_for_lookup.lower() in curated_lower:
+                    return {
+                        "accepted": True,
+                        "persist": True,
+                        "recognized": True,
+                        "message": (
+                            f"Note: `{requested}` was not found in the live /v1/models listing "
+                            f"but exists in the curated catalog - accepted."
+                        ),
+                    }
 
         return {
             "accepted": False,
