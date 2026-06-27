@@ -41,6 +41,25 @@ def _alias_lines(text: str) -> list[str]:
     ]
 
 
+def _uid_gid_validation_block(text: str) -> str:
+    start_marker = "invalid_uid_gid() {"
+    end_marker = 'HERMES_GID="${HERMES_GID:-${PGID:-}}"\n'
+    start = text.find(start_marker)
+    end = text.find(end_marker, start)
+    assert start != -1 and end != -1, (
+        "expected alias resolution followed by explicit UID/GID validation"
+    )
+    block = text[start : end + len(end_marker)]
+    for expected in (
+        'validate_uid_gid HERMES_UID "$HERMES_UID"',
+        'validate_uid_gid HERMES_GID "$HERMES_GID"',
+        'validate_uid_gid PUID "$PUID"',
+        'validate_uid_gid PGID "$PGID"',
+    ):
+        assert expected in block
+    return block
+
+
 def test_stage2_hook_resolves_puid_pgid_aliases(stage2_text: str) -> None:
     alias_lines = _alias_lines(stage2_text)
     assert any("PUID" in line for line in alias_lines), (
@@ -84,3 +103,57 @@ def test_hermes_uid_gid_take_precedence_over_aliases(stage2_text: str) -> None:
 def test_no_uid_vars_leaves_values_empty(stage2_text: str) -> None:
     # An empty resolution means the stage2 hook keeps the default hermes user.
     assert _resolve(stage2_text, {}) == ":"
+
+
+def _validate(stage2_text: str, env: dict[str, str]) -> subprocess.CompletedProcess:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash not available")
+    script = _uid_gid_validation_block(stage2_text)
+    script += '\nprintf "VALID:%s:%s\\n" "${HERMES_UID:-}" "${HERMES_GID:-}"\n'
+    return subprocess.run(
+        [bash, "-ec", script],
+        env={"PATH": os.environ.get("PATH", "")} | env,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"HERMES_UID": "1", "HERMES_GID": "65534"}, "VALID:1:65534"),
+        ({"PUID": "4242", "PGID": "4243"}, "VALID:4242:4243"),
+        ({"HERMES_UID": "2000", "PUID": "3000"}, "VALID:2000:"),
+    ],
+)
+def test_uid_gid_validation_accepts_integer_range(
+    stage2_text: str, env: dict[str, str], expected: str
+) -> None:
+    proc = _validate(stage2_text, env)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == expected
+
+
+@pytest.mark.parametrize(
+    ("env", "var_name", "value"),
+    [
+        ({"HERMES_UID": "0"}, "HERMES_UID", "0"),
+        ({"HERMES_GID": "0"}, "HERMES_GID", "0"),
+        ({"PUID": "65535"}, "PUID", "65535"),
+        ({"PGID": "65535"}, "PGID", "65535"),
+        ({"HERMES_UID": "abc"}, "HERMES_UID", "abc"),
+        ({"HERMES_GID": "12x"}, "HERMES_GID", "12x"),
+        ({"PUID": "-1"}, "PUID", "-1"),
+        ({"PGID": ""}, "PGID", ""),
+    ],
+)
+def test_uid_gid_validation_rejects_invalid_values(
+    stage2_text: str, env: dict[str, str], var_name: str, value: str
+) -> None:
+    proc = _validate(stage2_text, env)
+    assert proc.returncode == 1
+    assert "[stage2] ERROR: invalid" in proc.stderr
+    assert var_name in proc.stderr
+    assert f"'{value}'" in proc.stderr
+    assert "expected integer in range 1-65534 and not 0/root" in proc.stderr

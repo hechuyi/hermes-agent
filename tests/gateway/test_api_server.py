@@ -355,6 +355,40 @@ class TestAdapterInit:
 
 
 # ---------------------------------------------------------------------------
+# Adapter disconnect
+# ---------------------------------------------------------------------------
+
+
+class TestAdapterDisconnect:
+    @pytest.mark.asyncio
+    async def test_disconnect_closes_response_store(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        close_mock = MagicMock()
+        adapter._response_store.close = close_mock
+
+        await adapter.disconnect()
+
+        close_mock.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_response_store_close_error_does_not_block_teardown(self, caplog):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        adapter._response_store.close = MagicMock(side_effect=RuntimeError("sqlite close failed"))
+
+        with caplog.at_level("WARNING", logger="gateway.platforms.api_server"):
+            await adapter.disconnect()
+
+        assert adapter._app is None
+        assert any(
+            "Failed to close API server response store during disconnect" in record.message
+            and record.platform == Platform.API_SERVER.value
+            and record.stage == "api_server_disconnect"
+            and record.failure_class == "response_store_close_failed"
+            for record in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
 # Auth checking
 # ---------------------------------------------------------------------------
 

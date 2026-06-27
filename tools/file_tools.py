@@ -425,20 +425,21 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
 
 
 def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | None:
-    """Return a cross-profile warning string when ``filepath`` lands in
-    another Hermes profile's skills/plugins/cron/memories directory.
+    """Return a soft-guard warning for cross-profile or host sandbox mirrors.
 
-    Returns ``None`` when the write is in-scope (same profile) or outside
-    Hermes scope entirely. Soft guard — the agent can override by passing
-    ``cross_profile=True`` to its write tool after explicit user direction.
+    Returns ``None`` when the write is in-scope or outside guarded Hermes
+    paths. Soft guard — the agent can override by passing ``cross_profile=True``
+    to its write tool after explicit user direction.
 
     Defense-in-depth, NOT a security boundary — the terminal tool runs
     as the same OS user and can write any of these paths directly.
-    See ``agent/file_safety.classify_cross_profile_target`` for the
-    detection rules.
+    See ``agent/file_safety`` for the detection rules.
     """
     try:
-        from agent.file_safety import get_cross_profile_warning
+        from agent.file_safety import (
+            get_cross_profile_warning,
+            get_sandbox_mirror_warning,
+        )
     except Exception:
         # Fail open on import error — the existing sensitive-path guard
         # plus the write_denied list still apply.
@@ -452,13 +453,54 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
     except (OSError, ValueError):
         resolved = filepath
 
-    return get_cross_profile_warning(resolved)
+    warning = get_cross_profile_warning(resolved)
+    if warning is not None:
+        return warning
+    return get_sandbox_mirror_warning(resolved)
+
+
+def _container_backend_for_task(task_id: str = "default") -> str:
+    """Return the active container backend for file-tool mirror guards."""
+    try:
+        from tools.terminal_tool import (
+            _active_environments,
+            _env_lock,
+            _get_env_config,
+            _resolve_container_task_id,
+        )
+
+        container_key = _resolve_container_task_id(task_id)
+        with _env_lock:
+            env = _active_environments.get(container_key) or _active_environments.get(task_id)
+        if env is not None:
+            name = env.__class__.__name__.lower()
+            if "docker" in name:
+                return "docker"
+            if "singularity" in name:
+                return "singularity"
+            if "modal" in name:
+                return "modal"
+            if "daytona" in name:
+                return "daytona"
+            return "local"
+
+        config = _get_env_config()
+        backend = str(config.get("env_type") or "").strip().lower()
+        if backend:
+            return backend
+    except Exception:
+        pass
+
+    return os.getenv("TERMINAL_ENV", "local").strip().lower() or "local"
 
 
 def _check_container_mirror_path(filepath: str, task_id: str = "default") -> str | None:
-    """Return a warning when a container backend targets a sandbox .hermes mirror."""
+    """Return a warning when a write targets a sandbox .hermes mirror."""
     try:
-        from agent.file_safety import get_container_mirror_warning
+        from agent.file_safety import (
+            get_container_mirror_warning,
+            get_sandbox_mirror_warning,
+        )
     except Exception:
         return None
 
@@ -467,7 +509,11 @@ def _check_container_mirror_path(filepath: str, task_id: str = "default") -> str
     except (OSError, ValueError):
         resolved = filepath
 
-    backend = os.getenv("TERMINAL_ENV", "local")
+    warning = get_sandbox_mirror_warning(resolved)
+    if warning is not None:
+        return warning
+
+    backend = _container_backend_for_task(task_id)
     return get_container_mirror_warning(resolved, backend)
 
 

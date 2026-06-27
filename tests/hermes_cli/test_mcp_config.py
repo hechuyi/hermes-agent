@@ -72,6 +72,31 @@ class FakeTool:
         self.description = description
 
 
+class FakeMcpServer:
+    """Mimics the connected MCP server object used by the probe path."""
+
+    def __init__(self, tools: List[FakeTool] | None = None):
+        self._tools = tools or [FakeTool("do_thing", "Does a thing")]
+
+    async def shutdown(self):
+        return None
+
+
+def _install_fake_connect(monkeypatch, seen: list, tools: List[FakeTool] | None = None):
+    """Patch the low-level MCP connect helper and capture configs it receives."""
+
+    async def fake_connect(name, config):
+        seen.append((name, config))
+        return FakeMcpServer(tools)
+
+    monkeypatch.setattr("tools.mcp_tool._connect_server", fake_connect)
+
+
+def _write_env(tmp_path: Path, values: Dict[str, str]):
+    lines = [f"{key}={value}\n" for key, value in values.items()]
+    (tmp_path / ".env").write_text("".join(lines))
+
+
 # ---------------------------------------------------------------------------
 # Tests: cmd_mcp_list
 # ---------------------------------------------------------------------------
@@ -447,6 +472,33 @@ class TestMcpAdd:
         out = capsys.readouterr().out
         assert "Unknown MCP preset" in out
 
+    def test_add_header_auth_strips_pasted_bearer_and_probes_resolved_header(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """Header auth saved from add is normalized and resolved before probing."""
+        seen: list = []
+        _install_fake_connect(monkeypatch, seen)
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._prompt",
+            lambda *args, **kwargs: "Bearer pasted-token",
+        )
+        inputs = iter(["y", ""])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        from hermes_cli.config import get_env_value
+        from hermes_cli.mcp_config import cmd_mcp_add
+
+        cmd_mcp_add(_make_args(
+            name="n8n",
+            url="http://localhost:5678/mcp-server/http",
+            auth="header",
+        ))
+
+        out = capsys.readouterr().out
+        assert "Saved" in out
+        assert get_env_value("MCP_N8N_API_KEY") == "pasted-token"
+        assert seen[-1][1]["headers"]["Authorization"] == "Bearer pasted-token"
+
 
 # ---------------------------------------------------------------------------
 # Tests: cmd_mcp_test
@@ -478,6 +530,25 @@ class TestMcpTest:
         out = capsys.readouterr().out
         assert "Connected" in out
         assert "Tools discovered: 2" in out
+
+    def test_test_resolves_header_env_before_probe(self, tmp_path, capsys, monkeypatch):
+        _write_env(tmp_path, {"MCP_TEST_API_KEY": "test-token"})
+        _seed_config(tmp_path, {
+            "srv": {
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer ${MCP_TEST_API_KEY}"},
+            },
+        })
+        seen: list = []
+        _install_fake_connect(monkeypatch, seen)
+
+        from hermes_cli.mcp_config import cmd_mcp_test
+
+        cmd_mcp_test(_make_args(name="srv"))
+
+        out = capsys.readouterr().out
+        assert "Connected" in out
+        assert seen[-1][1]["headers"]["Authorization"] == "Bearer test-token"
 
 
 # ---------------------------------------------------------------------------
@@ -523,6 +594,92 @@ class TestEnvVarInterpolation:
         assert _interpolate_env_vars(42) == 42
         assert _interpolate_env_vars(True) is True
         assert _interpolate_env_vars(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: probe-path env resolution and header auth normalization
+# ---------------------------------------------------------------------------
+
+class TestProbeEnvResolution:
+    def test_resolve_interpolates_header(self, monkeypatch):
+        from hermes_cli.mcp_config import _resolve_mcp_server_config
+
+        monkeypatch.setenv("MCP_N8N_API_KEY", "jwt-token-xyz")
+        resolved = _resolve_mcp_server_config({
+            "url": "http://localhost:5678/mcp-server/http",
+            "headers": {"Authorization": "Bearer ${MCP_N8N_API_KEY}"},
+        })
+
+        assert resolved["headers"]["Authorization"] == "Bearer jwt-token-xyz"
+
+    def test_resolve_leaves_unset_var_literal(self, monkeypatch):
+        from hermes_cli.mcp_config import _resolve_mcp_server_config
+
+        monkeypatch.delenv("MCP_UNSET_API_KEY", raising=False)
+        resolved = _resolve_mcp_server_config({
+            "headers": {"Authorization": "Bearer ${MCP_UNSET_API_KEY}"},
+        })
+
+        assert resolved["headers"]["Authorization"] == "Bearer ${MCP_UNSET_API_KEY}"
+
+    def test_probe_resolves_before_connect(self, monkeypatch):
+        from hermes_cli.mcp_config import _probe_single_server
+
+        monkeypatch.setenv("MCP_N8N_PROBE_API_KEY", "jwt-token-xyz")
+        seen: list = []
+        _install_fake_connect(monkeypatch, seen, [FakeTool("do_thing", "a tool")])
+
+        tools = _probe_single_server("n8n", {
+            "url": "http://localhost:5678/mcp-server/http",
+            "headers": {"Authorization": "Bearer ${MCP_N8N_PROBE_API_KEY}"},
+        })
+
+        assert tools == [("do_thing", "a tool")]
+        assert seen[-1][1]["headers"]["Authorization"] == "Bearer jwt-token-xyz"
+
+    def test_probe_keeps_missing_env_var_literal(self, monkeypatch):
+        from hermes_cli.mcp_config import _probe_single_server
+
+        monkeypatch.delenv("MCP_MISSING_PROBE_API_KEY", raising=False)
+        seen: list = []
+        _install_fake_connect(monkeypatch, seen)
+
+        _probe_single_server("missing", {
+            "headers": {"Authorization": "Bearer ${MCP_MISSING_PROBE_API_KEY}"},
+        })
+
+        assert (
+            seen[-1][1]["headers"]["Authorization"]
+            == "Bearer ${MCP_MISSING_PROBE_API_KEY}"
+        )
+
+
+class TestStripBearerPrefix:
+    def test_bare_token_unchanged(self):
+        from hermes_cli.mcp_config import _strip_bearer_prefix
+
+        assert _strip_bearer_prefix("eyJabc123") == "eyJabc123"
+
+    def test_strips_bearer_prefix(self):
+        from hermes_cli.mcp_config import _strip_bearer_prefix
+
+        assert _strip_bearer_prefix("Bearer eyJabc123") == "eyJabc123"
+
+    def test_strips_case_insensitive_and_whitespace(self):
+        from hermes_cli.mcp_config import _strip_bearer_prefix
+
+        assert _strip_bearer_prefix("bearer eyJabc123") == "eyJabc123"
+        assert _strip_bearer_prefix("  Bearer   eyJabc123  ") == "eyJabc123"
+
+    def test_does_not_strip_without_space(self):
+        from hermes_cli.mcp_config import _strip_bearer_prefix
+
+        assert _strip_bearer_prefix("BearerToken") == "BearerToken"
+
+    def test_non_string_passthrough(self):
+        from hermes_cli.mcp_config import _strip_bearer_prefix
+
+        assert _strip_bearer_prefix(None) is None  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -691,3 +848,56 @@ class TestMcpLogin:
 
         assert "Authenticated — 3 tool(s) available" in out
         assert "no OAuth token" not in out
+
+    def test_login_resolves_header_env_before_probe(self, tmp_path, capsys, monkeypatch):
+        _write_env(tmp_path, {"MCP_LOGIN_API_KEY": "login-token"})
+        _seed_config(tmp_path, {
+            "oauthsrv": {
+                "url": "https://mcp.example.com/mcp",
+                "auth": "oauth",
+                "headers": {"Authorization": "Bearer ${MCP_LOGIN_API_KEY}"},
+            },
+        })
+        seen: list = []
+        _install_fake_connect(monkeypatch, seen)
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._oauth_tokens_present", lambda name: True
+        )
+
+        from hermes_cli.mcp_config import cmd_mcp_login
+
+        cmd_mcp_login(_make_args(name="oauthsrv"))
+
+        out = capsys.readouterr().out
+        assert "Authenticated" in out
+        assert seen[-1][1]["headers"]["Authorization"] == "Bearer login-token"
+
+
+class TestMcpConfigure:
+    def test_configure_resolves_header_env_before_probe(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        import sys
+
+        _write_env(tmp_path, {"MCP_CONFIGURE_API_KEY": "configure-token"})
+        _seed_config(tmp_path, {
+            "srv": {
+                "url": "https://example.com/mcp",
+                "headers": {"Authorization": "Bearer ${MCP_CONFIGURE_API_KEY}"},
+            },
+        })
+        seen: list = []
+        _install_fake_connect(monkeypatch, seen)
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(
+            "hermes_cli.curses_ui.curses_checklist",
+            lambda title, labels, pre_selected: pre_selected,
+        )
+
+        from hermes_cli.mcp_config import cmd_mcp_configure
+
+        cmd_mcp_configure(_make_args(name="srv"))
+
+        out = capsys.readouterr().out
+        assert "No changes made" in out
+        assert seen[-1][1]["headers"]["Authorization"] == "Bearer configure-token"

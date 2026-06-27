@@ -109,6 +109,16 @@ def _env_key_for_server(name: str) -> str:
     return f"MCP_{name.upper().replace('-', '_')}_API_KEY"
 
 
+def _strip_bearer_prefix(token: str) -> str:
+    """Strip a leading ``Bearer `` prefix from a pasted token."""
+    if not isinstance(token, str):
+        return token
+    stripped = token.strip()
+    if stripped[:7].lower() == "bearer ":
+        return stripped[7:].strip()
+    return stripped
+
+
 def _parse_env_assignments(raw_env: Optional[List[str]]) -> Dict[str, str]:
     """Parse ``KEY=VALUE`` strings from CLI args into an env dict."""
     parsed: Dict[str, str] = {}
@@ -164,6 +174,19 @@ def _apply_mcp_preset(
 
 # ─── Discovery (temporary connect) ───────────────────────────────────────────
 
+def _resolve_mcp_server_config(config: dict) -> dict:
+    """Resolve ``${ENV}`` placeholders in a server config before connecting."""
+    from tools.mcp_tool import _interpolate_env_vars
+
+    try:
+        from hermes_cli.env_loader import load_hermes_dotenv
+        load_hermes_dotenv()
+    except Exception as exc:  # pragma: no cover — defensive parity with runtime loading
+        logger.debug("Failed to load Hermes .env before MCP probe: %s", exc)
+
+    return _interpolate_env_vars(config)
+
+
 def _probe_single_server(
     name: str, config: dict, connect_timeout: float = 30
 ) -> List[Tuple[str, str]]:
@@ -178,6 +201,8 @@ def _probe_single_server(
         _connect_server,
         _stop_mcp_loop,
     )
+
+    config = _resolve_mcp_server_config(config)
 
     _ensure_mcp_loop()
 
@@ -342,6 +367,7 @@ def cmd_mcp_add(args):
                 else:
                     api_key = _prompt("API key / Bearer token", password=True)
                     if api_key:
+                        api_key = _strip_bearer_prefix(api_key)
                         save_env_value(env_key, api_key)
                         _success(f"Saved to {display_hermes_home()}/.env as {env_key}")
 

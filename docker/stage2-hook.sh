@@ -20,6 +20,47 @@ set -eu
 HERMES_HOME="${HERMES_HOME:-/opt/data}"
 INSTALL_DIR="/opt/hermes"
 
+# Drop to hermes via s6-setuidgid, but skip it when already non-root.
+as_hermes() {
+    if [ "$(id -u)" = 0 ]; then
+        s6-setuidgid hermes "$@"
+        return
+    fi
+    "$@"
+}
+
+reject_arbitrary_user() {
+    cur_uid="$(id -u)"
+    cur_gid="$(id -g)"
+    hermes_uid="$(id -u hermes)"
+    hermes_gid="$(id -g hermes)"
+    if [ "$cur_uid" = 0 ] || { [ "$cur_uid" = "$hermes_uid" ] && [ "$cur_gid" = "$hermes_gid" ]; }; then
+        return 0
+    fi
+
+    cat >&2 <<EOF
+[stage2] ERROR: container started with --user $cur_uid:$cur_gid (an arbitrary, non-hermes UID/GID) -- not supported.
+
+The s6-overlay bootstrap needs to start as root for UID/GID remap, volume
+ownership, dependency setup, and config seeding. To make container-written
+files match your host user, start as root (the default) and pass your host
+UID/GID instead:
+
+    docker run -e HERMES_UID=\$(id -u) -e HERMES_GID=\$(id -g) ...
+
+NAS users can use the PUID/PGID aliases:
+
+    docker run -e PUID=\$(id -u) -e PGID=\$(id -g) ...
+
+The supported non-root path is pinning the container to the hermes UID itself
+(currently $hermes_uid:$hermes_gid). Arbitrary non-root --user values cannot
+run the bootstrap safely.
+EOF
+    exit 1
+}
+
+reject_arbitrary_user
+
 # --- Bootstrap HERMES_HOME as root ---
 # Create the directory (and any missing parents) while we still have root
 # privileges so the chown checks below see real metadata and the later
@@ -32,6 +73,31 @@ INSTALL_DIR="/opt/hermes"
 # is a no-op if the dir already exists. (#18482, salvages #18488)
 mkdir -p "$HERMES_HOME"
 
+invalid_uid_gid() {
+    name=$1
+    value=$2
+    printf "[stage2] ERROR: invalid %s='%s'; expected integer in range 1-65534 and not 0/root\n" \
+        "$name" "$value" >&2
+    exit 1
+}
+
+validate_uid_gid() {
+    name=$1
+    value=$2
+    case "$value" in
+        ''|*[!0-9]*) invalid_uid_gid "$name" "$value" ;;
+    esac
+
+    normalized=$value
+    while [ "${normalized#0}" != "$normalized" ]; do
+        normalized=${normalized#0}
+    done
+
+    if [ -z "$normalized" ] || [ "${#normalized}" -gt 5 ] || [ "$normalized" -gt 65534 ]; then
+        invalid_uid_gid "$name" "$value"
+    fi
+}
+
 # --- UID/GID remap ---
 # Accept PUID/PGID as aliases for HERMES_UID/HERMES_GID.  NAS users (UGOS,
 # Synology, unRAID) expect the LinuxServer.io PUID/PGID convention and
@@ -39,8 +105,18 @@ mkdir -p "$HERMES_HOME"
 # this alias those vars are silently ignored and the s6-setuidgid drop to
 # UID 10000 leaves the runtime unable to read the volume.  HERMES_UID/
 # HERMES_GID still win when both are set.  See #15290, salvages #25872.
+[ "${HERMES_UID+x}" ] && validate_uid_gid HERMES_UID "$HERMES_UID"
+[ "${HERMES_GID+x}" ] && validate_uid_gid HERMES_GID "$HERMES_GID"
+[ "${PUID+x}" ] && validate_uid_gid PUID "$PUID"
+[ "${PGID+x}" ] && validate_uid_gid PGID "$PGID"
+
 HERMES_UID="${HERMES_UID:-${PUID:-}}"
 HERMES_GID="${HERMES_GID:-${PGID:-}}"
+
+if [ "$(id -u)" != 0 ] && { [ -n "${HERMES_UID:-}" ] || [ -n "${HERMES_GID:-}" ]; }; then
+    echo "[stage2] ERROR: HERMES_UID/HERMES_GID remap requires root container bootstrap" >&2
+    exit 1
+fi
 
 if [ -n "${HERMES_UID:-}" ] && [ "$HERMES_UID" != "$(id -u hermes)" ]; then
     echo "[stage2] Changing hermes UID to $HERMES_UID"
@@ -147,8 +223,8 @@ if [ "$needs_chown" = true ]; then
     done
     # Hermes-owned trees under $INSTALL_DIR must be re-chowned when the UID
     # is remapped — otherwise:
-    #   - .venv: lazy_deps.py cannot install platform packages (discord.py,
-    #     telegram, slack, etc.) with EACCES (#15012, #21100)
+    #   - .venv: lazy_deps.py cannot install runtime Python packages
+    #     with EACCES (#15012, #21100)
     #   - node_modules: root-level dependencies (browser tooling / Node-backed
     #     helpers) that runtime code may walk/update.
     # The set mirrors the build-time `chown -R hermes:hermes` line in the
@@ -188,7 +264,7 @@ fi
 # Use direct `mkdir -p` invocation (no `sh -c "..."` wrapper) so the
 # shell isn't a second interpreter — defends against $HERMES_HOME values
 # containing shell metacharacters. PR #30136 review item O2.
-s6-setuidgid hermes mkdir -p \
+as_hermes mkdir -p \
     "$HERMES_HOME/cron" \
     "$HERMES_HOME/sessions" \
     "$HERMES_HOME/logs" \
@@ -205,7 +281,7 @@ s6-setuidgid hermes mkdir -p \
 # the hermes user so ownership matches the file's documented owner.
 # tee is invoked directly via s6-setuidgid (no `sh -c` wrapper) for the
 # same shell-metacharacter safety described above.
-printf 'docker\n' | s6-setuidgid hermes tee "$HERMES_HOME/.install_method" >/dev/null \
+printf 'docker\n' | as_hermes tee "$HERMES_HOME/.install_method" >/dev/null \
     || true
 
 # --- Seed config files (only on first boot) ---
@@ -213,7 +289,7 @@ seed_one() {
     dest=$1
     src=$2
     if [ ! -f "$HERMES_HOME/$dest" ] && [ -f "$INSTALL_DIR/$src" ]; then
-        s6-setuidgid hermes cp "$INSTALL_DIR/$src" "$HERMES_HOME/$dest"
+        as_hermes cp "$INSTALL_DIR/$src" "$HERMES_HOME/$dest"
     fi
 }
 seed_one ".env" ".env.example"
@@ -244,7 +320,7 @@ fi
 # the python binary's own bin-stub already sets up (sys.path is rooted
 # at the venv's site-packages by virtue of running .venv/bin/python).
 if [ -d "$INSTALL_DIR/skills" ]; then
-    s6-setuidgid hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/tools/skills_sync.py" \
+    as_hermes "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/tools/skills_sync.py" \
         || echo "[stage2] Warning: skills_sync.py failed; continuing"
 fi
 

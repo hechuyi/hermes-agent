@@ -6507,6 +6507,7 @@ class GatewayRunner:
                     platform.value, attempt,
                 )
 
+                adapter = None
                 try:
                     adapter = self._create_adapter(platform, platform_config)
                     if not adapter:
@@ -6556,6 +6557,8 @@ class GatewayRunner:
                             "Reconnect %s: non-retryable error (%s), removing from retry queue",
                             platform.value, adapter.fatal_error_message,
                         )
+                        if self.adapters.get(platform) is not adapter:
+                            await self._safe_adapter_disconnect(adapter, platform)
                         del self._failed_platforms[platform]
                     else:
                         self._update_platform_runtime_status(
@@ -6571,7 +6574,11 @@ class GatewayRunner:
                             "Reconnect %s failed, next retry in %ds",
                             platform.value, backoff,
                         )
+                        if self.adapters.get(platform) is not adapter:
+                            await self._safe_adapter_disconnect(adapter, platform)
                 except Exception as e:
+                    if adapter is not None and self.adapters.get(platform) is not adapter:
+                        await self._safe_adapter_disconnect(adapter, platform)
                     self._update_platform_runtime_status(
                         platform.value,
                         platform_state="retrying",

@@ -463,18 +463,79 @@ def _is_under(path: Path, parent: Path) -> bool:
         return False
 
 
+def _find_host_sandbox_mirror_hermes(parts: tuple[str, ...]) -> Optional[int]:
+    """Return the ``.hermes`` index for host-side sandbox mirror paths.
+
+    Matches ``.../sandboxes/<backend>/<task>/home/.hermes/...`` by shape.
+    The target may live under the real Hermes root, so this check must run
+    before the host HERMES_HOME/Hermes-root allowlist in
+    ``classify_sandbox_mirror_target``.
+    """
+    for idx, part in enumerate(parts):
+        if part != "sandboxes":
+            continue
+        if idx + 5 >= len(parts):
+            continue
+        if parts[idx + 3] == "home" and parts[idx + 4] == ".hermes":
+            return idx + 4
+    return None
+
+
+def _classify_hermes_mirror_relative_path(
+    rel_parts: tuple[str, ...],
+) -> Optional[tuple[str, str]]:
+    """Return ``(area, relative_path)`` for Hermes state mirror paths."""
+    if not rel_parts:
+        return None
+
+    head = rel_parts[0]
+    if head in PROFILE_SCOPED_AREAS or head in {"SOUL.md", "USER.md", "MEMORY.md"}:
+        return head, os.path.join(*rel_parts)
+
+    if head == "profiles" and len(rel_parts) >= 3:
+        profile_area = rel_parts[2]
+        if (
+            profile_area in PROFILE_SCOPED_AREAS
+            or profile_area in {"SOUL.md", "USER.md", "MEMORY.md"}
+        ):
+            return profile_area, os.path.join(*rel_parts)
+
+    return None
+
+
 def classify_sandbox_mirror_target(path: str) -> Optional[dict]:
     """Classify writes into sandbox-local ``.hermes`` control-plane mirrors.
 
     Container/cloud backends often run in a project sandbox whose filesystem is
     not the host Hermes profile. Writing ``/workspace/.hermes/SOUL.md`` or
     ``/workspace/.hermes/memories/MEMORY.md`` appears successful in the sandbox
-    but the host Hermes process never reads it. This classifier detects that
-    mirror shape while explicitly allowing the real host ``HERMES_HOME`` and
-    Hermes root paths.
+    but the host Hermes process never reads it.
+
+    The classifier also detects the host-side mirror shape created under
+    ``.../sandboxes/<backend>/<task>/home/.hermes/...``. That path can be
+    physically under the real Hermes root, but it is still a per-task mirror,
+    not authoritative host state; therefore that shape is classified before
+    the real host ``HERMES_HOME``/Hermes-root allowlist.
     """
     try:
         target = Path(os.path.expanduser(str(path))).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+    parts = target.parts
+    host_mirror_idx = _find_host_sandbox_mirror_hermes(parts)
+    if host_mirror_idx is not None:
+        rel_parts = parts[host_mirror_idx + 1:]
+        mirror_root = Path(*parts[: host_mirror_idx + 1])
+        return {
+            "target_path": str(target),
+            "mirror_root": str(mirror_root),
+            "relative_path": os.path.join(*rel_parts) if rel_parts else "",
+            "area": rel_parts[0] if rel_parts else ".hermes",
+            "reason": "host_sandbox_mirror",
+        }
+
+    try:
         hermes_home = _hermes_home_path().resolve()
         hermes_root = _hermes_root_path().resolve()
     except (OSError, RuntimeError):
@@ -483,23 +544,37 @@ def classify_sandbox_mirror_target(path: str) -> Optional[dict]:
     if _is_under(target, hermes_home) or _is_under(target, hermes_root):
         return None
 
-    parts = target.parts
     for idx, part in enumerate(parts):
         if part != ".hermes":
             continue
         rel_parts = parts[idx + 1:]
-        if not rel_parts:
+        classified = _classify_hermes_mirror_relative_path(rel_parts)
+        if classified is None:
             continue
-        head = rel_parts[0]
-        if head in PROFILE_SCOPED_AREAS or head in {"SOUL.md", "USER.md", "MEMORY.md"}:
-            mirror_root = Path(*parts[:idx + 1])
-            return {
-                "target_path": str(target),
-                "mirror_root": str(mirror_root),
-                "relative_path": os.path.join(*rel_parts),
-                "area": head,
-            }
+        area, relative_path = classified
+        mirror_root = Path(*parts[:idx + 1])
+        return {
+            "target_path": str(target),
+            "mirror_root": str(mirror_root),
+            "relative_path": relative_path,
+            "area": area,
+            "reason": "non_host_hermes_mirror",
+        }
     return None
+
+
+def get_sandbox_mirror_warning(path: str) -> Optional[str]:
+    """Return a warning for host-side per-task Hermes sandbox mirrors."""
+    info = classify_sandbox_mirror_target(path)
+    if info is None or info.get("reason") != "host_sandbox_mirror":
+        return None
+    return (
+        f"sandbox mirror write blocked: reason=host_sandbox_mirror; "
+        f"{info['target_path']} is under {info['mirror_root']}, a per-task "
+        "host-side sandbox mirror created by a non-local terminal backend. "
+        "Writes there affect the sandbox copy, not the real host Hermes "
+        f"profile state. Intended Hermes-relative path: {info['relative_path']!r}."
+    )
 
 
 def get_container_mirror_warning(path: str, backend: str) -> Optional[str]:
@@ -510,8 +585,18 @@ def get_container_mirror_warning(path: str, backend: str) -> Optional[str]:
     info = classify_sandbox_mirror_target(path)
     if info is None:
         return None
+    reason = info.get("reason") or "non_host_hermes_mirror"
+    if reason == "non_host_hermes_mirror":
+        try:
+            target = Path(info["target_path"])
+            root_home = Path("/root/.hermes")
+            if target == root_home or target.is_relative_to(root_home):
+                reason = "inner_container_mirror"
+        except Exception:
+            pass
     return (
-        f"sandbox-local .hermes mirror write blocked: {info['target_path']} "
+        f"sandbox-local .hermes mirror write blocked: reason={reason}; "
+        f"sandbox mirror target {info['target_path']} "
         f"is under {info['mirror_root']}, but the terminal backend is "
         f"{backend_name!r}. Writes there usually affect only the sandbox "
         "filesystem, not the host Hermes profile that loads SOUL.md, USER.md, "

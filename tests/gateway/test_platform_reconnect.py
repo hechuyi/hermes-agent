@@ -260,6 +260,48 @@ class TestPlatformReconnectWatcher:
         assert LIVE_PLATFORM not in runner.adapters
 
     @pytest.mark.asyncio
+    async def test_reconnect_nonretryable_disconnects_unused_adapter_only(self):
+        """Non-retryable reconnect failures should dispose the uninstalled adapter."""
+        runner = _make_runner()
+
+        platform_config = PlatformConfig(enabled=True, token="test")
+        runner._failed_platforms[LIVE_PLATFORM] = {
+            "config": platform_config,
+            "attempts": 1,
+            "next_retry": time.monotonic() - 1,
+        }
+
+        installed_adapter = StubAdapter(succeed=True)
+        runner.adapters[LIVE_PLATFORM] = installed_adapter
+        fail_adapter = StubAdapter(
+            succeed=False, fatal_error="bad token", fatal_retryable=False
+        )
+        runner._safe_adapter_disconnect = AsyncMock()
+
+        real_sleep = asyncio.sleep
+
+        with patch.object(runner, "_create_adapter", return_value=fail_adapter):
+            async def run_one_iteration():
+                runner._running = True
+                call_count = 0
+
+                async def fake_sleep(n):
+                    nonlocal call_count
+                    call_count += 1
+                    if call_count > 1:
+                        runner._running = False
+                    await real_sleep(0)
+
+                with patch("asyncio.sleep", side_effect=fake_sleep):
+                    await runner._platform_reconnect_watcher()
+
+            await run_one_iteration()
+
+        runner._safe_adapter_disconnect.assert_awaited_once_with(fail_adapter, LIVE_PLATFORM)
+        assert runner.adapters[LIVE_PLATFORM] is installed_adapter
+        assert LIVE_PLATFORM not in runner._failed_platforms
+
+    @pytest.mark.asyncio
     async def test_reconnect_retryable_stays_in_queue(self):
         """Retryable failures should remain in the queue with incremented attempts."""
         runner = _make_runner()
@@ -294,6 +336,91 @@ class TestPlatformReconnectWatcher:
 
             await run_one_iteration()
 
+        assert LIVE_PLATFORM in runner._failed_platforms
+        assert runner._failed_platforms[LIVE_PLATFORM]["attempts"] == 2
+
+    @pytest.mark.asyncio
+    async def test_reconnect_retryable_disconnects_unused_adapter_only(self):
+        """Retryable reconnect failures should dispose the failed temporary adapter."""
+        runner = _make_runner()
+
+        platform_config = PlatformConfig(enabled=True, token="test")
+        runner._failed_platforms[LIVE_PLATFORM] = {
+            "config": platform_config,
+            "attempts": 1,
+            "next_retry": time.monotonic() - 1,
+        }
+
+        installed_adapter = StubAdapter(succeed=True)
+        runner.adapters[LIVE_PLATFORM] = installed_adapter
+        fail_adapter = StubAdapter(
+            succeed=False, fatal_error="DNS failure", fatal_retryable=True
+        )
+        runner._safe_adapter_disconnect = AsyncMock()
+
+        real_sleep = asyncio.sleep
+
+        with patch.object(runner, "_create_adapter", return_value=fail_adapter):
+            async def run_one_iteration():
+                runner._running = True
+                call_count = 0
+
+                async def fake_sleep(n):
+                    nonlocal call_count
+                    call_count += 1
+                    if call_count > 1:
+                        runner._running = False
+                    await real_sleep(0)
+
+                with patch("asyncio.sleep", side_effect=fake_sleep):
+                    await runner._platform_reconnect_watcher()
+
+            await run_one_iteration()
+
+        runner._safe_adapter_disconnect.assert_awaited_once_with(fail_adapter, LIVE_PLATFORM)
+        assert runner.adapters[LIVE_PLATFORM] is installed_adapter
+        assert LIVE_PLATFORM in runner._failed_platforms
+        assert runner._failed_platforms[LIVE_PLATFORM]["attempts"] == 2
+
+    @pytest.mark.asyncio
+    async def test_reconnect_retryable_does_not_disconnect_current_installed_adapter(self):
+        """Reconnect cleanup must not tear down the current installed adapter."""
+        runner = _make_runner()
+
+        platform_config = PlatformConfig(enabled=True, token="test")
+        runner._failed_platforms[LIVE_PLATFORM] = {
+            "config": platform_config,
+            "attempts": 1,
+            "next_retry": time.monotonic() - 1,
+        }
+
+        installed_adapter = StubAdapter(
+            succeed=False, fatal_error="DNS failure", fatal_retryable=True
+        )
+        runner.adapters[LIVE_PLATFORM] = installed_adapter
+        runner._safe_adapter_disconnect = AsyncMock()
+
+        real_sleep = asyncio.sleep
+
+        with patch.object(runner, "_create_adapter", return_value=installed_adapter):
+            async def run_one_iteration():
+                runner._running = True
+                call_count = 0
+
+                async def fake_sleep(n):
+                    nonlocal call_count
+                    call_count += 1
+                    if call_count > 1:
+                        runner._running = False
+                    await real_sleep(0)
+
+                with patch("asyncio.sleep", side_effect=fake_sleep):
+                    await runner._platform_reconnect_watcher()
+
+            await run_one_iteration()
+
+        runner._safe_adapter_disconnect.assert_not_awaited()
+        assert runner.adapters[LIVE_PLATFORM] is installed_adapter
         assert LIVE_PLATFORM in runner._failed_platforms
         assert runner._failed_platforms[LIVE_PLATFORM]["attempts"] == 2
 
@@ -390,6 +517,50 @@ class TestPlatformReconnectWatcher:
         assert info["attempts"] == 26
         assert info["next_retry"] != float("inf")
         assert info["next_retry"] > time.monotonic()
+
+    @pytest.mark.asyncio
+    async def test_reconnect_connect_exception_disconnects_unused_adapter_only(self):
+        """A reconnect connect() exception should dispose only the temporary adapter."""
+        runner = _make_runner()
+
+        platform_config = PlatformConfig(enabled=True, token="test")
+        runner._failed_platforms[LIVE_PLATFORM] = {
+            "config": platform_config,
+            "attempts": 1,
+            "next_retry": time.monotonic() - 1,
+        }
+
+        installed_adapter = StubAdapter(succeed=True)
+        runner.adapters[LIVE_PLATFORM] = installed_adapter
+        failed_adapter = StubAdapter(succeed=True)
+        runner._safe_adapter_disconnect = AsyncMock()
+        runner._connect_adapter_with_timeout = AsyncMock(
+            side_effect=TimeoutError("feishu connect timed out")
+        )
+
+        real_sleep = asyncio.sleep
+
+        with patch.object(runner, "_create_adapter", return_value=failed_adapter):
+            async def run_one_iteration():
+                runner._running = True
+                call_count = 0
+
+                async def fake_sleep(n):
+                    nonlocal call_count
+                    call_count += 1
+                    if call_count > 1:
+                        runner._running = False
+                    await real_sleep(0)
+
+                with patch("asyncio.sleep", side_effect=fake_sleep):
+                    await runner._platform_reconnect_watcher()
+
+            await run_one_iteration()
+
+        runner._safe_adapter_disconnect.assert_awaited_once_with(failed_adapter, LIVE_PLATFORM)
+        assert runner.adapters[LIVE_PLATFORM] is installed_adapter
+        assert LIVE_PLATFORM in runner._failed_platforms
+        assert runner._failed_platforms[LIVE_PLATFORM]["attempts"] == 2
 
     @pytest.mark.asyncio
     async def test_reconnect_skips_paused_platforms(self):

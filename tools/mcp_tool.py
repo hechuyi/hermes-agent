@@ -552,6 +552,15 @@ class InvalidMcpUrlError(ValueError):
     """
 
 
+class NonMcpEndpointError(ConnectionError):
+    """Raised when an HTTP MCP URL serves a definite non-MCP response.
+
+    This is non-retryable: a 2xx HTML/plain/XML endpoint means the configured
+    URL points at the wrong service path, not that the MCP server is transiently
+    unavailable.
+    """
+
+
 def _validate_remote_mcp_url(server_name: str, url: Any) -> str:
     """Return the URL as a string if it's a valid http(s) remote MCP URL.
 
@@ -1527,6 +1536,64 @@ class MCPServerTask:
                             # PID-reuse can't surface stale pgroup state later.
                             _stdio_pgids.pop(pid, None)
 
+    _MCP_CONTENT_TYPES = ("application/json", "text/event-stream")
+
+    async def _preflight_content_type(
+        self,
+        url: str,
+        *,
+        headers: Optional[dict] = None,
+        ssl_verify: bool = True,
+        client_cert=None,
+        timeout: float = 5.0,
+    ) -> None:
+        """Best-effort probe for obvious non-MCP HTTP endpoints.
+
+        Only 2xx responses with a definite content type outside the MCP
+        allowlist fail fast. Network errors, missing content type, and non-2xx
+        responses are left to the real SDK handshake.
+        """
+        try:
+            import httpx as _httpx
+        except ImportError:
+            return
+
+        client_kwargs: dict = {
+            "verify": ssl_verify,
+            "follow_redirects": True,
+            "timeout": _httpx.Timeout(timeout),
+        }
+        if client_cert is not None:
+            client_kwargs["cert"] = client_cert
+
+        probe_headers = dict(headers) if headers else {}
+        try:
+            async with _httpx.AsyncClient(**client_kwargs) as client:
+                response = await client.head(url, headers=probe_headers)
+                if response.status_code in (405, 501):
+                    response = await client.get(url, headers=probe_headers)
+        except _httpx.HTTPError:
+            return
+
+        if not (200 <= response.status_code < 300):
+            return
+
+        content_type = (
+            response.headers.get("content-type", "")
+            .split(";", 1)[0]
+            .strip()
+            .lower()
+        )
+        if not content_type or content_type in self._MCP_CONTENT_TYPES:
+            return
+
+        raise NonMcpEndpointError(
+            f"MCP server '{self.name}' at {url} returned Content-Type "
+            f"'{content_type}', not an MCP response (expected one of: "
+            f"{', '.join(self._MCP_CONTENT_TYPES)}). Verify the URL points "
+            "to an MCP Streamable HTTP endpoint, e.g. https://host/mcp."
+        )
+
     async def _run_http(self, config: dict):
         """Run the server using HTTP/StreamableHTTP transport."""
         if not _MCP_HTTP_AVAILABLE:
@@ -1783,6 +1850,19 @@ class MCPServerTask:
                 self._error = exc
                 self._ready.set()
                 return
+            if config.get("transport") != "sse":
+                try:
+                    await self._preflight_content_type(
+                        config["url"],
+                        headers=dict(config.get("headers") or {}),
+                        ssl_verify=config.get("ssl_verify", True),
+                        client_cert=_resolve_client_cert(self.name, config),
+                    )
+                except NonMcpEndpointError as exc:
+                    logger.warning("%s", exc)
+                    self._error = exc
+                    self._ready.set()
+                    return
 
         retries = 0
         initial_retries = 0

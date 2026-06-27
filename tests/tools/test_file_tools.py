@@ -202,6 +202,61 @@ class TestWriteFileHandler:
         mock_get.assert_not_called()
 
     @patch("tools.file_tools._get_file_ops")
+    def test_blocks_host_side_sandbox_home_hermes_mirror_write(
+        self, mock_get, tmp_path, monkeypatch
+    ):
+        _allow_private_var_tmp_path(monkeypatch)
+        monkeypatch.setenv("TERMINAL_ENV", "local")
+        target = (
+            tmp_path
+            / "hermes-root"
+            / "profiles"
+            / "research"
+            / "sandboxes"
+            / "docker"
+            / "default"
+            / "home"
+            / ".hermes"
+            / "profiles"
+            / "research"
+            / "SOUL.md"
+        )
+
+        from tools.file_tools import write_file_tool
+
+        result = json.loads(write_file_tool(str(target), "new soul"))
+
+        assert "error" in result
+        assert "sandbox mirror" in result["error"].lower()
+        assert "host_sandbox_mirror" in result["error"]
+        assert "sandboxes/docker/default/home/.hermes" in result["error"]
+        assert "profiles/research/SOUL.md" in result["error"]
+        mock_get.assert_not_called()
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_blocks_inner_container_hermes_mirror_write_from_docker_config(
+        self, mock_get, monkeypatch
+    ):
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        import tools.terminal_tool as terminal_tool
+        monkeypatch.setattr(
+            terminal_tool,
+            "_get_env_config",
+            lambda: {"env_type": "docker", "container_persistent": True},
+        )
+        target = "/root/.hermes/profiles/research/SOUL.md"
+
+        from tools.file_tools import write_file_tool
+
+        result = json.loads(write_file_tool(target, "new soul"))
+
+        assert "error" in result
+        assert "sandbox mirror" in result["error"].lower()
+        assert "inner_container_mirror" in result["error"]
+        assert "profiles/research/SOUL.md" in result["error"]
+        mock_get.assert_not_called()
+
+    @patch("tools.file_tools._get_file_ops")
     def test_local_backend_allows_project_dot_hermes_write(
         self, mock_get, tmp_path, monkeypatch
     ):
@@ -219,6 +274,33 @@ class TestWriteFileHandler:
 
         assert result["status"] == "ok"
         mock_ops.write_file.assert_called_once()
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_real_host_hermes_home_not_blocked_as_sandbox_mirror(
+        self, mock_get, tmp_path, monkeypatch
+    ):
+        _allow_private_var_tmp_path(monkeypatch)
+        hermes_root = tmp_path / "host-hermes"
+        hermes_home = hermes_root / "profiles" / "research"
+        target = hermes_home / "SOUL.md"
+        hermes_home.mkdir(parents=True)
+        target.write_text("old soul")
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        import agent.file_safety as file_safety
+        monkeypatch.setattr(file_safety, "_hermes_root_path", lambda: hermes_root)
+        monkeypatch.setattr(file_safety, "_hermes_home_path", lambda: hermes_home)
+        mock_ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.to_dict.return_value = {"status": "ok", "path": str(target)}
+        mock_ops.write_file.return_value = result_obj
+        mock_get.return_value = mock_ops
+
+        from tools.file_tools import write_file_tool
+
+        result = json.loads(write_file_tool(str(target), "new soul"))
+
+        assert result["status"] == "ok"
+        mock_ops.write_file.assert_called_once_with(str(target.resolve()), "new soul")
 
 
 class TestPatchHandler:
@@ -314,6 +396,72 @@ class TestPatchHandler:
         assert "error" in result
         assert "sandbox-local .hermes mirror" in result["error"]
         assert "docker" in result["error"]
+        mock_get.assert_not_called()
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_blocks_inner_container_hermes_mirror_replace_patch(
+        self, mock_get, monkeypatch
+    ):
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        target = "/root/.hermes/profiles/research/memories/MEMORY.md"
+
+        from tools.file_tools import patch_tool
+
+        result = json.loads(
+            patch_tool(
+                mode="replace",
+                path=target,
+                old_string="old",
+                new_string="new",
+            )
+        )
+
+        assert "error" in result
+        assert "sandbox mirror" in result["error"].lower()
+        assert "inner_container_mirror" in result["error"]
+        assert "profiles/research/memories/MEMORY.md" in result["error"]
+        mock_get.assert_not_called()
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_blocks_host_side_sandbox_home_hermes_mirror_v4a_patch(
+        self, mock_get, tmp_path, monkeypatch
+    ):
+        _allow_private_var_tmp_path(monkeypatch)
+        monkeypatch.setenv("TERMINAL_ENV", "local")
+        target = (
+            tmp_path
+            / "hermes-root"
+            / "profiles"
+            / "research"
+            / "sandboxes"
+            / "docker"
+            / "default"
+            / "home"
+            / ".hermes"
+            / "profiles"
+            / "research"
+            / "SOUL.md"
+        )
+
+        from tools.file_tools import patch_tool
+
+        result = json.loads(
+            patch_tool(
+                mode="patch",
+                patch=(
+                    "*** Begin Patch\n"
+                    f"*** Update File: {target}\n"
+                    "@@ soul @@\n"
+                    "-old\n"
+                    "+new\n"
+                    "*** End Patch\n"
+                ),
+            )
+        )
+
+        assert "error" in result
+        assert "host_sandbox_mirror" in result["error"]
+        assert "sandboxes/docker/default/home/.hermes" in result["error"]
         mock_get.assert_not_called()
 
     @patch("tools.file_tools._get_file_ops")
