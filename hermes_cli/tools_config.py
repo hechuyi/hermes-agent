@@ -457,7 +457,11 @@ TOOL_CATEGORIES = {
 }
 
 # Simple env-var requirements for toolsets NOT in TOOL_CATEGORIES.
-# Used as a fallback for tools like vision/moa that just need an API key.
+# Used as a fallback for toolsets that just need an API key.
+#
+# Vision is listed here only so it registers as configurable. Its setup uses
+# _configure_vision_backend(), which writes auxiliary.vision.* for the runtime
+# resolver instead of prompting for one fixed provider key.
 TOOLSET_ENV_REQUIREMENTS = {
     "vision":     [("OPENROUTER_API_KEY",   "https://openrouter.ai/keys")],
     "moa":        [("OPENROUTER_API_KEY",   "https://openrouter.ai/keys")],
@@ -2494,44 +2498,134 @@ def _configure_provider(
                 img_cfg["provider"] = "fal"
 
 
+def _configure_vision_backend() -> None:
+    """Configure auxiliary vision through the provider/model resolver surface."""
+    print()
+    print(color("  Vision / Image Analysis needs a multimodal model.", Colors.YELLOW))
+    print(color(
+        "  Pick any provider + model, or let Hermes auto-detect one.",
+        Colors.DIM,
+    ))
+
+    choices = [
+        "Auto - use main model / aggregator fallback",
+        "Pick a provider and model",
+        "Custom OpenAI-compatible endpoint - base URL, API key, model",
+        "Skip",
+    ]
+    idx = _prompt_choice("  Configure vision backend", choices, 0)
+
+    config = load_config()
+    aux = config.setdefault("auxiliary", {})
+    if not isinstance(aux, dict):
+        aux = {}
+        config["auxiliary"] = aux
+    vision_cfg = aux.setdefault("vision", {})
+    if not isinstance(vision_cfg, dict):
+        vision_cfg = {}
+        aux["vision"] = vision_cfg
+
+    if idx == 0:
+        for key in ("provider", "model", "base_url", "api_key", "api_mode"):
+            vision_cfg.pop(key, None)
+        save_config(config)
+        _print_success("  Vision set to auto")
+        return
+
+    if idx == 1:
+        _configure_vision_provider_model(config, vision_cfg)
+        return
+
+    if idx == 2:
+        base_url = _prompt("    Base URL (blank for OpenAI)").strip() or "https://api.openai.com/v1"
+        is_native_openai = base_url_hostname(base_url) == "api.openai.com"
+        key_label = "    OPENAI_API_KEY" if is_native_openai else "    API key"
+        api_key = _prompt(key_label, password=True)
+        if not (api_key and api_key.strip()):
+            _print_warning("    Skipped")
+            return
+        default_model = "gpt-4o-mini" if is_native_openai else ""
+        model = _prompt(
+            f"    Vision model{f' (blank for {default_model})' if default_model else ''}"
+        ).strip() or default_model
+        save_env_value("OPENAI_API_KEY", api_key.strip())
+        vision_cfg["provider"] = "custom"
+        vision_cfg["base_url"] = base_url
+        if model:
+            vision_cfg["model"] = model
+        else:
+            vision_cfg.pop("model", None)
+        save_config(config)
+        _print_success(f"  Vision set to custom endpoint{f' ({model})' if model else ''}")
+        return
+
+    _print_info("  Skipped vision configuration")
+
+
+def _configure_vision_provider_model(config: dict, vision_cfg: dict) -> None:
+    """Pick any authenticated provider/model pair for auxiliary vision."""
+    try:
+        from hermes_cli.model_switch import list_authenticated_providers
+    except Exception as exc:  # pragma: no cover - import guard
+        _print_warning(f"  Could not load provider list: {exc}")
+        return
+
+    try:
+        providers = list_authenticated_providers(max_models=40)
+    except Exception as exc:
+        _print_warning(f"  Could not detect providers: {exc}")
+        providers = []
+
+    if not providers:
+        _print_warning(
+            "  No authenticated providers found. Configure a provider first "
+            "with `hermes model`, then re-run this."
+        )
+        return
+
+    provider_labels = []
+    for provider in providers:
+        name = provider.get("name") or provider.get("slug")
+        total = provider.get("total_models", len(provider.get("models", [])))
+        provider_labels.append(f"{name}  ({total} models)" if total else str(name))
+    provider_labels.append("Cancel")
+
+    pidx = _prompt_choice("  Choose vision provider:", provider_labels, 0)
+    if pidx >= len(providers):
+        _print_info("  Cancelled")
+        return
+
+    chosen = providers[pidx]
+    slug = chosen.get("slug")
+    models = list(chosen.get("models", []))
+    model_choices = list(models) + ["Type a custom model id"]
+    midx = _prompt_choice(
+        f"  Choose vision model for {chosen.get('name') or slug}:",
+        model_choices,
+        0,
+    )
+    if midx < len(models):
+        model = models[midx]
+    else:
+        model = _prompt("    Model id").strip()
+        if not model:
+            _print_warning("  No model entered - cancelled")
+            return
+
+    vision_cfg["provider"] = slug
+    vision_cfg["model"] = model
+    vision_cfg.pop("base_url", None)
+    vision_cfg.pop("api_key", None)
+    save_config(config)
+    _print_success(f"  Vision set to {slug} / {model}")
+
+
 def _configure_simple_requirements(ts_key: str):
     """Simple fallback for toolsets that just need env vars (no provider selection)."""
     if ts_key == "vision":
         if _toolset_has_keys("vision"):
             return
-        print()
-        print(color("  Vision / Image Analysis requires a multimodal backend:", Colors.YELLOW))
-        choices = [
-            "OpenRouter — uses Gemini",
-            "OpenAI-compatible endpoint — base URL, API key, and vision model",
-            "Skip",
-        ]
-        idx = _prompt_choice("  Configure vision backend", choices, 2)
-        if idx == 0:
-            _print_info("  Get key at: https://openrouter.ai/keys")
-            value = _prompt("    OPENROUTER_API_KEY", password=True)
-            if value and value.strip():
-                save_env_value("OPENROUTER_API_KEY", value.strip())
-                _print_success("    Saved")
-            else:
-                _print_warning("    Skipped")
-        elif idx == 1:
-            base_url = _prompt("    OPENAI_BASE_URL (blank for OpenAI)").strip() or "https://api.openai.com/v1"
-            is_native_openai = base_url_hostname(base_url) == "api.openai.com"
-            key_label = "    OPENAI_API_KEY" if is_native_openai else "    API key"
-            api_key = _prompt(key_label, password=True)
-            if api_key and api_key.strip():
-                save_env_value("OPENAI_API_KEY", api_key.strip())
-                # Save vision base URL to config (not .env — only secrets go there)
-                _cfg = load_config()
-                _aux = _cfg.setdefault("auxiliary", {}).setdefault("vision", {})
-                _aux["base_url"] = base_url
-                save_config(_cfg)
-                if is_native_openai:
-                    save_env_value("AUXILIARY_VISION_MODEL", "gpt-4o-mini")
-                _print_success("    Saved")
-            else:
-                _print_warning("    Skipped")
+        _configure_vision_backend()
         return
 
     requirements = TOOLSET_ENV_REQUIREMENTS.get(ts_key, [])
@@ -2827,6 +2921,10 @@ def _reconfigure_provider(
 
 def _reconfigure_simple_requirements(ts_key: str):
     """Reconfigure simple env var requirements."""
+    if ts_key == "vision":
+        _configure_vision_backend()
+        return
+
     requirements = TOOLSET_ENV_REQUIREMENTS.get(ts_key, [])
     if not requirements:
         return

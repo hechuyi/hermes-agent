@@ -1118,6 +1118,100 @@ class TestImagegenModelPicker:
         assert config["image_gen"]["model"] == "fal-ai/flux-2/klein/9b"
 
 
+def test_vision_picker_writes_provider_and_model(tmp_path, monkeypatch):
+    """Picking a provider+model persists auxiliary.vision.{provider,model}."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    import hermes_cli.tools_config as tc
+    from hermes_cli.config import load_config
+
+    fake_providers = [
+        {
+            "slug": "anthropic",
+            "name": "Anthropic",
+            "total_models": 2,
+            "models": ["claude-sonnet-4.6", "claude-opus-4.6"],
+        },
+        {
+            "slug": "openai",
+            "name": "OpenAI",
+            "total_models": 1,
+            "models": ["gpt-5.4"],
+        },
+    ]
+    seq = iter([1, 0, 1])
+    with patch(
+        "hermes_cli.model_switch.list_authenticated_providers",
+        return_value=fake_providers,
+    ), patch.object(
+        tc, "_prompt_choice", side_effect=lambda *a, **k: next(seq)
+    ):
+        tc._configure_vision_backend()
+
+    v = load_config().get("auxiliary", {}).get("vision", {})
+    assert v.get("provider") == "anthropic"
+    assert v.get("model") == "claude-opus-4.6"
+    assert not v.get("base_url")
+
+
+def test_vision_picker_auto_clears_override(tmp_path, monkeypatch):
+    """Choosing auto clears pinned provider/model so resolution can detect."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    import hermes_cli.tools_config as tc
+    from hermes_cli.config import load_config, save_config
+
+    cfg = load_config()
+    cfg.setdefault("auxiliary", {})["vision"] = {
+        "provider": "openrouter",
+        "model": "google/gemini-2.5-flash",
+        "base_url": "https://stale.example/v1",
+    }
+    save_config(cfg)
+
+    with patch.object(tc, "_prompt_choice", return_value=0):
+        tc._configure_vision_backend()
+
+    v = load_config().get("auxiliary", {}).get("vision", {})
+    assert v.get("provider") in (None, "", "auto")
+    assert not v.get("model")
+    assert not v.get("base_url")
+
+
+def test_vision_picker_custom_endpoint(tmp_path, monkeypatch):
+    """Custom endpoint writes base_url+model to config and the key to env."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    import hermes_cli.tools_config as tc
+    from hermes_cli.config import load_config
+
+    prompts = iter(["https://my.endpoint/v1", "sk-secret", "my-vision-model"])
+    with patch.object(tc, "_prompt_choice", return_value=2), patch.object(
+        tc, "_prompt", side_effect=lambda *a, **k: next(prompts)
+    ), patch.object(tc, "save_env_value") as save_env:
+        tc._configure_vision_backend()
+
+    v = load_config().get("auxiliary", {}).get("vision", {})
+    assert v.get("base_url") == "https://my.endpoint/v1"
+    assert v.get("model") == "my-vision-model"
+    assert v.get("provider") == "custom"
+    save_env.assert_called_once_with("OPENAI_API_KEY", "sk-secret")
+
+
+def test_reconfigure_vision_uses_backend_picker(monkeypatch):
+    """Vision reconfigure must not fall back to the OpenRouter key prompt."""
+    import hermes_cli.tools_config as tc
+
+    called = []
+    monkeypatch.setattr(tc, "_configure_vision_backend", lambda: called.append("vision"))
+    monkeypatch.setattr(
+        tc,
+        "_prompt",
+        lambda *a, **k: pytest.fail("generic env prompt should not run"),
+    )
+
+    tc._reconfigure_simple_requirements("vision")
+
+    assert called == ["vision"]
+
+
 def test_save_platform_tools_normalizes_numeric_mcp_entries():
     """YAML may parse bare numeric MCP server names as int. Configured MCP
     names should be normalized to str so they survive the save round-trip.
