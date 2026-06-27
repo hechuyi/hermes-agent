@@ -70,6 +70,21 @@ def test_send_message_delivers_to_feishu_and_rejects_other_platforms():
     assert rejected["error"].startswith("Unsupported delivery platform: telegram")
 
 
+def test_send_message_rejects_email_before_home_channel_lookup():
+    rejected = json.loads(
+        send_message_tool(
+            {
+                "action": "send",
+                "target": "email:user@example.com",
+                "message": "hello",
+            }
+        )
+    )
+
+    assert rejected["error"].startswith("Unsupported delivery platform: email")
+    assert "EMAIL_HOME_CHANNEL" not in rejected["error"]
+
+
 def test_send_message_schema_is_feishu_only():
     serialized = json.dumps(SEND_MESSAGE_SCHEMA).lower()
 
