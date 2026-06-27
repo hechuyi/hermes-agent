@@ -72,6 +72,32 @@ def _make_agent(monkeypatch, provider, api_mode="chat_completions", base_url="ht
 # ── _build_api_kwargs tests ─────────────────────────────────────────────────
 
 class TestBuildApiKwargsOpenRouter:
+    def _messages_with_extra_content(self):
+        return [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "Checking now.",
+                "codex_reasoning_items": [
+                    {"type": "reasoning", "id": "rs_1", "encrypted_content": "blob"},
+                ],
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "call_id": "call_123",
+                        "response_item_id": "fc_123",
+                        "type": "function",
+                        "function": {
+                            "name": "terminal",
+                            "arguments": "{\"command\":\"pwd\"}",
+                        },
+                        "extra_content": {"google": {"thought_signature": "opaque"}},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_123", "content": "/tmp"},
+        ]
+
     def test_uses_chat_completions_format(self, monkeypatch):
         agent = _make_agent(monkeypatch, "openrouter")
         messages = [{"role": "user", "content": "hi"}]
@@ -107,27 +133,7 @@ class TestBuildApiKwargsOpenRouter:
 
     def test_strips_codex_only_tool_call_fields_from_chat_messages(self, monkeypatch):
         agent = _make_agent(monkeypatch, "openrouter")
-        messages = [
-            {"role": "user", "content": "hi"},
-            {
-                "role": "assistant",
-                "content": "Checking now.",
-                "codex_reasoning_items": [
-                    {"type": "reasoning", "id": "rs_1", "encrypted_content": "blob"},
-                ],
-                "tool_calls": [
-                    {
-                        "id": "call_123",
-                        "call_id": "call_123",
-                        "response_item_id": "fc_123",
-                        "type": "function",
-                        "function": {"name": "terminal", "arguments": "{\"command\":\"pwd\"}"},
-                        "extra_content": {"thought_signature": "opaque"},
-                    }
-                ],
-            },
-            {"role": "tool", "tool_call_id": "call_123", "content": "/tmp"},
-        ]
+        messages = self._messages_with_extra_content()
 
         kwargs = agent._build_api_kwargs(messages)
 
@@ -137,7 +143,7 @@ class TestBuildApiKwargsOpenRouter:
         assert "codex_reasoning_items" not in assistant_msg
         assert tool_call["id"] == "call_123"
         assert tool_call["function"]["name"] == "terminal"
-        assert tool_call["extra_content"] == {"thought_signature": "opaque"}
+        assert "extra_content" not in tool_call
         assert "call_id" not in tool_call
         assert "response_item_id" not in tool_call
 
@@ -145,6 +151,62 @@ class TestBuildApiKwargsOpenRouter:
         assert messages[1]["tool_calls"][0]["call_id"] == "call_123"
         assert messages[1]["tool_calls"][0]["response_item_id"] == "fc_123"
         assert "codex_reasoning_items" in messages[1]
+        assert messages[1]["tool_calls"][0]["extra_content"] == {
+            "google": {"thought_signature": "opaque"}
+        }
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "anthropic/claude-sonnet-4-20250514",
+            "accounts/fireworks/models/llama-v3p1-70b",
+            "mistral-large-latest",
+        ],
+    )
+    def test_strips_extra_content_for_non_gemini_openai_compatible_targets(
+        self, monkeypatch, model
+    ):
+        agent = _make_agent(monkeypatch, "openrouter", model=model)
+        messages = self._messages_with_extra_content()
+
+        kwargs = agent._build_api_kwargs(messages)
+        tool_call = kwargs["messages"][1]["tool_calls"][0]
+
+        assert "extra_content" not in tool_call
+        assert "call_id" not in tool_call
+        assert "response_item_id" not in tool_call
+        assert messages[1]["tool_calls"][0]["extra_content"] == {
+            "google": {"thought_signature": "opaque"}
+        }
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "google/gemini-3-pro-preview",
+            "gemini-3-flash-preview",
+            "google/gemma-4-31b-it",
+            "gemma-3-27b-it",
+        ],
+    )
+    def test_keeps_extra_content_for_gemini_and_gemma_targets(
+        self, monkeypatch, model
+    ):
+        agent = _make_agent(monkeypatch, "openrouter", model=model)
+        messages = self._messages_with_extra_content()
+
+        kwargs = agent._build_api_kwargs(messages)
+        tool_call = kwargs["messages"][1]["tool_calls"][0]
+
+        assert tool_call["extra_content"] == {
+            "google": {"thought_signature": "opaque"}
+        }
+        assert "call_id" not in tool_call
+        assert "response_item_id" not in tool_call
+        assert messages[1]["tool_calls"][0]["call_id"] == "call_123"
+        assert messages[1]["tool_calls"][0]["response_item_id"] == "fc_123"
+        assert messages[1]["tool_calls"][0]["extra_content"] == {
+            "google": {"thought_signature": "opaque"}
+        }
 
     def test_gemini_native_passes_base_url_for_top_level_thinking_config(self, monkeypatch):
         agent = _make_agent(
@@ -192,6 +254,66 @@ class TestBuildApiKwargsOpenRouter:
         anthropic_agent = _make_agent(monkeypatch, "openrouter")
         anthropic_agent.api_mode = "anthropic_messages"
         assert anthropic_agent._should_sanitize_tool_calls() is True
+
+    def _api_msg_with_extra_content(self):
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "call_id": "call_1",
+                    "response_item_id": "fc_1",
+                    "type": "function",
+                    "extra_content": {"google": {"thought_signature": "SIG_123"}},
+                    "function": {"name": "t", "arguments": "{}"},
+                },
+            ],
+        }
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "anthropic/claude-sonnet-4-20250514",
+            "accounts/fireworks/models/llama-v3p1-70b",
+            "mistral-large-latest",
+            None,
+        ],
+    )
+    def test_sanitize_tool_calls_strips_extra_content_for_non_gemini_models(
+        self, monkeypatch, model
+    ):
+        agent = _make_agent(monkeypatch, "openrouter")
+        api_msg = self._api_msg_with_extra_content()
+
+        result = agent._sanitize_tool_calls_for_strict_api(api_msg, model=model)
+
+        assert "extra_content" not in result["tool_calls"][0]
+        assert "call_id" not in result["tool_calls"][0]
+        assert "response_item_id" not in result["tool_calls"][0]
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "google/gemini-3-pro-preview",
+            "gemini-3-flash-preview",
+            "google/gemma-4-31b-it",
+            "gemma-3-27b-it",
+        ],
+    )
+    def test_sanitize_tool_calls_keeps_extra_content_for_gemini_and_gemma(
+        self, monkeypatch, model
+    ):
+        agent = _make_agent(monkeypatch, "openrouter")
+        api_msg = self._api_msg_with_extra_content()
+
+        result = agent._sanitize_tool_calls_for_strict_api(api_msg, model=model)
+
+        assert result["tool_calls"][0]["extra_content"] == {
+            "google": {"thought_signature": "SIG_123"}
+        }
+        assert "call_id" not in result["tool_calls"][0]
+        assert "response_item_id" not in result["tool_calls"][0]
 
 
 class TestDeveloperRoleSwap:

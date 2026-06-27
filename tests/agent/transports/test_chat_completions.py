@@ -46,6 +46,81 @@ class TestChatCompletionsBasic:
         assert "codex_reasoning_items" in msgs[0]
         assert "codex_message_items" in msgs[0]
 
+    def _msg_with_extra_content(self):
+        return [
+            {
+                "role": "assistant",
+                "content": "ok",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "call_id": "call_1",
+                        "response_item_id": "fc_1",
+                        "type": "function",
+                        "extra_content": {"google": {"thought_signature": "SIG_123"}},
+                        "function": {"name": "t", "arguments": "{}"},
+                    }
+                ],
+            },
+        ]
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "anthropic/claude-sonnet-4-20250514",
+            "accounts/fireworks/models/llama-v3p1-70b",
+            "mistral-large-latest",
+        ],
+    )
+    def test_convert_messages_strips_extra_content_for_non_gemini_models(
+        self, transport, model
+    ):
+        msgs = self._msg_with_extra_content()
+
+        result = transport.convert_messages(msgs, model=model)
+
+        assert "extra_content" not in result[0]["tool_calls"][0]
+        assert "call_id" not in result[0]["tool_calls"][0]
+        assert "response_item_id" not in result[0]["tool_calls"][0]
+        assert msgs[0]["tool_calls"][0]["extra_content"] == {
+            "google": {"thought_signature": "SIG_123"}
+        }
+
+    def test_convert_messages_strips_extra_content_when_model_unknown(self, transport):
+        msgs = self._msg_with_extra_content()
+
+        result = transport.convert_messages(msgs)
+
+        assert "extra_content" not in result[0]["tool_calls"][0]
+        assert "extra_content" in msgs[0]["tool_calls"][0]
+
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "google/gemini-3-pro-preview",
+            "gemini-3-flash-preview",
+            "google/gemma-4-31b-it",
+            "gemma-3-27b-it",
+        ],
+    )
+    def test_convert_messages_keeps_extra_content_for_gemini_and_gemma(
+        self, transport, model
+    ):
+        msgs = self._msg_with_extra_content()
+
+        result = transport.convert_messages(msgs, model=model)
+
+        tool_call = result[0]["tool_calls"][0]
+        assert tool_call["extra_content"] == {
+            "google": {"thought_signature": "SIG_123"}
+        }
+        assert "call_id" not in tool_call
+        assert "response_item_id" not in tool_call
+        assert msgs[0]["tool_calls"][0]["call_id"] == "call_1"
+        assert msgs[0]["tool_calls"][0]["extra_content"] == {
+            "google": {"thought_signature": "SIG_123"}
+        }
+
     def test_convert_messages_strips_tool_name(self, transport):
         """Internal `tool_name` (used for FTS indexing in the SQLite store) is
         not part of the OpenAI Chat Completions schema. Strict providers like

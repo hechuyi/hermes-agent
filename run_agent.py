@@ -4574,26 +4574,38 @@ class AIAgent:
         return reapply_reasoning_echo_for_provider(self, api_messages)
 
     @staticmethod
-    def _sanitize_tool_calls_for_strict_api(api_msg: dict) -> dict:
+    def _sanitize_tool_calls_for_strict_api(
+        api_msg: dict, model: "str | None" = None
+    ) -> dict:
         """Strip Codex Responses API fields from tool_calls for strict providers.
 
         Providers like Mistral, Fireworks, and other strict OpenAI-compatible APIs
         validate the Chat Completions schema and reject unknown fields (call_id,
-        response_item_id) with 400 or 422 errors. These fields are preserved in
-        the internal message history — this method only modifies the outgoing
-        API copy.
+        response_item_id, extra_content) with 400 or 422 errors. These fields
+        are preserved in the internal message history — this method only
+        modifies the outgoing API copy.
+
+        ``extra_content`` is a Gemini/Gemma thought-signature replay field.
+        Keep it only when the outgoing model can consume it; strip it by
+        default, including when model is unknown.
 
         Creates new tool_call dicts rather than mutating in-place, so the
-        original messages list retains call_id/response_item_id for Codex
-        Responses API compatibility (e.g. if the session falls back to a
-        Codex provider later).
+        original messages list retains call_id/response_item_id/extra_content
+        for Codex Responses or Gemini/Gemma replay compatibility.
 
-        Fields stripped: call_id, response_item_id
+        Fields stripped: call_id, response_item_id, and model-gated
+        extra_content.
         """
         tool_calls = api_msg.get("tool_calls")
         if not isinstance(tool_calls, list):
             return api_msg
+        from agent.transports.chat_completions import (
+            _model_consumes_thought_signature,
+        )
+
         _STRIP_KEYS = {"call_id", "response_item_id"}
+        if not _model_consumes_thought_signature(model):
+            _STRIP_KEYS = _STRIP_KEYS | {"extra_content"}
         api_msg["tool_calls"] = [
             {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
             if isinstance(tc, dict) else tc

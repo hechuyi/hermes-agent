@@ -99,6 +99,21 @@ def _is_gemini_openai_compat_base_url(base_url: Any) -> bool:
     return normalized.endswith("/openai")
 
 
+def _model_consumes_thought_signature(model: Any) -> bool:
+    """Return True when the target model may need Gemini thought signatures.
+
+    Gemini/Gemma tool calls can carry ``extra_content`` with an opaque Google
+    thought signature that must be replayed on later turns. Strict
+    OpenAI-compatible APIs reject that same unknown field for other model
+    families, so default to stripping it unless the outgoing model is gated in.
+    """
+    normalized = str(model or "").strip().lower()
+    if not normalized:
+        return False
+    leaf = normalized.rsplit("/", 1)[-1]
+    return leaf.startswith(("gemini", "gemma"))
+
+
 class ChatCompletionsTransport(ProviderTransport):
     """Transport for api_mode='chat_completions'.
 
@@ -119,6 +134,10 @@ class ChatCompletionsTransport(ProviderTransport):
         - Codex Responses API fields: ``codex_reasoning_items`` /
           ``codex_message_items`` on the message, ``call_id`` /
           ``response_item_id`` on ``tool_calls`` entries.
+        - ``extra_content`` on ``tool_calls`` (Gemini/Gemma thought
+          signature), unless the outgoing ``model`` is Gemini/Gemma. Strict
+          OpenAI-compatible providers reject it as an unknown field; Google
+          thinking models can require it for multi-turn tool-call replay.
         - ``tool_name`` on tool-result messages — written by
           ``make_tool_result_message()`` for the SQLite FTS index, but not
           part of the Chat Completions schema. Strict providers (Fireworks,
@@ -137,6 +156,9 @@ class ChatCompletionsTransport(ProviderTransport):
           ``Extra inputs are not permitted, field: 'messages[N]._empty_recovery_synthetic'``,
           which then poisons every subsequent request in the session.
         """
+        strip_extra_content = not _model_consumes_thought_signature(
+            kwargs.get("model")
+        )
         needs_sanitize = False
         for msg in messages:
             if not isinstance(msg, dict):
@@ -155,7 +177,9 @@ class ChatCompletionsTransport(ProviderTransport):
             if isinstance(tool_calls, list):
                 for tc in tool_calls:
                     if isinstance(tc, dict) and (
-                        "call_id" in tc or "response_item_id" in tc
+                        "call_id" in tc
+                        or "response_item_id" in tc
+                        or (strip_extra_content and "extra_content" in tc)
                     ):
                         needs_sanitize = True
                         break
@@ -183,6 +207,8 @@ class ChatCompletionsTransport(ProviderTransport):
                     if isinstance(tc, dict):
                         tc.pop("call_id", None)
                         tc.pop("response_item_id", None)
+                        if strip_extra_content:
+                            tc.pop("extra_content", None)
         return sanitized
 
     def convert_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -240,8 +266,9 @@ class ChatCompletionsTransport(ProviderTransport):
             anthropic_max_output: int | None
             extra_body_additions: dict | None
         """
-        # Codex sanitization: drop reasoning_items / call_id / response_item_id
-        sanitized = self.convert_messages(messages)
+        # Codex/strict-API sanitization. Pass model so Gemini/Gemma thought
+        # signatures are kept only for model families that can consume them.
+        sanitized = self.convert_messages(messages, model=model)
 
         # ── Provider profile: single-path when present ──────────────────
         _profile = params.get("provider_profile")
