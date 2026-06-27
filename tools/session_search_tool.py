@@ -37,6 +37,8 @@ from typing import Any, Dict, List, Optional, Union
 # Third-party integrations tag their sessions with HERMES_SESSION_SOURCE=tool
 # so they don't clutter the user's session history.
 _HIDDEN_SESSION_SOURCES = ("tool",)
+_DEMOTED_SESSION_SOURCES = ("cron",)
+_DISCOVER_SCAN_LIMIT = 300
 _IMPLICIT_SCOPE = "__implicit__"
 _VALID_SCOPES = {"current_chat", "current_route", "global"}
 
@@ -100,6 +102,14 @@ def _same_compression_lineage(db, left_session_id: str, right_session_id: str) -
     if not left_session_id or not right_session_id:
         return False
     return _compression_root(db, left_session_id) == _compression_root(db, right_session_id)
+
+
+def _order_for_recall(raw_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Stable-sort FTS rows so scheduled automation cannot crowd out chats."""
+    return sorted(
+        raw_results,
+        key=lambda r: 1 if (r.get("source") or "") in _DEMOTED_SESSION_SOURCES else 0,
+    )
 
 
 def _shape_message(m: Dict[str, Any], anchor_id: Optional[int] = None) -> Dict[str, Any]:
@@ -439,6 +449,108 @@ def _scroll(
     return json.dumps(response, ensure_ascii=False)
 
 
+def _normalize_title_query(query: str) -> str:
+    """Strip common quoting the model may include around a remembered title."""
+    return query.strip().strip("`'\"")
+
+
+def _title_match_result(
+    db,
+    query: str,
+    current_session_id: Optional[str],
+    current_lineage_root: Optional[str],
+    scope: str,
+    current_conversation_scope_id: Optional[str],
+    current_route_partition_key: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    title_query = _normalize_title_query(query)
+    if not title_query:
+        return None
+
+    scope_kwargs = _scope_filter_kwargs(
+        scope,
+        current_conversation_scope_id=current_conversation_scope_id,
+        current_route_partition_key=current_route_partition_key,
+    )
+    try:
+        session_id = db.resolve_session_by_title(title_query, **scope_kwargs)
+    except Exception:
+        logging.debug("resolve_session_by_title failed for %r", title_query, exc_info=True)
+        return None
+    if not session_id:
+        return None
+
+    lineage_root = _resolve_to_parent(db, session_id)
+    if current_session_id and session_id == current_session_id:
+        return None
+    if current_lineage_root and lineage_root == current_lineage_root:
+        return None
+
+    try:
+        hit_meta = db.get_session(session_id) or {}
+    except Exception:
+        logging.debug("get_session failed for title match %s", session_id, exc_info=True)
+        hit_meta = {}
+    if hit_meta.get("source") in _HIDDEN_SESSION_SOURCES:
+        return None
+
+    try:
+        root_meta = db.get_session(lineage_root) or {}
+    except Exception:
+        root_meta = {}
+    session_meta = hit_meta or root_meta
+
+    try:
+        messages = db.get_messages(session_id)
+    except Exception:
+        logging.debug("get_messages failed for title match %s", session_id, exc_info=True)
+        messages = []
+
+    anchor_id = messages[0].get("id") if messages else None
+    if anchor_id is not None:
+        try:
+            view = db.get_anchored_view(
+                session_id,
+                anchor_id,
+                window=5,
+                bookend=3,
+                **scope_kwargs,
+            )
+        except Exception:
+            logging.debug(
+                "get_anchored_view failed for title match %s/%s",
+                session_id,
+                anchor_id,
+                exc_info=True,
+            )
+            view = {}
+    else:
+        view = {}
+
+    entry = {
+        "session_id": session_id,
+        "when": _format_timestamp(session_meta.get("started_at")),
+        "source": session_meta.get("source", "unknown"),
+        "model": session_meta.get("model") or "unknown",
+        "title": session_meta.get("title") or title_query,
+        "matched_role": "session_title",
+        "match_message_id": anchor_id,
+        "snippet": f"Session title matched: {session_meta.get('title') or title_query}",
+        "conversation_scope_id": session_meta.get("conversation_scope_id"),
+        "route_partition_key": session_meta.get("route_partition_key"),
+        "scope_assignment_status": session_meta.get("scope_assignment_status"),
+        "bookend_start": [_shape_message(m) for m in (view.get("bookend_start") or messages[:3])],
+        "messages": [_shape_message(m, anchor_id=anchor_id) for m in (view.get("window") or messages[:5])],
+        "bookend_end": [_shape_message(m) for m in (view.get("bookend_end") or messages[-3:])],
+        "messages_before": view.get("messages_before", 0),
+        "messages_after": view.get("messages_after", max(len(messages) - 5, 0)),
+        "_lineage_root": lineage_root,
+    }
+    if lineage_root and lineage_root != session_id:
+        entry["parent_session_id"] = lineage_root
+    return entry
+
+
 def _discover(
     db,
     query: str,
@@ -452,6 +564,16 @@ def _discover(
 ) -> str:
     """Discovery shape: FTS5 + anchored window + bookends per hit. Single call."""
     role_list = role_filter if role_filter else ["user", "assistant"]
+    current_lineage_root = _resolve_to_parent(db, current_session_id) if current_session_id else None
+    title_result = _title_match_result(
+        db,
+        query,
+        current_session_id,
+        current_lineage_root,
+        scope,
+        current_conversation_scope_id,
+        current_route_partition_key,
+    )
 
     try:
         scope_kwargs = _scope_filter_kwargs(
@@ -463,7 +585,7 @@ def _discover(
             query=query,
             role_filter=role_list,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
-            limit=50,  # widen so dedup-by-lineage can find distinct sessions
+            limit=_DISCOVER_SCAN_LIMIT,
             offset=0,
             sort=sort,
             **scope_kwargs,
@@ -472,7 +594,9 @@ def _discover(
         logging.error("FTS5 search failed: %s", e, exc_info=True)
         return tool_error(f"Search failed: {e}", success=False)
 
-    if not raw_results:
+    raw_results = _order_for_recall(raw_results)
+
+    if not raw_results and not title_result:
         return json.dumps({
             "success": True,
             "mode": "discover",
@@ -482,13 +606,20 @@ def _discover(
             "message": "No matching sessions found.",
         }, ensure_ascii=False)
 
-    current_lineage_root = _resolve_to_parent(db, current_session_id) if current_session_id else None
-
     # Dedupe by lineage. Keep the raw owning session_id on the surviving
     # row — only that pairs validly with the FTS5 match id for the anchored
     # window. parent_session_id is exposed separately when different.
     seen_sessions = {}
+    results = []
+    if title_result:
+        title_lineage = title_result.pop("_lineage_root", None)
+        if title_lineage:
+            seen_sessions[title_lineage] = {"_title_only": True}
+        results.append(title_result)
+
     for r in raw_results:
+        if len(seen_sessions) >= limit:
+            break
         raw_sid = r["session_id"]
         resolved_sid = _resolve_to_parent(db, raw_sid)
         # Skip the current session lineage
@@ -503,8 +634,9 @@ def _discover(
         if len(seen_sessions) >= limit:
             break
 
-    results = []
     for lineage_root, match_info in seen_sessions.items():
+        if match_info.get("_title_only"):
+            continue
         hit_sid = match_info.get("session_id") or lineage_root
         msg_id = match_info.get("id")
         try:

@@ -13,6 +13,7 @@ import time
 import pytest
 
 from hermes_state import SessionDB
+from tools import session_search_tool as session_search_mod
 from tools.session_search_tool import (
     SESSION_SEARCH_SCHEMA,
     _HIDDEN_SESSION_SOURCES,
@@ -70,6 +71,11 @@ def _create_scoped_session(db, session_id, *, scope_id, route_key, content):
     mid = db.append_message(session_id, role="user", content=content)
     db._conn.commit()
     return mid
+
+
+def _set_session_title(db, session_id, title):
+    db._conn.execute("UPDATE sessions SET title = ? WHERE id = ?", (title, session_id))
+    db._conn.commit()
 
 
 def _create_compression_child(db, parent_id, child_id, *, scope_id, route_key, content):
@@ -269,6 +275,124 @@ class TestDiscoveryShape:
         sids = [r["session_id"] for r in result["results"]]
         assert "s_newest" not in sids
 
+    def test_query_can_match_session_title_without_message_hit(self, db):
+        db.create_session("s_fingerprint", source="cli")
+        _set_session_title(db, "s_fingerprint", "fingerprint-login")
+        db.append_message("s_fingerprint", role="user", content="configure PAM for biometric auth")
+        db.append_message("s_fingerprint", role="assistant", content="Checking Linux auth settings.")
+        db._conn.commit()
+
+        result = json.loads(session_search(query="fingerprint-login", db=db, scope="global"))
+
+        assert result["success"] is True
+        assert result["count"] == 1
+        hit = result["results"][0]
+        assert hit["session_id"] == "s_fingerprint"
+        assert hit["title"] == "fingerprint-login"
+        assert hit["matched_role"] == "session_title"
+        assert "Session title matched" in hit["snippet"]
+
+    def test_title_query_strips_common_model_quoting(self, db):
+        db.create_session("s_fingerprint", source="cli")
+        _set_session_title(db, "s_fingerprint", "fingerprint-login")
+        db.append_message("s_fingerprint", role="user", content="PAM auth setup")
+        db._conn.commit()
+
+        result = json.loads(session_search(query="`fingerprint-login`", db=db, scope="global"))
+
+        assert result["success"] is True
+        assert result["results"][0]["session_id"] == "s_fingerprint"
+        assert result["results"][0]["matched_role"] == "session_title"
+
+    def test_title_match_respects_current_session_filter(self, db):
+        db.create_session("s_current", source="cli")
+        _set_session_title(db, "s_current", "fingerprint-login")
+        db.append_message("s_current", role="user", content="PAM auth setup")
+        db._conn.commit()
+
+        result = json.loads(session_search(
+            query="fingerprint-login",
+            current_session_id="s_current",
+            db=db,
+            scope="global",
+        ))
+
+        assert result["success"] is True
+        assert result["results"] == []
+        assert result["count"] == 0
+
+    def test_title_match_respects_current_chat_scope(self, db):
+        _create_scoped_session(
+            db, "chat-a", scope_id="cs_a", route_key="route-a",
+            content="alpha body without title token",
+        )
+        _set_session_title(db, "chat-a", "chat-a-title")
+        _create_scoped_session(
+            db, "chat-b", scope_id="cs_b", route_key="route-b",
+            content="beta body without title token",
+        )
+        _set_session_title(db, "chat-b", "chat-b-title")
+
+        result = json.loads(session_search(
+            query="chat-b-title",
+            db=db,
+            current_conversation_scope_id="cs_a",
+            current_route_partition_key="route-a",
+        ))
+
+        assert result["success"] is True
+        assert result["results"] == []
+
+    def test_title_match_respects_current_route_scope(self, db):
+        _create_scoped_session(
+            db, "route-a", scope_id="cs_shared", route_key="route-a",
+            content="route a body without title token",
+        )
+        _set_session_title(db, "route-a", "route-a-title")
+        _create_scoped_session(
+            db, "route-b", scope_id="cs_shared", route_key="route-b",
+            content="route b body without title token",
+        )
+        _set_session_title(db, "route-b", "route-b-title")
+
+        route_result = json.loads(session_search(
+            query="route-b-title",
+            scope="current_route",
+            db=db,
+            current_conversation_scope_id="cs_shared",
+            current_route_partition_key="route-a",
+        ))
+        chat_result = json.loads(session_search(
+            query="route-b-title",
+            scope="current_chat",
+            db=db,
+            current_conversation_scope_id="cs_shared",
+            current_route_partition_key="route-a",
+        ))
+
+        assert route_result["success"] is True
+        assert route_result["results"] == []
+        assert chat_result["success"] is True
+        assert [r["session_id"] for r in chat_result["results"]] == ["route-b"]
+
+    def test_global_title_match_crosses_chat_scope(self, db):
+        _create_scoped_session(
+            db, "chat-b", scope_id="cs_b", route_key="route-b",
+            content="beta body without title token",
+        )
+        _set_session_title(db, "chat-b", "chat-b-title")
+
+        result = json.loads(session_search(
+            query="chat-b-title",
+            scope="global",
+            db=db,
+            current_conversation_scope_id="cs_a",
+            current_route_partition_key="route-a",
+        ))
+
+        assert result["success"] is True
+        assert [r["session_id"] for r in result["results"]] == ["chat-b"]
+
     def test_current_chat_scope_hides_other_chat_by_default(self, db):
         _create_scoped_session(
             db, "chat-a", scope_id="cs_a", route_key="route-a",
@@ -352,6 +476,58 @@ class TestRoleFilter:
         # Should now match the tool message
         if result["count"] > 0:
             assert result["results"][0]["matched_role"] == "tool"
+
+
+class TestCronDemotion:
+    def test_interactive_session_surfaces_above_cron(self, db):
+        now = int(time.time())
+        db.create_session("s_user", source="telegram")
+        db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 90000, "s_user"))
+        db.append_message("s_user", role="user", content="how is the venom project going")
+        db.append_message("s_user", role="assistant", content="The venom project shipped its first milestone.")
+
+        for i in range(60):
+            sid = f"cron_{i}"
+            db.create_session(sid, source="cron")
+            db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 1000 - i, sid))
+            db.append_message(sid, role="user", content="venom project daily status")
+            db.append_message(sid, role="assistant", content="venom project venom project venom summary")
+        db._conn.commit()
+
+        result = json.loads(session_search(query="venom project", limit=1, db=db, scope="global"))
+
+        assert result["success"] is True
+        assert result["count"] == 1
+        assert result["results"][0]["source"] == "telegram"
+        assert result["results"][0]["session_id"] == "s_user"
+
+    def test_cron_still_reachable_when_only_match(self, db):
+        now = int(time.time())
+        db.create_session("cron_only", source="cron")
+        db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = ?", (now - 500, "cron_only"))
+        db.append_message("cron_only", role="user", content="quarterly archive sweep")
+        db.append_message("cron_only", role="assistant", content="Archive sweep complete.")
+        db._conn.commit()
+
+        result = json.loads(session_search(query="archive sweep", db=db, scope="global"))
+
+        assert result["success"] is True
+        assert result["count"] == 1
+        assert result["results"][0]["source"] == "cron"
+
+    def test_order_for_recall_is_stable_within_source_class(self):
+        rows = [
+            {"id": 1, "source": "cron"},
+            {"id": 2, "source": "telegram"},
+            {"id": 3, "source": "cron"},
+            {"id": 4, "source": "cli"},
+            {"id": 5, "source": None},
+        ]
+
+        assert hasattr(session_search_mod, "_order_for_recall")
+        ordered = session_search_mod._order_for_recall(rows)
+
+        assert [r["id"] for r in ordered] == [2, 4, 5, 1, 3]
 
 
 # =========================================================================
