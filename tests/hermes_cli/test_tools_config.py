@@ -1,5 +1,6 @@
 """Tests for hermes_cli.tools_config platform tool persistence."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -53,6 +54,42 @@ def test_agent_disabled_toolsets_with_explicit_platform_config():
     assert "memory" not in enabled
     assert "web" in enabled
     assert "terminal" in enabled
+
+
+def test_all_invalid_platform_toolsets_logs_runtime_warning(caplog):
+    import hermes_cli.tools_config as tools_config
+
+    tools_config._warned_invalid_platform_toolsets.discard("cli")
+    config = {"platform_toolsets": {"cli": ["hermes"]}}
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.tools_config"):
+        _get_platform_tools(config, "cli")
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("#38798" in m and "hermes" in m for m in warnings), warnings
+
+
+def test_invalid_platform_toolsets_runtime_warning_fires_once(caplog):
+    import hermes_cli.tools_config as tools_config
+
+    tools_config._warned_invalid_platform_toolsets.discard("cli")
+    config = {"platform_toolsets": {"cli": ["hermes"]}}
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.tools_config"):
+        _get_platform_tools(config, "cli")
+        _get_platform_tools(config, "cli")
+
+    hits = [r for r in caplog.records if "#38798" in r.getMessage()]
+    assert len(hits) == 1
+
+
+def test_partially_valid_platform_toolsets_no_runtime_warning(caplog):
+    config = {"platform_toolsets": {"cli": ["hermes-cli", "bogus"]}}
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.tools_config"):
+        _get_platform_tools(config, "cli")
+
+    assert not any("#38798" in r.getMessage() for r in caplog.records)
 
 
 def test_agent_disabled_toolsets_empty_list_is_noop():

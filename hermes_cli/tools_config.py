@@ -34,6 +34,8 @@ from utils import base_url_hostname, is_truthy_value
 
 logger = logging.getLogger(__name__)
 
+_warned_invalid_platform_toolsets: Set[str] = set()
+
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 
@@ -1078,6 +1080,22 @@ def _get_platform_tools(
     )
     if context_engine_name and context_engine_name != "compressor" and not explicit_empty_selection:
         enabled_toolsets.add("context_engine")
+
+    if (
+        platform in platform_toolsets
+        and isinstance(platform_toolsets.get(platform), list)
+        and toolset_names
+        and not any(name in TOOLSETS or name in plugin_ts_keys for name in toolset_names)
+        and platform not in _warned_invalid_platform_toolsets
+    ):
+        _warned_invalid_platform_toolsets.add(platform)
+        logger.warning(
+            "platform '%s' has no valid toolsets configured (unknown name(s): %s) "
+            "- tools will be unavailable. Run `hermes tools` to reconfigure. "
+            "See issue #38798.",
+            platform,
+            ", ".join(toolset_names),
+        )
 
     # MCP servers are expected to be available on all platforms by default.
     # If the platform explicitly lists one or more MCP server names, treat that
