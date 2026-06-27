@@ -34,9 +34,11 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
 
         def _discover() -> None:
             try:
+                from tools.mcp_oauth import suppress_oauth_stdin_fallback
                 from tools.mcp_tool import discover_mcp_tools
 
-                discover_mcp_tools()
+                with suppress_oauth_stdin_fallback():
+                    discover_mcp_tools()
             except Exception:
                 logger.debug("Background MCP tool discovery failed", exc_info=True)
 

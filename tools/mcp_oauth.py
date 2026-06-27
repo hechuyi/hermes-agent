@@ -44,6 +44,8 @@ import sys
 import threading
 import time
 import webbrowser
+from contextlib import contextmanager
+from contextvars import ContextVar
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -103,6 +105,11 @@ _SKIP_TOKENS = frozenset({"skip", "cancel", "s", "n", "no", "q", "quit"})
 # server" rather than a hard failure.
 _USER_SKIPPED_SENTINEL = "__hermes_user_skipped__"
 
+_suppress_stdin_fallback: ContextVar[bool] = ContextVar(
+    "mcp_oauth_suppress_stdin_fallback",
+    default=False,
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -137,10 +144,22 @@ def _find_free_port() -> int:
 
 def _is_interactive() -> bool:
     """Return True if we can reasonably expect to interact with a user."""
+    if _suppress_stdin_fallback.get():
+        return False
     try:
         return sys.stdin.isatty()
     except (AttributeError, ValueError):
         return False
+
+
+@contextmanager
+def suppress_oauth_stdin_fallback():
+    """Temporarily disable OAuth stdin paste fallback in this context."""
+    token = _suppress_stdin_fallback.set(True)
+    try:
+        yield
+    finally:
+        _suppress_stdin_fallback.reset(token)
 
 
 def _can_open_browser() -> bool:
@@ -342,6 +361,10 @@ class HermesTokenStorage:
         """Delete all stored OAuth state for this server."""
         for p in (self._tokens_path(), self._client_info_path(), self._meta_path()):
             p.unlink(missing_ok=True)
+
+    def remove_client_info(self) -> None:
+        """Delete only the stored dynamic OAuth client registration."""
+        self._client_info_path().unlink(missing_ok=True)
 
     def has_cached_tokens(self) -> bool:
         """Return True if we have tokens on disk (may be expired)."""

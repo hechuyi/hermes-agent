@@ -177,6 +177,44 @@ class TestProbeMcpServerTools:
         assert result == {}
         mock_stop.assert_called_once()
 
+    def test_probe_does_not_stop_loop_with_live_servers(self):
+        """A config-time probe must not tear down an existing live MCP loop."""
+        config = {"github": {"command": "npx", "connect_timeout": 5}}
+        mock_server = MagicMock()
+        mock_server._tools = []
+        mock_server.shutdown = AsyncMock()
+        live_server = MagicMock()
+
+        async def fake_connect(name, cfg):
+            return mock_server
+
+        with patch("tools.mcp_tool._MCP_AVAILABLE", True), \
+             patch("tools.mcp_tool._load_mcp_config", return_value=config), \
+             patch("tools.mcp_tool._connect_server", side_effect=fake_connect), \
+             patch("tools.mcp_tool._ensure_mcp_loop"), \
+             patch("tools.mcp_tool._run_on_mcp_loop") as mock_run, \
+             patch("tools.mcp_tool._stop_mcp_loop") as mock_stop:
+
+            def run_coro(coro_or_factory, timeout=120):
+                coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
+                loop = asyncio.new_event_loop()
+                try:
+                    return loop.run_until_complete(coro)
+                finally:
+                    loop.close()
+
+            mock_run.side_effect = run_coro
+
+            import tools.mcp_tool as mcp
+            mcp._servers["live"] = live_server
+
+            from tools.mcp_tool import probe_mcp_server_tools
+            result = probe_mcp_server_tools()
+
+        assert result == {"github": []}
+        mock_server.shutdown.assert_awaited_once()
+        mock_stop.assert_not_called()
+
     def test_skips_disabled_servers(self):
         """Disabled servers are not probed."""
         config = {

@@ -323,12 +323,47 @@ def _make_hermes_provider_class() -> Optional[type]:
                 # 401 branch so a subsequent cold-load skips discovery.
                 self._persist_oauth_metadata_if_changed()
                 return
+            except Exception as exc:
+                get_manager().heal_invalid_client_if_needed(
+                    self._hermes_server_name, exc
+                )
+                raise
 
     return HermesMCPOAuthProvider
 
 
 # Cached at import time. Tested and used by :class:`MCPOAuthManager`.
 _HERMES_PROVIDER_CLS: Optional[type] = _make_hermes_provider_class()
+
+
+def _is_invalid_client_error(exc: BaseException) -> bool:
+    """Return True when an OAuth failure indicates stale client registration."""
+    candidates = [
+        getattr(exc, "error", None),
+        getattr(exc, "error_code", None),
+        getattr(exc, "code", None),
+        str(exc),
+    ]
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = response.json()
+        except Exception:
+            body = None
+        if isinstance(body, dict):
+            candidates.extend([
+                body.get("error"),
+                body.get("error_description"),
+            ])
+        candidates.append(getattr(response, "text", None))
+
+    for value in candidates:
+        if value is None:
+            continue
+        text = str(value).lower()
+        if "invalid_client" in text:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +495,38 @@ class MCPOAuthManager:
             "MCP OAuth '%s': evicted from cache and removed from disk",
             server_name,
         )
+
+    def heal_invalid_client_if_needed(
+        self,
+        server_name: str,
+        exc: BaseException,
+    ) -> bool:
+        """Clear stale OAuth client registration after ``invalid_client``.
+
+        Dynamic client registrations can expire or be revoked independently
+        from the token file. When the provider reports ``invalid_client``,
+        preserve tokens for diagnostics but delete the cached client-info
+        file so the next OAuth flow can register a fresh client instead of
+        replaying the known-bad client_id.
+        """
+        if not _is_invalid_client_error(exc):
+            return False
+
+        from tools.mcp_oauth import HermesTokenStorage
+
+        HermesTokenStorage(server_name).remove_client_info()
+        with self._entries_lock:
+            entry = self._entries.get(server_name)
+            if entry is not None:
+                entry.provider = None
+                entry.last_mtime_ns = 0
+                entry.pending_401.clear()
+        logger.info(
+            "MCP OAuth '%s': cleared stale client registration after "
+            "invalid_client",
+            server_name,
+        )
+        return True
 
     # -- Disk watch ----------------------------------------------------------
 

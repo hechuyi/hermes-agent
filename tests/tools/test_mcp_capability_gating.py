@@ -18,6 +18,18 @@ import pytest
 from tools.mcp_tool import MCPServerTask
 
 
+class _RpcError(Exception):
+    def __init__(self, code=None, message=""):
+        super().__init__(message)
+        self.error = SimpleNamespace(code=code, message=message)
+
+
+class _DictRpcError(Exception):
+    def __init__(self, code=None, message=""):
+        super().__init__({"code": code, "message": message})
+        self.error = {"code": code, "message": message}
+
+
 def _caps(tools=None, prompts=None, resources=None):
     """Build a fake InitializeResult with the given capability sub-objects."""
     return SimpleNamespace(
@@ -51,6 +63,25 @@ class TestAdvertisesTools:
         task = MCPServerTask("test")
         task.initialize_result = SimpleNamespace()  # no .capabilities
         assert task._advertises_tools() is True
+
+
+class TestMethodNotFoundDetection:
+    def test_detects_json_rpc_method_not_found_code(self):
+        from tools.mcp_tool import _is_method_not_found_error
+
+        assert _is_method_not_found_error(_RpcError(-32601, "Method not found"))
+
+    def test_detects_dict_json_rpc_method_not_found_code(self):
+        from tools.mcp_tool import _is_method_not_found_error
+
+        assert _is_method_not_found_error(
+            _DictRpcError(-32601, "Method not found")
+        )
+
+    def test_rejects_other_json_rpc_errors(self):
+        from tools.mcp_tool import _is_method_not_found_error
+
+        assert not _is_method_not_found_error(_RpcError(-32602, "Invalid params"))
 
 
 @pytest.mark.asyncio
@@ -88,6 +119,35 @@ class TestDiscoverToolsGating:
         await task._discover_tools()
 
         task.session.list_tools.assert_awaited_once()
+
+    async def test_method_not_found_falls_back_to_ping_and_empty_tools(self):
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task.session = SimpleNamespace(
+            list_tools=AsyncMock(side_effect=_RpcError(-32601, "Method not found")),
+            send_ping=AsyncMock(),
+        )
+        task._tools = ["stale"]
+
+        await task._discover_tools()
+
+        task.session.list_tools.assert_awaited_once()
+        task.session.send_ping.assert_awaited_once()
+        assert task._tools == []
+
+    async def test_other_list_tools_errors_are_not_swallowed(self):
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task.session = SimpleNamespace(
+            list_tools=AsyncMock(side_effect=_RpcError(-32602, "Invalid params")),
+            send_ping=AsyncMock(),
+        )
+
+        with pytest.raises(_RpcError):
+            await task._discover_tools()
+
+        task.session.list_tools.assert_awaited_once()
+        task.session.send_ping.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -154,5 +214,33 @@ class TestKeepaliveProbe:
         reason = await self._run_one_keepalive_cycle(task)
 
         assert reason == "shutdown"
+        task.session.list_tools.assert_awaited_once()
+        task.session.send_ping.assert_not_called()
+
+    async def test_keepalive_method_not_found_falls_back_to_ping(self):
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task.session = SimpleNamespace(
+            list_tools=AsyncMock(side_effect=_RpcError(-32601, "Method not found")),
+            send_ping=AsyncMock(),
+        )
+
+        reason = await self._run_one_keepalive_cycle(task)
+
+        assert reason == "shutdown"
+        task.session.list_tools.assert_awaited_once()
+        task.session.send_ping.assert_awaited_once()
+
+    async def test_keepalive_other_list_tools_errors_trigger_reconnect(self):
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task.session = SimpleNamespace(
+            list_tools=AsyncMock(side_effect=_RpcError(-32602, "Invalid params")),
+            send_ping=AsyncMock(),
+        )
+
+        reason = await self._run_one_keepalive_cycle(task)
+
+        assert reason == "reconnect"
         task.session.list_tools.assert_awaited_once()
         task.session.send_ping.assert_not_called()

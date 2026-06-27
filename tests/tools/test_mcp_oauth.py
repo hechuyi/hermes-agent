@@ -432,6 +432,49 @@ class TestRemoveOAuthTokens:
         remove_oauth_tokens("nonexistent")  # should not raise
 
 
+class TestInvalidClientAutoHeal:
+    """invalid_client clears stale dynamic registration without erasing tokens."""
+
+    def test_invalid_client_removes_client_info_only(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        token_dir = tmp_path / "mcp-tokens"
+        token_dir.mkdir(parents=True)
+        tokens_file = token_dir / "srv.json"
+        client_file = token_dir / "srv.client.json"
+        tokens_file.write_text('{"access_token": "tok", "token_type": "Bearer"}')
+        client_file.write_text('{"client_id": "stale-client"}')
+
+        from tools.mcp_oauth_manager import MCPOAuthManager
+
+        mgr = MCPOAuthManager()
+
+        healed = mgr.heal_invalid_client_if_needed(
+            "srv", RuntimeError("OAuth token exchange failed: invalid_client")
+        )
+
+        assert healed is True
+        assert tokens_file.exists()
+        assert not client_file.exists()
+
+    def test_non_invalid_client_error_is_not_healed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        token_dir = tmp_path / "mcp-tokens"
+        token_dir.mkdir(parents=True)
+        client_file = token_dir / "srv.client.json"
+        client_file.write_text('{"client_id": "still-valid"}')
+
+        from tools.mcp_oauth_manager import MCPOAuthManager
+
+        mgr = MCPOAuthManager()
+
+        healed = mgr.heal_invalid_client_if_needed(
+            "srv", RuntimeError("temporarily_unavailable")
+        )
+
+        assert healed is False
+        assert client_file.exists()
+
+
 # ---------------------------------------------------------------------------
 # Non-interactive / startup-safety tests
 # ---------------------------------------------------------------------------
@@ -456,6 +499,18 @@ class TestIsInteractive:
         mock_stdin = object()  # no isatty attribute
         monkeypatch.setattr("tools.mcp_oauth.sys.stdin", mock_stdin)
         assert _is_interactive() is False
+
+    def test_false_when_stdin_fallback_suppressed(self, monkeypatch):
+        from tools.mcp_oauth import suppress_oauth_stdin_fallback
+
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = True
+        monkeypatch.setattr("tools.mcp_oauth.sys.stdin", mock_stdin)
+
+        with suppress_oauth_stdin_fallback():
+            assert _is_interactive() is False
+
+        assert _is_interactive() is True
 
 
 class TestWaitForCallbackNoBlocking:

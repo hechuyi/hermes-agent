@@ -1214,6 +1214,12 @@ class MCPServerTask:
             return True
         return getattr(caps, "tools", None) is not None
 
+    async def _ping_session(self) -> None:
+        """Send an MCP ping when the SDK/session exposes it."""
+        ping = getattr(self.session, "send_ping", None) if self.session is not None else None
+        if callable(ping):
+            await ping()
+
     # ----- Dynamic tool discovery (notifications/tools/list_changed) -----
 
     async def _refresh_tools_task(self):
@@ -1385,10 +1391,18 @@ class MCPServerTask:
                 if self.session:
                     try:
                         if self._advertises_tools():
-                            await asyncio.wait_for(
-                                self.session.list_tools(),
-                                timeout=30.0,
-                            )
+                            try:
+                                await asyncio.wait_for(
+                                    self.session.list_tools(),
+                                    timeout=30.0,
+                                )
+                            except Exception as exc:
+                                if not _is_method_not_found_error(exc):
+                                    raise
+                                await asyncio.wait_for(
+                                    self._ping_session(),
+                                    timeout=30.0,
+                                )
                         else:
                             await asyncio.wait_for(
                                 self.session.send_ping(),
@@ -1804,7 +1818,19 @@ class MCPServerTask:
             self._tools = []
             return
         async with self._rpc_lock:
-            tools_result = await self.session.list_tools()
+            try:
+                tools_result = await self.session.list_tools()
+            except Exception as exc:
+                if not _is_method_not_found_error(exc):
+                    raise
+                logger.info(
+                    "MCP server '%s': tools/list returned Method not found — "
+                    "falling back to ping and leaving tools empty",
+                    self.name,
+                )
+                await self._ping_session()
+                self._tools = []
+                return
         self._tools = (
             tools_result.tools
             if hasattr(tools_result, "tools")
@@ -2078,6 +2104,27 @@ def _reset_server_error(server_name: str) -> None:
     """
     _server_error_counts[server_name] = 0
     _server_breaker_opened_at.pop(server_name, None)
+
+
+def _is_method_not_found_error(exc: BaseException) -> bool:
+    """Return True for JSON-RPC ``Method not found`` errors.
+
+    MCP SDK versions expose this shape differently: some wrap an
+    ``ErrorData`` object on ``exc.error``, while lightweight tests and older
+    wrappers may expose ``code`` directly or only stringify the JSON-RPC
+    failure. Prefer the stable numeric code and use the message only as a
+    fallback.
+    """
+    candidates = [exc, getattr(exc, "error", None)]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        code = getattr(candidate, "code", None)
+        if code == -32601 or str(code) == "-32601":
+            return True
+
+    message = str(exc).lower()
+    return "-32601" in message and "method not found" in message
 
 # ---------------------------------------------------------------------------
 # Auth-failure detection helpers (Task 6 of MCP OAuth consolidation)
@@ -3861,7 +3908,7 @@ def probe_mcp_server_tools() -> Dict[str, List[tuple]]:
     except Exception as exc:
         logger.debug("MCP probe failed: %s", exc)
     finally:
-        _stop_mcp_loop()
+        _stop_mcp_loop_if_idle()
 
     return result
 
@@ -4019,3 +4066,11 @@ def _stop_mcp_loop():
         # graceful shutdown are now orphaned — include active PIDs too
         # since the loop is gone and no session can still be in flight.
         _kill_orphaned_mcp_children(include_active=True)
+
+
+def _stop_mcp_loop_if_idle():
+    """Stop the MCP loop only when no live servers are registered."""
+    with _lock:
+        has_live_servers = bool(_servers)
+    if not has_live_servers:
+        _stop_mcp_loop()

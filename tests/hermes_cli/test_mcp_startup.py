@@ -95,6 +95,37 @@ def test_prepare_agent_startup_backgrounds_blocking_mcp_for_chat(monkeypatch):
         stop.set()
 
 
+def test_background_discovery_suppresses_oauth_stdin_fallback(monkeypatch):
+    seen = {"interactive": None}
+
+    def _discover():
+        from tools.mcp_oauth import _is_interactive
+
+        seen["interactive"] = _is_interactive()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        types.SimpleNamespace(
+            read_raw_config=lambda: {"mcp_servers": {"demo": {"url": "https://example.com/mcp"}}},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.mcp_tool",
+        types.SimpleNamespace(discover_mcp_tools=_discover),
+    )
+    monkeypatch.setattr("tools.mcp_oauth.sys.stdin.isatty", lambda: True)
+
+    mcp_startup.start_background_mcp_discovery(
+        logger=types.SimpleNamespace(debug=lambda *_a, **_k: None),
+        thread_name="test-mcp-discovery",
+    )
+    mcp_startup.wait_for_mcp_discovery(timeout=1.0)
+
+    assert seen["interactive"] is False
+
+
 def test_prepare_agent_startup_skips_mcp_bootstrap_for_tui_chat(monkeypatch):
     calls = {"mcp": 0}
 
