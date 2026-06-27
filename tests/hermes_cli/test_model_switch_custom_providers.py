@@ -606,3 +606,71 @@ def test_custom_providers_uses_live_models_for_multi_model_endpoint(monkeypatch)
         "gateway-model-c",
     ], "Live models must replace the static subset"
     assert gateway_prov["total_models"] == 3
+
+
+def test_custom_providers_discover_models_false_keeps_explicit_subset(monkeypatch):
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    calls = []
+
+    def fake_fetch_api_models(api_key, base_url):
+        calls.append((api_key, base_url))
+        return ["live-a", "live-b"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
+
+    providers = list_authenticated_providers(
+        current_provider="openrouter",
+        current_base_url="https://openrouter.ai/api/v1",
+        custom_providers=[
+            {
+                "name": "my-gateway",
+                "api_key": "sk-test",
+                "base_url": "https://gateway.example.com/v1",
+                "discover_models": False,
+                "model": "configured-a",
+                "models": {"configured-b": {"context_length": 128000}},
+            }
+        ],
+        max_models=50,
+    )
+
+    gateway = next(p for p in providers if p.get("api_url") == "https://gateway.example.com/v1")
+
+    assert calls == []
+    assert gateway["models"] == ["configured-a", "configured-b"]
+    assert gateway["total_models"] == 2
+
+
+def test_custom_providers_discover_models_false_string_is_normalized(monkeypatch):
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
+    monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
+
+    calls = []
+
+    def fake_fetch_api_models(api_key, base_url):
+        calls.append((api_key, base_url))
+        return ["live-a", "live-b"]
+
+    monkeypatch.setattr("hermes_cli.models.fetch_api_models", fake_fetch_api_models)
+
+    providers = list_authenticated_providers(
+        current_provider="openrouter",
+        current_base_url="https://openrouter.ai/api/v1",
+        custom_providers=[
+            {
+                "name": "my-gateway",
+                "api_key": "sk-test",
+                "base_url": "https://gateway.example.com/v1",
+                "discover_models": "false",
+                "models": {"configured-only": {"context_length": 128000}},
+            }
+        ],
+        max_models=50,
+    )
+
+    gateway = next(p for p in providers if p.get("api_url") == "https://gateway.example.com/v1")
+
+    assert calls == []
+    assert gateway["models"] == ["configured-only"]

@@ -616,6 +616,75 @@ def resolve_display_context_length(
 
 
 # ---------------------------------------------------------------------------
+# Configured-provider detection for typed model names
+# ---------------------------------------------------------------------------
+
+def _configured_provider_matches(
+    model_name: str,
+    user_providers: Optional[dict],
+    custom_providers: Optional[list],
+) -> dict[str, str]:
+    """Return configured providers that explicitly declare ``model_name``.
+
+    Matching is exact and case-insensitive. The returned model id preserves the
+    configured spelling so validation and config override checks see the
+    canonical user-provided value.
+    """
+    target = (model_name or "").strip().lower()
+    if not target:
+        return {}
+
+    def _match(value) -> Optional[str]:
+        if isinstance(value, str):
+            value = value.strip()
+            return value if value.lower() == target else None
+        if isinstance(value, dict):
+            for mid in value:
+                if isinstance(mid, str) and mid.strip().lower() == target:
+                    return mid
+            return None
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                if isinstance(item, str) and item.strip().lower() == target:
+                    return item
+                if isinstance(item, dict):
+                    name = item.get("name")
+                    if isinstance(name, str) and name.strip().lower() == target:
+                        return name
+            return None
+        return None
+
+    matches: dict[str, str] = {}
+    if isinstance(user_providers, dict):
+        for slug, cfg in user_providers.items():
+            if not isinstance(slug, str) or not isinstance(cfg, dict):
+                continue
+            for key in ("models", "model", "default_model"):
+                hit = _match(cfg.get(key))
+                if hit:
+                    matches[slug] = hit
+                    break
+
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "").strip()
+            if not name:
+                continue
+            slug = custom_provider_slug(name)
+            if slug in matches:
+                continue
+            for key in ("models", "model", "default_model"):
+                hit = _match(entry.get(key))
+                if hit:
+                    matches[slug] = hit
+                    break
+
+    return matches
+
+
+# ---------------------------------------------------------------------------
 # Core model-switching pipeline
 # ---------------------------------------------------------------------------
 
@@ -830,10 +899,49 @@ def switch_model(
                                 resolved_in_current_catalog = True
                                 break
 
+        # --- Step d.5: configured-provider exact-match detection ---
+        # A typed model explicitly declared in config should route to that
+        # provider before static catalog detection can attribute the same name
+        # to OpenAI/OpenRouter or a soft-accepting current provider swallows it.
+        config_routed = False
+        if (
+            not resolved_alias
+            and not resolved_in_current_catalog
+            and target_provider == current_provider
+        ):
+            cfg_matches = _configured_provider_matches(
+                new_model,
+                user_providers,
+                custom_providers,
+            )
+            if cfg_matches:
+                if current_provider in cfg_matches:
+                    new_model = cfg_matches[current_provider]
+                    config_routed = True
+                else:
+                    match_slugs = sorted(cfg_matches)
+                    if len(match_slugs) > 1:
+                        return ModelSwitchResult(
+                            success=False,
+                            is_global=is_global,
+                            error_message=(
+                                f"'{new_model}' is declared by multiple configured "
+                                f"providers ({', '.join(match_slugs)}). Re-run with "
+                                f"--provider <slug> to choose which one to use."
+                            ),
+                        )
+                    target_provider = match_slugs[0]
+                    new_model = cfg_matches[target_provider]
+                    config_routed = True
+                    if isinstance(user_providers, dict) and target_provider in user_providers:
+                        explicit_provider = target_provider
+
         # --- Step e: detect_provider_for_model() as last resort ---
         _base = current_base_url or ""
-        is_custom = current_provider in {"custom", "local"} or (
-            "localhost" in _base or "127.0.0.1" in _base
+        is_custom = (
+            current_provider in {"custom", "local"}
+            or current_provider.startswith("custom:")
+            or ("localhost" in _base or "127.0.0.1" in _base)
         )
 
         if (
@@ -841,6 +949,7 @@ def switch_model(
             and not is_custom
             and not resolved_alias
             and not resolved_in_current_catalog
+            and not config_routed
         ):
             detected = detect_provider_for_model(new_model, current_provider)
             if detected:
@@ -1614,6 +1723,9 @@ def list_authenticated_providers(
                 if inline_api_key
                 else (f"env:{key_env}" if key_env else "")
             )
+            discover = entry.get("discover_models", True)
+            if isinstance(discover, str):
+                discover = discover.lower() not in {"false", "no", "0"}
 
             group_key = (api_url, credential_identity, api_mode)
             if group_key not in groups:
@@ -1635,9 +1747,13 @@ def list_authenticated_providers(
                     "api_url": api_url,
                     "api_key": api_key,
                     "models": [],
+                    "discover_models": discover,
                 }
-            elif api_key and not groups[group_key].get("api_key"):
-                groups[group_key]["api_key"] = api_key
+            else:
+                if api_key and not groups[group_key].get("api_key"):
+                    groups[group_key]["api_key"] = api_key
+                if not discover:
+                    groups[group_key]["discover_models"] = False
 
             # The singular ``model:`` field only holds the currently
             # active model. Hermes's own writer (main.py::_save_custom_provider)
@@ -1726,7 +1842,11 @@ def list_authenticated_providers(
             # - Without an api_key AND no explicit models, fall through to
             #   live discovery so bare-endpoint custom providers (local
             #   llama.cpp / Ollama servers) still appear populated.
-            should_probe = bool(api_url) and (bool(api_key) or not grp["models"])
+            should_probe = (
+                bool(api_url)
+                and (bool(api_key) or not grp["models"])
+                and grp.get("discover_models", True)
+            )
             if should_probe:
                 try:
                     from hermes_cli.models import fetch_api_models

@@ -1757,8 +1757,14 @@ def detect_static_provider_for_model(
         return None
 
     # --- Step 1: check static provider catalogs for a direct match ---
+    is_custom_current = (
+        current_provider == "custom"
+        or current_provider.startswith("custom:")
+    )
     for pid, models in _PROVIDER_MODELS.items():
         if pid in current_keys or pid in _AGGREGATOR_PROVIDERS:
+            continue
+        if is_custom_current:
             continue
         if any(name_lower == m.lower() for m in models):
             return (pid, name)
@@ -1788,6 +1794,8 @@ def detect_provider_for_model(
     static_match = detect_static_provider_for_model(name, current_provider)
     if static_match:
         return static_match
+    if current_provider == "custom" or current_provider.startswith("custom:"):
+        return None
     if _model_in_provider_catalog(name.lower(), _provider_keys(current_provider)):
         return None
 

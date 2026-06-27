@@ -321,6 +321,22 @@ class TestDetectProviderForModel:
         assert result is not None
         assert result[0] not in {"nous",}  # nous has claude models but shouldn't be suggested
 
+    def test_custom_provider_not_overridden_by_static_catalog(self):
+        """A custom endpoint may serve a name that exists in a native catalog."""
+        assert detect_provider_for_model("gpt-5.4", "custom:my-gateway") is None
+
+    def test_custom_provider_not_overridden_by_openrouter_catalog(self):
+        with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
+            assert detect_provider_for_model("claude-opus-4.6", "custom:my-gateway") is None
+
+    def test_bare_custom_provider_not_overridden_by_static_catalog(self):
+        assert detect_provider_for_model("gpt-5.4", "custom") is None
+
+    def test_non_custom_provider_detection_unaffected(self):
+        result = detect_provider_for_model("gpt-5.4", "openrouter")
+        assert result is not None
+        assert result[0] == "openai"
+
 
 class TestIsNousFreeTier:
     """Tests for is_nous_free_tier — account tier detection."""
