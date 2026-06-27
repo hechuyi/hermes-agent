@@ -51,6 +51,27 @@ class TestSetRuntimeMainCustomProvider:
         finally:
             mod.clear_runtime_main()
 
+    def test_conversation_loop_sync_passes_custom_runtime_fields(self):
+        import agent.conversation_loop as loop
+
+        agent = MagicMock()
+        agent.provider = "custom:router"
+        agent.model = "glm-5.1"
+        agent.base_url = "https://router.example.com/v1"
+        agent.api_key = "sk-runtime"
+        agent.api_mode = "anthropic_messages"
+
+        with patch.object(loop, "set_runtime_main") as set_runtime_main:
+            loop._sync_runtime_main_for_aux_routing(agent)
+
+        set_runtime_main.assert_called_once_with(
+            "custom:router",
+            "glm-5.1",
+            base_url="https://router.example.com/v1",
+            api_key="sk-runtime",
+            api_mode="anthropic_messages",
+        )
+
     def test_clear_runtime_main_resets_custom_fields(self):
         import agent.auxiliary_client as mod
 

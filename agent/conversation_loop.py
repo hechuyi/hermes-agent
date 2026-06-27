@@ -193,6 +193,17 @@ def _ra():
     return run_agent
 
 
+def _sync_runtime_main_for_aux_routing(agent: Any) -> None:
+    """Publish the live main runtime used by auxiliary auto-routing."""
+    set_runtime_main(
+        getattr(agent, "provider", "") or "",
+        getattr(agent, "model", "") or "",
+        base_url=getattr(agent, "base_url", "") or "",
+        api_key=getattr(agent, "api_key", "") or "",
+        api_mode=getattr(agent, "api_mode", "") or "",
+    )
+
+
 def _nous_entitlement_message(capability: str) -> str:
     try:
         from hermes_cli.nous_account import (
@@ -466,14 +477,7 @@ def run_conversation(
     # the CLI/gateway override instead of the stale config.yaml
     # default. Idempotent — fine to call every turn.
     try:
-        from agent.auxiliary_client import set_runtime_main
-        set_runtime_main(
-            getattr(agent, "provider", "") or "",
-            getattr(agent, "model", "") or "",
-            base_url=getattr(agent, "base_url", "") or "",
-            api_key=getattr(agent, "api_key", "") or "",
-            api_mode=getattr(agent, "api_mode", "") or "",
-        )
+        _sync_runtime_main_for_aux_routing(agent)
     except Exception:
         pass
 
