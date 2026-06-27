@@ -248,6 +248,12 @@ class TestHasDirectModalCredentials:
         with patch.object(Path, "home", side_effect=PermissionError("denied")):
             assert has_direct_modal_credentials() is False
 
+    def test_home_dir_os_error(self, monkeypatch):
+        monkeypatch.delenv("MODAL_TOKEN_ID", raising=False)
+        monkeypatch.delenv("MODAL_TOKEN_SECRET", raising=False)
+        with patch.object(Path, "home", side_effect=OSError("home unavailable")):
+            assert has_direct_modal_credentials() is False
+
     def test_home_dir_permission_denied_with_env_vars(self, monkeypatch):
         monkeypatch.setenv("MODAL_TOKEN_ID", "id-123")
         monkeypatch.setenv("MODAL_TOKEN_SECRET", "sec-456")
