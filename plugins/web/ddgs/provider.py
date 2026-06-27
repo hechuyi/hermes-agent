@@ -13,11 +13,33 @@ whether the package is importable; the plugin still registers either way so
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import Any, Dict
 
 from agent.web_search_provider import WebSearchProvider
 
 logger = logging.getLogger(__name__)
+
+_DDGS_SEARCH_TIMEOUT_SECONDS = 30
+
+
+def _run_ddgs_search(DDGS: Any, query: str, safe_limit: int) -> list[Dict[str, Any]]:
+    """Run the blocking ddgs SDK call and normalize its search hits."""
+    web_results = []
+    with DDGS() as client:
+        for i, hit in enumerate(client.text(query, max_results=safe_limit)):
+            if i >= safe_limit:
+                break
+            url = str(hit.get("href") or hit.get("url") or "")
+            web_results.append(
+                {
+                    "title": str(hit.get("title", "")),
+                    "url": url,
+                    "description": str(hit.get("body", "")),
+                    "position": i + 1,
+                }
+            )
+    return web_results
 
 
 class DDGSWebSearchProvider(WebSearchProvider):
@@ -70,24 +92,24 @@ class DDGSWebSearchProvider(WebSearchProvider):
         # in case the package ignores the hint.
         safe_limit = max(1, int(limit))
 
+        executor = ThreadPoolExecutor(max_workers=1)
+        timed_out = False
         try:
-            web_results = []
-            with DDGS() as client:
-                for i, hit in enumerate(client.text(query, max_results=safe_limit)):
-                    if i >= safe_limit:
-                        break
-                    url = str(hit.get("href") or hit.get("url") or "")
-                    web_results.append(
-                        {
-                            "title": str(hit.get("title", "")),
-                            "url": url,
-                            "description": str(hit.get("body", "")),
-                            "position": i + 1,
-                        }
-                    )
+            future = executor.submit(_run_ddgs_search, DDGS, query, safe_limit)
+            web_results = future.result(timeout=_DDGS_SEARCH_TIMEOUT_SECONDS)
+        except TimeoutError:
+            timed_out = True
+            future.cancel()
+            logger.warning("DDGS search timed out after %d seconds", _DDGS_SEARCH_TIMEOUT_SECONDS)
+            return {
+                "success": False,
+                "error": f"DuckDuckGo search timed out after {_DDGS_SEARCH_TIMEOUT_SECONDS} seconds",
+            }
         except Exception as exc:  # noqa: BLE001 — ddgs raises its own exceptions
             logger.warning("DDGS search error: %s", exc)
             return {"success": False, "error": f"DuckDuckGo search failed: {exc}"}
+        finally:
+            executor.shutdown(wait=not timed_out, cancel_futures=timed_out)
 
         logger.info("DDGS search '%s': %d results (limit %d)", query, len(web_results), limit)
         return {"success": True, "data": {"web": web_results}}

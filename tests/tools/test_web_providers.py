@@ -483,3 +483,55 @@ class TestDispatchersTriggerPluginDiscovery:
             assert web_search_registry.get_provider("firecrawl") is not None
         finally:
             self._reset_registry()
+
+
+class TestDDGSProviderTimeout:
+    """DDGS provider must bound backend hangs with a wall-clock timeout."""
+
+    def test_search_uses_hard_timeout_for_ddgs_backend(self, monkeypatch):
+        import concurrent.futures
+        import sys
+        from types import ModuleType
+
+        from plugins.web.ddgs import provider as ddgs_provider
+
+        class FakeDDGS:
+            pass
+
+        fake_ddgs = ModuleType("ddgs")
+        fake_ddgs.DDGS = FakeDDGS
+        monkeypatch.setitem(sys.modules, "ddgs", fake_ddgs)
+
+        timeouts = []
+
+        class FakeFuture:
+            def cancel(self):
+                return True
+
+            def result(self, timeout=None):
+                timeouts.append(timeout)
+                raise concurrent.futures.TimeoutError()
+
+        class FakeExecutor:
+            def __init__(self, max_workers=None):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                self.shutdown_args = (wait, cancel_futures)
+
+            def submit(self, fn, *args, **kwargs):
+                return FakeFuture()
+
+        monkeypatch.setattr(ddgs_provider, "ThreadPoolExecutor", FakeExecutor)
+
+        result = ddgs_provider.DDGSWebSearchProvider().search("stuck backend", limit=2)
+
+        assert timeouts == [30]
+        assert result["success"] is False
+        assert "timed out" in result["error"].lower()
