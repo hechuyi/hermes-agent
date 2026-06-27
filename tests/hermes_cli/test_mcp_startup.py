@@ -38,7 +38,6 @@ def _agent_args(**overrides) -> Namespace:
         "cron_command": None,
         "gateway_command": None,
         "mcp_action": None,
-        "tui": False,
     }
     base.update(overrides)
     return Namespace(**base)
@@ -46,10 +45,12 @@ def _agent_args(**overrides) -> Namespace:
 
 def test_prepare_agent_startup_backgrounds_blocking_mcp_for_chat(monkeypatch):
     stop = threading.Event()
+    entered = threading.Event()
     calls = {"mcp": 0}
 
     def _blocking_discover():
         calls["mcp"] += 1
+        entered.set()
         stop.wait()
 
     monkeypatch.setitem(
@@ -88,6 +89,7 @@ def test_prepare_agent_startup_backgrounds_blocking_mcp_for_chat(monkeypatch):
         elapsed = time.monotonic() - start
         assert not startup_thread.is_alive()
         assert elapsed < 0.2
+        assert entered.wait(timeout=1.0)
         assert calls["mcp"] == 1
         assert mcp_startup._mcp_discovery_thread is not None
         assert mcp_startup._mcp_discovery_thread.is_alive()
@@ -126,7 +128,7 @@ def test_background_discovery_suppresses_oauth_stdin_fallback(monkeypatch):
     assert seen["interactive"] is False
 
 
-def test_prepare_agent_startup_skips_mcp_bootstrap_for_tui_chat(monkeypatch):
+def test_prepare_agent_startup_has_no_tui_skip_path(monkeypatch):
     calls = {"mcp": 0}
 
     monkeypatch.setitem(
@@ -152,10 +154,11 @@ def test_prepare_agent_startup_skips_mcp_bootstrap_for_tui_chat(monkeypatch):
         ),
     )
 
-    main_mod._prepare_agent_startup(_agent_args(tui=True))
+    main_mod._prepare_agent_startup(_agent_args())
+    mcp_startup.wait_for_mcp_discovery(timeout=1.0)
 
-    assert calls["mcp"] == 0
-    assert mcp_startup._mcp_discovery_thread is None
+    assert calls["mcp"] == 1
+    assert mcp_startup._mcp_discovery_thread is not None
 
 
 def test_cli_get_tool_definitions_briefly_waits_for_fast_mcp_thread(monkeypatch):

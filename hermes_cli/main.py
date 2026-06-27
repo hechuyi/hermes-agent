@@ -9895,10 +9895,6 @@ _AGENT_SUBCOMMANDS = {
 }
 
 
-def _is_tui_chat_launch(args) -> bool:
-    return bool(getattr(args, "tui", False) or os.environ.get("HERMES_TUI") == "1")
-
-
 def _command_has_dedicated_mcp_startup(args) -> bool:
     if args.command == "acp":
         return True
@@ -9910,8 +9906,6 @@ def _command_has_dedicated_mcp_startup(args) -> bool:
 
 
 def _should_background_mcp_startup(args) -> bool:
-    if _is_tui_chat_launch(args):
-        return False
     return args.command in {None, "chat", "rl"}
 
 
@@ -9935,9 +9929,7 @@ def _prepare_agent_startup(args) -> None:
             exc_info=True,
         )
     _run_inline_mcp_discovery = True
-    if _is_tui_chat_launch(args):
-        _run_inline_mcp_discovery = False
-    elif _command_has_dedicated_mcp_startup(args):
+    if _command_has_dedicated_mcp_startup(args):
         _run_inline_mcp_discovery = False
     elif _should_background_mcp_startup(args):
         try:
