@@ -465,6 +465,69 @@ class TestFormBodyRedaction:
         assert "first=1" in redact_sensitive_text(text)
 
 
+class TestLowercaseDottedConfigKeys:
+    def test_spring_dotted_password_assignment(self):
+        text = "spring.datasource.password=Sup3rS3cret!"
+        result = redact_sensitive_text(text)
+        assert "Sup3rS3cret!" not in result
+        assert "spring.datasource.password=" in result
+
+    def test_dotted_api_key_split_keyword(self):
+        text = "app.api.key=ak_live_998877"
+        result = redact_sensitive_text(text)
+        assert "ak_live_998877" not in result
+        assert "app.api.key=" in result
+
+    def test_bare_lowercase_password_at_line_start(self):
+        text = "password=mysecretvalue123"
+        result = redact_sensitive_text(text)
+        assert "mysecretvalue123" not in result
+
+    def test_quoted_lowercase_value(self):
+        text = "password='mysecretvalue123'"
+        result = redact_sensitive_text(text)
+        assert "mysecretvalue123" not in result
+
+    def test_yaml_unquoted_password(self):
+        text = "password: Sup3rS3cret!"
+        result = redact_sensitive_text(text)
+        assert "Sup3rS3cret!" not in result
+        assert "password:" in result
+
+    def test_yaml_indented_password(self):
+        text = "spring:\n  datasource:\n    password: hunter2pass"
+        result = redact_sensitive_text(text)
+        assert "hunter2pass" not in result
+
+    def test_properties_file_dump_preserves_non_secret_keys(self):
+        text = (
+            "server.port=8080\n"
+            "spring.datasource.username=admin\n"
+            "spring.datasource.password=Sup3rS3cret!\n"
+            "logging.level.root=INFO"
+        )
+        result = redact_sensitive_text(text)
+        assert "Sup3rS3cret!" not in result
+        assert "server.port=8080" in result
+        assert "username=admin" in result
+
+    def test_prose_mid_sentence_password_unchanged(self):
+        text = "I have password=foo and other things"
+        assert redact_sensitive_text(text) == text
+
+    def test_lowercase_code_assignment_unchanged(self):
+        text = "const secret = await fetchSecret();"
+        assert redact_sensitive_text(text) == text
+
+    def test_url_query_param_passes_through(self):
+        text = "https://example.com/api?password=opaqueval123&format=json"
+        assert redact_sensitive_text(text) == text
+
+    def test_prose_keyword_in_value_unchanged(self):
+        text = "note: secret meeting at noon"
+        assert redact_sensitive_text(text) == text
+
+
 class TestXaiToken:
     KEY = "xai-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstu"
 

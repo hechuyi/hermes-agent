@@ -1604,3 +1604,76 @@ class TestApprovalTimeoutIsNotConsent:
         assert last_post.get("choice") == "timeout", (
             f"hook choice should be 'timeout' on no-response, got {last_post.get('choice')!r}"
         )
+
+
+class TestTirithImportErrorFailOpenPolicy:
+    def _make_failing_import(self, real_import):
+        def _fake(name, *args, **kwargs):
+            if name == "tools.tirith_security":
+                raise ImportError("simulated tirith import failure")
+            return real_import(name, *args, **kwargs)
+
+        return _fake
+
+    def test_fail_open_true_allows_silently_on_import_error(self):
+        import builtins
+        from tools.approval import check_all_command_guards
+
+        cfg = {
+            "approvals": {"mode": "manual"},
+            "security": {"tirith_enabled": True, "tirith_fail_open": True},
+        }
+        real_import = builtins.__import__
+        with mock_patch("builtins.__import__", side_effect=self._make_failing_import(real_import)):
+            with mock_patch("hermes_cli.config.load_config", return_value=cfg):
+                with mock_patch("tools.approval.detect_dangerous_command", return_value=(False, None, None)):
+                    with mock_patch.dict("os.environ", {"HERMES_INTERACTIVE": "1"}, clear=False):
+                        result = check_all_command_guards("echo hello", "local")
+
+        assert result.get("approved") is True
+
+    def test_fail_open_false_escalates_to_approval_on_import_error(self):
+        import builtins
+        from tools.approval import check_all_command_guards
+
+        cfg = {
+            "approvals": {"mode": "manual"},
+            "security": {"tirith_enabled": True, "tirith_fail_open": False},
+        }
+        calls = []
+
+        def approval_callback(command, description, **kwargs):
+            calls.append({"command": command, "description": description})
+            return "deny"
+
+        real_import = builtins.__import__
+        with mock_patch("builtins.__import__", side_effect=self._make_failing_import(real_import)):
+            with mock_patch("hermes_cli.config.load_config", return_value=cfg):
+                with mock_patch("tools.approval.detect_dangerous_command", return_value=(False, None, None)):
+                    with mock_patch.dict("os.environ", {"HERMES_INTERACTIVE": "1"}, clear=False):
+                        result = check_all_command_guards(
+                            "echo hello",
+                            "local",
+                            approval_callback=approval_callback,
+                        )
+
+        assert result.get("approved") is False
+        assert calls
+        assert "tirith" in calls[0]["description"].lower() or "unavailable" in calls[0]["description"].lower()
+
+    def test_tirith_disabled_skips_fail_open_check(self):
+        import builtins
+        from tools.approval import check_all_command_guards
+
+        cfg = {
+            "approvals": {"mode": "manual"},
+            "security": {"tirith_enabled": False, "tirith_fail_open": False},
+        }
+        real_import = builtins.__import__
+        with mock_patch("builtins.__import__", side_effect=self._make_failing_import(real_import)):
+            with mock_patch("hermes_cli.config.load_config", return_value=cfg):
+                with mock_patch("tools.approval.detect_dangerous_command", return_value=(False, None, None)):
+                    with mock_patch.dict("os.environ", {"HERMES_INTERACTIVE": "1"}, clear=False):
+                        result = check_all_command_guards("echo hello", "local")
+
+        assert result.get("approved") is True

@@ -1312,7 +1312,32 @@ def check_all_command_guards(command: str, env_type: str,
         from tools.tirith_security import check_command_security
         tirith_result = check_command_security(command)
     except ImportError:
-        pass  # tirith module not installed — allow
+        tirith_fail_open = True
+        try:
+            from hermes_cli.config import load_config
+
+            security_cfg = (load_config() or {}).get("security", {}) or {}
+            if security_cfg.get("tirith_enabled", True):
+                tirith_fail_open = security_cfg.get("tirith_fail_open", True)
+        except Exception:
+            pass
+        if not tirith_fail_open:
+            tirith_result = {
+                "action": "warn",
+                "findings": [
+                    {
+                        "rule_id": "tirith-import-error",
+                        "severity": "HIGH",
+                        "title": "Tirith security module unavailable",
+                        "description": (
+                            "The Tirith security scanner could not be imported. "
+                            "Because security.tirith_fail_open is false, this "
+                            "command cannot be silently allowed."
+                        ),
+                    }
+                ],
+                "summary": "Tirith unavailable (fail-closed)",
+            }
 
     # Dangerous command check (detection only, no approval)
     is_dangerous, pattern_key, description = detect_dangerous_command(command)

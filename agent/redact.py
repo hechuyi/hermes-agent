@@ -112,6 +112,24 @@ _ENV_ASSIGN_RE = re.compile(
     rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
 )
 
+_SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth)"
+_CFG_VALUE = r"(['\"]?)([^\s&]+?)\2(?=[\s&]|$)"
+_CFG_DOTTED_RE = re.compile(
+    rf"((?:[A-Za-z0-9_\-]+\.)+[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*"
+    rf"|[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]+)"
+    rf"={_CFG_VALUE}",
+    re.IGNORECASE,
+)
+_CFG_ANCHORED_RE = re.compile(
+    rf"(^[ \t]*(?:export[ \t]+)?[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)={_CFG_VALUE}",
+    re.IGNORECASE | re.MULTILINE,
+)
+_YAML_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential)"
+_YAML_ASSIGN_RE = re.compile(
+    rf"(^[ \t]*[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*)(:[ \t]*)(?!['\"])([^\s&]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
 _JSON_KEY_NAMES = r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
 _JSON_FIELD_RE = re.compile(
@@ -382,6 +400,9 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
                 name, quote, value = m.group(1), m.group(2), m.group(3)
                 return f"{name}={quote}{_mask_token(value)}{quote}"
             text = _ENV_ASSIGN_RE.sub(_redact_env, text)
+            if "://" not in text:
+                text = _CFG_DOTTED_RE.sub(_redact_env, text)
+                text = _CFG_ANCHORED_RE.sub(_redact_env, text)
 
         # JSON fields: "apiKey": "***"  (skip for code files — false positives)
         if ":" in text and '"' in text:
@@ -389,6 +410,12 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
                 key, value = m.group(1), m.group(2)
                 return f'{key}: "{_mask_token(value)}"'
             text = _JSON_FIELD_RE.sub(_redact_json, text)
+
+        if ":" in text and "://" not in text:
+            def _redact_yaml(m):
+                key, sep, value = m.group(1), m.group(2), m.group(3)
+                return f"{key}{sep}{_mask_token(value)}"
+            text = _YAML_ASSIGN_RE.sub(_redact_yaml, text)
 
     # Authorization headers — _AUTH_HEADER_RE is "Authorization: Bearer ..."
     # case-insensitive, so "uthorization" is the cheapest substring gate that
