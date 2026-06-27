@@ -288,8 +288,24 @@ def _find_bash() -> str:
     )
 
 
-# Backward compat — process_registry.py imports this name
-_find_shell = _find_bash
+_SPAWN_COMPATIBLE_SHELLS = frozenset({"bash", "zsh", "dash", "sh", "ksh", "mksh"})
+
+
+def _find_shell() -> str:
+    """Find a shell compatible with background process spawning."""
+    if _IS_WINDOWS:
+        return _find_bash()
+
+    user_shell = os.environ.get("SHELL")
+    if (
+        user_shell
+        and os.path.isfile(user_shell)
+        and os.access(user_shell, os.X_OK)
+        and Path(user_shell).name in _SPAWN_COMPATIBLE_SHELLS
+    ):
+        return user_shell
+
+    return _find_bash()
 
 
 # Standard PATH entries for environments with minimal PATH.
