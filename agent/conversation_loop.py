@@ -115,6 +115,31 @@ def _with_persistence(
     return result
 
 
+def _record_cleanup_error(
+    agent: Any,
+    cleanup_errors: List[Dict[str, str]],
+    *,
+    action: str,
+    exc: BaseException,
+) -> None:
+    try:
+        sanitized = agent._sanitize_persistence_reason(exc)
+    except Exception:
+        sanitized = f"{type(exc).__name__}: cleanup error could not be sanitized"
+    cleanup_errors.append(
+        {
+            "stage": "turn_finalization",
+            "action": action,
+            "error": sanitized,
+        }
+    )
+    logger.warning(
+        "Turn finalization cleanup failed: action=%s error=%s",
+        action,
+        sanitized,
+    )
+
+
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
     """Return a user-facing error when Ollama is loaded with too little context."""
     if not getattr(agent, "tools", None):
@@ -4488,19 +4513,46 @@ def run_conversation(
                     exc_info=True,
                 )
 
-    # Determine if conversation completed successfully
+    # Determine if conversation completed successfully.  A normal final
+    # text response can arrive on the last allowed API call; do not treat
+    # api_call_count == max_iterations as exhaustion unless the loop actually
+    # exited through the budget/max-iteration path.
     completed = (
         final_response is not None
-        and api_call_count < agent.max_iterations
         and not failed
+        and (
+            api_call_count < agent.max_iterations
+            or str(_turn_exit_reason).startswith("text_response")
+        )
     )
+    cleanup_errors: List[Dict[str, str]] = []
 
     # Save trajectory if enabled.  ``user_message`` may be a multimodal
     # list of parts; the trajectory format wants a plain string.
-    agent._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed)
+    try:
+        agent._save_trajectory(
+            messages,
+            _summarize_user_message_for_log(user_message),
+            completed,
+        )
+    except Exception as exc:
+        _record_cleanup_error(
+            agent,
+            cleanup_errors,
+            action="save_trajectory",
+            exc=exc,
+        )
 
     # Clean up VM and browser for this task after conversation completes
-    agent._cleanup_task_resources(effective_task_id)
+    try:
+        agent._cleanup_task_resources(effective_task_id)
+    except Exception as exc:
+        _record_cleanup_error(
+            agent,
+            cleanup_errors,
+            action="cleanup_task_resources",
+            exc=exc,
+        )
 
     # Drop private retry scaffolding before turn-exit transforms. Otherwise a
     # later user "continue" turn can replay assistant("(empty)") / recovery
@@ -4651,7 +4703,22 @@ def run_conversation(
 
     final_response_for_persistence = None if final_response == "(empty)" else final_response
     agent._ensure_final_visible_assistant_message(messages, final_response_for_persistence)
-    _persistence_result = agent._persist_session(messages, conversation_history)
+    try:
+        _persistence_result = agent._persist_session(messages, conversation_history)
+    except Exception as exc:
+        _record_cleanup_error(
+            agent,
+            cleanup_errors,
+            action="persist_session",
+            exc=exc,
+        )
+        _persistence_result = {
+            "attempted": True,
+            "ok": False,
+            "failure_class": "turn_finalization_cleanup_failed",
+            "stage": "turn_exit",
+            "sanitized_reason": cleanup_errors[-1]["error"],
+        }
 
     # Plugin hook: post_llm_call
     # Fired once per turn after the tool-calling loop completes.
@@ -4697,7 +4764,9 @@ def run_conversation(
         "api_calls": api_call_count,
         "completed": completed,
         "turn_exit_reason": _turn_exit_reason,
-        "failed": failed,
+        "failed": failed or bool(cleanup_errors),
+        "cleanup_failed": bool(cleanup_errors),
+        "cleanup_errors": cleanup_errors,
         "partial": False,  # True only when stopped due to invalid tool calls
         "interrupted": interrupted,
         "response_transformed": _response_transformed,
