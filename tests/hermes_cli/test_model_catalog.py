@@ -333,6 +333,32 @@ class TestProviderOverride:
         assert result == [("override/model", "custom")]
 
 
+class TestSeedCacheFromCheckout:
+    def test_seed_cache_from_checkout_writes_valid_manifest(self, isolated_home, tmp_path):
+        from hermes_cli import model_catalog
+
+        root = tmp_path / "checkout"
+        manifest_path = root / "website" / "static" / "api" / "model-catalog.json"
+        manifest_path.parent.mkdir(parents=True)
+        manifest = _valid_manifest()
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        assert model_catalog.seed_cache_from_checkout(root) is True
+        with open(model_catalog._cache_path(), encoding="utf-8") as fh:
+            assert json.load(fh) == manifest
+
+    def test_seed_cache_from_checkout_rejects_invalid_manifest(self, isolated_home, tmp_path):
+        from hermes_cli import model_catalog
+
+        root = tmp_path / "checkout"
+        manifest_path = root / "website" / "static" / "api" / "model-catalog.json"
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_text(json.dumps({"version": 1}), encoding="utf-8")
+
+        assert model_catalog.seed_cache_from_checkout(root) is False
+        assert not model_catalog._cache_path().exists()
+
+
 class TestIntegrationWithModelsModule:
     """Exercise the fallback paths via the real callers in hermes_cli.models."""
 

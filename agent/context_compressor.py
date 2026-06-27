@@ -68,6 +68,12 @@ SUMMARY_PREFIX = (
 )
 LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
 
+# Internal metadata marker for the message that carries a compressed-context
+# handoff. The leading underscore is intentional: transport sanitizers strip
+# underscore-prefixed message keys before sending strict chat-completions
+# requests.
+COMPRESSED_SUMMARY_METADATA_KEY = "_compressed_summary"
+
 # Handoff prefixes that shipped in earlier releases. A summary persisted under
 # one of these can be inherited into a resumed lineage; when it is normalized
 # on re-compaction we must strip the old prefix too, otherwise stale directives
@@ -1573,6 +1579,11 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             return True
         return any(text.startswith(prefix) for prefix in _HISTORICAL_SUMMARY_PREFIXES)
 
+    @staticmethod
+    def _has_compressed_summary_metadata(message: Any) -> bool:
+        """Return True when a message is explicitly marked as a compaction handoff."""
+        return isinstance(message, dict) and bool(message.get(COMPRESSED_SUMMARY_METADATA_KEY))
+
     @classmethod
     def _find_latest_context_summary(
         cls,
@@ -2070,7 +2081,11 @@ The user has requested that this compaction PRIORITISE preserving all informatio
             )
 
         if not _merge_summary_into_tail:
-            compressed.append({"role": summary_role, "content": summary})
+            compressed.append({
+                "role": summary_role,
+                "content": summary,
+                COMPRESSED_SUMMARY_METADATA_KEY: True,
+            })
 
         for i in range(compress_end, n_messages):
             msg = messages[i].copy()
@@ -2085,6 +2100,7 @@ The user has requested that this compaction PRIORITISE preserving all informatio
                     merged_prefix,
                     prepend=True,
                 )
+                msg[COMPRESSED_SUMMARY_METADATA_KEY] = True
                 _merge_summary_into_tail = False
             compressed.append(msg)
 

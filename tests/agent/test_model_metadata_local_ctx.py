@@ -519,6 +519,12 @@ class TestQueryLocalContextLengthNetworkError:
 class TestGetModelContextLengthLocalFallback:
     """get_model_context_length uses local server query before falling back to 2M."""
 
+    def test_unqualified_service_hostname_is_local_endpoint(self):
+        """Docker Compose service names should get local-server context probing."""
+        from agent.model_metadata import is_local_endpoint
+
+        assert is_local_endpoint("http://ollama:11434/v1") is True
+
     def test_local_endpoint_unknown_model_queries_server(self):
         """Unknown model on local endpoint gets ctx from server, not 2M default."""
         from agent.model_metadata import get_model_context_length

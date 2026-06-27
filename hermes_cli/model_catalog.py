@@ -67,7 +67,7 @@ DEFAULT_CATALOG_URL = (
 DEFAULT_CATALOG_FALLBACK_URLS: tuple[str, ...] = (
     "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/website/static/api/model-catalog.json",
 )
-DEFAULT_TTL_HOURS = 24
+DEFAULT_TTL_HOURS = 1
 DEFAULT_FETCH_TIMEOUT = 8.0
 SUPPORTED_SCHEMA_VERSION = 1
 
@@ -343,6 +343,23 @@ def get_curated_nous_models() -> list[str] | None:
         if mid:
             out.append(mid)
     return out or None
+
+
+def seed_cache_from_checkout(project_root: "Path | str") -> bool:
+    """Seed the disk cache from a checked-out website model catalog manifest."""
+    src = Path(project_root) / "website" / "static" / "api" / "model-catalog.json"
+    try:
+        with open(src, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.debug("model catalog seed from checkout skipped (%s): %s", src, exc)
+        return False
+    if not _validate_manifest(data):
+        logger.debug("model catalog seed from checkout skipped: invalid manifest at %s", src)
+        return False
+    _write_disk_cache(data)
+    reset_cache()
+    return True
 
 
 def reset_cache() -> None:
