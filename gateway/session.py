@@ -492,7 +492,7 @@ class SessionEntry:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionEntry":
         origin = None
-        if "origin" in data and data["origin"]:
+        if "origin" in data and isinstance(data["origin"], dict):
             origin = SessionSource.from_dict(data["origin"])
         
         platform = None
@@ -689,10 +689,27 @@ class SessionStore:
                 with open(sessions_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     for key, entry_data in data.items():
+                        if not isinstance(entry_data, dict):
+                            logger.warning(
+                                "session_index_entry_invalid_type: "
+                                "stage=load_sessions_index "
+                                "action=skip_session_entry "
+                                "entry_key_hash=%s expected_type=dict actual_type=%s",
+                                _hash_id(str(key)),
+                                type(entry_data).__name__,
+                            )
+                            continue
                         try:
                             self._entries[key] = SessionEntry.from_dict(entry_data)
-                        except (ValueError, KeyError):
-                            # Skip entries with unknown/removed platform values
+                        except (ValueError, KeyError, TypeError) as e:
+                            logger.warning(
+                                "session_index_entry_invalid: "
+                                "stage=load_sessions_index "
+                                "action=skip_session_entry "
+                                "entry_key_hash=%s exception_type=%s",
+                                _hash_id(str(key)),
+                                type(e).__name__,
+                            )
                             continue
             except Exception as e:
                 print(f"[gateway] Warning: Failed to load sessions: {e}")
