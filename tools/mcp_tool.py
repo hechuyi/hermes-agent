@@ -2106,6 +2106,19 @@ def _reset_server_error(server_name: str) -> None:
     _server_breaker_opened_at.pop(server_name, None)
 
 
+def _signal_reconnect(server: Any) -> bool:
+    """Ask a server task to rebuild its transport."""
+    event = getattr(server, "_reconnect_event", None)
+    if event is None:
+        return False
+    loop = _mcp_loop
+    if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(event.set)
+    else:
+        event.set()
+    return True
+
+
 def _is_method_not_found_error(exc: BaseException) -> bool:
     """Return True for JSON-RPC ``Method not found`` errors.
 
@@ -2734,8 +2747,22 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
 
         with _lock:
             server = _servers.get(server_name)
-        if not server or not server.session:
+        if not server:
             _bump_server_error(server_name)
+            return json.dumps({
+                "error": f"MCP server '{server_name}' is not connected"
+            }, ensure_ascii=False)
+
+        if not server.session:
+            _bump_server_error(server_name)
+            if _signal_reconnect(server):
+                return json.dumps({
+                    "error": (
+                        f"MCP server '{server_name}' transport is down; "
+                        "reconnect requested. Do NOT retry this tool "
+                        "immediately — give it a few seconds to come back."
+                    )
+                }, ensure_ascii=False)
             return json.dumps({
                 "error": f"MCP server '{server_name}' is not connected"
             }, ensure_ascii=False)

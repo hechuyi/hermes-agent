@@ -179,6 +179,34 @@ def test_circuit_breaker_reopens_on_probe_failure(monkeypatch, tmp_path):
         _cleanup(mcp_tool, "srv")
 
 
+def test_half_open_probe_on_dead_session_requests_reconnect(monkeypatch, tmp_path):
+    """A half-open probe against a dead transport should revive the server."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from tools import mcp_tool
+    from tools.mcp_tool import _make_tool_handler
+
+    server = _install_stub_server(mcp_tool, "srv", None)
+    server.session = None
+    monkeypatch.setattr(mcp_tool, "_mcp_loop", None)
+
+    try:
+        mcp_tool._server_error_counts["srv"] = mcp_tool._CIRCUIT_BREAKER_THRESHOLD
+        fake_now = [1000.0]
+        monkeypatch.setattr(mcp_tool.time, "monotonic", lambda: fake_now[0])
+        mcp_tool._server_breaker_opened_at["srv"] = fake_now[0]
+        cooldown = getattr(mcp_tool, "_CIRCUIT_BREAKER_COOLDOWN_SEC", 60.0)
+        fake_now[0] += cooldown + 1.0
+
+        handler = _make_tool_handler("srv", "tool1", 10.0)
+        parsed = json.loads(handler({}))
+
+        assert "reconnect" in parsed.get("error", "").lower(), parsed
+        server._reconnect_event.set.assert_called_once()
+    finally:
+        _cleanup(mcp_tool, "srv")
+
+
 def test_circuit_breaker_cleared_on_reconnect(monkeypatch, tmp_path):
     """When the auth-recovery path successfully reconnects the server,
     the breaker should be cleared so subsequent calls aren't gated on a
