@@ -356,7 +356,7 @@ def test_base_adapter_guard_key_uses_injected_config_instead_of_platform_extra()
                 "thread_sessions_per_user": True,
             }
         ),
-        Platform.TELEGRAM,
+        Platform.FEISHU,
         session_isolation_config=GatewayConfig.from_dict(
             {
                 "group_sessions_per_user": False,
@@ -365,29 +365,29 @@ def test_base_adapter_guard_key_uses_injected_config_instead_of_platform_extra()
         ),
     )
     source = SessionSource(
-        platform=Platform.TELEGRAM,
+        platform=Platform.FEISHU,
         chat_id="group-1",
         chat_type="group",
         thread_id="topic-1",
         user_id="user-1",
     )
 
-    assert adapter._session_guard_key(source) == "agent:main:telegram:group:group-1:topic-1"
+    assert adapter._session_guard_key(source) == "agent:main:feishu:group:group-1:topic-1"
 
 
 def test_gateway_runner_injects_session_isolation_config_into_base_adapter_without_signature_support(monkeypatch):
     import gateway.run as gateway_run
-    import gateway.platforms.slack as slack_mod
+    import gateway.platforms.feishu as feishu_mod
 
     config = GatewayConfig.from_dict(
         {
             "group_sessions_per_user": False,
             "platforms": {
-                "slack": {
+                "feishu": {
                     "enabled": True,
                     "extra": {
-                        "bot_token": "xoxb-test",
-                        "app_token": "xapp-test",
+                        "app_id": "cli_test",
+                        "app_secret": "secret",
                         "group_sessions_per_user": True,
                     },
                 }
@@ -396,15 +396,15 @@ def test_gateway_runner_injects_session_isolation_config_into_base_adapter_witho
     )
     runner = object.__new__(gateway_run.GatewayRunner)
     runner.config = config
-    monkeypatch.setattr(slack_mod, "check_slack_requirements", lambda: True)
+    monkeypatch.setattr(feishu_mod, "check_feishu_requirements", lambda: True)
 
     adapter = gateway_run.GatewayRunner._create_adapter(
         runner,
-        Platform.SLACK,
-        config.platforms[Platform.SLACK],
+        Platform.FEISHU,
+        config.platforms[Platform.FEISHU],
     )
     source = SessionSource(
-        platform=Platform.SLACK,
+        platform=Platform.FEISHU,
         chat_id="channel-1",
         chat_type="group",
         user_id="user-1",
@@ -412,7 +412,7 @@ def test_gateway_runner_injects_session_isolation_config_into_base_adapter_witho
 
     assert adapter is not None
     assert adapter._session_isolation_config is config
-    assert adapter._session_guard_key(source) == "agent:main:slack:group:channel-1"
+    assert adapter._session_guard_key(source) == "agent:main:feishu:group:channel-1:user-1"
 
 @pytest.mark.asyncio
 async def test_feishu_default_group_scope_is_chat_shared_across_store_guard_and_batches(tmp_path, monkeypatch):

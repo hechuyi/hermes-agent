@@ -1,24 +1,14 @@
-"""Tests for transient-error handling in Telegram progress-message editing.
+"""Tests for transient-error handling in progress-message editing.
 
 Issue: #27828
 
-When ``edit_message_text`` fails with a transient network error (e.g.
-``httpx.ConnectError``), the gateway must NOT permanently disable progress-
-message editing.  Only permanent failures (flood control, message-not-found,
-permissions) should set ``can_edit = False``.
-
-Two layers are tested:
-
-1. The ``_TRANSIENT_EDIT_MARKERS`` / retryable classification logic in
-   ``TelegramAdapter.edit_message``.
-2. The ``send_progress_messages`` caller in ``run.py`` honours
-   ``result.retryable`` and keeps ``can_edit = True``.
+When a platform edit operation fails with a transient network error, the
+gateway must not permanently disable progress-message editing. Only permanent
+failures such as flood control, missing messages, or permission errors should
+set ``can_edit = False``.
 """
 
 from __future__ import annotations
-
-import asyncio
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -53,7 +43,7 @@ _PERMANENT_MARKERS = (
 
 
 def _is_transient(error_str: str) -> bool:
-    """Mirrors the classification logic added to TelegramAdapter.edit_message."""
+    """Classify transient platform edit failures."""
     err = error_str.lower()
     return any(m in err for m in _TRANSIENT_MARKERS)
 
@@ -120,7 +110,7 @@ def test_send_result_retryable_false_for_permanent():
 
 
 # ---------------------------------------------------------------------------
-# 3. run.py logic — retryable result must NOT set can_edit=False
+# 3. Progress-loop logic — retryable result must NOT set can_edit=False
 #    We simulate the relevant block from send_progress_messages():
 #
 #      if not result.success:

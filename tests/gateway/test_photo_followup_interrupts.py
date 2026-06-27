@@ -1,4 +1,3 @@
-import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,8 +15,8 @@ class _PendingAdapter:
 
 def _make_runner():
     runner = object.__new__(GatewayRunner)
-    runner.config = GatewayConfig(platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="***")})
-    runner.adapters = {Platform.TELEGRAM: _PendingAdapter()}
+    runner.config = GatewayConfig(platforms={Platform.FEISHU: PlatformConfig(enabled=True, token="***")})
+    runner.adapters = {Platform.FEISHU: _PendingAdapter()}
     runner._running_agents = {}
     runner._pending_messages = {}
     runner._pending_approvals = {}
@@ -29,7 +28,7 @@ def _make_runner():
 @pytest.mark.asyncio
 async def test_handle_message_does_not_priority_interrupt_photo_followup():
     runner = _make_runner()
-    source = SessionSource(platform=Platform.TELEGRAM, chat_id="12345", chat_type="dm", user_id="u1")
+    source = SessionSource(platform=Platform.FEISHU, chat_id="12345", chat_type="dm", user_id="u1")
     session_key = build_session_key(source)
     running_agent = MagicMock()
     runner._running_agents[session_key] = running_agent
@@ -46,4 +45,4 @@ async def test_handle_message_does_not_priority_interrupt_photo_followup():
 
     assert result is None
     running_agent.interrupt.assert_not_called()
-    assert runner.adapters[Platform.TELEGRAM]._pending_messages[session_key] is event
+    assert runner.adapters[Platform.FEISHU]._pending_messages[session_key] is event

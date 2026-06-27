@@ -1,4 +1,4 @@
-"""Telegram-specific gateway filtering for noisy status/error output."""
+"""Gateway filtering for noisy status/error output before chat delivery."""
 
 from gateway.config import Platform
 from gateway.run import (
@@ -7,8 +7,8 @@ from gateway.run import (
 )
 
 
-def test_telegram_status_suppresses_auxiliary_and_retry_noise():
-    """Auxiliary failures and retry backoff chatter should not hit Telegram."""
+def test_chat_status_suppresses_auxiliary_and_retry_noise():
+    """Auxiliary failures and retry backoff chatter should not hit chat delivery."""
     noisy_messages = [
         "⚠ Auxiliary title generation failed: HTTP 400: Operation contains cybersecurity risk",
         "⚠ Compression summary failed: upstream error. Inserted a fallback context marker.",
@@ -20,25 +20,25 @@ def test_telegram_status_suppresses_auxiliary_and_retry_noise():
     ]
 
     for message in noisy_messages:
-        assert _prepare_gateway_status_message(Platform.TELEGRAM, "warn", message) is None
+        assert _prepare_gateway_status_message(Platform.FEISHU, "warn", message) is None
 
 
-def test_non_telegram_status_is_unchanged():
-    """The Telegram quieting policy must not hide CLI/Discord diagnostics."""
+def test_non_chat_status_is_unchanged():
+    """The chat quieting policy must not hide CLI/API diagnostics."""
     message = "⏳ Retrying in 4.2s (attempt 1/3)..."
 
-    assert _prepare_gateway_status_message(Platform.DISCORD, "lifecycle", message) == message
+    assert _prepare_gateway_status_message(Platform.API_SERVER, "lifecycle", message) == message
     assert _prepare_gateway_status_message("local", "lifecycle", message) == message
 
 
-def test_telegram_status_sanitizes_raw_provider_security_errors():
+def test_chat_status_sanitizes_raw_provider_security_errors():
     """Provider policy/security bodies should be replaced before chat delivery."""
     raw = (
         "❌ API failed after 3 retries — HTTP 400: request blocked because "
         "Operation contains cybersecurity risk. request_id=req_123"
     )
 
-    sanitized = _prepare_gateway_status_message(Platform.TELEGRAM, "lifecycle", raw)
+    sanitized = _prepare_gateway_status_message(Platform.FEISHU, "lifecycle", raw)
 
     assert sanitized is not None
     assert "provider rejected" in sanitized.lower()
@@ -47,14 +47,14 @@ def test_telegram_status_sanitizes_raw_provider_security_errors():
     assert "req_123" not in sanitized
 
 
-def test_telegram_final_response_sanitizes_raw_provider_errors():
-    """Final Telegram replies should not expose raw provider/security details."""
+def test_chat_final_response_sanitizes_raw_provider_errors():
+    """Final chat replies should not expose raw provider/security details."""
     raw = (
         "API call failed after 3 retries: HTTP 400: This request was blocked "
         "under the provider cybersecurity risk policy. request_id=req_abc"
     )
 
-    sanitized = _sanitize_gateway_final_response(Platform.TELEGRAM, raw)
+    sanitized = _sanitize_gateway_final_response(Platform.FEISHU, raw)
 
     assert "provider rejected" in sanitized.lower()
     assert "cybersecurity risk" not in sanitized.lower()
@@ -62,22 +62,22 @@ def test_telegram_final_response_sanitizes_raw_provider_errors():
     assert "req_abc" not in sanitized
 
 
-def test_telegram_final_response_redacts_auth_secrets():
+def test_chat_final_response_redacts_auth_secrets():
     """Authentication errors should be useful without leaking key material."""
     raw = (
         "⚠️ Provider authentication failed: Incorrect API key provided: "
         "sk-REDACTED"
     )
 
-    sanitized = _sanitize_gateway_final_response(Platform.TELEGRAM, raw)
+    sanitized = _sanitize_gateway_final_response(Platform.FEISHU, raw)
 
     assert "authentication failed" in sanitized.lower()
     assert "check the configured credentials" in sanitized.lower()
     assert "sk-live" not in sanitized
 
 
-def test_telegram_final_response_keeps_normal_answers():
+def test_chat_final_response_keeps_normal_answers():
     """Normal assistant content should not be rewritten."""
     answer = "Here is the clean summary you asked for."
 
-    assert _sanitize_gateway_final_response(Platform.TELEGRAM, answer) == answer
+    assert _sanitize_gateway_final_response(Platform.FEISHU, answer) == answer

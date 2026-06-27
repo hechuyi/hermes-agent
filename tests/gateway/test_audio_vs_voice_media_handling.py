@@ -1,7 +1,7 @@
 """
-Tests for #24870 — Telegram: audio file attachments must NOT be routed to STT.
+Tests for #24870 — media handling: audio file attachments must NOT be routed to STT.
 
-Telegram distinguishes three kinds of audio payloads:
+Platform adapters may distinguish three kinds of audio payloads:
   - message.voice  → Opus/OGG voice message  → STT pipeline
   - message.audio  → audio file attachment   → file path note, NOT STT
   - message.document (audio mime) → generic file route
@@ -12,7 +12,7 @@ These tests confirm that:
   3. Mixed media lists (voice + audio) split correctly.
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -37,7 +37,7 @@ def _voice_event(path: str = "/tmp/voice.ogg") -> MessageEvent:
     return MessageEvent(
         text="",
         message_type=MessageType.VOICE,
-        source=SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm"),
+        source=SessionSource(platform=Platform.FEISHU, chat_id="1", chat_type="dm"),
         media_urls=[path],
         media_types=["audio/ogg"],
     )
@@ -47,7 +47,7 @@ def _audio_event(path: str = "/tmp/song.mp3") -> MessageEvent:
     return MessageEvent(
         text="",
         message_type=MessageType.AUDIO,
-        source=SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm"),
+        source=SessionSource(platform=Platform.FEISHU, chat_id="1", chat_type="dm"),
         media_urls=[path],
         media_types=["audio/mpeg"],
     )
@@ -61,7 +61,7 @@ def _audio_event(path: str = "/tmp/song.mp3") -> MessageEvent:
 async def test_voice_message_still_transcribed():
     """MessageType.VOICE must still be sent through _enrich_message_with_transcription."""
     runner = _make_runner(stt_enabled=True)
-    source = SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm")
+    source = SessionSource(platform=Platform.FEISHU, chat_id="1", chat_type="dm")
     event = _voice_event("/tmp/voice.ogg")
 
     with patch(
@@ -87,7 +87,7 @@ async def test_voice_message_still_transcribed():
 async def test_audio_attachment_skips_stt():
     """MessageType.AUDIO must NOT be routed to STT — transcribe_audio must not be called."""
     runner = _make_runner(stt_enabled=True)
-    source = SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm")
+    source = SessionSource(platform=Platform.FEISHU, chat_id="1", chat_type="dm")
     event = _audio_event("/tmp/song.mp3")
 
     with patch(
@@ -113,7 +113,7 @@ async def test_audio_attachment_skips_stt():
 async def test_audio_attachment_context_note_format():
     """Context note for audio file attachments should include the file path and guidance."""
     runner = _make_runner(stt_enabled=True)
-    source = SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm")
+    source = SessionSource(platform=Platform.FEISHU, chat_id="1", chat_type="dm")
     event = _audio_event("/tmp/cache_12345_my_song.mp3")
 
     with patch(
@@ -147,7 +147,7 @@ async def test_audio_attachment_context_note_format():
 async def test_audio_attachment_skips_stt_when_stt_disabled():
     """Even with STT disabled, AUDIO must NOT produce STT disabled notice — just a file note."""
     runner = _make_runner(stt_enabled=False)
-    source = SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm")
+    source = SessionSource(platform=Platform.FEISHU, chat_id="1", chat_type="dm")
     event = _audio_event("/tmp/podcast.m4a")
 
     with patch(
@@ -171,17 +171,13 @@ async def test_audio_attachment_skips_stt_when_stt_disabled():
 
 
 # ---------------------------------------------------------------------------
-# 4. Telegram gateway: msg.audio → MessageType.AUDIO (not VOICE)
+# 4. Gateway media model: audio files and voice messages stay distinct
 # ---------------------------------------------------------------------------
 
-def test_telegram_media_type_detection_audio_vs_voice():
-    """The Telegram platform must set MessageType.AUDIO for msg.audio, VOICE for msg.voice."""
+def test_media_type_model_distinguishes_audio_vs_voice():
+    """The gateway media model must set MessageType.AUDIO for msg.audio, VOICE for msg.voice."""
     from gateway.platforms.base import MessageType
 
-    # The Telegram adapter's _build_media_type already returns correct values
-    # via MessageType.AUDIO for .audio and MessageType.VOICE for .voice.
-    # Check the constants match expected semantic roles.
     assert MessageType.AUDIO.value == "audio"
     assert MessageType.VOICE.value == "voice"
-    # Sanity: they are distinct
     assert MessageType.AUDIO != MessageType.VOICE

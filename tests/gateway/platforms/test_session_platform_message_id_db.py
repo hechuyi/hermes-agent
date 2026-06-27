@@ -1,12 +1,10 @@
-"""Yuanbao recall: branch A1 (exact id) and A2 (content-match) against DB-only transcripts.
+"""Session DB platform message-id round-trip for recall-style lookups.
 
 state.db persists the platform-side ``message_id`` via the
 ``platform_message_id`` column (added in the salvage of PR #29211) and
-``load_transcript`` surfaces it back on each message dict as ``message_id``
-— so the recall guard's exact-id match path stays canonical even with the
-JSONL file gone.  When a row has no platform id (e.g. agent-processed
-@bot messages whose adapter didn't carry a msg_id, or pre-column legacy
-rows), recall falls through to content-match.
+``load_transcript`` surfaces it back on each message dict as ``message_id``.
+That keeps exact-id lookup canonical even with the JSONL file gone. When a row
+has no platform id, callers can still fall back to content matching.
 """
 from gateway.session import SessionStore
 from gateway.config import GatewayConfig
@@ -18,7 +16,7 @@ def _pin_db(monkeypatch, tmp_path):
     monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
 
 
-def test_recall_branch_a1_exact_id_match_round_trips_through_db(tmp_path, monkeypatch):
+def test_exact_id_match_round_trips_through_db(tmp_path, monkeypatch):
     """A user message persisted with ``message_id`` must round-trip through
     state.db so recall can find and redact it by exact id (branch A1)."""
     _pin_db(monkeypatch, tmp_path)
@@ -26,8 +24,8 @@ def test_recall_branch_a1_exact_id_match_round_trips_through_db(tmp_path, monkey
     config = GatewayConfig()
     store = SessionStore(sessions_dir=tmp_path, config=config)
 
-    sid = "test-yuanbao-recall-a1"
-    store._db.create_session(session_id=sid, source="yuanbao:group:G")
+    sid = "test-platform-message-id-a1"
+    store._db.create_session(session_id=sid, source="feishu:group:G")
     store.append_to_transcript(sid, {
         "role": "user",
         "content": "sensitive content",
@@ -58,18 +56,17 @@ def test_recall_branch_a1_exact_id_match_round_trips_through_db(tmp_path, monkey
     assert target["content"] == "sensitive content"
 
 
-def test_recall_branch_a2_content_match_when_no_platform_id(tmp_path, monkeypatch):
-    """Rows that lack a platform_message_id (e.g. agent-processed @bot
-    messages) still match by content as a fallback."""
+def test_content_match_when_no_platform_id(tmp_path, monkeypatch):
+    """Rows that lack a platform_message_id still match by content fallback."""
     _pin_db(monkeypatch, tmp_path)
 
     config = GatewayConfig()
     store = SessionStore(sessions_dir=tmp_path, config=config)
 
-    sid = "test-yuanbao-recall-a2"
-    store._db.create_session(session_id=sid, source="yuanbao:group:G")
-    # No message_id on the dict — simulates an agent-processed message
-    # that did not carry the platform msg_id through.
+    sid = "test-platform-message-id-a2"
+    store._db.create_session(session_id=sid, source="feishu:group:G")
+    # No message_id on the dict: simulates a message that did not carry the
+    # platform msg_id through.
     store.append_to_transcript(sid, {
         "role": "user",
         "content": "sensitive content",

@@ -31,6 +31,7 @@ CLI_TOOL_PLATFORMS: "OrderedDict[str, RuntimePlatformInfo]" = OrderedDict(
 
 
 GATEWAY_RUNTIME_PLATFORM_VALUES = frozenset({"local", "feishu", "api_server"})
+CHAT_DELIVERY_PLATFORM_VALUES = frozenset({"feishu"})
 
 
 def is_gateway_runtime_platform(value: object) -> bool:
@@ -38,3 +39,10 @@ def is_gateway_runtime_platform(value: object) -> bool:
 
     platform_value = getattr(value, "value", value)
     return str(platform_value) in GATEWAY_RUNTIME_PLATFORM_VALUES
+
+
+def is_chat_delivery_platform(value: object) -> bool:
+    """Return whether a platform delivers user-visible chat messages."""
+
+    platform_value = getattr(value, "value", value)
+    return str(platform_value) in CHAT_DELIVERY_PLATFORM_VALUES

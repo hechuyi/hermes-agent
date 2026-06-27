@@ -247,21 +247,7 @@ class TestStreamingConfigFreshFinalField:
         assert restored.fresh_final_after_seconds == 90.0
 
 
-class TestTelegramAdapterDeleteMessage:
-    """Contract: Telegram adapter implements ``delete_message``."""
-
-    def test_delete_message_method_exists(self):
-        telegram = pytest.importorskip("gateway.platforms.telegram")
-        import inspect
-        cls = telegram.TelegramAdapter
-        assert hasattr(cls, "delete_message"), (
-            "TelegramAdapter.delete_message is required for the fresh-final "
-            "cleanup path (openclaw/openclaw#72038 port)."
-        )
-        sig = inspect.signature(cls.delete_message)
-        params = list(sig.parameters)
-        assert params[:3] == ["self", "chat_id", "message_id"]
-
+class TestAdapterDeleteMessageContract:
     def test_base_adapter_default_returns_false(self):
         """BasePlatformAdapter.delete_message default = no-op returning False."""
         from gateway.platforms.base import BasePlatformAdapter
