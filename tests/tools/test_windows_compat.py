@@ -16,6 +16,12 @@ GUARDED_FILES = [
     "gateway/platforms/whatsapp.py",
 ]
 
+GENERIC_PROCESS_START_FILES = [
+    "tools/environments/local.py",
+    "tools/process_registry.py",
+    "tools/code_execution_tool.py",
+]
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
@@ -44,6 +50,22 @@ class TestNoUnconditionalSetsid:
             assert "attr='setsid'" not in val or "IfExp" in val or "None" in val, (
                 f"{relpath} has unconditional preexec_fn=os.setsid"
             )
+
+
+class TestGenericProcessStartSafety:
+    """Generic production process starts must avoid fork-child Python hooks."""
+
+    @pytest.mark.parametrize("relpath", GENERIC_PROCESS_START_FILES)
+    def test_generic_process_starts_use_start_new_session(self, relpath):
+        filepath = PROJECT_ROOT / relpath
+        source = filepath.read_text(encoding="utf-8")
+
+        assert "preexec_fn=" not in source, (
+            f"{relpath} still uses preexec_fn=; use start_new_session=True instead"
+        )
+        assert "start_new_session=True" in source, (
+            f"{relpath} missing start_new_session=True in production Popen call"
+        )
 
 
 class TestIsWindowsConstant:
