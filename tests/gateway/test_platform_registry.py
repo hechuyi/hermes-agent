@@ -568,6 +568,38 @@ class TestApplyYamlConfigFnDispatch:
         finally:
             reg.unregister("mycaptureplat")
 
+    def test_hook_receives_nested_gateway_platform_subdict(
+        self, tmp_path, monkeypatch
+    ):
+        """Hook falls back to gateway.platforms when no top-level block exists."""
+        captured: dict = {}
+
+        def _hook(yaml_cfg, platform_cfg):
+            captured["yaml_cfg"] = yaml_cfg
+            captured["platform_cfg"] = platform_cfg
+            return None
+
+        reg = self._register_hook("mynestedplat", _hook)
+        try:
+            home = self._write_config(
+                tmp_path,
+                "gateway:\n"
+                "  platforms:\n"
+                "    mynestedplat:\n"
+                "      flag: nested\n",
+            )
+            monkeypatch.setenv("HERMES_HOME", str(home))
+
+            from gateway.config import load_gateway_config
+            load_gateway_config()
+
+            assert captured["yaml_cfg"]["gateway"]["platforms"]["mynestedplat"] == {
+                "flag": "nested",
+            }
+            assert captured["platform_cfg"] == {"flag": "nested"}
+        finally:
+            reg.unregister("mynestedplat")
+
     def test_hook_exception_swallowed(self, tmp_path, monkeypatch):
         """A misbehaving hook never aborts load_gateway_config()."""
 
