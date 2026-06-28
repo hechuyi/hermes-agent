@@ -4,8 +4,9 @@ from unittest.mock import patch
 
 
 class TestMinimaxContextLengths:
-    """Verify context length entries match official docs (204,800 for all models).
+    """Verify context length entries match official docs.
 
+    M2.x series is 204,800; M3 is 1M.
     Source: https://platform.minimax.io/docs/api-reference/text-anthropic-api
     """
 
@@ -15,10 +16,62 @@ class TestMinimaxContextLengths:
 
     def test_minimax_models_resolve_via_prefix(self):
         from agent.model_metadata import get_model_context_length
-        # All MiniMax models should resolve to 204,800 via the "minimax" prefix
+        # M2.x models resolve to 204,800 via the "minimax" catch-all.
         for model in ("MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-M2"):
             ctx = get_model_context_length(model, "")
             assert ctx == 204_800, f"{model} expected 204800, got {ctx}"
+
+    def test_minimax_m3_resolves_to_1m(self):
+        from agent.model_metadata import get_model_context_length
+        for model in ("MiniMax-M3", "minimax/minimax-m3", "minimax-m3"):
+            ctx = get_model_context_length(model, "")
+            assert ctx >= 1_000_000, f"{model} expected 1M-class, got {ctx}"
+
+
+class TestMinimaxM3StaleCacheGuard:
+    def test_suggests_minimax_m3(self):
+        from agent.model_metadata import _model_name_suggests_minimax_m3
+        assert _model_name_suggests_minimax_m3("MiniMax-M3")
+        assert _model_name_suggests_minimax_m3("minimax/minimax-m3")
+        assert not _model_name_suggests_minimax_m3("MiniMax-M2.7")
+        assert not _model_name_suggests_minimax_m3("MiniMax-M2.5")
+
+    def test_stale_m3_cache_dropped_and_reresolves_to_1m(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import importlib
+        import agent.model_metadata as mm
+        importlib.reload(mm)
+        base = "https://api.minimaxi.com/anthropic"
+        mm.save_context_length("MiniMax-M3", base, 204_800)
+        ctx = mm.get_model_context_length(
+            "MiniMax-M3", base_url=base, api_key="", provider="minimax-cn"
+        )
+        assert ctx == 1_000_000
+
+    def test_correct_m3_cache_preserved(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import importlib
+        import agent.model_metadata as mm
+        importlib.reload(mm)
+        base = "https://api.minimaxi.com/anthropic"
+        mm.save_context_length("MiniMax-M3", base, 1_000_000)
+        ctx = mm.get_model_context_length(
+            "MiniMax-M3", base_url=base, api_key="", provider="minimax-cn"
+        )
+        assert ctx == 1_000_000
+
+    def test_m2_cache_not_clobbered(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import importlib
+        import agent.model_metadata as mm
+        importlib.reload(mm)
+        base = "https://api.minimaxi.com/anthropic"
+        for slug in ("MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2.1"):
+            mm.save_context_length(slug, base, 204_800)
+            ctx = mm.get_model_context_length(
+                slug, base_url=base, api_key="", provider="minimax-cn"
+            )
+            assert ctx == 204_800, f"{slug} should stay 204800, got {ctx}"
 
 
 

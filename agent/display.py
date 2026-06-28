@@ -12,9 +12,10 @@ import time
 from dataclasses import dataclass, field
 from difflib import unified_diff
 from pathlib import Path
+from typing import Any
 
 from utils import safe_json_loads
-from agent.redact import redact_browser_typed_text
+from agent.redact import redact_sensitive_text
 from agent.tool_result_classification import file_mutation_result_landed
 
 # ANSI escape codes for coloring tool failure indicators
@@ -169,6 +170,48 @@ def _oneline(text: str) -> str:
     return " ".join(text.split())
 
 
+def redact_browser_typed_text_for_display(value: Any, typed_text: Any) -> Any:
+    """Apply forced secret-pattern redaction to browser_type display payloads.
+
+    Browser backends can echo attempted input in result metadata, errors, or
+    fallback warnings. Recognizable credentials must not reach logs, callbacks,
+    model-visible tool results, or chat history even when global log redaction
+    is disabled. Normal typed text does not match a secret pattern and remains
+    readable.
+    """
+    if typed_text is None:
+        return value
+    needle = str(typed_text)
+    if needle == "":
+        return value
+    redacted = redact_sensitive_text(needle, force=True)
+    if redacted == needle:
+        return value
+    if isinstance(value, str):
+        return value.replace(needle, redacted)
+    if isinstance(value, dict):
+        return {
+            key: redact_browser_typed_text_for_display(item, typed_text)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_browser_typed_text_for_display(item, typed_text) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_browser_typed_text_for_display(item, typed_text) for item in value)
+    return value
+
+
+def redact_tool_args_for_display(tool_name: str, args: dict | None) -> dict | None:
+    """Return a copy of tool args safe for logs and progress callbacks."""
+    if not isinstance(args, dict):
+        return args
+    if tool_name == "browser_type" and isinstance(args.get("text"), str):
+        safe_args = dict(args)
+        safe_args["text"] = redact_sensitive_text(args["text"], force=True)
+        return safe_args
+    return args
+
+
 def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
     """Build a short preview of a tool call's primary argument for display.
 
@@ -179,6 +222,7 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
         max_len = _tool_preview_max_len
     if not args:
         return None
+    args = redact_tool_args_for_display(tool_name, args) or args
     primary_args = {
         "terminal": "command", "web_search": "query", "web_extract": "urls",
         "read_file": "path", "write_file": "path", "patch": "path",
@@ -255,10 +299,7 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
     if isinstance(value, list):
         value = value[0] if value else ""
 
-    if tool_name == "browser_type" and key == "text":
-        preview = redact_browser_typed_text(value)
-    else:
-        preview = _oneline(str(value))
+    preview = _oneline(str(value))
     if not preview:
         return None
     if max_len > 0 and len(preview) > max_len:
@@ -886,6 +927,7 @@ def get_cute_tool_message(
     When *result* is provided the line is checked for failure indicators.
     Failed tool calls get a red prefix and an informational suffix.
     """
+    args = redact_tool_args_for_display(tool_name, args) or args
     dur = f"{duration:.1f}s"
     is_failure, failure_suffix = _detect_tool_failure(tool_name, result)
     skin_prefix = get_skin_tool_prefix()
@@ -953,7 +995,7 @@ def get_cute_tool_message(
     if tool_name == "browser_click":
         return _wrap(f"┊ 👆 click     {args.get('ref', '?')}  {dur}")
     if tool_name == "browser_type":
-        return _wrap(f"┊ ⌨️  type      \"{redact_browser_typed_text(args.get('text', ''))}\"  {dur}")
+        return _wrap(f"┊ ⌨️  type      \"{args.get('text', '')}\"  {dur}")
     if tool_name == "browser_scroll":
         d = args.get("direction", "down")
         arrow = {"down": "↓", "up": "↑", "right": "→", "left": "←"}.get(d, "↓")
@@ -1049,4 +1091,3 @@ def get_cute_tool_message(
 # =========================================================================
 # Honcho session line (one-liner with clickable OSC 8 hyperlink)
 # =========================================================================
-

@@ -235,13 +235,43 @@ class TestCamofoxInteractions:
         camofox_navigate("https://x.com", task_id="t5")
 
         mock_post.return_value = _mock_response(json_data={"ok": True})
-        secret = "correct horse battery staple"
-        result_text = camofox_type("@e3", secret, task_id="t5")
+        text = "hello world"
+        result_text = camofox_type("@e3", text, task_id="t5")
         result = json.loads(result_text)
         assert result["success"] is True
-        assert result["typed"] == "[redacted]"
+        assert result["typed"] == text
+        assert mock_post.call_args.kwargs["json"]["text"] == text
+
+    @patch("tools.browser_camofox.requests.post")
+    def test_type_redacts_api_key_even_when_global_redaction_disabled(self, mock_post, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", False)
+        mock_post.return_value = _mock_response(json_data={"tabId": "tab5b", "url": "https://x.com"})
+        camofox_navigate("https://x.com", task_id="t5b")
+
+        secret = "sk-proj-ABCD1234567890EFGH"
+        mock_post.return_value = _mock_response(json_data={"ok": True})
+        result_text = camofox_type("@apikey", secret, task_id="t5b")
+        result = json.loads(result_text)
+        assert result["success"] is True
         assert secret not in result_text
+        assert result["typed"].startswith("sk-pro")
         assert mock_post.call_args.kwargs["json"]["text"] == secret
+
+    @patch("tools.browser_camofox.requests.post")
+    def test_type_failure_redacts_api_key_even_when_global_redaction_disabled(self, mock_post, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", False)
+        mock_post.return_value = _mock_response(json_data={"tabId": "tab5c", "url": "https://x.com"})
+        camofox_navigate("https://x.com", task_id="t5c")
+
+        secret = "sk-proj-ABCD1234567890EFGH"
+        mock_post.side_effect = RuntimeError(f"camofox failed while typing {secret}")
+        result_text = camofox_type("@apikey", secret, task_id="t5c")
+        result = json.loads(result_text)
+        assert result["success"] is False
+        assert secret not in result_text
+        assert "sk-pro" in result_text
 
     @patch("tools.browser_camofox.requests.post")
     def test_scroll(self, mock_post, monkeypatch):
@@ -430,4 +460,3 @@ class TestBrowserToolRouting:
         monkeypatch.setenv("CAMOFOX_URL", "http://localhost:9377")
         from tools.browser_tool import check_browser_requirements
         assert check_browser_requirements() is True
-

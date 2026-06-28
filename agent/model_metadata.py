@@ -5,6 +5,7 @@ and run_agent.py for pre-flight context checks.
 """
 
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -16,7 +17,7 @@ from urllib.parse import urlparse
 import requests
 import yaml
 
-from utils import base_url_host_matches, base_url_hostname
+from utils import atomic_json_write, base_url_host_matches, base_url_hostname
 
 from hermes_constants import OPENROUTER_MODELS_URL
 
@@ -111,6 +112,54 @@ _endpoint_model_metadata_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _endpoint_model_metadata_cache_time: Dict[str, float] = {}
 _ENDPOINT_MODEL_CACHE_TTL = 300
 
+
+def _get_model_metadata_cache_path() -> Path:
+    """Return path to the processed OpenRouter model metadata disk cache."""
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "cache" / "openrouter_model_metadata.json"
+
+
+def _model_metadata_disk_cache_age_seconds() -> Optional[float]:
+    try:
+        cache_path = _get_model_metadata_cache_path()
+        if not cache_path.exists():
+            return None
+        age = time.time() - cache_path.stat().st_mtime
+        if age < 0:
+            return None
+        return age
+    except Exception:
+        return None
+
+
+def _load_model_metadata_disk_cache() -> Dict[str, Dict[str, Any]]:
+    try:
+        cache_path = _get_model_metadata_cache_path()
+        with cache_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(key): value
+            for key, value in data.items()
+            if isinstance(value, dict)
+        }
+    except Exception as e:
+        logger.debug("Failed to load OpenRouter model metadata disk cache: %s", e)
+        return {}
+
+
+def _save_model_metadata_disk_cache(data: Dict[str, Dict[str, Any]]) -> None:
+    try:
+        atomic_json_write(
+            _get_model_metadata_cache_path(),
+            data,
+            indent=0,
+            separators=(",", ":"),
+        )
+    except Exception as e:
+        logger.debug("Failed to save OpenRouter model metadata disk cache: %s", e)
+
 # Descending tiers for context length probing when the model is unknown.
 # We start at 256K (covers GPT-5.x, many current large-context models) and
 # step down on context-length errors until one works.  Tier[0] is also the
@@ -202,8 +251,9 @@ DEFAULT_CONTEXT_LENGTHS = {
     "qwen3-coder-plus": 1000000,  # 1M context
     "qwen3-coder": 262144,        # 256K context
     "qwen": 131072,
-    # MiniMax — official docs: 204,800 context for all models
+    # MiniMax — M2.x is 204,800; M3 is 1M-class.
     # https://platform.minimax.io/docs/api-reference/text-anthropic-api
+    "minimax-m3": 1_000_000,
     "minimax": 204800,
     # GLM
     "glm": 202752,
@@ -251,6 +301,16 @@ DEFAULT_CONTEXT_LENGTHS = {
     "mimo-v2-flash": 262144,
     "zai-org/GLM-5": 202752,
 }
+
+
+def _lookup_default_context_length(model: str) -> Optional[int]:
+    model_lower = model.lower()
+    for default_model, length in sorted(
+        DEFAULT_CONTEXT_LENGTHS.items(), key=lambda x: len(x[0]), reverse=True
+    ):
+        if default_model.lower() in model_lower:
+            return length
+    return None
 
 # xAI Grok models that ACCEPT the `reasoning.effort` parameter on
 # api.x.ai. Verified live against /v1/responses 2026-05-10:
@@ -623,6 +683,15 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
     if not force_refresh and _model_metadata_cache and (time.time() - _model_metadata_cache_time) < _MODEL_CACHE_TTL:
         return _model_metadata_cache
 
+    if not force_refresh:
+        disk_age = _model_metadata_disk_cache_age_seconds()
+        if disk_age is not None and disk_age < _MODEL_CACHE_TTL:
+            disk_cache = _load_model_metadata_disk_cache()
+            if disk_cache:
+                _model_metadata_cache = disk_cache
+                _model_metadata_cache_time = time.time() - disk_age
+                return _model_metadata_cache
+
     try:
         response = requests.get(OPENROUTER_MODELS_URL, timeout=10, verify=_resolve_requests_verify())
         response.raise_for_status()
@@ -644,12 +713,24 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
 
         _model_metadata_cache = cache
         _model_metadata_cache_time = time.time()
+        _save_model_metadata_disk_cache(cache)
         logger.debug("Fetched metadata for %s models from OpenRouter", len(cache))
         return cache
 
     except Exception as e:
         logger.warning(f"Failed to fetch model metadata from OpenRouter: {e}")
-        return _model_metadata_cache or {}
+        if _model_metadata_cache:
+            return _model_metadata_cache
+        disk_cache = _load_model_metadata_disk_cache()
+        if disk_cache:
+            _model_metadata_cache = disk_cache
+            disk_age = _model_metadata_disk_cache_age_seconds()
+            if disk_age is not None:
+                _model_metadata_cache_time = time.time() - min(disk_age, _MODEL_CACHE_TTL)
+            else:
+                _model_metadata_cache_time = time.time() - _MODEL_CACHE_TTL + 1
+            return _model_metadata_cache
+        return {}
 
 
 def fetch_endpoint_model_metadata(
@@ -962,6 +1043,10 @@ def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:
     is_output_cap_error = (
         "max_tokens" in error_lower
         and ("available_tokens" in error_lower or "available tokens" in error_lower)
+    ) or (
+        "maximum context length" in error_lower
+        and "requested" in error_lower
+        and "output tokens" in error_lower
     )
     if not is_output_cap_error:
         return None
@@ -980,6 +1065,15 @@ def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:
             tokens = int(match.group(1))
             if tokens >= 1:
                 return tokens
+
+    m_ctx_tok = re.search(r'maximum context length is (\d+)\s*token', error_lower)
+    m_chars = re.search(r'prompt contains (\d+)\s*character', error_lower)
+    if m_ctx_tok and m_chars:
+        ctx = int(m_ctx_tok.group(1))
+        estimated_input = (int(m_chars.group(1)) + 2) // 3
+        available = ctx - estimated_input
+        if available >= 1:
+            return available
     return None
 
 
@@ -1128,6 +1222,16 @@ def _model_name_suggests_kimi(model: str) -> bool:
     """
     lower = model.lower()
     return lower.startswith("kimi") or "moonshot" in lower
+
+
+def _model_name_suggests_minimax_m3(model: str) -> bool:
+    """Return True if the model name looks like MiniMax M3."""
+    return "minimax-m3" in model.lower()
+
+
+def _model_name_suggests_grok_4_3(model: str) -> bool:
+    """Return True if the model name looks like a Grok 4.3 variant."""
+    return "grok-4.3" in model.lower()
 
 
 def _query_local_context_length(model: str, base_url: str, api_key: str = "") -> Optional[int]:
@@ -1541,6 +1645,20 @@ def get_model_context_length(
                     model, base_url, f"{cached:,}",
                 )
                 _invalidate_cached_context_length(model, base_url)
+            elif cached <= 204_800 and _model_name_suggests_minimax_m3(model):
+                logger.info(
+                    "Dropping stale MiniMax-M3 cache entry %s@%s -> %s (pre-catalog value); "
+                    "re-resolving via hardcoded defaults",
+                    model, base_url, f"{cached:,}",
+                )
+                _invalidate_cached_context_length(model, base_url)
+            elif cached <= 256_000 and _model_name_suggests_grok_4_3(model):
+                logger.info(
+                    "Dropping stale Grok-4.3 cache entry %s@%s -> %s (pre-catalog value); "
+                    "re-resolving via hardcoded defaults",
+                    model, base_url, f"{cached:,}",
+                )
+                _invalidate_cached_context_length(model, base_url)
             # Nous Portal: the portal /v1/models endpoint is authoritative.
             # Bypass the persistent cache so step 5b can always reconcile
             # against it — this corrects pre-fix entries seeded from the
@@ -1615,6 +1733,14 @@ def get_model_context_length(
                 "in config.yaml to override.",
                 model, base_url, f"{DEFAULT_FALLBACK_CONTEXT:,}",
             )
+            catalog_ctx = _lookup_default_context_length(model)
+            if catalog_ctx:
+                logger.info(
+                    "Using hardcoded context length %s for model %r "
+                    "(custom endpoint catalog match)",
+                    f"{catalog_ctx:,}", model,
+                )
+                return catalog_ctx
             return DEFAULT_FALLBACK_CONTEXT
 
     # 4. Anthropic /v1/models API (only for regular API keys, not OAuth)
@@ -1695,10 +1821,28 @@ def get_model_context_length(
         if ctx is not None:
             save_context_length(model, base_url, ctx)
             return ctx
+    if effective_provider == "openrouter":
+        metadata = fetch_model_metadata()
+        entry = metadata.get(model)
+        if entry:
+            or_ctx = entry.get("context_length")
+            if isinstance(or_ctx, int) and or_ctx > 0 and not (
+                or_ctx == 32768 and _model_name_suggests_kimi(model)
+            ):
+                return or_ctx
     if effective_provider:
         from agent.models_dev import lookup_models_dev_context
         ctx = lookup_models_dev_context(effective_provider, model)
         if ctx:
+            if _model_name_suggests_minimax_m3(model):
+                catalog = DEFAULT_CONTEXT_LENGTHS.get("minimax-m3")
+                if catalog and ctx < catalog:
+                    logger.info(
+                        "Rejecting models.dev context=%s for %r "
+                        "(MiniMax-M3 underreport); using hardcoded default %s",
+                        ctx, model, f"{catalog:,}",
+                    )
+                    return catalog
             return ctx
 
     # 6. OpenRouter live API metadata — provider-unaware fallback.
@@ -1725,12 +1869,9 @@ def get_model_context_length(
     # Only check `default_model in model` (is the key a substring of the input).
     # The reverse (`model in default_model`) causes shorter names like
     # "claude-sonnet-4" to incorrectly match "claude-sonnet-4-6" and return 1M.
-    model_lower = model.lower()
-    for default_model, length in sorted(
-        DEFAULT_CONTEXT_LENGTHS.items(), key=lambda x: len(x[0]), reverse=True
-    ):
-        if default_model in model_lower:
-            return length
+    catalog_ctx = _lookup_default_context_length(model)
+    if catalog_ctx:
+        return catalog_ctx
 
     # 9. Query local server as last resort
     if base_url and is_local_endpoint(base_url):

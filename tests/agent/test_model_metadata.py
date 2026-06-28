@@ -22,6 +22,7 @@ from unittest.mock import patch, MagicMock
 from agent.model_metadata import (
     CONTEXT_PROBE_TIERS,
     DEFAULT_CONTEXT_LENGTHS,
+    DEFAULT_FALLBACK_CONTEXT,
     _strip_provider_prefix,
     estimate_tokens_rough,
     estimate_messages_tokens_rough,
@@ -29,6 +30,7 @@ from agent.model_metadata import (
     get_next_probe_tier,
     get_cached_context_length,
     parse_context_limit_from_error,
+    parse_available_output_tokens_from_error,
     save_context_length,
     fetch_model_metadata,
     _MODEL_CACHE_TTL,
@@ -134,7 +136,7 @@ class TestDefaultContextLengths:
             # Claude 4.6+ models (4.6, 4.7, 4.8) have 1M context at standard
             # API pricing (no long-context premium).  Older Claude 4.x and
             # 3.x models cap at 200k.
-            if any(tag in key for tag in ("4.6", "4-6", "4.7", "4-7", "4.8", "4-8")):
+            if any(tag in key for tag in ("4.6", "4-6", "4.7", "4-7", "4.8", "4-8", "fable")):
                 assert value == 1000000, f"{key} should be 1000000"
             else:
                 assert value == 200000, f"{key} should be 200000"
@@ -833,7 +835,7 @@ class TestGetModelContextLength:
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
-    def test_custom_endpoint_without_metadata_skips_name_based_default(self, mock_endpoint_fetch, mock_fetch):
+    def test_custom_endpoint_without_metadata_falls_back_to_catalog(self, mock_endpoint_fetch, mock_fetch):
         mock_fetch.return_value = {}
         mock_endpoint_fetch.return_value = {}
 
@@ -843,7 +845,68 @@ class TestGetModelContextLength:
             api_key="test-key",
         )
 
-        assert result == CONTEXT_PROBE_TIERS[0]
+        assert result == 202752
+
+    @patch("agent.model_metadata.fetch_model_metadata")
+    def test_custom_endpoint_falls_back_to_hardcoded_catalog_before_256k(self, mock_fetch):
+        mock_fetch.return_value = {}
+        with patch("agent.model_metadata._resolve_endpoint_context_length", return_value=None), \
+             patch("agent.model_metadata._query_ollama_api_show", return_value=None), \
+             patch("agent.model_metadata._query_local_context_length", return_value=None), \
+             patch("agent.model_metadata.is_local_endpoint", return_value=False):
+            assert get_model_context_length(
+                "claude-opus-4-8",
+                base_url="https://my-gateway.example.com/v1/claude",
+            ) == 1000000
+            assert get_model_context_length(
+                "totally-unknown-model",
+                base_url="https://my-gateway.example.com/v1/claude",
+            ) == DEFAULT_FALLBACK_CONTEXT
+
+    def test_openrouter_live_metadata_beats_hardcoded_catchall(self):
+        live = {
+            "anthropic/claude-live-new-5": {"context_length": 1_000_000},
+            "anthropic/claude-haiku-4.5": {"context_length": 200_000},
+        }
+        with patch("agent.model_metadata.fetch_model_metadata", return_value=live) as mock_fetch, \
+             patch("agent.model_metadata._query_ollama_api_show", return_value=None), \
+             patch("agent.model_metadata.get_cached_context_length", return_value=None), \
+             patch("agent.models_dev.lookup_models_dev_context", return_value=None):
+            assert get_model_context_length(
+                "anthropic/claude-live-new-5",
+                base_url="https://openrouter.ai/api/v1",
+                provider="openrouter",
+            ) == 1_000_000
+            assert get_model_context_length(
+                "anthropic/claude-haiku-4.5",
+                base_url="https://openrouter.ai/api/v1",
+                provider="openrouter",
+            ) == 200_000
+            assert mock_fetch.call_count == 2
+
+    def test_openrouter_kimi_32k_underreport_still_guarded(self):
+        live = {"moonshotai/kimi-k2.6": {"context_length": 32768}}
+        with patch("agent.model_metadata.fetch_model_metadata", return_value=live) as mock_fetch, \
+             patch("agent.model_metadata._query_ollama_api_show", return_value=None), \
+             patch("agent.model_metadata.get_cached_context_length", return_value=None), \
+             patch("agent.models_dev.lookup_models_dev_context", return_value=None):
+            ctx = get_model_context_length(
+                "moonshotai/kimi-k2.6",
+                base_url="https://openrouter.ai/api/v1",
+                provider="openrouter",
+            )
+            assert ctx != 32768
+            mock_fetch.assert_called_once()
+
+    def test_minimax_m3_prefers_catalog_over_models_dev_underreport(self):
+        with patch("agent.model_metadata._query_ollama_api_show", return_value=None), \
+             patch("agent.model_metadata.get_cached_context_length", return_value=None), \
+             patch("agent.models_dev.lookup_models_dev_context", return_value=524288):
+            assert get_model_context_length(
+                "MiniMax-M3",
+                base_url="https://api.minimax.io/anthropic",
+                provider="minimax",
+            ) == 1_000_000
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
@@ -1024,6 +1087,77 @@ class TestFetchModelMetadata:
         mm._model_metadata_cache = {}
         mm._model_metadata_cache_time = 0
 
+    def _isolate_disk_cache(self, monkeypatch, tmp_path):
+        import agent.model_metadata as mm
+        cache_path = tmp_path / "openrouter_model_metadata.json"
+        monkeypatch.setattr(mm, "_get_model_metadata_cache_path", lambda: cache_path)
+        return cache_path
+
+    def test_fresh_disk_cache_skips_network(self, tmp_path, monkeypatch):
+        self._reset_cache()
+        cache_path = self._isolate_disk_cache(monkeypatch, tmp_path)
+        cache_path.write_text(
+            '{"test/model":{"context_length":12345,"name":"Cached","pricing":{}}}',
+            encoding="utf-8",
+        )
+
+        with patch("agent.model_metadata.requests.get") as mock_get:
+            result = fetch_model_metadata()
+
+        mock_get.assert_not_called()
+        assert result["test/model"]["context_length"] == 12345
+
+    def test_force_refresh_bypasses_fresh_disk_cache(self, tmp_path, monkeypatch):
+        self._reset_cache()
+        cache_path = self._isolate_disk_cache(monkeypatch, tmp_path)
+        cache_path.write_text(
+            '{"test/model":{"context_length":12345,"name":"Cached","pricing":{}}}',
+            encoding="utf-8",
+        )
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": [{"id": "live/model", "context_length": 67890, "name": "Live"}]
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("agent.model_metadata.requests.get", return_value=mock_response) as mock_get:
+            result = fetch_model_metadata(force_refresh=True)
+
+        assert mock_get.call_count == 1
+        assert "live/model" in result
+        assert "test/model" not in result
+
+    def test_network_success_writes_disk_cache(self, tmp_path, monkeypatch):
+        self._reset_cache()
+        cache_path = self._isolate_disk_cache(monkeypatch, tmp_path)
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "data": [{"id": "live/model", "context_length": 67890, "name": "Live"}]
+        }
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("agent.model_metadata.requests.get", return_value=mock_response):
+            fetch_model_metadata(force_refresh=True)
+
+        assert cache_path.exists()
+        assert "live/model" in cache_path.read_text(encoding="utf-8")
+
+    def test_network_failure_falls_back_to_stale_disk_cache(self, tmp_path, monkeypatch):
+        self._reset_cache()
+        cache_path = self._isolate_disk_cache(monkeypatch, tmp_path)
+        cache_path.write_text(
+            '{"stale/model":{"context_length":50000,"name":"Stale","pricing":{}}}',
+            encoding="utf-8",
+        )
+        old = time.time() - _MODEL_CACHE_TTL - 60
+        os.utime(cache_path, (old, old))
+
+        with patch("agent.model_metadata.requests.get", side_effect=Exception("Network error")):
+            result = fetch_model_metadata(force_refresh=True)
+
+        assert result["stale/model"]["context_length"] == 50000
+
     @patch("agent.model_metadata.requests.get")
     def test_caches_result(self, mock_get):
         self._reset_cache()
@@ -1103,10 +1237,11 @@ class TestFetchModelMetadata:
         assert result["test-model"]["context_length"] == 123456
 
     @patch("agent.model_metadata.requests.get")
-    def test_ttl_expiry_triggers_refetch(self, mock_get):
+    def test_ttl_expiry_triggers_refetch(self, mock_get, tmp_path, monkeypatch):
         """Cache expires after _MODEL_CACHE_TTL seconds."""
         import agent.model_metadata as mm
         self._reset_cache()
+        cache_path = self._isolate_disk_cache(monkeypatch, tmp_path)
 
         mock_response = MagicMock()
         mock_response.json.return_value = {
@@ -1118,8 +1253,10 @@ class TestFetchModelMetadata:
         fetch_model_metadata(force_refresh=True)
         assert mock_get.call_count == 1
 
-        # Simulate TTL expiry
+        # Simulate both memory and disk TTL expiry.
         mm._model_metadata_cache_time = time.time() - _MODEL_CACHE_TTL - 1
+        old = time.time() - _MODEL_CACHE_TTL - 1
+        os.utime(cache_path, (old, old))
         fetch_model_metadata()
         assert mock_get.call_count == 2  # refetched
 
@@ -1234,6 +1371,15 @@ class TestParseContextLimitFromError:
         assert parse_context_limit_from_error(msg) is None
 
 
+class TestParseAvailableOutputTokensFromError:
+    def test_lmstudio_char_based_output_cap_overflow(self):
+        msg = (
+            "This model's maximum context length is 65536 tokens. However, you "
+            "requested 65536 output tokens and your prompt contains 77409 characters."
+        )
+        assert parse_available_output_tokens_from_error(msg) == 39733
+
+
 # =========================================================================
 # Persistent context length cache
 # =========================================================================
@@ -1313,3 +1459,47 @@ class TestContextLengthCache:
         with patch("agent.model_metadata._get_context_cache_path", return_value=cache_file):
             save_context_length(model, url, 200000)
             assert get_cached_context_length(model, url) == 200000
+
+
+class TestGrok43StaleCacheGuard:
+    def test_suggests_grok_4_3(self):
+        from agent.model_metadata import _model_name_suggests_grok_4_3
+        assert _model_name_suggests_grok_4_3("grok-4.3")
+        assert _model_name_suggests_grok_4_3("grok-4.3-latest")
+        assert _model_name_suggests_grok_4_3("xai/grok-4.3")
+        assert not _model_name_suggests_grok_4_3("grok-4")
+        assert not _model_name_suggests_grok_4_3("grok-4-fast")
+        assert not _model_name_suggests_grok_4_3("grok-4.20")
+
+    def test_stale_grok_4_3_dropped_and_reresolves_to_1m(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import importlib
+        import agent.model_metadata as mm
+        importlib.reload(mm)
+        base = "https://api.x.ai/v1"
+        mm.save_context_length("grok-4.3", base, 256_000)
+        ctx = mm.get_model_context_length(
+            "grok-4.3", base_url=base, api_key="", provider="xai"
+        )
+        assert ctx == 1_000_000
+
+    def test_correct_grok_4_3_cache_preserved(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import importlib
+        import agent.model_metadata as mm
+        importlib.reload(mm)
+        base = "https://api.x.ai/v1"
+        mm.save_context_length("grok-4.3", base, 1_000_000)
+        assert mm.get_model_context_length(
+            "grok-4.3", base_url=base, provider="xai"
+        ) == 1_000_000
+
+    def test_grok_4_not_clobbered(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        import importlib
+        import agent.model_metadata as mm
+        importlib.reload(mm)
+        base = "https://api.x.ai/v1"
+        for slug in ("grok-4", "grok-4-0709"):
+            mm.save_context_length(slug, base, 256_000)
+            assert mm.get_model_context_length(slug, base_url=base, provider="xai") == 256_000

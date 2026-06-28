@@ -10,6 +10,7 @@ from agent.display import (
     capture_local_edit_snapshot,
     extract_edit_diff,
     get_cute_tool_message,
+    redact_tool_args_for_display,
     set_tool_preview_max_len,
     _render_inline_unified_diff,
     _summarize_rendered_diff_sections,
@@ -106,13 +107,39 @@ class TestBuildToolPreview:
         assert result is not None
         assert "find something" in result
 
-    def test_browser_type_preview_redacts_text(self):
-        secret = "correct horse battery staple"
+    def test_browser_type_preview_redacts_api_key_even_when_global_redaction_disabled(self, monkeypatch):
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", False)
+        secret = "sk-proj-ABCD1234567890EFGH"
 
         result = build_tool_preview("browser_type", {"text": secret})
 
-        assert result == "[redacted]"
+        assert result.startswith("sk-pro")
         assert secret not in result
+
+    def test_browser_type_preview_keeps_normal_text(self):
+        text = "hello world search query"
+
+        result = build_tool_preview("browser_type", {"text": text})
+
+        assert result == text
+
+    def test_browser_type_display_args_redact_api_key_even_when_global_redaction_disabled(self, monkeypatch):
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", False)
+        secret = "ghp_ABCDEFGHIJ1234567890"
+
+        safe_args = redact_tool_args_for_display("browser_type", {"ref": "@e3", "text": secret})
+
+        assert safe_args["ref"] == "@e3"
+        assert safe_args["text"].startswith("ghp_AB")
+        assert secret not in str(safe_args)
+
+    def test_browser_type_display_args_keep_normal_text(self):
+        text = "normal search text"
+
+        assert redact_tool_args_for_display("browser_type", {"ref": "@e3", "text": text}) == {
+            "ref": "@e3",
+            "text": text,
+        }
 
     def test_false_like_args_zero(self):
         """Non-dict falsy values should return None, not crash."""
@@ -180,13 +207,21 @@ class TestCuteToolMessagePreviewLength:
 
         assert "[error]" not in line
 
-    def test_browser_type_preview_redacts_typed_text(self):
-        secret = "correct horse battery staple"
+    def test_browser_type_preview_redacts_api_key_in_cute_message(self, monkeypatch):
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", False)
+        secret = "sk-proj-ABCD1234567890EFGH"
 
         line = get_cute_tool_message("browser_type", {"ref": "@e3", "text": secret}, 0.1)
 
-        assert "[redacted]" in line
+        assert "sk-pro" in line
         assert secret not in line
+
+    def test_browser_type_preview_keeps_normal_text_in_cute_message(self):
+        text = "hello world"
+
+        line = get_cute_tool_message("browser_type", {"ref": "@e3", "text": text}, 0.1)
+
+        assert text in line
 
 
 class TestWebProviderLabel:

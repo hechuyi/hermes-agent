@@ -562,15 +562,23 @@ def camofox_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
             f"/tabs/{session['tab_id']}/type",
             {"userId": session["user_id"], "ref": clean_ref, "text": text},
         )
-        from agent.redact import redact_browser_typed_text
+        from agent.display import (
+            redact_browser_typed_text_for_display,
+            redact_tool_args_for_display,
+        )
 
-        return json.dumps({
+        display_text = (redact_tool_args_for_display("browser_type", {"text": text}) or {})["text"]
+        response = {
             "success": True,
-            "typed": redact_browser_typed_text(text),
+            "typed": display_text,
             "element": clean_ref,
-        })
+        }
+        response = redact_browser_typed_text_for_display(response, text)
+        return json.dumps(response)
     except Exception as e:
-        return tool_error(str(e), success=False)
+        from agent.display import redact_browser_typed_text_for_display
+
+        return tool_error(redact_browser_typed_text_for_display(str(e), text), success=False)
 
 
 def camofox_scroll(direction: str, task_id: Optional[str] = None) -> str:
@@ -791,5 +799,4 @@ def camofox_console(clear: bool = False, task_id: Optional[str] = None) -> str:
         "note": "Console log capture is not available with the Camofox backend. "
                 "Use browser_snapshot or browser_vision to inspect page state.",
     })
-
 

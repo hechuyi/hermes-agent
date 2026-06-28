@@ -2688,21 +2688,30 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     # Use fill command (clears then types)
     result = _run_browser_command(effective_task_id, "fill", [ref, text])
 
-    if result.get("success"):
-        from agent.redact import redact_browser_typed_text
+    from agent.display import (
+        redact_browser_typed_text_for_display,
+        redact_tool_args_for_display,
+    )
 
+    display_text = (redact_tool_args_for_display("browser_type", {"text": text}) or {})["text"]
+
+    if result.get("success"):
         response = {
             "success": True,
-            "typed": redact_browser_typed_text(text),
+            "typed": display_text,
             "element": ref
         }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+        response = _copy_fallback_warning(response, result)
+        response = redact_browser_typed_text_for_display(response, text)
+        return json.dumps(response, ensure_ascii=False)
     else:
         response = {
             "success": False,
             "error": result.get("error", f"Failed to type into {ref}")
         }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+        response = _copy_fallback_warning(response, result)
+        response = redact_browser_typed_text_for_display(response, text)
+        return json.dumps(response, ensure_ascii=False)
 
 
 def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
