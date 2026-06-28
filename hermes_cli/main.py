@@ -4821,6 +4821,48 @@ def _model_flow_bedrock(config, current_model=""):
         print("  No change.")
 
 
+def _select_zai_endpoint(current_base: str) -> str:
+    """Present an explicit endpoint picker for Z.AI setup."""
+    from hermes_cli.auth import ZAI_ENDPOINTS
+
+    options = [(label, url) for _, url, _, label in ZAI_ENDPOINTS]
+    normalized_current = (current_base or "").strip().rstrip("/")
+
+    default_idx = 0
+    for idx, (_, url) in enumerate(options):
+        if normalized_current == url.rstrip("/"):
+            default_idx = idx
+            break
+    else:
+        if normalized_current:
+            default_idx = len(options)
+
+    print("Select Z.AI / GLM endpoint:")
+    choices = [f"{label} ({url})" for label, url in options]
+    choices.append("Custom proxy URL")
+
+    selected = _prompt_provider_choice(choices, default=default_idx)
+    if selected is None:
+        return current_base
+
+    if selected == len(options):
+        try:
+            override = input(f"Custom base URL [{current_base}]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return current_base
+        if not override:
+            return current_base
+        if not override.startswith(("http://", "https://")):
+            print(
+                "  Invalid URL — must start with http:// or https://. Keeping current value."
+            )
+            return current_base
+        return override.rstrip("/")
+
+    return options[selected][1].rstrip("/")
+
+
 def _model_flow_api_key_provider(config, provider_id, current_model=""):
     """Generic flow for API-key providers (z.ai, MiniMax, OpenCode, etc.)."""
     from hermes_cli.auth import (
@@ -4934,19 +4976,25 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
             pass
     effective_base = current_base or pconfig.inference_base_url
 
-    try:
-        override = input(f"Base URL [{effective_base}]: ").strip()
-    except (KeyboardInterrupt, EOFError):
-        print()
-        override = ""
-    if override and base_url_env:
-        if not override.startswith(("http://", "https://")):
-            print(
-                "  Invalid URL — must start with http:// or https://. Keeping current value."
-            )
-        else:
-            save_env_value(base_url_env, override)
-            effective_base = override
+    if provider_id == "zai":
+        chosen_base = _select_zai_endpoint(effective_base)
+        if chosen_base and chosen_base != effective_base and base_url_env:
+            save_env_value(base_url_env, chosen_base)
+        effective_base = chosen_base
+    else:
+        try:
+            override = input(f"Base URL [{effective_base}]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            override = ""
+        if override and base_url_env:
+            if not override.startswith(("http://", "https://")):
+                print(
+                    "  Invalid URL — must start with http:// or https://. Keeping current value."
+                )
+            else:
+                save_env_value(base_url_env, override)
+                effective_base = override
 
     # Model selection — resolution order:
     #   1. models.dev registry (cached, filtered for agentic/tool-capable models)

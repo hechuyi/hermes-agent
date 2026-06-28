@@ -2210,7 +2210,11 @@ def _is_method_not_found_error(exc: BaseException) -> bool:
             return True
 
     message = str(exc).lower()
-    return "-32601" in message and "method not found" in message
+    return (
+        ("-32601" in message and "method not found" in message)
+        or "unknown method" in message
+        or "not found: ping" in message
+    )
 
 # ---------------------------------------------------------------------------
 # Auth-failure detection helpers (Task 6 of MCP OAuth consolidation)
@@ -4053,7 +4057,7 @@ def shutdown_mcp_servers():
         if future is not None:
             try:
                 future.result(timeout=15)
-            except Exception as exc:
+            except BaseException as exc:
                 logger.debug("Error during MCP shutdown: %s", exc)
 
     _stop_mcp_loop()

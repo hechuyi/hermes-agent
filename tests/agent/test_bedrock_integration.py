@@ -163,6 +163,26 @@ class TestRuntimeProvider:
 
         assert result["region"] == "us-east-1"
 
+    def test_bedrock_runtime_uses_target_model_for_api_mode_routing(self, monkeypatch):
+        """Delegated Bedrock resolution must route from target_model, not stale default."""
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+        monkeypatch.setenv("AWS_REGION", "us-east-1")
+
+        model_cfg = {"provider": "bedrock", "default": "us.amazon.nova-pro-v1:0"}
+
+        with patch("hermes_cli.runtime_provider.resolve_provider", return_value="bedrock"), \
+             patch("hermes_cli.runtime_provider._get_model_config", return_value=model_cfg):
+            result = resolve_runtime_provider(
+                requested="bedrock",
+                target_model="us.anthropic.claude-sonnet-4-6",
+            )
+
+        assert result["provider"] == "bedrock"
+        assert result["api_mode"] == "anthropic_messages"
+
     def test_bedrock_runtime_no_credentials_raises_on_auto_detect(self, monkeypatch):
         """When bedrock is auto-detected (not explicitly requested) and no
         credentials are found, runtime resolution should raise AuthError."""

@@ -190,6 +190,15 @@ class TestIsLocalBackend:
 
         assert browser_tool._is_local_backend() is False
 
+    @pytest.mark.parametrize("backend", ["docker", "modal", "daytona", "ssh", "singularity"])
+    def test_container_terminal_backend_is_not_local(self, monkeypatch, backend):
+        """Containerized terminal backends must not skip SSRF checks."""
+        monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+        monkeypatch.setattr(browser_tool, "_get_cloud_provider", lambda: None)
+        monkeypatch.setenv("TERMINAL_ENV", backend)
+
+        assert browser_tool._is_local_backend() is False
+
 
 # ---------------------------------------------------------------------------
 # Post-redirect SSRF check

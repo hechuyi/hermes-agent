@@ -88,7 +88,10 @@ class TestReapOrphanedBrowserSessions:
         # Post-#21561 the liveness probe goes through
         # ``gateway.status._pid_exists`` (which wraps ``psutil.pid_exists``
         # so it's safe on Windows — ``os.kill(pid, 0)`` is bpo-14484).
+        # Identity guard #14073 is mocked True here; its own behavior is
+        # covered by TestReaperIdentityGuard.
         with patch("gateway.status._pid_exists", return_value=True), \
+             patch("tools.browser_tool._verify_reapable_browser_daemon", return_value=True), \
              patch("tools.process_registry.ProcessRegistry._terminate_host_pid", side_effect=mock_terminate):
             _reap_orphaned_browser_sessions()
 
@@ -139,6 +142,7 @@ class TestReapOrphanedBrowserSessions:
             terminate_calls.append(pid)
 
         with patch("gateway.status._pid_exists", return_value=True), \
+             patch("tools.browser_tool._verify_reapable_browser_daemon", return_value=True), \
              patch("tools.process_registry.ProcessRegistry._terminate_host_pid", side_effect=mock_terminate):
             _reap_orphaned_browser_sessions()
 
@@ -232,6 +236,7 @@ class TestOwnerPidCrossProcess:
         pid_alive = {999999999: False, 12345: True}
         with patch("gateway.status._pid_exists",
                    side_effect=lambda pid: pid_alive.get(int(pid), False)), \
+             patch("tools.browser_tool._verify_reapable_browser_daemon", return_value=True), \
              patch("tools.process_registry.ProcessRegistry._terminate_host_pid", side_effect=mock_terminate):
             _reap_orphaned_browser_sessions()
 
@@ -408,3 +413,59 @@ class TestEmergencyCleanupRunsReaper:
         assert reaper_called, (
             "Reaper must run on exit even with no active sessions"
         )
+
+
+class TestReaperIdentityGuard:
+    """Tests for the daemon identity guard used before orphan reaping."""
+
+    class _FakeProc:
+        def __init__(self, name, cmdline=None, environ=None):
+            self._name = name
+            self._cmdline = cmdline or []
+            self._environ = environ or {}
+
+        def name(self):
+            return self._name
+
+        def cmdline(self):
+            return self._cmdline
+
+        def environ(self):
+            return self._environ
+
+    def test_reapable_browser_daemon_requires_session_binding(self):
+        from tools.browser_tool import _verify_reapable_browser_daemon
+
+        socket_dir = "/tmp/agent-browser-h_sess123456"
+        proc = self._FakeProc(
+            name="agent-browser",
+            cmdline=["agent-browser", "--socket-dir", socket_dir],
+        )
+
+        with patch("psutil.Process", return_value=proc):
+            assert _verify_reapable_browser_daemon(12345, socket_dir, "h_sess123456") is True
+
+    def test_reapable_browser_daemon_refuses_non_browser_process(self):
+        from tools.browser_tool import _verify_reapable_browser_daemon
+
+        socket_dir = "/tmp/agent-browser-h_sess123456"
+        proc = self._FakeProc(name="sleep", cmdline=["/bin/sleep", "600"])
+
+        with patch("psutil.Process", return_value=proc):
+            assert _verify_reapable_browser_daemon(12345, socket_dir, "h_sess123456") is False
+
+    def test_planted_pid_is_not_reaped_by_full_reaper(self, fake_tmpdir):
+        from tools.browser_tool import _reap_orphaned_browser_sessions
+
+        d = _make_socket_dir(fake_tmpdir, "h_planted9999", pid=12345)
+        proc = self._FakeProc(name="sleep", cmdline=["/bin/sleep", "600"])
+        terminate_calls = []
+
+        with patch("gateway.status._pid_exists", return_value=True), \
+             patch("psutil.Process", return_value=proc), \
+             patch("tools.process_registry.ProcessRegistry._terminate_host_pid",
+                   side_effect=lambda pid: terminate_calls.append(pid)):
+            _reap_orphaned_browser_sessions()
+
+        assert terminate_calls == []
+        assert d.exists()

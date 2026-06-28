@@ -11,7 +11,7 @@ Ported from anomalyco/opencode#31271.
 """
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -82,6 +82,11 @@ class TestMethodNotFoundDetection:
         from tools.mcp_tool import _is_method_not_found_error
 
         assert not _is_method_not_found_error(_RpcError(-32602, "Invalid params"))
+
+    def test_unknown_method_phrasing_is_match(self):
+        from tools.mcp_tool import _is_method_not_found_error
+
+        assert _is_method_not_found_error(Exception("Unknown method: ping"))
 
 
 @pytest.mark.asyncio
@@ -231,6 +236,20 @@ class TestKeepaliveProbe:
         task.session.list_tools.assert_awaited_once()
         task.session.send_ping.assert_awaited_once()
 
+    async def test_keepalive_unknown_method_falls_back_to_ping(self):
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task.session = SimpleNamespace(
+            list_tools=AsyncMock(side_effect=Exception("Unknown method: ping")),
+            send_ping=AsyncMock(),
+        )
+
+        reason = await self._run_one_keepalive_cycle(task)
+
+        assert reason == "shutdown"
+        task.session.list_tools.assert_awaited_once()
+        task.session.send_ping.assert_awaited_once()
+
     async def test_keepalive_other_list_tools_errors_trigger_reconnect(self):
         task = MCPServerTask("test")
         task.initialize_result = _caps(tools=SimpleNamespace())
@@ -244,3 +263,37 @@ class TestKeepaliveProbe:
         assert reason == "reconnect"
         task.session.list_tools.assert_awaited_once()
         task.session.send_ping.assert_not_called()
+
+
+class TestShutdown:
+    def test_shutdown_mcp_servers_swallows_cancelled_error_from_future_result(self):
+        import tools.mcp_tool as mcp_mod
+        from tools.mcp_tool import _servers, shutdown_mcp_servers
+
+        class _CancelledFuture:
+            def result(self, timeout=None):
+                raise asyncio.CancelledError()
+
+        _servers.clear()
+        _servers["test"] = SimpleNamespace(name="test", shutdown=AsyncMock())
+        original_loop = mcp_mod._mcp_loop
+        original_thread = mcp_mod._mcp_thread
+        mcp_mod._mcp_loop = SimpleNamespace(
+            is_running=lambda: True,
+            call_soon_threadsafe=lambda *args, **kwargs: None,
+        )
+        mcp_mod._mcp_thread = None
+        try:
+            def _fake_schedule(coro, loop, **kwargs):
+                coro.close()
+                return _CancelledFuture()
+
+            with patch(
+                "agent.async_utils.safe_schedule_threadsafe",
+                side_effect=_fake_schedule,
+            ), patch.object(mcp_mod, "_stop_mcp_loop", return_value=None):
+                shutdown_mcp_servers()
+        finally:
+            _servers.clear()
+            mcp_mod._mcp_loop = original_loop
+            mcp_mod._mcp_thread = original_thread
