@@ -122,10 +122,11 @@ class TestExistingInstallDefault:
         m["prompt_choice"].assert_not_called()
         # Quick-setup path NOT taken.
         m["quick"].assert_not_called()
-        # All five sections ran.
+        # Model/terminal/gateway/tools run; agent settings are no longer
+        # prompted on existing installs.
         m["model"].assert_called_once()
         m["terminal"].assert_called_once()
-        m["agent"].assert_called_once()
+        m["agent"].assert_not_called()
         m["gateway"].assert_called_once()
         m["tools"].assert_called_once()
 
@@ -149,7 +150,7 @@ class TestExistingInstallDefault:
         m["prompt_choice"].assert_not_called()
         m["model"].assert_called_once()
         m["terminal"].assert_called_once()
-        m["agent"].assert_called_once()
+        m["agent"].assert_not_called()
         m["gateway"].assert_called_once()
         m["tools"].assert_called_once()
 
@@ -214,6 +215,44 @@ class TestFreshInstall:
 
         m["prompt"].assert_called_once()
         m["first"].assert_called_once()
+
+    def test_first_time_quick_setup_routes_through_nous_portal(self, fresh_install):
+        with ExitStack() as stack:
+            m = _enter_fresh_install_patches(
+                stack,
+                model_provider="hermes_cli.setup.setup_model_provider",
+                nous_flow="hermes_cli.main._model_flow_nous",
+                terminal="hermes_cli.setup.setup_terminal_backend",
+                defaults="hermes_cli.setup._apply_default_agent_settings",
+                gateway="hermes_cli.setup.setup_gateway",
+                summary="hermes_cli.setup._print_setup_summary",
+                prompt=("hermes_cli.setup.prompt_choice", {"return_value": 0}),
+            )
+            from hermes_cli.setup import _run_first_time_quick_setup
+
+            _run_first_time_quick_setup({}, "/tmp/.hermes", False)
+
+        m["model_provider"].assert_not_called()
+        m["nous_flow"].assert_called_once()
+        m["terminal"].assert_called_once()
+        m["defaults"].assert_called_once()
+        m["gateway"].assert_called_once()
+        m["summary"].assert_called_once()
+
+    def test_apply_default_agent_settings_uses_new_full_setup_defaults(self, fresh_install, monkeypatch):
+        from hermes_cli.setup import _apply_default_agent_settings
+
+        config = {}
+        monkeypatch.setattr("hermes_cli.setup.save_config", lambda cfg: None)
+        monkeypatch.setattr("hermes_cli.setup.remove_env_value", lambda key: None)
+
+        _apply_default_agent_settings(config)
+
+        assert config["agent"]["max_turns"] == 150
+        assert config["display"]["tool_progress"] == "all"
+        assert config["compression"]["enabled"] is True
+        assert config["compression"]["threshold"] == 0.50
+        assert config["session_reset"]["mode"] == "none"
 
     def test_quick_on_fresh_install_falls_through(self, fresh_install):
         args = _make_setup_args(quick=True)

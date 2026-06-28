@@ -541,3 +541,33 @@ class TestZaiEndpointPicker:
             _select_zai_endpoint(custom_url)
 
         assert captured["default"] == expected_default
+
+
+class TestXaiOauthModelSetup:
+    def test_empty_catalog_defaults_to_grok_build(self, monkeypatch):
+        from hermes_cli.main import _model_flow_xai_oauth
+
+        captured = {}
+        monkeypatch.setattr("hermes_cli.auth.get_xai_oauth_auth_status", lambda: {"logged_in": True})
+        monkeypatch.setattr(
+            "hermes_cli.auth.resolve_xai_oauth_runtime_credentials",
+            lambda: {"base_url": "https://api.x.ai/v1"},
+        )
+        monkeypatch.setattr(
+            "hermes_cli.auth._prompt_model_selection",
+            lambda model_ids, current_model="": captured.setdefault("current_model", current_model),
+        )
+        monkeypatch.setattr("hermes_cli.auth._save_model_choice", lambda selected: None)
+        monkeypatch.setattr("hermes_cli.auth._update_config_for_provider", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            "hermes_cli.models._PROVIDER_MODELS",
+            {
+                "xai-oauth": [],
+                "xai": [],
+            },
+        )
+        monkeypatch.setattr("builtins.input", lambda prompt="": "1")
+
+        _model_flow_xai_oauth({}, current_model="")
+
+        assert captured["current_model"] == "grok-build-0.1"

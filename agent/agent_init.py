@@ -452,6 +452,13 @@ def init_agent(
     # Store toolset filtering options
     agent.enabled_toolsets = enabled_toolsets
     agent.disabled_toolsets = disabled_toolsets
+    # Turn-boundary MCP refresh can be disabled for parity-sensitive forks.
+    agent._skip_mcp_refresh = False
+    try:
+        from tools.registry import registry as _registry
+        agent._tool_snapshot_generation = _registry._generation
+    except Exception:
+        agent._tool_snapshot_generation = 0
     
     # Model response configuration
     agent.max_tokens = max_tokens  # None = use model default

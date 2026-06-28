@@ -1047,6 +1047,9 @@ def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:
         "maximum context length" in error_lower
         and "requested" in error_lower
         and "output tokens" in error_lower
+    ) or (
+        "in the output" in error_lower
+        and "maximum context length" in error_lower
     )
     if not is_output_cap_error:
         return None
@@ -1072,6 +1075,16 @@ def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:
         ctx = int(m_ctx_tok.group(1))
         estimated_input = (int(m_chars.group(1)) + 2) // 3
         available = ctx - estimated_input
+        if available >= 1:
+            return available
+
+    m_ctx = re.search(r'maximum context length is (\d+)', error_lower)
+    m_parts = re.search(
+        r'\((\d+)\s+of text input,\s*(\d+)\s+of tool input,\s*(\d+)\s+in the output\)',
+        error_lower,
+    )
+    if m_ctx and m_parts:
+        available = int(m_ctx.group(1)) - int(m_parts.group(1)) - int(m_parts.group(2))
         if available >= 1:
             return available
     return None

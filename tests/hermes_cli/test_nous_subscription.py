@@ -189,6 +189,75 @@ def test_get_nous_subscription_features_requires_agent_browser_for_browserbase(m
     assert features.browser.current_provider == "Browserbase"
 
 
+def test_get_nous_subscription_features_requires_chromium_for_local_browser(monkeypatch):
+    env = {}
+
+    monkeypatch.setattr(ns, "get_env_value", lambda name: env.get(name, ""))
+    monkeypatch.setattr(
+        ns, "get_nous_portal_account_info", lambda: _account(logged_in=False)
+    )
+    monkeypatch.setattr(ns, "_toolset_enabled", lambda config, key: key == "browser")
+    monkeypatch.setattr(ns, "_has_agent_browser", lambda: True)
+    monkeypatch.setattr(ns, "resolve_openai_audio_api_key", lambda: "")
+    monkeypatch.setattr(ns, "has_direct_modal_credentials", lambda: False)
+    monkeypatch.setattr(ns, "is_managed_tool_gateway_ready", lambda vendor: False)
+    monkeypatch.setattr("tools.browser_tool._chromium_installed", lambda: False)
+    monkeypatch.setattr("tools.browser_tool._using_lightpanda_engine", lambda: False)
+
+    features = ns.get_nous_subscription_features({"browser": {"cloud_provider": "local"}})
+
+    assert features.browser.available is False
+    assert features.browser.active is False
+    assert features.browser.current_provider == "Local browser"
+
+
+def test_get_nous_subscription_features_allows_lightpanda_without_chromium(monkeypatch):
+    monkeypatch.setattr(ns, "get_env_value", lambda name: "")
+    monkeypatch.setattr(
+        ns, "get_nous_portal_account_info", lambda: _account(logged_in=False)
+    )
+    monkeypatch.setattr(ns, "_toolset_enabled", lambda config, key: key == "browser")
+    monkeypatch.setattr(ns, "_has_agent_browser", lambda: True)
+    monkeypatch.setattr(ns, "resolve_openai_audio_api_key", lambda: "")
+    monkeypatch.setattr(ns, "has_direct_modal_credentials", lambda: False)
+    monkeypatch.setattr(ns, "is_managed_tool_gateway_ready", lambda vendor: False)
+    monkeypatch.setattr("tools.browser_tool._chromium_installed", lambda: False)
+    monkeypatch.setattr("tools.browser_tool._using_lightpanda_engine", lambda: True)
+
+    features = ns.get_nous_subscription_features({"browser": {"cloud_provider": "local"}})
+
+    assert features.browser.available is True
+    assert features.browser.active is True
+    assert features.browser.current_provider == "Local browser"
+
+
+def test_get_nous_subscription_features_keeps_browserbase_available_without_chromium(monkeypatch):
+    env = {
+        "BROWSERBASE_API_KEY": "bb-key",
+        "BROWSERBASE_PROJECT_ID": "bb-project",
+    }
+
+    monkeypatch.setattr(ns, "get_env_value", lambda name: env.get(name, ""))
+    monkeypatch.setattr(
+        ns, "get_nous_portal_account_info", lambda: _account(logged_in=False)
+    )
+    monkeypatch.setattr(ns, "_toolset_enabled", lambda config, key: key == "browser")
+    monkeypatch.setattr(ns, "_has_agent_browser", lambda: True)
+    monkeypatch.setattr(ns, "resolve_openai_audio_api_key", lambda: "")
+    monkeypatch.setattr(ns, "has_direct_modal_credentials", lambda: False)
+    monkeypatch.setattr(ns, "is_managed_tool_gateway_ready", lambda vendor: False)
+    monkeypatch.setattr("tools.browser_tool._chromium_installed", lambda: False)
+    monkeypatch.setattr("tools.browser_tool._using_lightpanda_engine", lambda: False)
+
+    features = ns.get_nous_subscription_features(
+        {"browser": {"cloud_provider": "browserbase"}}
+    )
+
+    assert features.browser.available is True
+    assert features.browser.active is True
+    assert features.browser.current_provider == "Browserbase"
+
+
 def test_get_nous_subscription_features_does_not_treat_quoted_false_as_gateway_opt_in(monkeypatch):
     env = {"EXA_API_KEY": "exa-test"}
 

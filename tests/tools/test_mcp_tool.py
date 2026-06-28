@@ -1763,6 +1763,70 @@ class TestReconnection:
 
         asyncio.run(_test())
 
+    def test_preflight_probe_runs_on_initial_http_connect(self):
+        """The content-type preflight probe fires on the first HTTP connect."""
+        from tools.mcp_tool import MCPServerTask
+
+        target_server = None
+        probe = AsyncMock()
+
+        original_run_http = MCPServerTask._run_http
+
+        async def patched_run_http(self_srv, config):
+            if target_server is not self_srv:
+                return await original_run_http(self_srv, config)
+            self_srv.session = MagicMock()
+            self_srv._tools = []
+            self_srv._ready.set()
+            self_srv._shutdown_event.set()
+            await self_srv._shutdown_event.wait()
+
+        async def _test():
+            nonlocal target_server
+            server = MCPServerTask("http_srv")
+            target_server = server
+
+            with patch.object(MCPServerTask, "_run_http", patched_run_http), \
+                 patch.object(MCPServerTask, "_preflight_content_type", probe), \
+                 patch("asyncio.sleep", new_callable=AsyncMock):
+                await server.run({"url": "https://example.com/mcp"})
+
+            assert probe.await_count == 1
+
+        asyncio.run(_test())
+
+    def test_preflight_probe_skipped_when_already_ready(self):
+        """The preflight probe is skipped on reconnect after a prior success."""
+        from tools.mcp_tool import MCPServerTask
+
+        target_server = None
+        probe = AsyncMock()
+
+        original_run_http = MCPServerTask._run_http
+
+        async def patched_run_http(self_srv, config):
+            if target_server is not self_srv:
+                return await original_run_http(self_srv, config)
+            self_srv.session = MagicMock()
+            self_srv._tools = []
+            self_srv._shutdown_event.set()
+            await self_srv._shutdown_event.wait()
+
+        async def _test():
+            nonlocal target_server
+            server = MCPServerTask("http_srv")
+            target_server = server
+            server._ready.set()
+
+            with patch.object(MCPServerTask, "_run_http", patched_run_http), \
+                 patch.object(MCPServerTask, "_preflight_content_type", probe), \
+                 patch("asyncio.sleep", new_callable=AsyncMock):
+                await server.run({"url": "https://example.com/mcp"})
+
+            assert probe.await_count == 0
+
+        asyncio.run(_test())
+
     def test_initial_oauth_failure_does_not_retry(self):
         """Initial OAuth failures stop immediately to avoid repeated browser prompts."""
         from tools.mcp_tool import MCPServerTask

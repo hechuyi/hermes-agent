@@ -71,6 +71,7 @@ class TestHandleFunctionCall:
     def test_tool_hooks_receive_session_and_tool_call_ids(self):
         with (
             patch("model_tools.registry.dispatch", return_value='{"ok":true}'),
+            patch("model_tools._has_hook", return_value=True),
             patch("hermes_cli.plugins.invoke_hook") as mock_invoke_hook,
         ):
             result = handle_function_call(
@@ -100,6 +101,9 @@ class TestHandleFunctionCall:
                 session_id="session-1",
                 tool_call_id="call-1",
                 duration_ms=ANY,
+                status="ok",
+                error_type=None,
+                error_message=None,
             ),
             call(
                 "transform_tool_result",
@@ -110,6 +114,9 @@ class TestHandleFunctionCall:
                 session_id="session-1",
                 tool_call_id="call-1",
                 duration_ms=ANY,
+                status="ok",
+                error_type=None,
+                error_message=None,
             ),
         ]
 
@@ -121,6 +128,7 @@ class TestHandleFunctionCall:
         """
         with (
             patch("model_tools.registry.dispatch", return_value='{"ok":true}'),
+            patch("model_tools._has_hook", return_value=True),
             patch("hermes_cli.plugins.invoke_hook") as mock_invoke_hook,
         ):
             handle_function_call("web_search", {"q": "test"}, task_id="t1")
@@ -139,6 +147,20 @@ class TestHandleFunctionCall:
         assert post_duration == transform_duration
         # pre_tool_call does NOT get duration_ms (nothing has run yet).
         assert "duration_ms" not in kwargs_by_hook["pre_tool_call"]
+
+    def test_no_listener_skips_post_and_transform_emit(self):
+        """When no hook listener exists, the observer emit path should short-circuit."""
+        with (
+            patch("model_tools.registry.dispatch", return_value='{"ok":true}'),
+            patch("model_tools._has_hook", return_value=False),
+            patch("hermes_cli.plugins.invoke_hook") as mock_invoke_hook,
+        ):
+            result = handle_function_call("web_search", {"q": "test"}, task_id="t1")
+
+        assert result == '{"ok":true}'
+        fired = [c.args[0] for c in mock_invoke_hook.call_args_list]
+        assert "post_tool_call" not in fired
+        assert "transform_tool_result" not in fired
 
 
 # =========================================================================

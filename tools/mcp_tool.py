@@ -262,6 +262,8 @@ _DEFAULT_CONNECT_TIMEOUT = 60    # seconds for initial connection per server
 _MAX_RECONNECT_RETRIES = 5
 _MAX_INITIAL_CONNECT_RETRIES = 3 # retries for the very first connection attempt
 _MAX_BACKOFF_SECONDS = 60
+_DEFAULT_KEEPALIVE_INTERVAL = 180
+_MIN_KEEPALIVE_INTERVAL = 5
 
 # Environment variables that are safe to pass to stdio subprocesses
 _SAFE_ENV_KEYS = frozenset({
@@ -1152,7 +1154,7 @@ class MCPServerTask:
         "_tools", "_error", "_config",
         "_sampling", "_registered_tool_names", "_auth_type", "_refresh_lock",
         "_rpc_lock", "_pending_refresh_tasks",
-        "initialize_result",
+        "initialize_result", "_ping_unsupported",
     )
 
     def __init__(self, name: str):
@@ -1189,6 +1191,7 @@ class MCPServerTask:
         # ``.capabilities.prompts``) instead of assuming every ``ClientSession``
         # method attribute corresponds to a supported server method. See #18051.
         self.initialize_result: Optional[Any] = None
+        self._ping_unsupported: bool = False
 
     def _is_http(self) -> bool:
         """Check if this server uses HTTP transport."""
@@ -1349,6 +1352,26 @@ class MCPServerTask:
                     self.name, len(self._registered_tool_names),
                 )
 
+    async def _keepalive_probe(self) -> None:
+        """Exercise the session to detect a stale or expired connection."""
+        if not self._ping_unsupported:
+            try:
+                await asyncio.wait_for(self.session.send_ping(), timeout=30.0)
+                return
+            except Exception as exc:
+                if not _is_method_not_found_error(exc):
+                    raise
+                if not self._advertises_tools():
+                    raise
+                self._ping_unsupported = True
+                logger.info(
+                    "MCP server '%s': optional ping is not implemented; "
+                    "using tools/list for keepalive on this connection",
+                    self.name,
+                )
+
+        await asyncio.wait_for(self.session.list_tools(), timeout=30.0)
+
     async def _wait_for_lifecycle_event(self) -> str:
         """Block until either _shutdown_event or _reconnect_event fires.
 
@@ -1362,13 +1385,15 @@ class MCPServerTask:
 
         Shutdown takes precedence if both events are set simultaneously.
 
-        Periodically sends a lightweight keepalive (``list_tools``) to
-        prevent TCP connections from going stale during long idle
-        periods (#17003).  If the keepalive fails, triggers a reconnect.
+        Periodically sends a lightweight keepalive (``ping``, with a
+        ``list_tools`` fallback for tool-capable servers that do not implement
+        ping) to prevent TCP/session state from going stale during idle periods
+        (#17003). If the keepalive fails, triggers a reconnect.
         """
-        # Keepalive interval in seconds.  Must be shorter than typical
-        # LB / NAT idle-timeout (commonly 300-600s).
-        _KEEPALIVE_INTERVAL = 180  # 3 minutes
+        keepalive_interval = max(
+            _MIN_KEEPALIVE_INTERVAL,
+            float(self._config.get("keepalive_interval", _DEFAULT_KEEPALIVE_INTERVAL)),
+        )
 
         shutdown_task = asyncio.create_task(self._shutdown_event.wait())
         reconnect_task = asyncio.create_task(self._reconnect_event.wait())
@@ -1376,38 +1401,19 @@ class MCPServerTask:
             while True:
                 done, _pending = await asyncio.wait(
                     {shutdown_task, reconnect_task},
-                    timeout=_KEEPALIVE_INTERVAL,
+                    timeout=keepalive_interval,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if done:
                     break
 
-                # Timeout — no lifecycle event fired.  Send a keepalive
-                # to exercise the connection and detect stale sockets.
-                # Prompt-only / resource-only servers don't implement
-                # ``tools/list`` (McpError -32601), so use the universal
-                # ``ping`` request for them instead — otherwise every
-                # keepalive cycle would trigger a spurious reconnect.
+                # Timeout — no lifecycle event fired. Probe the connection
+                # with ping first: it is small and independent of tool count.
+                # If a tool-capable server lacks ping, fall back to tools/list
+                # for this connection.
                 if self.session:
                     try:
-                        if self._advertises_tools():
-                            try:
-                                await asyncio.wait_for(
-                                    self.session.list_tools(),
-                                    timeout=30.0,
-                                )
-                            except Exception as exc:
-                                if not _is_method_not_found_error(exc):
-                                    raise
-                                await asyncio.wait_for(
-                                    self._ping_session(),
-                                    timeout=30.0,
-                                )
-                        else:
-                            await asyncio.wait_for(
-                                self.session.send_ping(),
-                                timeout=30.0,
-                            )
+                        await self._keepalive_probe()
                     except Exception as exc:
                         logger.warning(
                             "MCP server '%s' keepalive failed, "
@@ -1838,6 +1844,7 @@ class MCPServerTask:
         server doesn't advertise the ``tools`` capability.
         (Ported from anomalyco/opencode#31271.)
         """
+        self._ping_unsupported = False
         if self.session is None:
             return
         if not self._advertises_tools():
@@ -1931,7 +1938,7 @@ class MCPServerTask:
                 self._error = exc
                 self._ready.set()
                 return
-            if config.get("transport") != "sse":
+            if config.get("transport") != "sse" and not self._ready.is_set():
                 try:
                     await self._preflight_content_type(
                         config["url"],
@@ -3703,6 +3710,9 @@ async def _discover_and_register_server(name: str, config: dict) -> List[str]:
 # Public API
 # ---------------------------------------------------------------------------
 
+_agent_tools_lock = threading.Lock()
+
+
 def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
     """Connect to explicit MCP servers and register their tools.
 
@@ -3807,6 +3817,118 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
         logger.info(summary)
 
     return _existing_tool_names()
+
+
+def has_registered_mcp_tools() -> bool:
+    """Return True when at least one MCP server is currently connected."""
+    with _lock:
+        return bool(_servers)
+
+
+def refresh_agent_mcp_tools(agent, *, enabled_override=None, quiet_mode: bool = True) -> set:
+    """Rebuild an already-initialized agent's tool snapshot from live state.
+
+    The rebuild happens outside the publish lock, but the publish step is
+    atomic and generation-aware: a slower caller that computed against an
+    older registry generation cannot clobber a newer snapshot already
+    published by a concurrent refresh.
+    """
+    if getattr(agent, "_skip_mcp_refresh", False):
+        return set()
+
+    from tools.registry import registry
+
+    enabled = enabled_override if enabled_override is not None else getattr(agent, "enabled_toolsets", None)
+    disabled = getattr(agent, "disabled_toolsets", None)
+
+    # Capture the registry generation before the potentially slow rebuild.
+    snapshot_generation = registry._generation
+
+    from model_tools import get_tool_definitions
+
+    new_defs = list(
+        get_tool_definitions(
+            enabled_toolsets=enabled,
+            disabled_toolsets=disabled,
+            quiet_mode=quiet_mode,
+        )
+        or []
+    )
+    new_names = {
+        tool["function"]["name"]
+        for tool in new_defs
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict) and tool["function"].get("name")
+    }
+
+    staged_engine_names = _reinject_post_build_tools(agent, new_defs, new_names)
+
+    with _agent_tools_lock:
+        published_gen = getattr(agent, "_tool_snapshot_generation", -1)
+        if snapshot_generation < published_gen:
+            return set()
+
+        current = {
+            t["function"]["name"]
+            for t in (getattr(agent, "tools", None) or [])
+            if isinstance(t, dict) and isinstance(t.get("function"), dict) and t["function"].get("name")
+        }
+        if new_names == current:
+            agent._tool_snapshot_generation = max(published_gen, snapshot_generation)
+            if enabled_override is not None:
+                agent.enabled_toolsets = enabled_override
+            return set()
+
+        agent.tools = new_defs
+        agent.valid_tool_names = new_names
+        engine_names = getattr(agent, "_context_engine_tool_names", None)
+        if isinstance(engine_names, set):
+            engine_names.clear()
+            engine_names.update(staged_engine_names)
+        agent._tool_snapshot_generation = max(published_gen, snapshot_generation)
+        if enabled_override is not None:
+            agent.enabled_toolsets = enabled_override
+        return new_names - current
+
+
+def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
+    """Re-append memory-provider and context-engine tools onto staged locals."""
+    def _add(schema: dict) -> bool:
+        name = schema.get("name", "")
+        if not name or name in name_set:
+            return False
+        tools_list.append({"type": "function", "function": schema})
+        name_set.add(name)
+        return True
+
+    # Memory-provider tools.
+    try:
+        if getattr(agent, "_memory_manager", None) and (
+            agent.enabled_toolsets is None or "memory" in agent.enabled_toolsets
+        ):
+            for schema in agent._memory_manager.get_all_tool_schemas():
+                if isinstance(schema, dict):
+                    _add(schema)
+    except Exception:
+        logger.debug("Memory-provider tool re-injection skipped", exc_info=True)
+
+    # Context-engine tools.
+    staged_engine_names: set = set()
+    try:
+        enabled = getattr(agent, "enabled_toolsets", None)
+        context_engine_allowed = enabled is None or "context_engine" in enabled
+        compressor = getattr(agent, "context_compressor", None)
+        get_schemas = getattr(compressor, "get_tool_schemas", None) if compressor else None
+        if context_engine_allowed and callable(get_schemas):
+            for schema in get_schemas():
+                if not isinstance(schema, dict):
+                    continue
+                name = schema.get("name", "")
+                if _add(schema) and name:
+                    staged_engine_names.add(name)
+    except Exception:
+        logger.debug("Context-engine tool re-injection skipped", exc_info=True)
+
+    return staged_engine_names
 
 
 def discover_mcp_tools() -> List[str]:
@@ -4150,10 +4272,15 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
         )
 
 
-def _stop_mcp_loop():
+def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
     """Stop the background event loop and join its thread."""
     global _mcp_loop, _mcp_thread
     with _lock:
+        if only_if_idle and (_servers or _server_connecting):
+            logger.debug(
+                "Leaving MCP event loop running; active servers are registered or connecting"
+            )
+            return False
         loop = _mcp_loop
         thread = _mcp_thread
         _mcp_loop = None
@@ -4170,11 +4297,9 @@ def _stop_mcp_loop():
         # graceful shutdown are now orphaned — include active PIDs too
         # since the loop is gone and no session can still be in flight.
         _kill_orphaned_mcp_children(include_active=True)
+    return True
 
 
-def _stop_mcp_loop_if_idle():
+def _stop_mcp_loop_if_idle() -> bool:
     """Stop the MCP loop only when no live servers are registered."""
-    with _lock:
-        has_live_servers = bool(_servers)
-    if not has_live_servers:
-        _stop_mcp_loop()
+    return _stop_mcp_loop(only_if_idle=True)

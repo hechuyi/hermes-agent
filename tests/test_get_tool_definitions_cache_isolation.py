@@ -87,6 +87,24 @@ class TestQuietModeCacheIsolation:
             f"baseline={baseline}, final={len(final)}."
         )
 
+    def test_cache_is_bounded_by_eviction(self):
+        """The quiet_mode cache must stay capped instead of growing forever."""
+        cap = model_tools._TOOL_DEFS_CACHE_MAX
+        for i in range(cap):
+            model_tools.get_tool_definitions(
+                enabled_toolsets=[f"fake_toolset_{i}"],
+                quiet_mode=True,
+            )
+
+        assert len(model_tools._tool_defs_cache) == cap
+
+        model_tools.get_tool_definitions(
+            enabled_toolsets=["fake_toolset_overflow"],
+            quiet_mode=True,
+        )
+
+        assert len(model_tools._tool_defs_cache) == cap
+
     def test_non_quiet_mode_does_not_use_cache(self):
         """Sanity: quiet_mode=False (TUI path) skips the cache entirely \u2014
         explains why the bug only hit Gateway."""

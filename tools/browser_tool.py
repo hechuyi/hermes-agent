@@ -66,7 +66,7 @@ import requests
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
 from agent.auxiliary_client import call_llm
-from hermes_constants import get_hermes_home
+from hermes_constants import agent_browser_runnable, get_hermes_home
 from utils import is_truthy_value
 from hermes_cli.config import cfg_get
 
@@ -1187,10 +1187,24 @@ _cleanup_done = False
 # Inactivity Timeout Configuration
 # =============================================================================
 
-# Session inactivity timeout (seconds) - cleanup if no activity for this long
-# Default: 5 minutes. Needs headroom for LLM reasoning between browser commands,
-# especially when subagents are doing multi-step browser tasks.
-BROWSER_SESSION_INACTIVITY_TIMEOUT = int(os.environ.get("BROWSER_INACTIVITY_TIMEOUT", "300"))
+# Session inactivity timeout (seconds) - cleanup if no activity for this long.
+# config.yaml is authoritative; BROWSER_INACTIVITY_TIMEOUT remains a legacy
+# fallback so older deployments still work during migration.
+def _get_session_inactivity_timeout() -> int:
+    result = int(os.environ.get("BROWSER_INACTIVITY_TIMEOUT", "300"))
+    try:
+        from hermes_cli.config import read_raw_config
+
+        cfg = read_raw_config()
+        val = cfg_get(cfg, "browser", "inactivity_timeout")
+        if val is not None:
+            result = max(int(val), 30)
+    except Exception as e:
+        logger.debug("Could not read inactivity_timeout from config: %s", e)
+    return result
+
+
+BROWSER_SESSION_INACTIVITY_TIMEOUT = _get_session_inactivity_timeout()
 
 # Track last activity time per session
 _session_last_activity: Dict[str, float] = {}
@@ -1838,10 +1852,14 @@ def _find_agent_browser() -> str:
     # Note: _agent_browser_resolved is set at each return site below
     # (not before the search) to prevent a race where a concurrent thread
     # sees resolved=True but _cached_agent_browser is still None.
+    #
+    # Validate each filesystem candidate before caching it. A stale global
+    # symlink can be visible to shutil.which() but fail at exec time; rejecting
+    # it here allows fallback to extended PATH, local .bin, or npx.
 
     # Check if it's in PATH (global install)
     which_result = shutil.which("agent-browser")
-    if which_result:
+    if which_result and agent_browser_runnable(which_result):
         _cached_agent_browser = which_result
         _agent_browser_resolved = True
         return which_result
@@ -1851,7 +1869,7 @@ def _find_agent_browser() -> str:
     extended_path = _merge_browser_path("")
     if extended_path:
         which_result = shutil.which("agent-browser", path=extended_path)
-        if which_result:
+        if which_result and agent_browser_runnable(which_result):
             _cached_agent_browser = which_result
             _agent_browser_resolved = True
             return which_result
@@ -1868,7 +1886,7 @@ def _find_agent_browser() -> str:
     local_bin_dir = repo_root / "node_modules" / ".bin"
     if local_bin_dir.is_dir():
         local_which = shutil.which("agent-browser", path=str(local_bin_dir))
-        if local_which:
+        if local_which and agent_browser_runnable(local_which):
             _cached_agent_browser = local_which
             _agent_browser_resolved = True
             return _cached_agent_browser
@@ -1886,22 +1904,18 @@ def _find_agent_browser() -> str:
     try:
         from hermes_cli.dep_ensure import ensure_dependency
         if ensure_dependency("browser"):
-            recheck = shutil.which("agent-browser")
-            if not recheck and extended_path:
-                recheck = shutil.which("agent-browser", path=extended_path)
-            if not recheck:
-                hermes_nm = str(get_hermes_home() / "node_modules" / ".bin")
-                recheck = shutil.which("agent-browser", path=hermes_nm)
-            if not recheck:
-                hermes_node_bin = str(get_hermes_home() / "node" / "bin")
-                recheck = shutil.which("agent-browser", path=hermes_node_bin)
-            if not recheck:
-                hermes_node_root = str(get_hermes_home() / "node")
-                recheck = shutil.which("agent-browser", path=hermes_node_root)
-            if recheck:
-                _cached_agent_browser = recheck
-                _agent_browser_resolved = True
-                return recheck
+            candidates = [
+                shutil.which("agent-browser"),
+                shutil.which("agent-browser", path=extended_path) if extended_path else None,
+                shutil.which("agent-browser", path=str(get_hermes_home() / "node_modules" / ".bin")),
+                shutil.which("agent-browser", path=str(get_hermes_home() / "node" / "bin")),
+                shutil.which("agent-browser", path=str(get_hermes_home() / "node")),
+            ]
+            for recheck in candidates:
+                if recheck and agent_browser_runnable(recheck):
+                    _cached_agent_browser = recheck
+                    _agent_browser_resolved = True
+                    return recheck
     except Exception:
         pass
 

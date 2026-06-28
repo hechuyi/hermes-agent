@@ -218,6 +218,22 @@ class TestXAIProviderSearchJSONPath:
         assert web[0]["url"] == "https://ok.com"
         assert web[0]["position"] == 1
 
+    def test_uses_grok_build_as_default_model(self):
+        from plugins.web.xai import provider as xai_provider
+
+        captured = {}
+        def fake_post(url, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return _mock_resp(_responses_payload(self._GROK_JSON))
+
+        with patch.object(xai_provider, "resolve_xai_http_credentials", return_value=_creds()), \
+             patch.object(xai_provider, "_load_xai_web_config", return_value={}), \
+             patch("httpx.post", side_effect=fake_post):
+            result = xai_provider.XAIWebSearchProvider().search("what is xai", limit=5)
+
+        assert result["success"] is True
+        assert captured["json"]["model"] == "grok-build-0.1"
+
 
 class TestXAIProviderSearchFallbacks:
     def test_falls_back_to_annotations_when_json_missing(self):

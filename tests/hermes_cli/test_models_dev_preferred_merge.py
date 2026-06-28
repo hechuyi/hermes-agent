@@ -24,6 +24,7 @@ import pytest
 
 from hermes_cli.models import (
     _MODELS_DEV_PREFERRED,
+    _PROVIDER_MODELS,
     _merge_with_models_dev,
     provider_model_ids,
 )
@@ -98,6 +99,20 @@ class TestProviderModelIdsPreferred:
         assert "claude-opus-4-7" in out
         assert "kimi-k2.6" in out
 
+    def test_kimi_coding_live_catalog_keeps_curated_k2_7_code(self):
+        """A live Kimi catalog must not hide the curated K2.7 Code entry."""
+        with (
+            patch(
+                "hermes_cli.auth.resolve_api_key_provider_credentials",
+                return_value={"api_key": "sk-test", "base_url": "https://api.moonshot.ai/v1"},
+            ),
+            patch("providers.base.ProviderProfile.fetch_models", return_value=["kimi-k2.6"]),
+        ):
+            out = provider_model_ids("kimi-coding")
+
+        assert out[:2] == ["kimi-k2.7-code", "kimi-k2.6"]
+        assert "kimi-k2.7-code" in out
+
 
 class TestOpenRouterAndNousUnchanged:
     """Per Teknium: openrouter and nous are NEVER merged with models.dev."""
@@ -122,3 +137,24 @@ class TestOpenRouterAndNousUnchanged:
                 raise
             except Exception:
                 pass  # model_ids() may fail in the hermetic test env — that's fine.
+
+
+def test_kimi_coding_setup_flow_uses_shared_catalog(monkeypatch):
+    """The coding-plan setup flow should reuse the shared Kimi catalog."""
+    from hermes_cli.main import _model_flow_kimi
+
+    captured = {}
+
+    def fake_select(model_list, **_kwargs):
+        captured["models"] = list(model_list)
+        return None
+
+    with (
+        patch("hermes_cli.main._prompt_api_key", return_value=("sk-kimi-test", False)),
+        patch("hermes_cli.auth._prompt_model_selection", side_effect=fake_select),
+        patch("hermes_cli.config.get_env_value", return_value=""),
+    ):
+        _model_flow_kimi({}, current_model="")
+
+    assert captured["models"] == _PROVIDER_MODELS["kimi-coding"]
+    assert captured["models"][0] == "kimi-k2.7-code"

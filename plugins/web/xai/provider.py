@@ -19,7 +19,7 @@ Optional knobs (under ``web.xai`` in ``config.yaml``)::
 
     web:
       xai:
-        model: "grok-4.3"             # reasoning model required by web_search
+        model: "grok-build-0.1"       # reasoning model required by web_search
         allowed_domains: ["x.ai"]     # max 5 — mutually exclusive with excluded_domains
         excluded_domains: ["bad.com"] # max 5 — mutually exclusive with allowed_domains
         timeout: 90                   # seconds (default 90)
@@ -46,7 +46,7 @@ from tools.xai_http import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "grok-4.3"
+DEFAULT_MODEL = "grok-build-0.1"
 DEFAULT_TIMEOUT = 90
 _MAX_DOMAIN_FILTERS = 5  # xAI hard cap on allowed_domains / excluded_domains
 
@@ -99,7 +99,7 @@ class XAIWebSearchProvider(WebSearchProvider):
     Sends a structured prompt to Grok with ``tools=[{"type": "web_search"}]``
     enabled and asks it to return the top *limit* results as JSON. Falls
     back to the Responses API ``citations`` list if Grok ignores the JSON
-    schema instruction (rare for grok-4.3 but cheap insurance).
+    schema instruction (rare for grok-build-0.1 but cheap insurance).
 
     No extract capability — pair with Firecrawl / Tavily / Exa for
     ``web_extract`` if you need page content.

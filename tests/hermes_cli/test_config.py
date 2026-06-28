@@ -71,6 +71,8 @@ class TestLoadConfigDefaults:
             assert "terminal" in config
             assert config["terminal"]["backend"] == "local"
             assert config["display"]["interim_assistant_messages"] is True
+            assert config["model_catalog"]["ttl_hours"] == 1
+            assert DEFAULT_CONFIG["model_catalog"]["ttl_hours"] == 1
 
     def test_default_config_does_not_expose_legacy_chat_platform_sections(self, tmp_path):
         legacy_platforms = {
@@ -688,6 +690,44 @@ class TestAnthropicTokenMigration:
         }):
             migrate_config(interactive=False, quiet=True)
             assert load_env().get("ANTHROPIC_TOKEN") == "current-token"
+
+
+class TestModelCatalogTtlMigration:
+    def _write_config(self, tmp_path, payload):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    def test_lowers_default_ttl_from_24_to_1_on_upgrade(self, tmp_path):
+        self._write_config(
+            tmp_path,
+            {
+                "_config_version": 24,
+                "model_catalog": {"ttl_hours": 24},
+            },
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+
+        assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
+        assert raw["model_catalog"]["ttl_hours"] == 1
+
+    def test_preserves_custom_ttl_on_upgrade(self, tmp_path):
+        self._write_config(
+            tmp_path,
+            {
+                "_config_version": 24,
+                "model_catalog": {"ttl_hours": 6},
+            },
+        )
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            migrate_config(interactive=False, quiet=True)
+            raw = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+
+        assert raw["_config_version"] == DEFAULT_CONFIG["_config_version"]
+        assert raw["model_catalog"]["ttl_hours"] == 6
 
 
 class TestCustomProviderCompatibility:

@@ -52,6 +52,13 @@ def _valid_manifest() -> dict:
     }
 
 
+class TestDefaults:
+    def test_default_ttl_is_hourly(self, isolated_home):
+        from hermes_cli import model_catalog
+
+        assert model_catalog.DEFAULT_TTL_HOURS == 1
+
+
 class TestValidation:
     def test_accepts_well_formed_manifest(self, isolated_home):
         from hermes_cli.model_catalog import _validate_manifest

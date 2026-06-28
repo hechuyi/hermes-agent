@@ -1657,6 +1657,8 @@ def select_provider_and_model(args=None):
         _model_flow_minimax_oauth(config, current_model, args=args)
     elif selected_provider == "google-gemini-cli":
         _model_flow_google_gemini_cli(config, current_model)
+    elif selected_provider == "google-antigravity":
+        _model_flow_google_antigravity(config, current_model)
     elif selected_provider == "copilot-acp":
         _model_flow_copilot_acp(config, current_model)
     elif selected_provider == "copilot":
@@ -2426,6 +2428,9 @@ def _model_flow_nous(config, current_model="", args=None):
         # Reactivate Nous as the provider and update config
         inference_url = creds.get("base_url", "")
         _update_config_for_provider("nous", inference_url)
+        # Reload after the auth helper writes provider state. The incoming
+        # config object may still contain stale custom-provider fields.
+        config = load_config()
         current_model_cfg = config.get("model")
         if isinstance(current_model_cfg, dict):
             model_cfg = dict(current_model_cfg)
@@ -2626,7 +2631,7 @@ def _model_flow_xai_oauth(_config, current_model="", *, args=None):
         pass
 
     models = list(_PROVIDER_MODELS.get("xai-oauth") or _PROVIDER_MODELS.get("xai") or [])
-    selected = _prompt_model_selection(models, current_model=current_model or (models[0] if models else "grok-4.3"))
+    selected = _prompt_model_selection(models, current_model=current_model or (models[0] if models else "grok-build-0.1"))
     if selected:
         _save_model_choice(selected)
         _update_config_for_provider("xai-oauth", base_url)
@@ -2803,6 +2808,66 @@ def _model_flow_google_gemini_cli(_config, current_model=""):
         )
         print(
             f"Default model set to: {selected} (via Google Gemini OAuth / Code Assist)"
+        )
+    else:
+        print("No change.")
+
+
+def _model_flow_google_antigravity(_config, current_model=""):
+    """Google Antigravity OAuth via Antigravity Code Assist.
+
+    This fork does not currently ship the Antigravity auth helpers or catalog
+    data, so the entry remains a guarded compatibility hook rather than a
+    partially-broken prompt path.
+    """
+    try:
+        from agent.antigravity_oauth import resolve_project_id_from_env, start_oauth_flow
+        from hermes_cli.auth import (
+            DEFAULT_ANTIGRAVITY_CLOUDCODE_BASE_URL,
+            get_antigravity_oauth_auth_status,
+            resolve_antigravity_oauth_runtime_credentials,
+            _prompt_model_selection,
+            _save_model_choice,
+            _update_config_for_provider,
+        )
+    except Exception as exc:
+        print(f"Antigravity OAuth support is unavailable in this build: {exc}")
+        return
+
+    from hermes_cli.models import provider_model_ids
+
+    status = get_antigravity_oauth_auth_status()
+    if not status.get("logged_in"):
+        try:
+            env_project = resolve_project_id_from_env()
+            start_oauth_flow(force_relogin=True, project_id=env_project)
+        except Exception as exc:
+            print(f"OAuth login failed: {exc}")
+            return
+
+    try:
+        creds = resolve_antigravity_oauth_runtime_credentials(force_refresh=False)
+        project_id = creds.get("project_id", "")
+        if project_id:
+            print(f"  Using Antigravity project: {project_id}")
+    except Exception as exc:
+        print(f"Failed to resolve Antigravity credentials: {exc}")
+        return
+
+    models = list(provider_model_ids("google-antigravity"))
+    if not models:
+        print("No Google Antigravity models are available in this build.")
+        return
+
+    default = current_model or models[0]
+    selected = _prompt_model_selection(models, current_model=default)
+    if selected:
+        _save_model_choice(selected)
+        _update_config_for_provider(
+            "google-antigravity", DEFAULT_ANTIGRAVITY_CLOUDCODE_BASE_URL
+        )
+        print(
+            f"Default model set to: {selected} (via Google Antigravity OAuth / Code Assist)"
         )
     else:
         print("No change.")
@@ -4378,18 +4443,7 @@ def _model_flow_kimi(config, current_model=""):
     print()
 
     # Step 3: Model selection — show appropriate models for the endpoint
-    if is_coding_plan:
-        # Coding Plan models (kimi-k2.6 first)
-        model_list = [
-            "kimi-k2.6",
-            "kimi-k2.5",
-            "kimi-for-coding",
-            "kimi-k2-thinking",
-            "kimi-k2-thinking-turbo",
-        ]
-    else:
-        # Legacy Moonshot models (excludes Coding Plan-only models)
-        model_list = _PROVIDER_MODELS.get("moonshot", [])
+    model_list = _PROVIDER_MODELS.get("kimi-coding" if is_coding_plan else "moonshot", [])
 
     if model_list:
         selected = _prompt_model_selection(model_list, current_model=current_model)

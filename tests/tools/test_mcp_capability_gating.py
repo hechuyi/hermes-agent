@@ -3,9 +3,11 @@
 Prompt-only / resource-only MCP servers do not implement the ``tools/*``
 request family. Per the MCP spec, ``InitializeResult.capabilities.tools``
 is non-None iff the server supports it. Before this fix, Hermes always
-called ``tools/list`` during discovery and as the keepalive probe — both
-raised ``McpError(-32601 Method not found)`` against such servers, so a
-prompt-only server could never stay connected.
+called ``tools/list`` during discovery, which raised
+``McpError(-32601 Method not found)`` against such servers, so a prompt-only
+server could never stay connected. Keepalive now uses ``ping`` first for every
+server and falls back to ``tools/list`` only when a tool-capable server does
+not implement ping.
 
 Ported from anomalyco/opencode#31271.
 """
@@ -208,7 +210,7 @@ class TestKeepaliveProbe:
         task.session.send_ping.assert_awaited_once()
         task.session.list_tools.assert_not_called()
 
-    async def test_keepalive_uses_list_tools_for_tool_capable_server(self):
+    async def test_keepalive_uses_ping_for_tool_capable_server(self):
         task = MCPServerTask("test")
         task.initialize_result = _caps(tools=SimpleNamespace())
         task.session = SimpleNamespace(
@@ -219,50 +221,147 @@ class TestKeepaliveProbe:
         reason = await self._run_one_keepalive_cycle(task)
 
         assert reason == "shutdown"
-        task.session.list_tools.assert_awaited_once()
-        task.session.send_ping.assert_not_called()
+        task.session.send_ping.assert_awaited_once()
+        task.session.list_tools.assert_not_called()
 
-    async def test_keepalive_method_not_found_falls_back_to_ping(self):
+    async def test_keepalive_uses_ping_legacy_fallback(self):
         task = MCPServerTask("test")
-        task.initialize_result = _caps(tools=SimpleNamespace())
+        assert task.initialize_result is None
         task.session = SimpleNamespace(
-            list_tools=AsyncMock(side_effect=_RpcError(-32601, "Method not found")),
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=[])),
             send_ping=AsyncMock(),
         )
 
         reason = await self._run_one_keepalive_cycle(task)
 
         assert reason == "shutdown"
-        task.session.list_tools.assert_awaited_once()
         task.session.send_ping.assert_awaited_once()
+        task.session.list_tools.assert_not_called()
 
-    async def test_keepalive_unknown_method_falls_back_to_ping(self):
+    async def test_keepalive_method_not_found_falls_back_to_list_tools(self):
         task = MCPServerTask("test")
         task.initialize_result = _caps(tools=SimpleNamespace())
         task.session = SimpleNamespace(
-            list_tools=AsyncMock(side_effect=Exception("Unknown method: ping")),
-            send_ping=AsyncMock(),
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=[])),
+            send_ping=AsyncMock(side_effect=_RpcError(-32601, "Method not found")),
         )
 
         reason = await self._run_one_keepalive_cycle(task)
 
         assert reason == "shutdown"
-        task.session.list_tools.assert_awaited_once()
         task.session.send_ping.assert_awaited_once()
+        task.session.list_tools.assert_awaited_once()
+        assert task._ping_unsupported is True
 
-    async def test_keepalive_other_list_tools_errors_trigger_reconnect(self):
+    async def test_keepalive_latch_skips_ping_after_method_not_found(self):
         task = MCPServerTask("test")
         task.initialize_result = _caps(tools=SimpleNamespace())
         task.session = SimpleNamespace(
-            list_tools=AsyncMock(side_effect=_RpcError(-32602, "Invalid params")),
-            send_ping=AsyncMock(),
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=[])),
+            send_ping=AsyncMock(side_effect=_RpcError(-32601, "Method not found")),
+        )
+
+        await task._keepalive_probe()
+        await task._keepalive_probe()
+
+        task.session.send_ping.assert_awaited_once()
+        assert task.session.list_tools.await_count == 2
+
+    async def test_keepalive_unknown_method_falls_back_to_list_tools(self):
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task.session = SimpleNamespace(
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=[])),
+            send_ping=AsyncMock(side_effect=Exception("Unknown method: ping")),
+        )
+
+        reason = await self._run_one_keepalive_cycle(task)
+
+        assert reason == "shutdown"
+        task.session.send_ping.assert_awaited_once()
+        task.session.list_tools.assert_awaited_once()
+
+    async def test_keepalive_other_ping_errors_trigger_reconnect(self):
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task.session = SimpleNamespace(
+            list_tools=AsyncMock(),
+            send_ping=AsyncMock(side_effect=_RpcError(-32602, "Invalid params")),
         )
 
         reason = await self._run_one_keepalive_cycle(task)
 
         assert reason == "reconnect"
-        task.session.list_tools.assert_awaited_once()
-        task.session.send_ping.assert_not_called()
+        task.session.send_ping.assert_awaited_once()
+        task.session.list_tools.assert_not_called()
+
+    async def test_keepalive_no_ping_no_tools_propagates_method_not_found(self):
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(prompts=SimpleNamespace())
+        task.session = SimpleNamespace(
+            list_tools=AsyncMock(),
+            send_ping=AsyncMock(side_effect=_RpcError(-32601, "Method not found")),
+        )
+
+        reason = await self._run_one_keepalive_cycle(task)
+
+        assert reason == "reconnect"
+        task.session.send_ping.assert_awaited_once()
+        task.session.list_tools.assert_not_called()
+
+    async def test_discover_resets_ping_fallback_latch(self):
+        task = MCPServerTask("test")
+        task.initialize_result = _caps(tools=SimpleNamespace())
+        task._ping_unsupported = True
+        task.session = SimpleNamespace(
+            list_tools=AsyncMock(return_value=SimpleNamespace(tools=[])),
+        )
+
+        await task._discover_tools()
+
+        assert task._ping_unsupported is False
+
+
+class TestKeepaliveInterval:
+    async def _captured_interval(self, config):
+        task = MCPServerTask("test")
+        task._config = config
+        task.session = SimpleNamespace(send_ping=AsyncMock())
+        captured = {}
+        real_wait = asyncio.wait
+
+        async def fake_wait(tasks, timeout=None, return_when=None):
+            captured["timeout"] = timeout
+            task._shutdown_event.set()
+            return await real_wait(
+                tasks, timeout=0.5, return_when=return_when or asyncio.FIRST_COMPLETED
+            )
+
+        import tools.mcp_tool as mcp_mod
+        orig = mcp_mod.asyncio.wait
+        mcp_mod.asyncio.wait = fake_wait
+        try:
+            await task._wait_for_lifecycle_event()
+        finally:
+            mcp_mod.asyncio.wait = orig
+        return captured["timeout"]
+
+    @pytest.mark.asyncio
+    async def test_default_interval_when_unset(self):
+        from tools.mcp_tool import _DEFAULT_KEEPALIVE_INTERVAL
+        assert await self._captured_interval({}) == _DEFAULT_KEEPALIVE_INTERVAL
+
+    @pytest.mark.asyncio
+    async def test_configured_interval_honored(self):
+        assert await self._captured_interval({"keepalive_interval": 10}) == 10
+
+    @pytest.mark.asyncio
+    async def test_interval_clamped_to_floor(self):
+        from tools.mcp_tool import _MIN_KEEPALIVE_INTERVAL
+        assert (
+            await self._captured_interval({"keepalive_interval": 0.1})
+            == _MIN_KEEPALIVE_INTERVAL
+        )
 
 
 class TestShutdown:

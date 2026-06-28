@@ -794,6 +794,9 @@ platform_toolsets:
 # Optional per-server settings:
 #   timeout: tool call timeout in seconds (default: 120)
 #   connect_timeout: initial connection timeout (default: 60)
+#   keepalive_interval: liveness ping cadence in seconds (default: 180).
+#     Lower it below the server's session TTL for servers that expire idle
+#     sessions quickly; floored at 5s.
 #
 # mcp_servers:
 #   time:

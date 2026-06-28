@@ -55,7 +55,8 @@ class TestFindAgentBrowserCache:
 
     def test_cached_after_first_call(self):
         import tools.browser_tool as bt
-        with patch("shutil.which", return_value="/usr/bin/agent-browser"):
+        with patch("shutil.which", return_value="/usr/bin/agent-browser"), \
+             patch("tools.browser_tool.agent_browser_runnable", return_value=True):
             result1 = bt._find_agent_browser()
             result2 = bt._find_agent_browser()
         assert result1 == result2 == "/usr/bin/agent-browser"
@@ -114,6 +115,28 @@ class TestCommandTimeoutCache:
             _get_command_timeout()
             _get_command_timeout()
         mock_read.assert_called_once()
+
+
+class TestSessionInactivityTimeout:
+
+    def test_default_is_300(self):
+        from tools.browser_tool import _get_session_inactivity_timeout
+        with patch("hermes_cli.config.read_raw_config", return_value={}):
+            assert _get_session_inactivity_timeout() == 300
+
+    def test_reads_from_config_over_env(self):
+        from tools.browser_tool import _get_session_inactivity_timeout
+        with patch.dict(os.environ, {"BROWSER_INACTIVITY_TIMEOUT": "120"}, clear=False):
+            cfg = {"browser": {"inactivity_timeout": 900}}
+            with patch("hermes_cli.config.read_raw_config", return_value=cfg):
+                assert _get_session_inactivity_timeout() == 900
+
+    def test_floor_at_30_seconds(self):
+        from tools.browser_tool import _get_session_inactivity_timeout
+        with patch.dict(os.environ, {"BROWSER_INACTIVITY_TIMEOUT": "120"}, clear=False):
+            cfg = {"browser": {"inactivity_timeout": 1}}
+            with patch("hermes_cli.config.read_raw_config", return_value=cfg):
+                assert _get_session_inactivity_timeout() == 30
 
 
 # ---------------------------------------------------------------------------

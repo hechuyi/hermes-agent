@@ -1961,6 +1961,17 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                     ),
                 ))
 
+        if (
+            finish_reason is None
+            and not content_parts
+            and not reasoning_parts
+            and not tool_calls_acc
+        ):
+            raise RuntimeError(
+                "Provider returned an empty stream with no finish_reason "
+                "(possible upstream error or malformed SSE response)."
+            )
+
         effective_finish_reason = finish_reason or "stop"
         if has_truncated_tool_args:
             effective_finish_reason = "length"

@@ -39,7 +39,6 @@ from agent.message_sanitization import (
     _sanitize_messages_surrogates,
     _sanitize_structure_non_ascii,
     _sanitize_structure_surrogates,
-    _sanitize_surrogates,
     _sanitize_tools_non_ascii,
     _strip_images_from_messages,
     _strip_non_ascii,
@@ -485,18 +484,16 @@ def run_conversation(
     # so the foreground value here does not leak into it.
     set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
 
-    # If the previous turn activated fallback, restore the primary
-    # runtime so this turn gets a fresh attempt with the preferred model.
-    # No-op when _fallback_activated is False (gateway, first turn, etc.).
-    agent._restore_primary_runtime()
+    from agent.turn_context import build_turn_context
 
-    # Sanitize surrogate characters from user input.  Clipboard paste from
-    # rich-text editors (Google Docs, Word, etc.) can inject lone surrogates
-    # that are invalid UTF-8 and crash JSON serialization in the OpenAI SDK.
-    if isinstance(user_message, str):
-        user_message = _sanitize_surrogates(user_message)
-    if isinstance(persist_user_message, str):
-        persist_user_message = _sanitize_surrogates(persist_user_message)
+    # Turn-boundary setup: restore the primary runtime, refresh any late
+    # MCP tools into the next request snapshot, and sanitize surrogate
+    # characters before the message is serialized into the API payload.
+    user_message, persist_user_message = build_turn_context(
+        agent,
+        user_message,
+        persist_user_message=persist_user_message,
+    )
 
     # Store stream callback for _interruptible_api_call to pick up
     agent._stream_callback = stream_callback

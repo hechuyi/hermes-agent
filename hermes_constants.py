@@ -234,6 +234,37 @@ def get_hermes_dir(new_subpath: str, old_name: str) -> Path:
     return home / new_subpath
 
 
+def agent_browser_runnable(path: str | None) -> bool:
+    """Return True only when *path* is an agent-browser CLI that actually runs.
+
+    Presence checks such as ``shutil.which`` and ``Path.exists`` are
+    insufficient for agent-browser: npm postinstall can leave a global symlink
+    pointing at a deleted local ``node_modules`` binary after an update. In
+    that state ``which`` may still report a candidate, but exec fails.
+
+    ``"npx agent-browser"`` is a command form rather than a filesystem path, so
+    it is accepted here and resolved by npx at command execution time.
+    """
+    if not path:
+        return False
+    if " " in path and path.split()[0].endswith("npx"):
+        return True
+    if not os.path.exists(path) or not os.access(path, os.X_OK):
+        return False
+
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [path, "--version"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return False
+    return result.returncode == 0
+
+
 def display_hermes_home() -> str:
     """Return a user-friendly display string for the current HERMES_HOME.
 

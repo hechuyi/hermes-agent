@@ -51,9 +51,29 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
         thread.start()
 
 
-def wait_for_mcp_discovery(timeout: float = 0.75) -> None:
+def _resolve_discovery_timeout(explicit: "float | None") -> float:
+    """Resolve the MCP discovery wait bound from explicit arg, config, or default."""
+    if explicit is not None:
+        return explicit
+    try:
+        from hermes_cli.config import DEFAULT_CONFIG, load_config
+
+        default = float(DEFAULT_CONFIG.get("mcp_discovery_timeout", 1.5))
+        raw = (load_config() or {}).get("mcp_discovery_timeout", default)
+        value = float(raw)
+        return value if value > 0 else default
+    except Exception:
+        try:
+            from hermes_cli.config import DEFAULT_CONFIG
+
+            return float(DEFAULT_CONFIG.get("mcp_discovery_timeout", 1.5))
+        except Exception:
+            return 1.5
+
+
+def wait_for_mcp_discovery(timeout: float | None = None) -> None:
     """Briefly wait for background MCP discovery before the first tool snapshot."""
     thread = _mcp_discovery_thread
     if thread is None or not thread.is_alive():
         return
-    thread.join(timeout=timeout)
+    thread.join(timeout=_resolve_discovery_timeout(timeout))

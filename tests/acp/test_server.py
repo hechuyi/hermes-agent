@@ -1736,15 +1736,24 @@ class TestRegisterSessionMcpServers:
             {"function": {"name": "terminal"}},
         ]
 
+        captured = {}
+
+        def _refresh(target_agent, *, enabled_override=None, quiet_mode=True):
+            captured["agent"] = target_agent
+            captured["enabled_override"] = enabled_override
+            captured["quiet_mode"] = quiet_mode
+            target_agent.tools = fake_tools
+            target_agent.valid_tool_names = {"mcp_srv_search", "terminal"}
+            return {"mcp_srv_search"}
+
         with patch("tools.mcp_tool.register_mcp_servers", return_value=["mcp_srv_search"]), \
-             patch("model_tools.get_tool_definitions", return_value=fake_tools) as mock_defs:
+             patch("tools.mcp_tool.refresh_agent_mcp_tools", side_effect=_refresh) as mock_refresh:
             await agent._register_session_mcp_servers(state, [server])
 
-        mock_defs.assert_called_once_with(
-            enabled_toolsets=["hermes-acp", "mcp-srv"],
-            disabled_toolsets=None,
-            quiet_mode=True,
-        )
+        mock_refresh.assert_called_once()
+        assert captured["agent"] is state.agent
+        assert captured["enabled_override"] == ["hermes-acp", "mcp-srv"]
+        assert captured["quiet_mode"] is True
         assert state.agent.enabled_toolsets == ["hermes-acp", "mcp-srv"]
         assert state.agent.tools == fake_tools
         assert state.agent.valid_tool_names == {"mcp_srv_search", "terminal"}

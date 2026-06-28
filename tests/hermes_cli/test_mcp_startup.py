@@ -214,3 +214,18 @@ def test_init_agent_waits_for_mcp_discovery_before_agent_build(monkeypatch):
     monkeypatch.setattr(cli_mod, "AIAgent", _fake_agent)
 
     assert cli._init_agent() is True
+
+
+def test_resolve_discovery_timeout_uses_default_config_fallback(monkeypatch):
+    from hermes_cli import mcp_startup
+    import hermes_cli.config as cfg
+
+    default = float(cfg.DEFAULT_CONFIG.get("mcp_discovery_timeout", 1.5))
+
+    monkeypatch.setattr(cfg, "load_config", lambda: {"mcp_discovery_timeout": 0})
+    assert mcp_startup._resolve_discovery_timeout(None) == default
+
+    monkeypatch.setattr(cfg, "load_config", lambda: {"mcp_discovery_timeout": "oops"})
+    assert mcp_startup._resolve_discovery_timeout(None) == default
+
+    assert mcp_startup._resolve_discovery_timeout(0.25) == 0.25

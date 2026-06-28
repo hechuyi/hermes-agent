@@ -255,6 +255,13 @@ _LEGACY_TOOLSET_MAP = {
 # daemon start/stop, env var changes, etc.) on a 30 s horizon.
 _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
 
+# Hard cap on memoized get_tool_definitions() results. A long-lived Gateway
+# process sees many distinct toolset/config fingerprints over its lifetime
+# (per-session toolset sets, config edits, kanban-task toggles); without a
+# bound the cache grows unboundedly. 8 comfortably covers the warm working
+# set while keeping the cache small.
+_TOOL_DEFS_CACHE_MAX = 8
+
 
 def _clear_tool_defs_cache() -> None:
     """Drop memoized get_tool_definitions() results. Called when dynamic
@@ -349,6 +356,11 @@ def get_tool_definitions(
         # agent inits and providers that enforce unique tool names
         # (DeepSeek, Xiaomi MiMo, Moonshot Kimi) reject the request with
         # HTTP 400. Mirrors the cache-hit path above. (issue #17335)
+        # Bound the cache with LRU eviction so a long-lived Gateway process
+        # doesn't accumulate entries unboundedly across the many distinct
+        # toolset/config fingerprints it sees over its lifetime (#19251).
+        if len(_tool_defs_cache) >= _TOOL_DEFS_CACHE_MAX:
+            _tool_defs_cache.pop(next(iter(_tool_defs_cache)))  # evict oldest
         _tool_defs_cache[cache_key] = result
         return list(result)
     return result
@@ -802,6 +814,25 @@ def _coerce_boolean(value: str):
     return value
 
 
+def _tool_result_observer_fields(result: Any) -> tuple[str, Optional[str], Optional[str]]:
+    try:
+        parsed_result = json.loads(result) if isinstance(result, str) else result
+        if isinstance(parsed_result, dict) and parsed_result.get("error"):
+            return "error", "tool_error", str(parsed_result.get("error"))
+    except Exception:
+        pass
+    return "ok", None, None
+
+
+def _has_hook(hook_name: str) -> bool:
+    try:
+        from hermes_cli.plugins import get_plugin_manager
+
+        return bool(get_plugin_manager()._hooks.get(hook_name))
+    except Exception:
+        return False
+
+
 def handle_function_call(
     function_name: str,
     function_args: Dict[str, Any],
@@ -971,19 +1002,29 @@ def handle_function_call(
                 user_task=user_task,
             )
         duration_ms = int((time.monotonic() - _dispatch_start) * 1000)
+        post_hook = _has_hook("post_tool_call")
+        transform_hook = _has_hook("transform_tool_result")
+        if post_hook or transform_hook:
+            status, error_type, error_message = _tool_result_observer_fields(result)
+        else:
+            status = error_type = error_message = None
 
         try:
             from hermes_cli.plugins import invoke_hook
-            invoke_hook(
-                "post_tool_call",
-                tool_name=function_name,
-                args=function_args,
-                result=result,
-                task_id=task_id or "",
-                session_id=session_id or "",
-                tool_call_id=tool_call_id or "",
-                duration_ms=duration_ms,
-            )
+            if post_hook:
+                invoke_hook(
+                    "post_tool_call",
+                    tool_name=function_name,
+                    args=function_args,
+                    result=result,
+                    task_id=task_id or "",
+                    session_id=session_id or "",
+                    tool_call_id=tool_call_id or "",
+                    duration_ms=duration_ms,
+                    status=status,
+                    error_type=error_type,
+                    error_message=error_message,
+                )
         except Exception as _hook_err:
             logger.debug("post_tool_call hook error: %s", _hook_err)
 
@@ -995,20 +1036,24 @@ def handle_function_call(
         # valid string return wins; non-string returns are ignored.
         try:
             from hermes_cli.plugins import invoke_hook
-            hook_results = invoke_hook(
-                "transform_tool_result",
-                tool_name=function_name,
-                args=function_args,
-                result=result,
-                task_id=task_id or "",
-                session_id=session_id or "",
-                tool_call_id=tool_call_id or "",
-                duration_ms=duration_ms,
-            )
-            for hook_result in hook_results:
-                if isinstance(hook_result, str):
-                    result = hook_result
-                    break
+            if transform_hook:
+                hook_results = invoke_hook(
+                    "transform_tool_result",
+                    tool_name=function_name,
+                    args=function_args,
+                    result=result,
+                    task_id=task_id or "",
+                    session_id=session_id or "",
+                    tool_call_id=tool_call_id or "",
+                    duration_ms=duration_ms,
+                    status=status,
+                    error_type=error_type,
+                    error_message=error_message,
+                )
+                for hook_result in hook_results:
+                    if isinstance(hook_result, str):
+                        result = hook_result
+                        break
         except Exception as _hook_err:
             logger.debug("transform_tool_result hook error: %s", _hook_err)
 

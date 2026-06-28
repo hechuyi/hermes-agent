@@ -10687,16 +10687,29 @@ class HermesCLI:
             else:
                 print(f"  🔧 {len(new_tools)} tool(s) available from {len(connected_servers)} server(s)")
 
-            # Refresh the agent's tool list so the model can call new tools
+            # Refresh the agent's tool list so the model can call new tools.
             if self.agent is not None:
-                self.agent.tools = get_tool_definitions(
-                    enabled_toolsets=self.agent.enabled_toolsets
-                    if hasattr(self.agent, "enabled_toolsets") else None,
+                from tools.mcp_tool import refresh_agent_mcp_tools
+
+                enabled_override = None
+                et = getattr(self, "enabled_toolsets", None)
+                if et and "all" not in et and "*" not in et:
+                    merged = list(et)
+                    for _name in sorted(connected_servers):
+                        if _name not in merged:
+                            merged.append(_name)
+                    enabled_override = merged
+
+                refresh_agent_mcp_tools(
+                    self.agent,
+                    enabled_override=enabled_override,
                     quiet_mode=True,
                 )
-                self.agent.valid_tool_names = {
-                    tool["function"]["name"] for tool in self.agent.tools
-                } if self.agent.tools else set()
+                if enabled_override is not None:
+                    self.enabled_toolsets = enabled_override
+                invalidate = getattr(self.agent, "_invalidate_system_prompt", None)
+                if callable(invalidate):
+                    invalidate()
 
             # Inject a message at the END of conversation history so the
             # model knows tools changed.  Appended after all existing

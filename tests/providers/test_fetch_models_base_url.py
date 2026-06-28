@@ -1,6 +1,8 @@
 """Regression tests for provider live-model fetch base_url overrides."""
 
 import json
+import importlib.util
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from providers.base import ProviderProfile
@@ -31,6 +33,23 @@ def test_provider_profile_fetch_models_uses_base_url_override():
     assert req.full_url == "https://proxy.example/v1/models"
 
 
+def test_provider_profile_fetch_models_falls_back_to_self_base_url():
+    profile = ProviderProfile(name="test", base_url="https://default.example/v1")
+
+    with patch("urllib.request.urlopen", return_value=_Response()) as urlopen:
+        models = profile.fetch_models(api_key="sk-test")
+
+    assert models == ["proxy-model"]
+    req = urlopen.call_args.args[0]
+    assert req.full_url == "https://default.example/v1/models"
+
+
+def test_provider_profile_fetch_models_returns_none_without_any_base_url():
+    profile = ProviderProfile(name="test", base_url="")
+
+    assert profile.fetch_models(api_key="sk-test", base_url="") is None
+
+
 def test_provider_profile_models_url_still_wins_over_base_url_override():
     profile = ProviderProfile(
         name="test",
@@ -47,6 +66,36 @@ def test_provider_profile_models_url_still_wins_over_base_url_override():
     assert models == ["proxy-model"]
     req = urlopen.call_args.args[0]
     assert req.full_url == "https://catalog.example/models"
+
+
+def test_custom_profile_passes_base_url_override_to_super():
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "plugins"
+        / "model-providers"
+        / "custom"
+        / "__init__.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_test_custom_provider_profile",
+        module_path,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    profile = module.CustomProfile(name="custom", base_url="https://default.example/v1")
+
+    with patch("urllib.request.urlopen", return_value=_Response()) as urlopen:
+        models = profile.fetch_models(
+            api_key="",
+            base_url="https://proxy.example/v1",
+        )
+
+    assert models == ["proxy-model"]
+    req = urlopen.call_args.args[0]
+    assert req.full_url == "https://proxy.example/v1/models"
 
 
 def test_provider_model_ids_passes_resolved_base_url_to_profile_fetch():

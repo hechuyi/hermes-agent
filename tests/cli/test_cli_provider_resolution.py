@@ -344,6 +344,76 @@ def test_model_flow_nous_offers_tool_gateway_prompt_when_unconfigured(monkeypatc
     assert "Tool Gateway" in out
 
 
+def test_model_flow_nous_does_not_restore_stale_custom_api_key(tmp_path, monkeypatch):
+    import yaml
+
+    config_home = tmp_path / "hermes"
+    config_home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(config_home))
+
+    config_path = config_home / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "model": {
+                    "provider": "custom",
+                    "default": "glm-5.2",
+                    "base_url": "https://api.neuralwatt.com/v1",
+                    "api_key": "${NEURALWATT_API_KEY}",
+                    "api_mode": "chat_completions",
+                }
+            },
+            sort_keys=False,
+        )
+    )
+
+    selected_model = "deepseek/deepseek-v4-flash"
+
+    monkeypatch.setattr(
+        "hermes_cli.auth.get_provider_auth_state",
+        lambda provider: {
+            "access_token": "nous-token",
+            "portal_base_url": "https://portal.example.com",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_nous_runtime_credentials",
+        lambda *args, **kwargs: {
+            "base_url": "https://inference-api.nousresearch.com/v1",
+            "api_key": "nous-key",
+        },
+    )
+    monkeypatch.setattr(
+        "hermes_cli.models.get_curated_nous_model_ids",
+        lambda: [selected_model],
+    )
+    monkeypatch.setattr("hermes_cli.models.get_pricing_for_provider", lambda provider: {})
+    monkeypatch.setattr("hermes_cli.models.check_nous_free_tier", lambda **kwargs: False)
+    monkeypatch.setattr(
+        "hermes_cli.models.union_with_portal_paid_recommendations",
+        lambda model_ids, pricing, portal_url: (model_ids, pricing),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.auth._prompt_model_selection",
+        lambda *args, **kwargs: selected_model,
+    )
+    monkeypatch.setattr("hermes_cli.auth._save_model_choice", lambda model: None)
+    monkeypatch.setattr(
+        "hermes_cli.nous_subscription.prompt_enable_tool_gateway",
+        lambda config: None,
+    )
+
+    hermes_main._model_flow_nous(yaml.safe_load(config_path.read_text()) or {}, current_model="glm-5.2")
+
+    config = yaml.safe_load(config_path.read_text()) or {}
+    model = config.get("model")
+    assert model["provider"] == "nous"
+    assert model["default"] == selected_model
+    assert model["base_url"] == "https://inference-api.nousresearch.com/v1"
+    assert "api_key" not in model
+    assert "api_mode" not in model
+
+
 def test_codex_provider_uses_config_model(monkeypatch):
     """Model comes from config.yaml, not LLM_MODEL env var.
     Config.yaml is the single source of truth to avoid multi-agent conflicts."""
@@ -607,6 +677,13 @@ def test_model_flow_custom_persists_selected_api_mode(monkeypatch):
     assert saved_cfg["model"]["api_key"] == "test-key"
     assert saved_cfg["model"]["api_mode"] == "codex_responses"
     assert captured_provider["api_mode"] == "codex_responses"
+
+
+def test_model_flow_google_antigravity_is_guarded_in_current_fork(capsys):
+    hermes_main._model_flow_google_antigravity({}, current_model="sonnet")
+
+    output = capsys.readouterr().out
+    assert "Antigravity OAuth support is unavailable in this build" in output
 
 
 def test_cmd_model_forwards_nous_login_tls_options(monkeypatch):

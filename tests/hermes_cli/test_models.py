@@ -8,6 +8,7 @@ from hermes_cli.models import (
     is_nous_free_tier, partition_nous_models_by_tier,
     check_nous_free_tier, _FREE_TIER_CACHE_TTL,
     get_curated_nous_model_ids,
+    get_default_model_for_provider,
     union_with_portal_free_recommendations,
     union_with_portal_paid_recommendations,
 )
@@ -68,6 +69,21 @@ class TestOpenRouterModels:
         assert "stepfun/step-3.5-flash" not in ids
 
 
+class TestXaiCuratedModels:
+    def test_static_fallback_prioritizes_grok_build(self, monkeypatch):
+        """The xAI fallback catalog should surface grok-build-0.1 first."""
+        monkeypatch.setattr(
+            "agent.models_dev._load_disk_cache",
+            lambda: (_ for _ in ()).throw(OSError("missing cache")),
+        )
+
+        from hermes_cli.models import _xai_curated_models
+
+        ids = _xai_curated_models()
+        assert ids[0] == "grok-build-0.1"
+        assert "grok-4.3" in ids
+
+
 class TestNousCuratedModels:
     def test_stepfun_flash_snapshot_tracks_curated_nous_id(self):
         with patch("hermes_cli.model_catalog.get_curated_nous_models", return_value=None):
@@ -75,6 +91,11 @@ class TestNousCuratedModels:
 
         assert "stepfun/step-3.7-flash" in ids
         assert "stepfun/step-3.5-flash" not in ids
+
+
+class TestNousSilentDefault:
+    def test_nous_silent_default_uses_deepseek_flash(self):
+        assert get_default_model_for_provider("nous") == "deepseek/deepseek-v4-flash"
 
 
 class TestFetchOpenRouterModels:
@@ -286,6 +307,29 @@ class TestDetectProviderForModel:
         assert result[0] == "anthropic"
         assert result[1].startswith("claude-sonnet")
 
+    def test_borrowed_catalog_does_not_hijack_native_vendor_aliases(self, monkeypatch):
+        borrowed_catalog = {
+            "google-antigravity": [
+                "anthropic/claude-sonnet-4.6",
+                "anthropic/claude-opus-4.6",
+            ],
+            "anthropic": [
+                "claude-sonnet-4.6",
+                "claude-opus-4.6",
+            ],
+        }
+        monkeypatch.setattr("hermes_cli.models._PROVIDER_MODELS", borrowed_catalog)
+
+        alias_result = detect_provider_for_model("sonnet", "auto")
+        direct_result = detect_provider_for_model("claude-opus-4.6", "openai-codex")
+
+        assert alias_result is not None
+        assert alias_result[0] == "anthropic"
+        assert alias_result[1].startswith("claude-sonnet")
+        assert direct_result is not None
+        assert direct_result[0] == "anthropic"
+        assert direct_result[1] == "claude-opus-4.6"
+
     def test_openrouter_slug_match(self):
         """Models in the OpenRouter catalog should be found."""
         with patch("hermes_cli.models.fetch_openrouter_models", return_value=LIVE_OPENROUTER_MODELS):
@@ -447,7 +491,7 @@ class TestUnionWithPortalFreeRecommendations:
         }
 
     def test_adds_portal_free_model_missing_from_curated(self):
-        """A Portal-advertised free model not in curated is prepended + priced free."""
+        """A Portal-advertised free model not in curated is appended + priced free."""
         curated = ["anthropic/claude-opus-4.6"]
         pricing = {"anthropic/claude-opus-4.6": self._PAID}
         with patch(
@@ -456,8 +500,8 @@ class TestUnionWithPortalFreeRecommendations:
         ):
             ids, p = union_with_portal_free_recommendations(curated, pricing, "")
 
-        assert ids[0] == "qwen/qwen3.6-plus"  # prepended
-        assert "anthropic/claude-opus-4.6" in ids
+        assert ids[0] == "anthropic/claude-opus-4.6"
+        assert ids[-1] == "qwen/qwen3.6-plus"  # appended
         # Synthetic free pricing entry created
         assert p["qwen/qwen3.6-plus"] == self._FREE
         # Existing pricing untouched
@@ -545,7 +589,7 @@ class TestUnionWithPortalFreeRecommendations:
             },
         ):
             ids, p = union_with_portal_free_recommendations(curated, pricing, "")
-        assert ids == ["qwen/qwen3.6-plus", "a"]
+        assert ids == ["a", "qwen/qwen3.6-plus"]
         assert p["qwen/qwen3.6-plus"] == self._FREE
 
 
@@ -571,7 +615,7 @@ class TestUnionWithPortalPaidRecommendations:
         }
 
     def test_adds_portal_paid_model_missing_from_curated(self):
-        """A Portal-advertised paid model not in curated is prepended."""
+        """A Portal-advertised paid model not in curated is appended."""
         curated = ["anthropic/claude-opus-4.6"]
         pricing = {"anthropic/claude-opus-4.6": self._PAID}
         with patch(
@@ -580,8 +624,8 @@ class TestUnionWithPortalPaidRecommendations:
         ):
             ids, p = union_with_portal_paid_recommendations(curated, pricing, "")
 
-        assert ids[0] == "openai/gpt-5.4"  # prepended
-        assert "anthropic/claude-opus-4.6" in ids
+        assert ids[0] == "anthropic/claude-opus-4.6"
+        assert ids[-1] == "openai/gpt-5.4"  # appended
         # Existing pricing untouched
         assert p["anthropic/claude-opus-4.6"] == self._PAID
 
@@ -670,12 +714,12 @@ class TestUnionWithPortalPaidRecommendations:
             },
         ):
             ids, p = union_with_portal_paid_recommendations(curated, pricing, "")
-        assert ids == ["openai/gpt-5.4", "a"]
+        assert ids == ["a", "openai/gpt-5.4"]
         # No synthetic entry — pricing is untouched.
         assert "openai/gpt-5.4" not in p
 
     def test_preserves_relative_order_of_new_paid_models(self):
-        """Multiple new paid models are prepended in payload order."""
+        """Multiple new paid models are appended in payload order, after curated."""
         curated = ["anthropic/claude-opus-4.6"]
         pricing = {"anthropic/claude-opus-4.6": self._PAID}
         with patch(
@@ -684,10 +728,36 @@ class TestUnionWithPortalPaidRecommendations:
         ):
             ids, _ = union_with_portal_paid_recommendations(curated, pricing, "")
         assert ids == [
+            "anthropic/claude-opus-4.6",
             "openai/gpt-5.4",
             "openai/gpt-5.5",
-            "anthropic/claude-opus-4.6",
         ]
+
+
+class TestProviderPickerDescriptions:
+    def test_curated_provider_descriptions_reflect_picker_copy_refresh(self):
+        import importlib.util
+        from pathlib import Path
+
+        from hermes_cli.models import CANONICAL_PROVIDERS
+
+        by_slug = {entry.slug: entry for entry in CANONICAL_PROVIDERS}
+        plugin_path = Path(__file__).resolve().parents[2] / "plugins" / "model-providers" / "alibaba-coding-plan" / "__init__.py"
+        spec = importlib.util.spec_from_file_location("alibaba_coding_plan_test", plugin_path)
+        assert spec and spec.loader
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        assert by_slug["nous"].tui_desc == (
+            "Nous Portal (Everything your agent needs, 300+ models with bundled tool use)"
+        )
+        assert by_slug["openai-codex"].tui_desc == (
+            "OpenAI Codex (Codex CLI via ChatGPT subscription or API key)"
+        )
+        assert by_slug["alibaba"].tui_desc == "Qwen Cloud / DashScope (Qwen + multi-provider)"
+        assert by_slug["gemini"].tui_desc == "Google AI Studio (Native Gemini API)"
+        assert by_slug["qwen-oauth"].tui_desc == "Qwen OAuth (Reuses local Qwen CLI login)"
+        assert module.alibaba_coding_plan.description == "Alibaba Cloud Coding Plan (Dedicated coding tier)"
 
 
 class TestCheckNousFreeTierCache:
@@ -813,6 +883,45 @@ class TestNousRecommendedModels:
         with patch("urllib.request.urlopen", side_effect=OSError("boom")):
             result = fetch_nous_recommended_models("https://portal.example.com")
         assert result == {}
+
+    def test_fetch_persists_last_known_good_and_recovers_from_disk(self, tmp_path, monkeypatch):
+        from hermes_cli.models import fetch_nous_recommended_models
+
+        payload = {
+            "freeRecommendedModels": [{"modelName": "qwen/qwen3.6-plus"}],
+            "paidRecommendedModels": [{"modelName": "anthropic/claude-opus-4.8"}],
+        }
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+
+        mock_cm = self._mock_urlopen(payload)
+        with patch("urllib.request.urlopen", return_value=mock_cm):
+            first = fetch_nous_recommended_models("https://portal.example.com", force_refresh=True)
+        assert first == payload
+
+        disk_path = tmp_path / "cache" / "nous_recommended_cache.json"
+        assert disk_path.exists()
+
+        _models_mod._nous_recommended_cache.clear()
+        with patch("urllib.request.urlopen", side_effect=OSError("boom")):
+            second = fetch_nous_recommended_models("https://portal.example.com", force_refresh=True)
+
+        assert second == payload
+
+    def test_fetch_disk_cache_is_keyed_by_portal_base(self, tmp_path, monkeypatch):
+        from hermes_cli.models import fetch_nous_recommended_models
+
+        payload = {"freeRecommendedModels": [{"modelName": "qwen/qwen3.6-plus"}]}
+        monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: tmp_path)
+
+        mock_cm = self._mock_urlopen(payload)
+        with patch("urllib.request.urlopen", return_value=mock_cm):
+            fetch_nous_recommended_models("https://portal.example.com", force_refresh=True)
+
+        _models_mod._nous_recommended_cache.clear()
+        with patch("urllib.request.urlopen", side_effect=OSError("boom")):
+            other = fetch_nous_recommended_models("https://portal.staging-nousresearch.com", force_refresh=True)
+
+        assert other == {}
 
     def test_fetch_force_refresh_bypasses_cache(self):
         from hermes_cli.models import fetch_nous_recommended_models

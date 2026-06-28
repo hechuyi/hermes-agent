@@ -1,6 +1,7 @@
 """Regression tests for loading feedback on slow slash commands."""
 
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from cli import HermesCLI
 
@@ -70,3 +71,50 @@ class TestCLILoadingIndicator:
         assert cli_obj._command_running is False
         assert cli_obj._command_status == ""
         assert invalidate_mock.call_count == 2
+
+    def test_reload_mcp_merges_connected_servers_into_shared_refresh(self):
+        cli_obj = self._make_cli()
+        cli_obj.enabled_toolsets = ["web"]
+        cli_obj.conversation_history = []
+        cli_obj.agent = SimpleNamespace(
+            enabled_toolsets=["web"],
+            disabled_toolsets=None,
+            tools=[],
+            valid_tool_names=set(),
+            _invalidate_system_prompt=MagicMock(),
+            _persist_session=MagicMock(),
+        )
+
+        from tools import mcp_tool as mcp_mod
+
+        saved_servers = dict(mcp_mod._servers)
+        try:
+            captured = {}
+
+            def _discover():
+                mcp_mod._servers.clear()
+                mcp_mod._servers["mcp_new"] = SimpleNamespace(name="mcp_new")
+                return ["mcp_new_tool"]
+
+            def _refresh(agent, *, enabled_override=None, quiet_mode=True):
+                captured["agent"] = agent
+                captured["enabled_override"] = enabled_override
+                captured["quiet_mode"] = quiet_mode
+                agent.tools = [{"function": {"name": "mcp_new_tool"}}]
+                agent.valid_tool_names = {"mcp_new_tool"}
+                return {"mcp_new_tool"}
+
+            with patch("tools.mcp_tool._servers", {}), \
+                 patch("tools.mcp_tool.shutdown_mcp_servers", return_value=None), \
+                 patch("tools.mcp_tool.discover_mcp_tools", side_effect=_discover), \
+                 patch("tools.mcp_tool.refresh_agent_mcp_tools", side_effect=_refresh):
+                cli_obj._reload_mcp()
+
+            assert captured["agent"] is cli_obj.agent
+            assert captured["enabled_override"] == ["web", "mcp_new"]
+            assert captured["quiet_mode"] is True
+            assert cli_obj.enabled_toolsets == ["web", "mcp_new"]
+            cli_obj.agent._invalidate_system_prompt.assert_called_once()
+        finally:
+            mcp_mod._servers.clear()
+            mcp_mod._servers.update(saved_servers)
