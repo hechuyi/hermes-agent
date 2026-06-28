@@ -34,11 +34,14 @@ T = TypeVar("T")
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 _SQLITE_CONNECT = sqlite3.connect
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 17
 SCOPE_ONLY_SCHEMA_VERSION = 14
+PREVIOUS_FORK_SCHEMA_VERSION = 15
+UPSTREAM_V16_SCHEMA_VERSION = 16
 SCHEMA_CONTRACT_META_KEY = "hermes_schema_contract"
 SCOPE_ONLY_SCHEMA_CONTRACT_META_VALUE = "rtoc-pr2a-scope-v1"
-SCHEMA_CONTRACT_META_VALUE = "rtoc-pr2a-scope-compression-lock-v2"
+PREVIOUS_SCHEMA_CONTRACT_META_VALUE = "rtoc-pr2a-scope-compression-lock-v2"
+SCHEMA_CONTRACT_META_VALUE = "rtoc-pr2a-scope-compression-lock-upstream-v16-v3"
 
 VALID_SCOPE_ASSIGNMENT_STATUSES = {
     "scoped",
@@ -471,6 +474,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     cache_read_tokens INTEGER DEFAULT 0,
     cache_write_tokens INTEGER DEFAULT 0,
     reasoning_tokens INTEGER DEFAULT 0,
+    cwd TEXT,
+    git_branch TEXT,
+    git_repo_root TEXT,
     billing_provider TEXT,
     billing_base_url TEXT,
     billing_mode TEXT,
@@ -484,6 +490,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_state TEXT,
     handoff_platform TEXT,
     handoff_error TEXT,
+    rewind_count INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
     conversation_scope_id TEXT,
     scope_assignment_status TEXT,
     route_session_key_snapshot TEXT,
@@ -509,6 +517,8 @@ CREATE TABLE IF NOT EXISTS messages (
     codex_message_items TEXT,
     platform_message_id TEXT,
     observed INTEGER DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    compacted INTEGER NOT NULL DEFAULT 0,
     conversation_scope_id TEXT
 );
 
@@ -541,9 +551,11 @@ CREATE TABLE IF NOT EXISTS compression_locks (
 
 SCHEMA_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
+CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_session_active ON messages(session_id, active, timestamp);
 CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
 """
 
@@ -645,6 +657,80 @@ COMPRESSION_LOCK_CONTRACT_COLUMNS = {
     },
 }
 
+UPSTREAM_V16_CONTRACT_COLUMNS = {
+    "schema_version": {"version"},
+    "sessions": {
+        "id",
+        "source",
+        "user_id",
+        "model",
+        "model_config",
+        "system_prompt",
+        "parent_session_id",
+        "started_at",
+        "ended_at",
+        "end_reason",
+        "message_count",
+        "tool_call_count",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "cwd",
+        "git_branch",
+        "git_repo_root",
+        "billing_provider",
+        "billing_base_url",
+        "billing_mode",
+        "estimated_cost_usd",
+        "actual_cost_usd",
+        "cost_status",
+        "cost_source",
+        "pricing_version",
+        "title",
+        "api_call_count",
+        "handoff_state",
+        "handoff_platform",
+        "handoff_error",
+        "rewind_count",
+        "archived",
+    },
+    "messages": {
+        "id",
+        "session_id",
+        "role",
+        "content",
+        "tool_call_id",
+        "tool_calls",
+        "tool_name",
+        "timestamp",
+        "token_count",
+        "finish_reason",
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details",
+        "codex_reasoning_items",
+        "codex_message_items",
+        "platform_message_id",
+        "observed",
+        "active",
+        "compacted",
+    },
+    "state_meta": {"key", "value"},
+    "compression_locks": {
+        "session_id",
+        "holder",
+        "acquired_at",
+        "expires_at",
+    },
+}
+
+UPSTREAM_V16_ADDED_COLUMNS = {
+    "sessions": {"cwd", "git_branch", "git_repo_root", "rewind_count", "archived"},
+    "messages": {"active", "compacted"},
+}
+
 REQUIRED_CONTRACT_COLUMNS = {
     **SCOPE_CONTRACT_COLUMNS,
     **COMPRESSION_LOCK_CONTRACT_COLUMNS,
@@ -660,9 +746,11 @@ REQUIRED_CONTRACT_TABLES = {
 
 REQUIRED_CONTRACT_INDEXES = {
     "idx_sessions_source": ("sessions", ("source",), False),
+    "idx_sessions_source_id": ("sessions", ("source", "id"), False),
     "idx_sessions_parent": ("sessions", ("parent_session_id",), False),
     "idx_sessions_started": ("sessions", ("started_at",), False),
     "idx_messages_session": ("messages", ("session_id", "timestamp"), False),
+    "idx_messages_session_active": ("messages", ("session_id", "active", "timestamp"), False),
     "idx_compression_locks_expires": ("compression_locks", ("expires_at",), False),
 }
 
@@ -1276,6 +1364,7 @@ class SessionDB:
         full: bool = False,
         require_foreign_keys: bool = False,
         include_compression_lock: bool = True,
+        include_upstream_v16: bool = True,
     ) -> None:
         expected_info = self._parse_schema_column_info(SCHEMA_SQL)
         required_tables = set(REQUIRED_CONTRACT_TABLES)
@@ -1285,6 +1374,9 @@ class SessionDB:
             required_tables.discard("compression_locks")
             required_indexes.pop("idx_compression_locks_expires", None)
             contract_column_source = SCOPE_CONTRACT_COLUMNS
+        if not include_upstream_v16:
+            required_indexes.pop("idx_sessions_source_id", None)
+            required_indexes.pop("idx_messages_session_active", None)
 
         for table_name in required_tables:
             row = cursor.execute(
@@ -1300,7 +1392,10 @@ class SessionDB:
 
         contract_columns = (
             {
-                table_name: set(expected_info[table_name])
+                table_name: (
+                    set(expected_info[table_name])
+                    - (UPSTREAM_V16_ADDED_COLUMNS.get(table_name, set()) if not include_upstream_v16 else set())
+                )
                 for table_name in required_tables
                 if table_name in expected_info
             }
@@ -1374,6 +1469,76 @@ class SessionDB:
                 "schema migration failed: "
                 "stage=schema_contract reason=missing_contract_marker"
             )
+
+    def _validate_upstream_v16_contract(self, cursor: sqlite3.Cursor) -> None:
+        """Verify an unmarked upstream v0.17.0 state.db before importing it.
+
+        Upstream schema_version 16 and this fork's schema_version 15 describe
+        different contracts.  Treat upstream v16 as a supported input format,
+        not as this fork's current schema, and fingerprint it before any
+        create/reconcile statements can mutate the database.
+        """
+        if self._read_schema_contract_marker(cursor) is not None:
+            raise sqlite3.OperationalError(
+                "schema migration failed: "
+                "stage=schema_contract reason=unexpected_contract_marker "
+                "version=upstream_v16"
+            )
+
+        expected_info = self._parse_schema_column_info(SCHEMA_SQL)
+        for table_name, columns in UPSTREAM_V16_CONTRACT_COLUMNS.items():
+            row = cursor.execute(
+                "SELECT type FROM sqlite_master WHERE name = ?",
+                (table_name,),
+            ).fetchone()
+            if row is None or row[0] != "table":
+                raise sqlite3.OperationalError(
+                    "schema migration failed: "
+                    "stage=upstream_v16_contract reason=missing_required_object "
+                    f"table={table_name}"
+                )
+
+            safe_table = table_name.replace('"', '""')
+            live_rows = cursor.execute(f'PRAGMA table_info("{safe_table}")').fetchall()
+            live_cols = {
+                (row[1] if isinstance(row, (tuple, list)) else row["name"]): {
+                    "type": row[2] if isinstance(row, (tuple, list)) else row["type"],
+                    "notnull": row[3] if isinstance(row, (tuple, list)) else row["notnull"],
+                    "default": row[4] if isinstance(row, (tuple, list)) else row["dflt_value"],
+                    "pk": row[5] if isinstance(row, (tuple, list)) else row["pk"],
+                }
+                for row in live_rows
+            }
+            for column in columns:
+                if column not in live_cols:
+                    raise sqlite3.OperationalError(
+                        "schema migration failed: "
+                        "stage=upstream_v16_contract reason=missing_required_column "
+                        f"table={table_name} column={column}"
+                    )
+                self._validate_existing_column_compat(
+                    table_name=table_name,
+                    col_name=column,
+                    declared=expected_info[table_name][column],
+                    live=live_cols[column],
+                    stage="upstream_v16_contract",
+                )
+
+        for index_name, (table_name, columns, unique) in REQUIRED_CONTRACT_INDEXES.items():
+            self._validate_required_index(
+                cursor,
+                index_name=index_name,
+                table_name=table_name,
+                columns=columns,
+                unique=unique,
+            )
+        self._validate_required_foreign_key(
+            cursor,
+            table_name="messages",
+            column="session_id",
+            ref_table="sessions",
+            ref_column="id",
+        )
 
     def _drop_and_rebuild_fts(self, cursor: sqlite3.Cursor) -> None:
         try:
@@ -1674,6 +1839,20 @@ class SessionDB:
                     full=True,
                     require_foreign_keys=True,
                 )
+            elif current_version == PREVIOUS_FORK_SCHEMA_VERSION:
+                self._require_schema_contract_marker(
+                    cursor,
+                    accepted_values=(PREVIOUS_SCHEMA_CONTRACT_META_VALUE,),
+                )
+                self._validate_schema_contract(
+                    cursor,
+                    full=True,
+                    require_foreign_keys=True,
+                    include_compression_lock=True,
+                    include_upstream_v16=False,
+                )
+            elif current_version == UPSTREAM_V16_SCHEMA_VERSION:
+                self._validate_upstream_v16_contract(cursor)
             elif current_version == SCOPE_ONLY_SCHEMA_VERSION:
                 self._require_schema_contract_marker(
                     cursor,
@@ -1684,6 +1863,7 @@ class SessionDB:
                     full=True,
                     require_foreign_keys=True,
                     include_compression_lock=False,
+                    include_upstream_v16=False,
                 )
 
             self._execute_sql_script(cursor, SCHEMA_SQL, stage="create_schema")
@@ -1693,6 +1873,8 @@ class SessionDB:
             # unmarked versions were already contract-checked above, so they
             # cannot silently masquerade as this fork's v14 by auto-repair.
             self._reconcile_columns(cursor)
+            if current_version is not None and current_version < 12:
+                cursor.execute("UPDATE messages SET active = 1 WHERE active IS NULL")
 
             self._execute_sql_script(cursor, SCHEMA_INDEX_SQL, stage="create_indexes")
             cursor.execute(

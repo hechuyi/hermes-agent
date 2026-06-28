@@ -1900,6 +1900,155 @@ class TestSanitizeTitle:
 
 
 class TestSchemaInit:
+    def _create_upstream_v16_db(
+        self,
+        db_path,
+        *,
+        include_active_index=True,
+        marker_value=None,
+    ):
+        import sqlite3
+
+        conn = sqlite3.connect(str(db_path))
+        conn.executescript("""
+            CREATE TABLE schema_version (
+                version INTEGER NOT NULL
+            );
+            INSERT INTO schema_version (version) VALUES (16);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                user_id TEXT,
+                model TEXT,
+                model_config TEXT,
+                system_prompt TEXT,
+                parent_session_id TEXT,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                end_reason TEXT,
+                message_count INTEGER DEFAULT 0,
+                tool_call_count INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0,
+                cache_write_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0,
+                cwd TEXT,
+                git_branch TEXT,
+                git_repo_root TEXT,
+                billing_provider TEXT,
+                billing_base_url TEXT,
+                billing_mode TEXT,
+                estimated_cost_usd REAL,
+                actual_cost_usd REAL,
+                cost_status TEXT,
+                cost_source TEXT,
+                pricing_version TEXT,
+                title TEXT,
+                api_call_count INTEGER DEFAULT 0,
+                handoff_state TEXT,
+                handoff_platform TEXT,
+                handoff_error TEXT,
+                rewind_count INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL,
+                token_count INTEGER,
+                finish_reason TEXT,
+                reasoning TEXT,
+                reasoning_content TEXT,
+                reasoning_details TEXT,
+                codex_reasoning_items TEXT,
+                codex_message_items TEXT,
+                platform_message_id TEXT,
+                observed INTEGER DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                compacted INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE state_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+            CREATE TABLE compression_locks (
+                session_id TEXT PRIMARY KEY,
+                holder TEXT NOT NULL,
+                acquired_at REAL NOT NULL,
+                expires_at REAL NOT NULL
+            );
+            CREATE INDEX idx_sessions_source ON sessions(source);
+            CREATE INDEX idx_sessions_source_id ON sessions(source, id);
+            CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+            CREATE INDEX idx_sessions_started ON sessions(started_at DESC);
+            CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+            CREATE INDEX idx_compression_locks_expires ON compression_locks(expires_at);
+            CREATE VIRTUAL TABLE messages_fts USING fts5(content);
+            CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, content) VALUES (
+                    new.id,
+                    COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+                );
+            END;
+            CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+                DELETE FROM messages_fts WHERE rowid = old.id;
+            END;
+            CREATE TRIGGER messages_fts_update AFTER UPDATE ON messages BEGIN
+                DELETE FROM messages_fts WHERE rowid = old.id;
+                INSERT INTO messages_fts(rowid, content) VALUES (
+                    new.id,
+                    COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+                );
+            END;
+            CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(content, tokenize='trigram');
+            CREATE TRIGGER messages_fts_trigram_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts_trigram(rowid, content) VALUES (
+                    new.id,
+                    COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+                );
+            END;
+            CREATE TRIGGER messages_fts_trigram_delete AFTER DELETE ON messages BEGIN
+                DELETE FROM messages_fts_trigram WHERE rowid = old.id;
+            END;
+            CREATE TRIGGER messages_fts_trigram_update AFTER UPDATE ON messages BEGIN
+                DELETE FROM messages_fts_trigram WHERE rowid = old.id;
+                INSERT INTO messages_fts_trigram(rowid, content) VALUES (
+                    new.id,
+                    COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+                );
+            END;
+        """)
+        if include_active_index:
+            conn.execute(
+                "CREATE INDEX idx_messages_session_active "
+                "ON messages(session_id, active, timestamp)"
+            )
+        if marker_value is not None:
+            conn.execute(
+                "INSERT INTO state_meta (key, value) VALUES (?, ?)",
+                ("hermes_schema_contract", marker_value),
+            )
+        conn.execute(
+            "INSERT INTO sessions (id, source, started_at, message_count, cwd) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("upstream-session", "cli", 1000.0, 1, "/srv/hermes"),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) "
+            "VALUES (?, ?, ?, ?)",
+            ("upstream-session", "user", "upstream v16 payload", 1001.0),
+        )
+        conn.commit()
+        conn.close()
+
     def _create_v14_contract_db(
         self,
         db_path,
@@ -2991,6 +3140,114 @@ class TestSchemaInit:
         assert "stage=schema_version" in msg
         assert "reason=future_version" in msg
 
+    def test_unmarked_upstream_v16_migrates_to_fork_contract(self, tmp_path):
+        """Official v0.17.0 state.db can be imported into the Feishu fork."""
+        from hermes_state import SCHEMA_CONTRACT_META_VALUE, SCHEMA_VERSION
+
+        db_path = tmp_path / "upstream_v16.db"
+        self._create_upstream_v16_db(db_path)
+
+        migrated_db = SessionDB(db_path=db_path)
+        try:
+            version = migrated_db._conn.execute(
+                "SELECT version FROM schema_version LIMIT 1"
+            ).fetchone()[0]
+            marker = migrated_db._conn.execute(
+                "SELECT value FROM state_meta WHERE key = 'hermes_schema_contract'"
+            ).fetchone()[0]
+            session_cols = {
+                row[1]
+                for row in migrated_db._conn.execute("PRAGMA table_info(sessions)")
+            }
+            message_cols = {
+                row[1]
+                for row in migrated_db._conn.execute("PRAGMA table_info(messages)")
+            }
+            tables = {
+                row[0]
+                for row in migrated_db._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            indexes = {
+                row[0]
+                for row in migrated_db._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                )
+            }
+
+            assert version == SCHEMA_VERSION
+            assert marker == SCHEMA_CONTRACT_META_VALUE
+            assert "conversation_scopes" in tables
+            assert "conversation_scope_id" in session_cols
+            assert "scope_assignment_status" in session_cols
+            assert "conversation_scope_id" in message_cols
+            assert "active" in message_cols
+            assert "compacted" in message_cols
+            assert "idx_messages_session_active" in indexes
+            assert "idx_sessions_source_id" in indexes
+            assert migrated_db.get_messages("upstream-session")[0]["content"] == "upstream v16 payload"
+        finally:
+            migrated_db.close()
+
+    def test_upstream_v16_missing_required_index_fails_before_migration(self, tmp_path):
+        """schema_version=16 is accepted only when it fingerprints as upstream v16."""
+        import sqlite3
+
+        from hermes_state import SCHEMA_VERSION
+
+        db_path = tmp_path / "upstream_v16_missing_active_index.db"
+        self._create_upstream_v16_db(db_path, include_active_index=False)
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=upstream_v16_contract" in msg or "stage=schema_contract" in msg
+        assert "reason=missing_required_index" in msg
+        assert "index=idx_messages_session_active" in msg
+
+        verify_conn = sqlite3.connect(str(db_path))
+        try:
+            version = verify_conn.execute(
+                "SELECT version FROM schema_version LIMIT 1"
+            ).fetchone()[0]
+            marker = verify_conn.execute(
+                "SELECT value FROM state_meta WHERE key = 'hermes_schema_contract'"
+            ).fetchone()
+        finally:
+            verify_conn.close()
+        assert version == 16
+        assert version != SCHEMA_VERSION
+        assert marker is None
+
+    def test_schema_version_16_with_contract_marker_fails_closed(self, tmp_path):
+        """Official v16 import only accepts unmarked upstream databases."""
+        import sqlite3
+
+        db_path = tmp_path / "marked_v16.db"
+        self._create_upstream_v16_db(db_path, marker_value="unexpected-contract")
+
+        with pytest.raises(sqlite3.OperationalError) as excinfo:
+            SessionDB(db_path=db_path)
+
+        msg = str(excinfo.value)
+        assert "stage=schema_contract" in msg
+        assert "reason=unexpected_contract_marker" in msg
+
+        verify_conn = sqlite3.connect(str(db_path))
+        try:
+            version = verify_conn.execute(
+                "SELECT version FROM schema_version LIMIT 1"
+            ).fetchone()[0]
+            marker = verify_conn.execute(
+                "SELECT value FROM state_meta WHERE key = 'hermes_schema_contract'"
+            ).fetchone()[0]
+        finally:
+            verify_conn.close()
+        assert version == 16
+        assert marker == "unexpected-contract"
+
     def test_schema_version_14_missing_required_index_fails_closed(self, tmp_path):
         """Current-version fork schemas must include required contract indexes."""
         import sqlite3
@@ -3199,7 +3456,7 @@ class TestSchemaInit:
     def test_schema_version_15_missing_compression_lock_table_fails_closed(self, tmp_path):
         import sqlite3
 
-        from hermes_state import SCHEMA_CONTRACT_META_KEY, SCHEMA_CONTRACT_META_VALUE
+        from hermes_state import SCHEMA_CONTRACT_META_KEY, PREVIOUS_SCHEMA_CONTRACT_META_VALUE
 
         db_path = tmp_path / "v15_missing_compression_locks.db"
         self._create_v14_contract_db(db_path)
@@ -3207,7 +3464,7 @@ class TestSchemaInit:
         conn.execute("UPDATE schema_version SET version = 15")
         conn.execute(
             "UPDATE state_meta SET value = ? WHERE key = ?",
-            (SCHEMA_CONTRACT_META_VALUE, SCHEMA_CONTRACT_META_KEY),
+            (PREVIOUS_SCHEMA_CONTRACT_META_VALUE, SCHEMA_CONTRACT_META_KEY),
         )
         conn.commit()
         conn.close()
