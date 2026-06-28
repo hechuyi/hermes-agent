@@ -47,6 +47,50 @@ class TestLoadDirectory:
 
 
 class TestBuildChannelDirectoryWrites:
+    def test_preserves_existing_entries_when_sessions_are_empty(self, tmp_path):
+        cache_file = _write_directory(tmp_path, {
+            "feishu": [{"id": "oc_123", "name": "Ops", "type": "group"}]
+        })
+
+        with (
+            patch("gateway.channel_directory.DIRECTORY_PATH", cache_file),
+            patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}),
+        ):
+            asyncio.run(build_channel_directory({}))
+            result = load_directory()
+
+        assert result["platforms"]["feishu"] == [
+            {"id": "oc_123", "name": "Ops", "type": "group"}
+        ]
+
+    def test_discovered_session_entry_replaces_existing_same_id(self, tmp_path):
+        cache_file = _write_directory(tmp_path, {
+            "feishu": [{"id": "oc_123", "name": "Old Ops", "type": "group"}]
+        })
+        sessions_path = tmp_path / "sessions" / "sessions.json"
+        sessions_path.parent.mkdir(parents=True)
+        sessions_path.write_text(json.dumps({
+            "session_1": {
+                "origin": {
+                    "platform": "feishu",
+                    "chat_id": "oc_123",
+                    "chat_name": "New Ops",
+                },
+                "chat_type": "group",
+            }
+        }))
+
+        with (
+            patch("gateway.channel_directory.DIRECTORY_PATH", cache_file),
+            patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}),
+        ):
+            asyncio.run(build_channel_directory({}))
+            result = load_directory()
+
+        assert result["platforms"]["feishu"] == [
+            {"id": "oc_123", "name": "New Ops", "type": "group"}
+        ]
+
     def test_failed_write_preserves_previous_cache(self, tmp_path, monkeypatch):
         cache_file = _write_directory(tmp_path, {
             "feishu": [{"id": "oc_123", "name": "Ops", "type": "group"}]

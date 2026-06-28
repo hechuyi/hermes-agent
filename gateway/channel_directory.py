@@ -61,8 +61,12 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
 
     Returns the directory dict and writes it to DIRECTORY_PATH.
     """
+    existing = load_directory()
     platforms: Dict[str, List[Dict[str, str]]] = {
-        "feishu": _build_from_sessions("feishu"),
+        "feishu": _merge_channel_entries(
+            existing.get("platforms", {}).get("feishu", []),
+            _build_from_sessions("feishu"),
+        ),
     }
 
     directory = {
@@ -76,6 +80,39 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
         logger.warning("Channel directory: failed to write: %s", e)
 
     return directory
+
+
+def _merge_channel_entries(
+    existing: List[Dict[str, Any]],
+    discovered: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    """Preserve imported channel aliases while refreshing discovered entries.
+
+    Startup rebuilds the directory from local session files.  On a host that
+    has just been paired to an existing Feishu bot, those legacy session files
+    may be empty even though an imported channel directory contains valid chat
+    targets.  Keep those entries and let newly discovered session rows replace
+    same-id entries with fresher names/types.
+    """
+    merged: Dict[str, Dict[str, str]] = {}
+    for source in (existing, discovered):
+        for entry in source:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = entry.get("id")
+            name = entry.get("name")
+            if not entry_id or not name:
+                continue
+            clean = {
+                "id": str(entry_id),
+                "name": str(name),
+                "type": str(entry.get("type") or "group"),
+            }
+            thread_id = entry.get("thread_id")
+            if thread_id:
+                clean["thread_id"] = str(thread_id)
+            merged[clean["id"]] = clean
+    return list(merged.values())
 
 
 def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
