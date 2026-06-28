@@ -1847,6 +1847,7 @@ class MCPServerTask:
                 self.name,
             )
             self._tools = []
+            self._register_discovered_tools_if_needed()
             return
         async with self._rpc_lock:
             try:
@@ -1861,12 +1862,35 @@ class MCPServerTask:
                 )
                 await self._ping_session()
                 self._tools = []
+                self._register_discovered_tools_if_needed()
                 return
         self._tools = (
             tools_result.tools
             if hasattr(tools_result, "tools")
             else []
         )
+        self._register_discovered_tools_if_needed()
+
+    def _register_discovered_tools_if_needed(self) -> None:
+        """Restore registry entries after a parked reconnect.
+
+        Initial startup registers tools after ``_connect_server`` publishes the
+        task into ``_servers``.  A parked task is already published, but park
+        clears ``_registered_tool_names`` and deregisters its handlers; once
+        discovery succeeds again, restore those handlers before marking ready.
+        """
+        if self._registered_tool_names:
+            return
+        with _lock:
+            if _servers.get(self.name) is not self:
+                return
+        registered_names = _register_server_tools(self.name, self, self._config)
+        self._registered_tool_names = list(registered_names)
+        if registered_names:
+            logger.info(
+                "MCP server '%s': restored %d tool(s) after reconnect: %s",
+                self.name, len(registered_names), ", ".join(registered_names),
+            )
 
     async def run(self, config: dict):
         """Long-lived coroutine: connect, discover tools, wait, disconnect.

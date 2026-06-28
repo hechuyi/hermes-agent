@@ -19,7 +19,7 @@ import os
 import random
 import threading
 import time
-from typing import Any, Optional
+from typing import Optional
 
 from agent.display import (
     KawaiiSpinner,

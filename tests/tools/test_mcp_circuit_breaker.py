@@ -12,6 +12,7 @@ half-open / cooldown / reconnect-resets-breaker behavior that fixes
 that.
 """
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -330,13 +331,14 @@ def test_circuit_breaker_cleared_on_reconnect(monkeypatch, tmp_path):
 
 
 def test_run_loop_parks_instead_of_exiting_then_revives(monkeypatch, tmp_path):
-    """The run loop must not exit when the reconnect budget is exhausted."""
+    """Parked reconnect must revive the transport and restore tool registry."""
     import asyncio
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     from tools import mcp_tool
     from tools.mcp_tool import MCPServerTask
+    from tools.registry import registry
 
     monkeypatch.setattr(mcp_tool, "_MAX_RECONNECT_RETRIES", 2)
 
@@ -347,6 +349,18 @@ def test_run_loop_parks_instead_of_exiting_then_revives(monkeypatch, tmp_path):
 
     monkeypatch.setattr(mcp_tool.asyncio, "sleep", _fast_sleep)
 
+    tool_name = "mcp_srv_tool"
+    mcp_tool_listing = SimpleNamespace(
+        name="tool",
+        description="test tool",
+        inputSchema={"type": "object", "properties": {}},
+    )
+    tools_result = SimpleNamespace(tools=[mcp_tool_listing])
+    config = {
+        "command": "x",
+        "tools": {"resources": False, "prompts": False},
+    }
+
     state = {"transport_calls": 0, "deregistered": 0, "revived": False}
 
     async def _scenario():
@@ -356,7 +370,7 @@ def test_run_loop_parks_instead_of_exiting_then_revives(monkeypatch, tmp_path):
 
             def _deregister_tools(self):
                 state["deregistered"] += 1
-                self._registered_tool_names = []
+                super()._deregister_tools()
 
             async def _run_stdio(self, config):
                 state["transport_calls"] += 1
@@ -366,16 +380,24 @@ def test_run_loop_parks_instead_of_exiting_then_revives(monkeypatch, tmp_path):
                     self.session = None
                     raise RuntimeError("subprocess died")
                 if state["revived"]:
-                    self.session = object()
+                    self.session = live_session
+                    await self._discover_tools()
                     self._ready.set()
                     await self._wait_for_lifecycle_event()
                     return
                 raise RuntimeError("still down")
 
         task = _Task("srv")
-        task._registered_tool_names = ["srv__tool"]
+        task._config = config
+        task._tools = [mcp_tool_listing]
+        mcp_tool._servers["srv"] = task
+        task._registered_tool_names = mcp_tool._register_server_tools(
+            "srv", task, task._config
+        )
+        assert tool_name in task._registered_tool_names
+        assert registry.get_entry(tool_name) is not None
 
-        run_task = asyncio.ensure_future(task.run({"command": "x"}))
+        run_task = asyncio.ensure_future(task.run(config))
 
         for _ in range(500):
             await real_sleep(0)
@@ -384,17 +406,32 @@ def test_run_loop_parks_instead_of_exiting_then_revives(monkeypatch, tmp_path):
         await real_sleep(0)
         assert not run_task.done(), "run loop exited instead of parking"
         assert state["deregistered"] >= 1, "tools not deregistered on park"
+        assert task._registered_tool_names == []
+        assert registry.get_entry(tool_name) is None
 
         state["revived"] = True
+        live_session = MagicMock()
+
+        async def _list_tools():
+            return tools_result
+
+        live_session.list_tools = _list_tools
         before = state["transport_calls"]
         task._reconnect_event.set()
         for _ in range(500):
             await real_sleep(0)
-            if state["transport_calls"] > before:
+            if (
+                state["transport_calls"] > before
+                and registry.get_entry(tool_name) is not None
+            ):
                 break
         assert state["transport_calls"] > before, (
             "parked task did not re-enter transport on reconnect signal"
         )
+        assert task._registered_tool_names == [tool_name]
+        entry = registry.get_entry(tool_name)
+        assert entry is not None, "parked reconnect did not restore registry entry"
+        assert entry.handler is not None
 
         task._shutdown_event.set()
         task._reconnect_event.set()
@@ -402,5 +439,8 @@ def test_run_loop_parks_instead_of_exiting_then_revives(monkeypatch, tmp_path):
             await asyncio.wait_for(run_task, timeout=2)
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             run_task.cancel()
+        finally:
+            task._deregister_tools()
+            mcp_tool._servers.pop("srv", None)
 
     asyncio.run(_scenario())
