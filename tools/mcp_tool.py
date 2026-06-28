@@ -1430,6 +1430,33 @@ class MCPServerTask:
         self._reconnect_event.clear()
         return "reconnect"
 
+    async def _wait_for_reconnect_or_shutdown(self) -> str:
+        """Block until a reconnect or shutdown is requested while parked.
+
+        Used by ``run`` after the reconnect budget is exhausted. The task stays
+        alive so ``_reconnect_event`` always has a listener, but does no work
+        until something explicitly asks it to rebuild the transport.
+        """
+        shutdown_task = asyncio.ensure_future(self._shutdown_event.wait())
+        reconnect_task = asyncio.ensure_future(self._reconnect_event.wait())
+        try:
+            await asyncio.wait(
+                {shutdown_task, reconnect_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for t in (shutdown_task, reconnect_task):
+                if not t.done():
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+        if self._shutdown_event.is_set():
+            return "shutdown"
+        self._reconnect_event.clear()
+        return "reconnect"
+
     async def _run_stdio(self, config: dict):
         """Run the server using stdio transport."""
         if not _MCP_AVAILABLE:
@@ -1511,6 +1538,7 @@ class MCPServerTask:
                     self.session = session
                     await self._discover_tools()
                     self._ready.set()
+                    _reset_server_error(self.name)
                     # stdio transport does not use OAuth, but we still honor
                     # _reconnect_event (e.g. future manual /mcp refresh) for
                     # consistency with _run_http.
@@ -1718,6 +1746,7 @@ class MCPServerTask:
                     self.session = session
                     await self._discover_tools()
                     self._ready.set()
+                    _reset_server_error(self.name)
                     reason = await self._wait_for_lifecycle_event()
                     if reason == "reconnect":
                         logger.info(
@@ -1767,6 +1796,7 @@ class MCPServerTask:
                         self.session = session
                         await self._discover_tools()
                         self._ready.set()
+                        _reset_server_error(self.name)
                         reason = await self._wait_for_lifecycle_event()
                         if reason == "reconnect":
                             logger.info(
@@ -1790,6 +1820,7 @@ class MCPServerTask:
                     self.session = session
                     await self._discover_tools()
                     self._ready.set()
+                    _reset_server_error(self.name)
                     reason = await self._wait_for_lifecycle_event()
                     if reason == "reconnect":
                         logger.info(
@@ -1912,6 +1943,8 @@ class MCPServerTask:
                     "manual refresh)",
                     self.name,
                 )
+                retries = 0
+                backoff = 1.0
                 # Reset the session reference; _run_http/_run_stdio will
                 # repopulate it on successful re-entry.
                 self.session = None
@@ -1988,10 +2021,22 @@ class MCPServerTask:
                 if retries > _MAX_RECONNECT_RETRIES:
                     logger.warning(
                         "MCP server '%s' failed after %d reconnection attempts, "
-                        "giving up: %s",
+                        "parking until a reconnect is requested: %s",
                         self.name, _MAX_RECONNECT_RETRIES, exc,
                     )
-                    return
+                    self._deregister_tools()
+                    self._reconnect_event.clear()
+                    parked = await self._wait_for_reconnect_or_shutdown()
+                    if parked == "shutdown":
+                        return
+                    logger.info(
+                        "MCP server '%s': reconnect requested while parked; "
+                        "rebuilding transport.",
+                        self.name,
+                    )
+                    retries = 0
+                    backoff = 1.0
+                    continue
 
                 logger.warning(
                     "MCP server '%s' connection lost (attempt %d/%d), "
@@ -2017,8 +2062,6 @@ class MCPServerTask:
 
     async def shutdown(self):
         """Signal the Task to exit and wait for clean resource teardown."""
-        from tools.registry import registry
-
         self._shutdown_event.set()
         # Defensive: if _wait_for_lifecycle_event is blocking, we need ANY
         # event to unblock it. _shutdown_event alone is sufficient (the
@@ -2044,11 +2087,17 @@ class MCPServerTask:
                 task.cancel()
             await asyncio.gather(*self._pending_refresh_tasks, return_exceptions=True)
             self._pending_refresh_tasks.clear()
+        self._deregister_tools()
+        self.session = None
+
+    def _deregister_tools(self) -> None:
+        """Drop this server's tools from the global registry."""
+        from tools.registry import registry
+
         for tool_name in list(getattr(self, "_registered_tool_names", [])):
             registry.deregister(tool_name)
             _forget_mcp_tool_server(tool_name)
         self._registered_tool_names = []
-        self.session = None
 
 
 # ---------------------------------------------------------------------------

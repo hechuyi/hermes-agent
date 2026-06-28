@@ -648,3 +648,39 @@ class TestFallbackNoCallback:
         assert result["approved"] is False
         assert result.get("status") == "pending_approval"
         assert result.get("approval_pending") is True
+
+
+class TestCrossSessionApprovalIsolation:
+    def setup_method(self):
+        _clear_approval_state()
+        os.environ.pop("HERMES_SESSION_KEY", None)
+
+    def teardown_method(self):
+        os.environ.pop("HERMES_SESSION_KEY", None)
+
+    def test_approval_contextvar_wins_over_process_global_session_key(self):
+        from tools.approval import (
+            get_current_session_key,
+            reset_current_session_key,
+            set_current_session_key,
+        )
+
+        os.environ["HERMES_SESSION_KEY"] = "session-from-other-chat"
+        token = set_current_session_key("originating-session")
+        try:
+            assert get_current_session_key() == "originating-session"
+        finally:
+            reset_current_session_key(token)
+
+    def test_cleared_gateway_session_does_not_fall_back_to_stale_env(self):
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from tools.approval import get_current_session_key
+
+        os.environ["HERMES_SESSION_KEY"] = "stale-other-session"
+        tokens = set_session_vars(session_key="originating-session")
+        try:
+            assert get_current_session_key() == "originating-session"
+        finally:
+            clear_session_vars(tokens)
+
+        assert get_current_session_key() != "stale-other-session"

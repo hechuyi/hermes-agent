@@ -634,6 +634,49 @@ class TestProjectSensitiveCopyPattern:
         assert desc is None
 
 
+class TestWindowsAbsolutePathFolding:
+    def test_windows_home_bashrc_folds(self, monkeypatch):
+        monkeypatch.setenv("HOME", r"C:\Users\tester")
+        dangerous, key, _ = detect_dangerous_command(
+            r"echo 'pwned' > C:\Users\tester\.bashrc"
+        )
+        assert dangerous is True
+        assert key is not None
+
+    def test_windows_home_ssh_authorized_keys_multiseg_folds(self, monkeypatch):
+        monkeypatch.setenv("HOME", r"C:\Users\tester")
+        dangerous, key, _ = detect_dangerous_command(
+            r"cat key >> C:\Users\tester\.ssh\authorized_keys"
+        )
+        assert dangerous is True
+        assert key is not None
+
+    def test_windows_home_forward_slash_folds(self, monkeypatch):
+        monkeypatch.setenv("HOME", r"C:\Users\tester")
+        dangerous, key, _ = detect_dangerous_command(
+            "cat key >> C:/Users/tester/.ssh/authorized_keys"
+        )
+        assert dangerous is True
+        assert key is not None
+
+    def test_windows_hermes_home_config_folds(self, monkeypatch):
+        monkeypatch.setenv("HOME", r"C:\Users\tester")
+        monkeypatch.setenv("HERMES_HOME", r"C:\Users\tester\.hermes")
+        dangerous, key, _ = detect_dangerous_command(
+            r"sed -i 's/manual/off/' C:\Users\tester\.hermes\config.yaml"
+        )
+        assert dangerous is True
+        assert key is not None
+
+    def test_windows_unrelated_path_not_flagged(self, monkeypatch):
+        monkeypatch.setenv("HOME", r"C:\Users\tester")
+        dangerous, key, _ = detect_dangerous_command(
+            r"cp report.txt C:\Users\tester\notes.txt"
+        )
+        assert dangerous is False
+        assert key is None
+
+
 class TestProjectSensitiveTeePattern:
     def test_tee_to_local_dotenv_requires_approval(self):
         dangerous, key, desc = detect_dangerous_command("printenv | tee .env.local")
@@ -956,6 +999,50 @@ class TestPgrepKillExpansion:
     def test_safe_kill_pid_not_flagged(self):
         """A plain 'kill 12345' (literal PID, no expansion) must stay safe."""
         cmd = "kill 12345"
+        dangerous, _, _ = detect_dangerous_command(cmd)
+        assert dangerous is False
+
+    def test_kill_dollar_pidof_detected(self):
+        cmd = "kill -TERM $(pidof hermes_cli.main)"
+        dangerous, _, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert "pidof" in desc.lower() or "pgrep" in desc.lower()
+
+    def test_kill_backtick_pidof_detected(self):
+        cmd = "kill -9 `pidof hermes`"
+        dangerous, _, _ = detect_dangerous_command(cmd)
+        assert dangerous is True
+
+
+class TestLaunchctlGatewayLifecycle:
+    def test_launchctl_stop_hermes_detected(self):
+        cmd = "launchctl stop ai.hermes.gateway"
+        dangerous, _, desc = detect_dangerous_command(cmd)
+        assert dangerous is True
+        assert "launchd" in desc.lower() or "hermes" in desc.lower()
+
+    def test_launchctl_kickstart_hermes_detected(self):
+        cmd = "launchctl kickstart -k system/ai.hermes.gateway"
+        dangerous, _, _ = detect_dangerous_command(cmd)
+        assert dangerous is True
+
+    def test_launchctl_bootout_hermes_detected(self):
+        cmd = "launchctl bootout system/ai.hermes.gateway"
+        dangerous, _, _ = detect_dangerous_command(cmd)
+        assert dangerous is True
+
+    def test_launchctl_unload_hermes_detected(self):
+        cmd = "launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist"
+        dangerous, _, _ = detect_dangerous_command(cmd)
+        assert dangerous is True
+
+    def test_launchctl_print_unrelated_not_flagged(self):
+        cmd = "launchctl print system/com.apple.WindowServer"
+        dangerous, _, _ = detect_dangerous_command(cmd)
+        assert dangerous is False
+
+    def test_launchctl_stop_unrelated_not_flagged(self):
+        cmd = "launchctl stop com.example.unrelated"
         dangerous, _, _ = detect_dangerous_command(cmd)
         assert dangerous is False
 

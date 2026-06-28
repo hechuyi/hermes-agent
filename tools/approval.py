@@ -9,6 +9,7 @@ This module is the single source of truth for the dangerous command system:
 """
 
 import contextvars
+import functools
 import logging
 import os
 import re
@@ -404,8 +405,13 @@ DANGEROUS_PATTERNS = [
     # The name-based pattern above catches `pkill hermes` but not
     # `kill -9 $(pgrep -f hermes)` because the substitution is opaque
     # to regex at detection time. Catch the structural pattern instead.
-    (r'\bkill\b.*\$\(\s*pgrep\b', "kill process via pgrep expansion (self-termination)"),
-    (r'\bkill\b.*`\s*pgrep\b', "kill process via backtick pgrep expansion (self-termination)"),
+    (r'\bkill\b.*\$\(\s*(pgrep|pidof)\b', "kill process via pgrep/pidof expansion (self-termination)"),
+    (r'\bkill\b.*`\s*(pgrep|pidof)\b', "kill process via backtick pgrep/pidof expansion (self-termination)"),
+    # launchctl-driven gateway stop/restart on macOS. The agent can bypass
+    # the `hermes gateway stop|restart` pattern above by driving launchd
+    # directly against the service label (commonly `ai.hermes.gateway`).
+    (r'\blaunchctl\s+(stop|kickstart|bootout|unload|kill|disable|remove)\b.*\b(hermes|ai\.hermes)\b',
+     "stop/restart hermes launchd service (kills running agents)"),
     # File copy/move/edit into sensitive system paths (/etc/ and macOS
     # /private/etc/ mirror).
     (rf'\b(cp|mv|install)\b.*\s{_SYSTEM_CONFIG_PATH}', "copy/move file into system config path"),
@@ -512,26 +518,72 @@ def _normalize_command_for_detection(command: str) -> str:
     command = command.replace('\x00', '')
     # Normalize Unicode (fullwidth Latin, halfwidth Katakana, etc.)
     command = unicodedata.normalize('NFKC', command)
+    # Fold absolute home / active-profile-home prefixes before stripping
+    # backslash escapes. Windows paths use backslash separators, and stripping
+    # them first dissolves C:\Users\alice\.ssh into C:Usersalice.ssh.
+    command = _rewrite_resolved_hermes_home(command)
+    command = _rewrite_resolved_user_home(command)
     # Strip shell backslash-escapes: r\m → rm. Prevents \-injection bypass.
     command = re.sub(r'\\([^\n])', r'\1', command)
     # Strip empty-string literals that split tokens: r''m → rm, r"\"m → rm.
     command = re.sub(r"''|\"\"", '', command)
-    # Fold the resolved absolute active-profile home path into the canonical
-    # ~/.hermes/ form so the Hermes config/env patterns catch it. In Docker and
-    # gateway deployments the agent often references the resolved absolute path
-    # directly (e.g. `sed -i ... /home/hermes/.hermes/config.yaml`) rather than
-    # ~, $HOME, or $HERMES_HOME. Done at detection time (not via an import-time
-    # pattern snapshot) so it tracks the live HERMES_HOME even when that is set
-    # after this module is imported — as the hermetic test conftest does.
-    command = _rewrite_resolved_hermes_home(command)
     return command
+
+
+_PATH_TOKEN_STOP = r"""\s'"`;|&<>()"""
+_PATH_TAIL = r"(?P<tail>(?:[/\\][^/\\" + _PATH_TOKEN_STOP + r"]*)+)"
+
+
+@functools.lru_cache(maxsize=64)
+def _home_prefix_fold_regex(path: str):
+    """Compile a regex matching *path* used as an absolute directory prefix."""
+    if not path:
+        return None
+    components = [c for c in re.split(r"[/\\]+", path) if c]
+    # Require at least two non-empty components below the root. This preserves
+    # the old POSIX guard against "/" or "/home" and rejects a bare "C:\".
+    if len(components) < 2:
+        return None
+    body = r"[/\\]+".join(re.escape(c) for c in components)
+    return re.compile(r"[/\\]*" + body + _PATH_TAIL)
+
+
+def _fold_home_prefixes(command: str, paths, replacement: str) -> str:
+    """Fold resolved home path prefixes to a static-pattern-friendly form."""
+    seen: set[str] = set()
+    for path in sorted((p for p in paths if p), key=len, reverse=True):
+        if path in seen:
+            continue
+        seen.add(path)
+        pattern = _home_prefix_fold_regex(path)
+        if pattern is None:
+            continue
+        command = pattern.sub(
+            lambda match: replacement + match.group("tail").replace("\\", "/"),
+            command,
+        )
+    return command
+
+
+def _rewrite_resolved_user_home(command: str) -> str:
+    """Rewrite resolved user home prefixes to ``~`` for static patterns."""
+    try:
+        home = os.path.expanduser("~")
+        candidates = [
+            home,
+            os.path.realpath(home),
+            os.environ.get("HOME", ""),
+        ]
+    except Exception:
+        return command
+    return _fold_home_prefixes(command, candidates, "~")
 
 
 def _rewrite_resolved_hermes_home(command: str) -> str:
     """Rewrite the resolved absolute Hermes home prefix to ``~/.hermes/``.
 
     Resolves the active ``HERMES_HOME`` at call time (and its symlink-resolved
-    form) and replaces an occurrence of ``<home>/`` in *command* with
+    form) and folds an occurrence of ``<home>/`` in *command* into
     ``~/.hermes/`` so the static ``_HERMES_CONFIG_PATH`` / ``_HERMES_ENV_PATH``
     patterns match. No-op when the path can't be resolved or doesn't appear.
     """
@@ -539,25 +591,12 @@ def _rewrite_resolved_hermes_home(command: str) -> str:
         from hermes_constants import get_hermes_home
         home = get_hermes_home().expanduser()
         candidates = [
-            str(home).rstrip("/"),
-            str(home.resolve(strict=False)).rstrip("/"),
+            str(home),
+            str(home.resolve(strict=False)),
         ]
     except Exception:
         return command
-    seen: set[str] = set()
-    for path in candidates:
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        # Guard against a degenerate HERMES_HOME (e.g. "/" or "") rewriting
-        # unrelated paths: require an absolute path with at least one non-root
-        # component. The active profile home is always a real directory like
-        # /home/hermes/.hermes or a per-test tempdir, never a bare root.
-        normalized = path.rstrip("/")
-        if not normalized.startswith("/") or normalized.count("/") < 2:
-            continue
-        command = command.replace(normalized + "/", "~/.hermes/")
-    return command
+    return _fold_home_prefixes(command, candidates, "~/.hermes")
 
 
 def detect_dangerous_command(command: str) -> tuple:

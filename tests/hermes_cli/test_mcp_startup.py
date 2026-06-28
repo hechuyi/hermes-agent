@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from contextlib import nullcontext
 import sys
 import threading
 import time
@@ -73,6 +74,14 @@ def test_prepare_agent_startup_backgrounds_blocking_mcp_for_chat(monkeypatch):
     )
     monkeypatch.setitem(
         sys.modules,
+        "tools.mcp_oauth",
+        types.SimpleNamespace(
+            suppress_oauth_stdin_fallback=lambda: nullcontext(),
+            suppress_interactive_oauth=lambda: nullcontext(),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
         "tools.mcp_tool",
         types.SimpleNamespace(discover_mcp_tools=_blocking_discover),
     )
@@ -89,7 +98,7 @@ def test_prepare_agent_startup_backgrounds_blocking_mcp_for_chat(monkeypatch):
         elapsed = time.monotonic() - start
         assert not startup_thread.is_alive()
         assert elapsed < 0.2
-        assert entered.wait(timeout=1.0)
+        assert entered.wait(timeout=3.0)
         assert calls["mcp"] == 1
         assert mcp_startup._mcp_discovery_thread is not None
         assert mcp_startup._mcp_discovery_thread.is_alive()

@@ -1190,6 +1190,9 @@ def _classify_by_message(
             should_fallback=True,
         )
 
+    if any(p in error_msg for p in _OVERLOADED_PATTERNS):
+        return result_fn(FailoverReason.overloaded, retryable=True)
+
     # Billing patterns
     if any(p in error_msg for p in _BILLING_PATTERNS):
         return result_fn(
@@ -1198,9 +1201,6 @@ def _classify_by_message(
             should_rotate_credential=True,
             should_fallback=True,
         )
-
-    if any(p in error_msg for p in _OVERLOADED_PATTERNS):
-        return result_fn(FailoverReason.overloaded, retryable=True)
 
     # Rate limit patterns
     if any(p in error_msg for p in _RATE_LIMIT_PATTERNS):
