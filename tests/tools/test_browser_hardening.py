@@ -124,6 +124,12 @@ class TestSessionInactivityTimeout:
         with patch("hermes_cli.config.read_raw_config", return_value={}):
             assert _get_session_inactivity_timeout() == 300
 
+    def test_invalid_env_falls_back_to_default(self):
+        from tools.browser_tool import _get_session_inactivity_timeout
+        with patch.dict(os.environ, {"BROWSER_INACTIVITY_TIMEOUT": "not-an-int"}, clear=False):
+            with patch("hermes_cli.config.read_raw_config", return_value={}):
+                assert _get_session_inactivity_timeout() == 300
+
     def test_reads_from_config_over_env(self):
         from tools.browser_tool import _get_session_inactivity_timeout
         with patch.dict(os.environ, {"BROWSER_INACTIVITY_TIMEOUT": "120"}, clear=False):
