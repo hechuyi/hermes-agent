@@ -98,6 +98,20 @@ def test_packaging_declared_as_core_dependency():
     )
 
 
+def test_runtime_profile_ships_as_top_level_py_module():
+    """Gateway imports runtime_profile from an installed wheel.
+
+    ``runtime_profile.py`` is a repository-root module, not a package member.
+    Setuptools only ships such modules when they are listed in
+    ``[tool.setuptools] py-modules``; omitting it makes installed gateway
+    imports fail with ``ModuleNotFoundError: runtime_profile``.
+    """
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert (REPO_ROOT / "runtime_profile.py").is_file()
+    assert "runtime_profile" in data["tool"]["setuptools"]["py-modules"]
+
+
 def test_faster_whisper_is_not_a_base_dependency():
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     deps = data["project"]["dependencies"]
