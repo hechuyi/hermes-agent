@@ -152,6 +152,12 @@ def test_dockerfile_preinstalls_gateway_messaging_dependencies(dockerfile_text):
         "Telegram/Discord gateway adapters do not depend on first-boot "
         "lazy installation (#24698)."
     )
+    assert any("--extra hindsight" in step for step in sync_steps), (
+        "Published Docker images must preload the [hindsight] extra when "
+        "the Hindsight memory provider is selected in config.yaml."
+    )
+
+
 def test_dockerignore_excludes_nested_dependency_dirs():
     if not DOCKERIGNORE.exists():
         pytest.skip(".dockerignore not present in this checkout")

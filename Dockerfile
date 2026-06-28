@@ -137,7 +137,7 @@ RUN npm install --prefer-offline --no-audit && \
 # The editable link is created after the source copy below.
 COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
-RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra anthropic --extra bedrock --extra azure-identity
+RUN uv sync --frozen --no-install-project --extra all --extra messaging --extra hindsight --extra anthropic --extra bedrock --extra azure-identity
 
 # ---------- Source code ----------
 # .dockerignore excludes node_modules, so the installs above survive.
